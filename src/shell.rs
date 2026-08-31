@@ -8,22 +8,52 @@
 
 use crate::sidebar::SessionSidebar;
 use crate::surfaces::SurfacePanel;
-use ginka_core::settings::AppSettings;
+use ginka_core::Paths;
+use ginka_core::settings::{self, AppSettings};
 use ginka_ui::Tokens;
+use ginka_ui::layout::{Layout, Panel};
 use ginka_ui::workspace::SessionRow;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     Icon, IconName, StyledExt as _, TitleBar, h_flex,
-    resizable::{h_resizable, resizable_panel},
+    resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
+
+actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
+
+const CONTEXT: &str = "Shell";
+
+/// Bind the panel toggles.
+///
+/// The chords follow VS Code, because that is the muscle memory everyone using
+/// this app already has.
+pub fn init(cx: &mut App) {
+    cx.bind_keys([
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-b", ToggleSidebar, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-b", ToggleSidebar, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-b", ToggleRightPanel, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-b", ToggleRightPanel, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-j", ToggleTerminalDock, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-j", ToggleTerminalDock, Some(CONTEXT)),
+    ]);
+}
 
 /// Width macOS reserves for the traffic lights before our own content starts.
 const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
 pub struct Shell {
+    /// Where `app.json` lives, so a toggle can be written straight back.
+    paths: Paths,
     settings: AppSettings,
+    layout: Layout,
     /// The row the centre column is showing.
     session: SessionRow,
     sidebar: Entity<SessionSidebar>,
@@ -33,7 +63,12 @@ pub struct Shell {
 }
 
 impl Shell {
-    pub fn new(settings: AppSettings, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(
+        paths: Paths,
+        settings: AppSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         // The window knows the real system appearance; the App-level default
         // applied at startup was a guess made before any window existed.
         ginka_ui::theme::apply(
@@ -54,6 +89,8 @@ impl Shell {
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|_| SurfacePanel::new());
         Self {
+            layout: Layout::from_settings(&settings),
+            paths,
             settings,
             session,
             sidebar,
@@ -62,15 +99,116 @@ impl Shell {
         }
     }
 
+    fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
+        self.layout.toggle(panel);
+        self.persist();
+        cx.notify();
+    }
+
+    /// Write the layout back to `app.json`.
+    ///
+    /// Synchronous and immediate: the file is small and the write is atomic, and
+    /// an arrangement that survives a crash is worth more than the microseconds.
+    /// If this ever shows up in a profile, debounce it -- do not move it off the
+    /// toggle, or the state stops matching what the user sees.
+    fn persist(&mut self) {
+        self.layout.write_into(&mut self.settings);
+        if let Err(error) = settings::save(&self.paths.app_settings(), &self.settings) {
+            tracing::warn!(%error, "could not persist the panel layout");
+        }
+    }
+
+    /// Store the sizes a divider drag produced.
+    ///
+    /// The slot map comes from the layout, not from a fixed index: with the
+    /// sidebar closed, index 0 is the centre column.
+    fn record_resize(
+        &mut self,
+        slots: Vec<Option<Panel>>,
+        state: &Entity<ResizableState>,
+        cx: &mut App,
+    ) {
+        let sizes = state.read(cx).sizes().clone();
+        self.layout.record_sizes(&slots, &sizes);
+        self.persist();
+    }
+
+    fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
+        self.toggle(Panel::Sidebar, cx);
+    }
+
+    fn on_toggle_right_panel(
+        &mut self,
+        _: &ToggleRightPanel,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle(Panel::RightPanel, cx);
+    }
+
+    fn on_toggle_terminal_dock(
+        &mut self,
+        _: &ToggleTerminalDock,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle(Panel::TerminalDock, cx);
+    }
+
+    /// A title-bar control that opens or closes a panel.
+    ///
+    /// The icon reports the state rather than the action -- an open panel shows
+    /// the "close" variant -- which is what VS Code does and what makes the
+    /// control readable without hovering it.
+    fn panel_toggle(
+        &self,
+        panel: Panel,
+        open_icon: IconName,
+        closed_icon: IconName,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        let open = self.layout.is_open(panel);
+        let color = if open {
+            tokens.colors().text_secondary
+        } else {
+            tokens.colors().text_muted
+        };
+        let radius = px(tokens.radius.row);
+        let hover_bg = tokens.colors().bg_raised;
+
+        div()
+            .id(SharedString::from(format!("toggle-{}", panel.label())))
+            .p_1()
+            .rounded(radius)
+            .hover(move |this| this.bg(hover_bg))
+            .child(
+                Icon::new(if open { open_icon } else { closed_icon })
+                    .size_4()
+                    .text_color(color),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle(panel, cx)))
+    }
+
     /// Three regions, aligned to the columns beneath: window controls over the
     /// sidebar, the session's identity over the transcript, surface controls
     /// over the right panel. `docs/ui.md` §3.1.
-    fn title_bar(&self, cx: &App) -> impl IntoElement {
+    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let muted = tokens.colors().text_muted;
         let secondary = tokens.colors().text_secondary;
-        // macOS already reserves the leading inset for the traffic lights.
-        let nav_width = px(self.settings.sidebar_width) - TRAFFIC_LIGHT_INSET;
+        let primary = tokens.colors().text_primary;
+        let title = self.session.title.clone();
+        let origin = self.session.origin.clone();
+        let glyph = self.session.agent.glyph();
+        // Track the column beneath. macOS already reserves the leading inset for
+        // the traffic lights; with the sidebar closed there is no column to
+        // align to, so the controls sit directly after them.
+        let nav_width = if self.layout.is_open(Panel::Sidebar) {
+            self.layout.size(Panel::Sidebar) - TRAFFIC_LIGHT_INSET
+        } else {
+            px(0.)
+        };
 
         TitleBar::new().child(
             h_flex()
@@ -96,29 +234,33 @@ impl Shell {
                         .gap_2()
                         .items_center()
                         .overflow_hidden()
-                        .child(self.session.agent.glyph().size_4().text_color(secondary))
+                        .child(glyph.size_4().text_color(secondary))
                         .child(
                             div()
                                 .text_sm()
                                 .font_medium()
-                                .text_color(tokens.colors().text_primary)
-                                .child(self.session.title.clone()),
+                                .text_color(primary)
+                                .child(title),
                         )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(muted)
-                                .truncate()
-                                .child(self.session.origin.clone()),
-                        ),
+                        .child(div().text_xs().text_color(muted).truncate().child(origin)),
                 )
                 .child(
                     h_flex()
                         .gap_3()
                         .items_center()
                         .child(Icon::new(IconName::Plus).size_4().text_color(secondary))
-                        .child(Icon::new(IconName::Maximize).size_4().text_color(muted))
-                        .child(Icon::new(IconName::PanelRight).size_4().text_color(muted)),
+                        .child(self.panel_toggle(
+                            Panel::TerminalDock,
+                            IconName::PanelBottom,
+                            IconName::PanelBottomOpen,
+                            cx,
+                        ))
+                        .child(self.panel_toggle(
+                            Panel::RightPanel,
+                            IconName::PanelRightClose,
+                            IconName::PanelRightOpen,
+                            cx,
+                        )),
                 ),
         )
     }
@@ -298,8 +440,7 @@ impl Shell {
     fn terminal_dock(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         v_flex()
-            .w_full()
-            .h(px(200.))
+            .size_full()
             .border_t_1()
             .border_color(tokens.colors().border_subtle)
             .bg(tokens.colors().bg_terminal)
@@ -381,14 +522,39 @@ impl Shell {
             )
     }
 
-    fn center(&self, cx: &App) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(self.transcript(cx))
-            .child(self.composer(cx))
-            .when(self.settings.terminal_dock_open, |this| {
-                this.child(self.terminal_dock(cx))
-            })
+    fn center(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let dock_open = self.layout.is_open(Panel::TerminalDock);
+        let dock_height = self.layout.size(Panel::TerminalDock);
+
+        v_flex().size_full().child(
+            v_resizable("centre-rows")
+                .on_resize({
+                    let this = cx.entity();
+                    let slots = self.layout.rows();
+                    move |state, _, cx| {
+                        let slots = slots.clone();
+                        let state = state.clone();
+                        this.update(cx, |this, cx| this.record_resize(slots, &state, cx));
+                    }
+                })
+                .child(
+                    resizable_panel().child(
+                        v_flex()
+                            .size_full()
+                            .child(self.transcript(cx))
+                            .child(self.composer(cx))
+                            .into_any_element(),
+                    ),
+                )
+                .when(dock_open, |this| {
+                    this.child(
+                        resizable_panel()
+                            .size(dock_height)
+                            .size_range(px(120.)..px(560.))
+                            .child(self.terminal_dock(cx).into_any_element()),
+                    )
+                }),
+        )
     }
 }
 
@@ -407,11 +573,16 @@ impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let bg = tokens.colors().bg_window;
-        let sidebar_width = px(self.settings.sidebar_width);
-        let right_width = px(self.settings.right_panel_width);
-        let right_open = self.settings.right_panel_open;
+        let sidebar_open = self.layout.is_open(Panel::Sidebar);
+        let right_open = self.layout.is_open(Panel::RightPanel);
+        let sidebar_width = self.layout.size(Panel::Sidebar);
+        let right_width = self.layout.size(Panel::RightPanel);
 
         v_flex()
+            .key_context(CONTEXT)
+            .on_action(cx.listener(Self::on_toggle_sidebar))
+            .on_action(cx.listener(Self::on_toggle_right_panel))
+            .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .size_full()
             .bg(bg)
             .text_color(tokens.colors().text_primary)
@@ -419,12 +590,23 @@ impl Render for Shell {
             .child(
                 div().flex_1().w_full().overflow_hidden().child(
                     h_resizable("shell-columns")
-                        .child(
-                            resizable_panel()
-                                .size(sidebar_width)
-                                .size_range(px(200.)..px(400.))
-                                .child(self.sidebar.clone()),
-                        )
+                        .on_resize({
+                            let this = cx.entity();
+                            let slots = self.layout.columns();
+                            move |state, _, cx| {
+                                let slots = slots.clone();
+                                let state = state.clone();
+                                this.update(cx, |this, cx| this.record_resize(slots, &state, cx));
+                            }
+                        })
+                        .when(sidebar_open, |this| {
+                            this.child(
+                                resizable_panel()
+                                    .size(sidebar_width)
+                                    .size_range(px(200.)..px(400.))
+                                    .child(self.sidebar.clone()),
+                            )
+                        })
                         .child(resizable_panel().child(self.center(cx).into_any_element()))
                         .when(right_open, |this| {
                             this.child(

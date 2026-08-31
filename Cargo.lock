@@ -2372,6 +2372,7 @@ dependencies = [
  "gpui-component-assets",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

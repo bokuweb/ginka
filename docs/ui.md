@@ -136,7 +136,8 @@ Four things are not in any library and are load-bearing for the product's identi
 
 ## 6. Interaction rules
 
-- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch session, `⌘⌥←/→` cycle surfaces, `⌘J` toggle terminal dock, `⌘B` toggle sidebar.
+- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch session, `⌘⌥←/→` cycle surfaces.
+- **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size and the whole arrangement persists to `app.json`, so a restart restores what the user left. The centre column is not a panel and cannot be closed.
 - **Focus is explicit.** A visible ring on the focused pane; `⌘K` never steals focus from a running terminal without returning it.
 - **No blocking modals** except destructive confirmations (delete worktree, force push).
 - **Never auto-scroll away from a user-scrolled transcript.** Pin-to-bottom only while already at the bottom.

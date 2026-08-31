@@ -20,11 +20,13 @@ fn main() -> Result<()> {
     paths.ensure()?;
     let _log_guard = ginka_core::logging::init(&paths, "app")?;
     let app_settings: settings::AppSettings = settings::load(&paths.app_settings());
+    let shell_paths = paths.clone();
 
     let application = gpui_platform::application().with_assets(ginka_ui::Assets);
 
     application.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        shell::init(cx);
         ginka_ui::theme::apply(ginka_ui::Mode::Dark, cx);
 
         cx.spawn(async move |cx| {
@@ -39,7 +41,7 @@ fn main() -> Result<()> {
             }));
 
             cx.open_window(options, |window, cx| {
-                let shell = cx.new(|cx| shell::Shell::new(app_settings, window, cx));
+                let shell = cx.new(|cx| shell::Shell::new(shell_paths, app_settings, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             })
             .expect("failed to open the main window");

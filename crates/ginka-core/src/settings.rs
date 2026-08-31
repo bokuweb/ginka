@@ -11,10 +11,12 @@ use std::path::Path;
 #[serde(default, deny_unknown_fields)]
 pub struct AppSettings {
     pub appearance: Appearance,
+    pub sidebar_open: bool,
     pub sidebar_width: f32,
-    pub right_panel_width: f32,
     pub right_panel_open: bool,
+    pub right_panel_width: f32,
     pub terminal_dock_open: bool,
+    pub terminal_dock_height: f32,
     /// Restored on launch when the workspace still exists.
     pub last_workspace: Option<String>,
     /// BCP-47 tag; `None` follows the system locale.
@@ -26,10 +28,12 @@ impl Default for AppSettings {
         Self {
             appearance: Appearance::System,
             // The defaults in docs/ui.md §2.
+            sidebar_open: true,
             sidebar_width: 250.0,
-            right_panel_width: 420.0,
             right_panel_open: true,
+            right_panel_width: 420.0,
             terminal_dock_open: true,
+            terminal_dock_height: 220.0,
             last_workspace: None,
             locale: None,
         }

@@ -217,6 +217,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] App shell matching `docs/ui.md`: custom title bar, three resizable columns, composer, context bar, terminal dock, right-panel surface chooser
 - [x] Design tokens: `assets/themes/{dark,light}.json` implementing `docs/ui.md` §2, installed globally and bridged onto the toolkit's `Theme` **and its derived semantic tokens**
 - [x] Title bar in three regions, agent glyphs per session row, app-owned icon set
+- [x] VS Code-style panel toggles: sidebar, right panel and terminal dock open and close independently by keyboard or title-bar control, keep their size while closed, and persist across restarts
 - [x] Appearance follows the system setting, and an explicit choice overrides it
 - [x] App-owned icon asset source layered over the toolkit's
 - [x] Settings: `~/.ginka/app.json` (UI) and `~/.ginka/settings.json` (daemon), atomic writes, corrupt files fall back without being overwritten
