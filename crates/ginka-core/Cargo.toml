@@ -1,0 +1,25 @@
+[package]
+name = "ginka-core"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Ginka domain logic: paths, settings, storage, projects and worktrees"
+
+[dependencies]
+ginka-protocol.workspace = true
+anyhow.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-appender.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

@@ -1,0 +1,103 @@
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+
+/// Every on-disk location Ginka owns, resolved once.
+///
+/// The root is overridable through `GINKA_HOME` so tests (and the debug build,
+/// which must not touch a release install's state) can run against a temporary
+/// directory. See `docs/roadmap.md` §4.1.
+#[derive(Debug, Clone)]
+pub struct Paths {
+    root: PathBuf,
+}
+
+impl Paths {
+    /// Resolve from the environment: `GINKA_HOME` if set, otherwise `~/.ginka`.
+    pub fn from_env() -> Result<Self> {
+        let root = match std::env::var_os("GINKA_HOME") {
+            Some(dir) => PathBuf::from(dir),
+            None => dirs::home_dir()
+                .context("no home directory; set GINKA_HOME to choose a state directory")?
+                .join(".ginka"),
+        };
+        Ok(Self { root })
+    }
+
+    pub fn with_root(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// UI-owned settings: window state, theme choice, last workspace.
+    pub fn app_settings(&self) -> PathBuf {
+        self.root.join("app.json")
+    }
+
+    /// Daemon-owned settings: agents, poll intervals, retention.
+    pub fn daemon_settings(&self) -> PathBuf {
+        self.root.join("settings.json")
+    }
+
+    pub fn database(&self) -> PathBuf {
+        self.root.join("ginka.db")
+    }
+
+    /// Port + token the app and CLI use to find a running daemon.
+    pub fn daemon_handshake(&self) -> PathBuf {
+        self.root.join("daemon.json")
+    }
+
+    pub fn logs(&self) -> PathBuf {
+        self.root.join("logs")
+    }
+
+    /// Worktrees Ginka creates live under the project's own directory here, so
+    /// they never pollute the user's repository checkout.
+    pub fn worktrees(&self) -> PathBuf {
+        self.root.join("worktrees")
+    }
+
+    /// Scratch workspaces for "just start an agent, no project" flows.
+    pub fn scratch_projects(&self) -> PathBuf {
+        self.root.join("projects")
+    }
+
+    /// Create every directory Ginka writes into. Idempotent.
+    pub fn ensure(&self) -> Result<()> {
+        for dir in [
+            self.root.clone(),
+            self.logs(),
+            self.worktrees(),
+            self.scratch_projects(),
+        ] {
+            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ensure_creates_the_tree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_root(tmp.path().join("state"));
+        paths.ensure().unwrap();
+        assert!(paths.logs().is_dir());
+        assert!(paths.worktrees().is_dir());
+        // Idempotent: a second call on an existing tree must not fail.
+        paths.ensure().unwrap();
+    }
+
+    #[test]
+    fn files_hang_off_the_root() {
+        let paths = Paths::with_root("/tmp/ginka-test");
+        assert!(paths.database().starts_with("/tmp/ginka-test"));
+        assert_ne!(paths.app_settings(), paths.daemon_settings());
+    }
+}

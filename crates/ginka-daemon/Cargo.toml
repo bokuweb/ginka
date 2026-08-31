@@ -1,0 +1,15 @@
+[package]
+name = "ginka-daemon"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The Ginka daemon: owns storage, agent processes, PTYs and git"
+
+[dependencies]
+ginka-core.workspace = true
+ginka-protocol.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

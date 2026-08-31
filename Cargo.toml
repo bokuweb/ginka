@@ -1,0 +1,69 @@
+[package]
+name = "ginka"
+version = "0.0.0"
+edition = "2024"
+description = "An IDE-agnostic coding-agent orchestrator"
+publish = false
+
+[workspace]
+members = [
+    "crates/ginka-client",
+    "crates/ginka-cli",
+    "crates/ginka-core",
+    "crates/ginka-daemon",
+    "crates/ginka-protocol",
+    "crates/ginka-ui",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
+ginka-client = { path = "crates/ginka-client" }
+ginka-core = { path = "crates/ginka-core" }
+ginka-protocol = { path = "crates/ginka-protocol" }
+ginka-ui = { path = "crates/ginka-ui" }
+
+# GPUI arrives transitively through gpui-component: the component library owns
+# the rev, and pinning it independently guarantees a conflict on the next
+# toolkit upgrade. See docs/roadmap.md §4.6 and docs/gpui-upgrades.md.
+gpui = { version = "0.2.2", git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+parking_lot = "0.12"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[dependencies]
+ginka-core.workspace = true
+ginka-protocol.workspace = true
+ginka-ui.workspace = true
+anyhow.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+gpui-component-assets.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[lints]
+workspace = true

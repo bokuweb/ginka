@@ -1,0 +1,24 @@
+{
+  "name": "Ginka Light",
+  "appearance": "light",
+  "colors": {
+    "bg.window": "#F7F5FBE6",
+    "bg.sidebar": "#F1EEF8CC",
+    "bg.surface": "#FFFFFF",
+    "bg.raised": "#EDEAF5",
+    "bg.terminal": "#1B1524",
+    "border.subtle": "#1B152414",
+    "border.strong": "#1B152433",
+    "text.primary": "#1B1524",
+    "text.secondary": "#544C66",
+    "text.muted": "#7C7490",
+    "accent": "#7C3AED",
+    "status.working": "#DB2777",
+    "status.attention": "#B45309",
+    "status.done": "#15803D",
+    "status.error": "#B91C1C",
+    "code.bg": "#7C3AED14"
+  },
+  "radius": { "window": 12.0, "panel": 10.0, "row": 8.0 },
+  "duration_ms": { "quick": 120, "standard": 260 }
+}

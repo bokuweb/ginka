@@ -1,0 +1,19 @@
+[package]
+name = "ginka-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The `ginka` command"
+
+[[bin]]
+name = "ginka"
+path = "src/main.rs"
+
+[dependencies]
+ginka-client.workspace = true
+ginka-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+
+[lints]
+workspace = true
