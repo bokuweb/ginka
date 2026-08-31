@@ -215,7 +215,8 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] Cargo workspace with the five crates from §4.2, `rust-toolchain.toml`
 - [x] Add `gpui-component`; take its `gpui` rev transitively. Bump procedure in `docs/gpui-upgrades.md`
 - [x] App shell matching `docs/ui.md`: custom title bar, three resizable columns, composer, context bar, terminal dock, right-panel surface chooser
-- [x] Design tokens: `assets/themes/{dark,light}.json` implementing `docs/ui.md` §2, installed globally and bridged onto the toolkit's `Theme`
+- [x] Design tokens: `assets/themes/{dark,light}.json` implementing `docs/ui.md` §2, installed globally and bridged onto the toolkit's `Theme` **and its derived semantic tokens**
+- [x] Title bar in three regions, agent glyphs per session row, app-owned icon set
 - [x] Appearance follows the system setting, and an explicit choice overrides it
 - [x] App-owned icon asset source layered over the toolkit's
 - [x] Settings: `~/.ginka/app.json` (UI) and `~/.ginka/settings.json` (daemon), atomic writes, corrupt files fall back without being overwritten
@@ -225,7 +226,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] CI: fmt, clippy, test on macOS + Linux
 - [x] `AGENTS.md` / `CLAUDE.md` conventions kept in sync with reality
 - [ ] **Visual sign-off against `docs/ui.md` (R8).** Blocked: this environment has neither screen-recording nor accessibility permission, so the window cannot be captured or measured here. Run `cargo run` and look.
-- [ ] Glass/vibrancy window layer ported from bezel (the translucent surface in `docs/ui.md` §1)
+- [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
 - [ ] Motion helpers ported from bezel; 260 ms list reordering
 - [ ] `export_types` binary for the protocol crate
 - [ ] Hot-reload settings on change

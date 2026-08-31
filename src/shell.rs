@@ -19,8 +19,13 @@ use gpui_component::{
     v_flex,
 };
 
+/// Width macOS reserves for the traffic lights before our own content starts.
+const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
+
 pub struct Shell {
     settings: AppSettings,
+    /// The row the centre column is showing.
+    session: SessionRow,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping this stops the app following the system appearance.
@@ -42,36 +47,78 @@ impl Shell {
             window.refresh();
         });
 
-        let sidebar = cx.new(|_| SessionSidebar::new(SessionRow::samples()));
+        let rows = SessionRow::samples();
+        // The centre column shows whichever row the sidebar has selected; until
+        // selection is wired in M1 that is simply the first.
+        let session = rows[0].clone();
+        let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|_| SurfacePanel::new());
         Self {
             settings,
+            session,
             sidebar,
             surfaces,
             _appearance: appearance,
         }
     }
 
+    /// Three regions, aligned to the columns beneath: window controls over the
+    /// sidebar, the session's identity over the transcript, surface controls
+    /// over the right panel. `docs/ui.md` §3.1.
     fn title_bar(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
+        let muted = tokens.colors().text_muted;
+        let secondary = tokens.colors().text_secondary;
+        // macOS already reserves the leading inset for the traffic lights.
+        let nav_width = px(self.settings.sidebar_width) - TRAFFIC_LIGHT_INSET;
+
         TitleBar::new().child(
             h_flex()
                 .w_full()
-                .pr_2()
-                .gap_2()
+                .pr_3()
                 .items_center()
                 .child(
-                    div()
-                        .text_sm()
-                        .font_medium()
-                        .text_color(tokens.colors().text_primary)
-                        .child("Repository Story Creation"),
+                    h_flex()
+                        .w(nav_width)
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            Icon::new(IconName::PanelLeft)
+                                .size_4()
+                                .text_color(secondary),
+                        )
+                        .child(Icon::new(IconName::ArrowLeft).size_4().text_color(muted))
+                        .child(Icon::new(IconName::ArrowRight).size_4().text_color(muted)),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors().text_muted)
-                        .child("ginka @ personal-metal"),
+                    h_flex()
+                        .flex_1()
+                        .gap_2()
+                        .items_center()
+                        .overflow_hidden()
+                        .child(self.session.agent.glyph().size_4().text_color(secondary))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(tokens.colors().text_primary)
+                                .child(self.session.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(muted)
+                                .truncate()
+                                .child(self.session.origin.clone()),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_3()
+                        .items_center()
+                        .child(Icon::new(IconName::Plus).size_4().text_color(secondary))
+                        .child(Icon::new(IconName::Maximize).size_4().text_color(muted))
+                        .child(Icon::new(IconName::PanelRight).size_4().text_color(muted)),
                 ),
         )
     }
@@ -140,7 +187,7 @@ impl Shell {
                             .text_color(tokens.colors().text_muted)
                             .child("Do anything…"),
                     )
-                    .child(self.chip("Claude Opus 5", cx))
+                    .child(self.model_chip(cx))
                     .child(self.chip("Agent", cx))
                     .child(
                         Icon::empty()
@@ -164,6 +211,32 @@ impl Shell {
                     ),
             )
             .child(self.context_bar(cx))
+    }
+
+    /// The model picker carries the agent's glyph so the row reads as
+    /// "which agent, which model" at a glance.
+    fn model_chip(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .px_2()
+            .py_0p5()
+            .gap_1p5()
+            .items_center()
+            .rounded_full()
+            .bg(tokens.colors().bg_raised)
+            .child(
+                self.session
+                    .agent
+                    .glyph()
+                    .size_3()
+                    .text_color(tokens.colors().text_secondary),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .child(self.session.agent.label()),
+            )
     }
 
     fn chip(&self, label: &'static str, cx: &App) -> impl IntoElement {
@@ -216,7 +289,7 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child("ginka/repository-story-creation"),
+                            .child(self.session.branch.clone()),
                     ),
             )
     }
@@ -268,17 +341,43 @@ impl Shell {
                         Icon::new(IconName::Plus)
                             .size_3p5()
                             .text_color(tokens.colors().text_muted),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size_3()
+                            .text_color(tokens.colors().text_muted),
                     ),
             )
             .child(
-                div()
+                h_flex()
                     .flex_1()
                     .px_3()
                     .py_2()
+                    .items_center()
                     .font_family(cx.theme_mono_font())
                     .text_size(px(13.))
-                    .text_color(tokens.colors().status_done)
-                    .child("ginka@local:~/.ginka/worktrees $"),
+                    // A real prompt is not one colour. Until the PTY lands in
+                    // M3, the placeholder at least has the right shape.
+                    .child(
+                        div()
+                            .text_color(tokens.colors().status_done)
+                            .child("ginka@local"),
+                    )
+                    .child(div().text_color(tokens.colors().text_muted).child(":"))
+                    .child(
+                        div()
+                            .text_color(tokens.colors().accent)
+                            .child("~/.ginka/worktrees/ginka/bright-harbor"),
+                    )
+                    .child(div().text_color(tokens.colors().text_muted).child("$"))
+                    .child(
+                        div()
+                            .ml_1p5()
+                            .w(px(7.))
+                            .h(px(15.))
+                            .bg(tokens.colors().text_secondary),
+                    ),
             )
     }
 

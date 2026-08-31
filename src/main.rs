@@ -10,7 +10,9 @@ mod surfaces;
 
 use anyhow::Result;
 use ginka_core::{Paths, settings};
-use gpui::{App, AppContext as _, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
+};
 use gpui_component::{Root, TitleBar};
 
 fn main() -> Result<()> {
@@ -28,6 +30,13 @@ fn main() -> Result<()> {
         cx.spawn(async move |cx| {
             let mut options: WindowOptions = TitleBar::window_options();
             options.window_min_size = Some(size(px(880.), px(560.)));
+            // The glass surface of docs/ui.md §1: the window is translucent and
+            // the desktop behind it is blurred. The theme's `bg.window` carries
+            // the alpha, so painting it opaque anywhere would cancel this out.
+            options.window_background = WindowBackgroundAppearance::Blurred;
+            options.window_bounds = Some(cx.update(|cx| {
+                WindowBounds::Windowed(Bounds::centered(None, size(px(1440.), px(920.)), cx))
+            }));
 
             cx.open_window(options, |window, cx| {
                 let shell = cx.new(|cx| shell::Shell::new(app_settings, window, cx));

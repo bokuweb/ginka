@@ -139,6 +139,12 @@ impl SessionSidebar {
                     .gap_1()
                     .items_center()
                     .child(
+                        row.agent
+                            .glyph()
+                            .size_3p5()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .child(
                         Icon::empty()
                             .path(ginka_ui::assets::icon::GIT_BRANCH)
                             .size_3()
@@ -318,7 +324,7 @@ impl Render for SessionSidebar {
                                 .py_1p5()
                                 .text_xs()
                                 .text_color(Tokens::global(cx).colors().text_muted)
-                                .child("Show more"),
+                                .child("Show 25 more"),
                         )
                     }),
             )

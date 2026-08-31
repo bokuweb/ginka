@@ -247,6 +247,11 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.radius = gpui::px(radii.row);
     theme.radius_lg = gpui::px(radii.panel);
 
+    // `Root` and several components paint from the derived semantic tokens
+    // rather than from `colors`. Without regenerating them the window keeps the
+    // toolkit's opaque default background, which cancels the glass surface.
+    theme.tokens = (&theme.colors).into();
+
     // The Base layer mirrors radius/colour for scrollbars and resize handles;
     // without this they keep the previous theme's values.
     gpui_component::Theme::sync_base(cx);

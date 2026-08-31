@@ -5,7 +5,39 @@
 //! with real projects and worktrees read through `ginka-core`; nothing else
 //! here should have to change when it does.
 
+use crate::assets::icon;
 use gpui::SharedString;
+use gpui_component::Icon;
+
+/// Which coding agent owns a session.
+///
+/// The sidebar marks each row with the agent's glyph rather than its name:
+/// at three lines per row there is no space for a word, and the shape is
+/// recognisable at 12px where text is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agent {
+    Claude,
+    Codex,
+    Gemini,
+}
+
+impl Agent {
+    pub fn glyph(self) -> Icon {
+        Icon::empty().path(match self {
+            Self::Claude => icon::AGENT_SPARK,
+            Self::Codex => icon::AGENT_ORBIT,
+            Self::Gemini => icon::AGENT_CUBE,
+        })
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
+        }
+    }
+}
 
 /// What an agent is doing, as shown in the sidebar.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +64,7 @@ impl AgentState {
 #[derive(Debug, Clone)]
 pub struct SessionRow {
     pub title: SharedString,
+    pub agent: Agent,
     /// `project @ device`, the muted line above the title.
     pub origin: SharedString,
     /// The worktree branch, truncated from the left when it does not fit.
@@ -43,16 +76,19 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         title: &str,
         origin: &str,
         branch: &str,
+        agent: Agent,
         state: AgentState,
         age: &str,
         archived: bool,
     ) -> Self {
         Self {
             title: title.into(),
+            agent,
             origin: origin.into(),
             branch: branch.into(),
             state,
@@ -68,6 +104,7 @@ impl SessionRow {
                 "Repository Story Creation",
                 "ginka @ personal-metal",
                 "ginka/repository-story-creation",
+                Agent::Gemini,
                 AgentState::Idle,
                 "now",
                 false,
@@ -76,6 +113,7 @@ impl SessionRow {
                 "PR 78 Audit And Review",
                 "ginka @ personal-metal",
                 "HEAD",
+                Agent::Claude,
                 AgentState::Working,
                 "2m",
                 false,
@@ -84,6 +122,7 @@ impl SessionRow {
                 "Remove R2 File Uploads",
                 "ginka @ personal-metal",
                 "ginka/remove-r2-file-uploads",
+                Agent::Codex,
                 AgentState::NeedsAttention,
                 "9m",
                 false,
@@ -92,6 +131,7 @@ impl SessionRow {
                 "Local First",
                 "ginka @ personal-metal",
                 "ginka/pr-30-silent-audit",
+                Agent::Claude,
                 AgentState::Idle,
                 "46m",
                 false,
@@ -100,6 +140,7 @@ impl SessionRow {
                 "Session Done Restart Loop",
                 "ginka @ personal-metal",
                 "ginka/session-done-restart-loop",
+                Agent::Claude,
                 AgentState::Idle,
                 "4h",
                 true,
@@ -108,6 +149,7 @@ impl SessionRow {
                 "Six Hundred Word Story",
                 "ginka @ personal-metal",
                 "ginka/six-hundred-word-story",
+                Agent::Gemini,
                 AgentState::Idle,
                 "4h",
                 true,
@@ -116,6 +158,7 @@ impl SessionRow {
                 "Privatize Orbit Repository",
                 "ginka @ personal-metal",
                 "ginka/privatize-orbit-repository",
+                Agent::Codex,
                 AgentState::Idle,
                 "6h",
                 true,

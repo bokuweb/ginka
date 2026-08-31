@@ -16,6 +16,12 @@ conflict the next time the toolkit moves — see `docs/roadmap.md` §4.6.
 4. Run the app and check, at minimum: window translucency, the sidebar and
    right-panel resize handles, terminal rendering, and theme switching. These
    are the four things that have broken across GPUI revs before.
+
+   Translucency is the fragile one. The toolkit paints from two places — the
+   `colors` palette and the `tokens` derived from it — and `Root` uses the
+   derived side. `ginka_ui::theme::apply` regenerates `tokens` after writing
+   `colors`; if a future rev adds a third source, an opaque window is the
+   symptom.
 5. Note the old and new revs in the PR description.
 
 ## Constraints
