@@ -196,6 +196,13 @@ So this is an either/or, not a "use both". We pick `gpui-component` because dock
 
 **Revisit condition:** if bezel moves onto upstream `gpui` (or gpui-component onto bezel's fork), re-evaluate. Until then, one linked toolkit.
 
+**Why Zed's own `editor` crate is not embedded.** Our `gpui` comes from `zed-industries/zed` at rev `ef07591` (via `gpui-component`), so depending on `editor` from that same rev would *not* hit the two-incompatible-`gpui`-crates problem that rules bezel out. It is rejected for two other reasons:
+
+- **License.** `gpui`, `gpui_platform`, `sum_tree` and `util` are Apache-2.0, but `editor` — and `rope`, `text`, `language`, `multi_buffer`, `settings`, `theme`, `ui`, `workspace`, `project`, `client` with it — is `GPL-3.0-or-later`. Linking it makes the whole `ginka` binary GPL-3.0, which pre-empts Q3 rather than deciding it.
+- **It is not a library.** `editor` declares 73 in-workspace dependencies, pulling in most of Zed's 245 crates (`client`, `project`, `workspace`, `settings`, `theme`, `ui`, `dap`, `telemetry`, `db`, `rpc`). Zed's whole workspace is `publish = false`, so there is no semver and no embedding API: `settings`, `client` and `theme` are initialized as globals, and `workspace` brings Zed's own Pane/Item/Dock model, which would compete with `gpui-component`'s `DockArea` and our theme tokens (`docs/ui.md` §2). Every rev bump would be a porting exercise.
+
+`gpui-component`'s `CodeEditor` (Apache-2.0) covers what M4 needs — `input/editor.rs` plus completion, hover, diagnostic and code-action popovers over `lsp-types` — and that is bounded by R5's read-focused cap. Driving an external editor (`zed <file>:<line>`, `$EDITOR`, `code`, `cursor`) stays the escape hatch for real editing work; it fits the IDE-agnostic premise better than embedding one.
+
 **Rules that follow from this:**
 
 - The `gpui` rev is transitively owned by `gpui-component`. Never pin it independently; upgrade the component library and take its rev.
@@ -375,7 +382,7 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | R7 | **`bezel` and `gpui-component` link incompatible `gpui` crates** (`bezel-gpui 0.3.8+zed.82aeef` vs `gpui 0.2.2` from zed git) and cannot be mixed | Decided: `gpui-component` is the only linked toolkit; bezel is a design reference we port from under MIT. See §4.6. Re-evaluate if the forks converge. |
 | R8 | `gpui-component`'s default look is macOS/Windows-conventional, not the glass aesthetic in `docs/ui.md` | Its theme system is token-driven; the glass layer and status glyphs are ours (`docs/ui.md` §5). Validate the look in M0 — if the toolkit fights the design there, that is the moment to reconsider R7, not later. |
 | **Q1** | Remote access (Band's tunnel + QR + mobile layout) — in or out? | Out for v1. Revisit after M6; a web client is cheap given `ts-rs` types, mobile-quality UI is not. |
-| **Q3** | License | Band is source-available, waku is GPL-3.0. Decide before the first public commit. |
+| **Q3** | License | Band is source-available, waku is GPL-3.0. Decide before the first public commit. Note that no GPL-3.0 Zed crate (`editor`, `rope`, `text`, `language`, `theme`, `ui`, …) may be linked until this is settled — see §4.6. |
 | **Q4** | Name/branding, bundle id, update feed host | Before M6. |
 
 ## 8. Decision log
@@ -388,6 +395,7 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-08-31 | Drop mobile, SSH worktrees, and team features from v1 | Each is a product in itself and none serve the core review loop. |
 | 2026-08-31 | `gpui-component` is the linked UI toolkit; `bezel` is a design reference ported under MIT | The two link incompatible `gpui` forks (R7), so it is either/or. Dock layout, `CodeEditor` + LSP, virtualized lists and the webview crate are worth more than bezel's head start on aesthetics, which we can reproduce. |
 | 2026-08-31 | The `gpui` rev is owned transitively by the UI toolkit | Pinning it independently guarantees a conflict on the next toolkit upgrade. |
+| 2026-08-31 | Zed's `editor` crate is not embedded; the code surface stays `gpui-component`'s `CodeEditor` | `editor` is `GPL-3.0-or-later` and would relicense the binary ahead of Q3, and its 73 in-workspace dependencies drag in most of Zed (including a rival `workspace`/`theme`/`ui` stack) with no published API to depend on. See §4.6. |
 | 2026-08-31 | **Q2 resolved:** `rusqlite` with a hand-rolled `user_version` migration runner, not `sqlx` or `refinery` | The database is owned by one synchronous daemon, so async SQL buys nothing and costs a runtime. The runner is ~30 lines, embeds migrations at compile time, and refuses to open a database written by a newer build rather than silently downgrading it. |
 | 2026-08-31 | CI lints with `cargo clippy -- -D warnings`, not a global `RUSTFLAGS` | `RUSTFLAGS` promotes warnings in third-party crates too, which makes the build fail on a dependency's schedule rather than on ours. |
 | 2026-08-31 | Testable UI code lives in `ginka-ui`; the binary crate holds views only | `rustc` overflows its stack expanding `#[test]` in a crate that also contains the toolkit's deeply nested builder chains — raising `recursion_limit` turns the error into a SIGBUS rather than fixing it. The split is forced by the compiler, and happens to be the structure rule 2 wanted anyway. |
