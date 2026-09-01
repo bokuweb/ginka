@@ -6,7 +6,7 @@
 //! point of this milestone is that the *layout* is right and the theme reaches
 //! every corner of it before there is any content to argue about.
 
-use crate::sidebar::SessionSidebar;
+use crate::sidebar::{SessionSidebar, SidebarEvent};
 use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
@@ -20,6 +20,7 @@ use gpui_component::{
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
+use std::time::Duration;
 
 actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
 
@@ -46,6 +47,12 @@ pub fn init(cx: &mut App) {
     ]);
 }
 
+/// How often worktrees and their git status are re-read.
+///
+/// Matches the daemon's planned sync cadence (`DaemonSettings::sync_interval_secs`).
+/// When the daemon owns this in M2 the UI will be told rather than polling.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
 /// Width macOS reserves for the traffic lights before our own content starts.
 const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
@@ -59,8 +66,9 @@ pub struct Shell {
     session: Option<SessionRow>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
-    /// Dropping this stops the app following the system appearance.
-    _appearance: Subscription,
+    /// Dropping these stops the app following the system appearance and the
+    /// sidebar's selection.
+    _subscriptions: Vec<Subscription>,
 }
 
 impl Shell {
@@ -89,6 +97,43 @@ impl Shell {
         let session = rows.first().cloned();
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|_| SurfacePanel::new());
+
+        let selection = cx.subscribe(&sidebar, |this, sidebar, event, cx| match event {
+            SidebarEvent::Selected => {
+                this.session = sidebar.read(cx).selected_row().cloned();
+                cx.notify();
+            }
+        });
+
+        // Worktrees change outside the app -- an agent commits, the user
+        // switches a branch in a terminal, someone runs `git worktree add`. A
+        // tick is how those reach the window without the user reopening it.
+        cx.spawn({
+            let paths = paths.clone();
+            async move |this, cx| {
+                loop {
+                    cx.background_executor().timer(REFRESH_INTERVAL).await;
+                    let paths = paths.clone();
+                    // Storage and one `git status` per worktree: off the main
+                    // thread, or the window stalls every tick.
+                    let rows = cx
+                        .background_spawn(async move { crate::sessions::load(&paths) })
+                        .await;
+                    tracing::debug!(rows = rows.len(), "refreshed sessions");
+                    let updated = this.update(cx, |this, cx| {
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+                        this.session = this.sidebar.read(cx).selected_row().cloned();
+                        cx.notify();
+                    });
+                    if updated.is_err() {
+                        // The window is gone; stop ticking.
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
         Self {
             layout: Layout::from_settings(&settings),
             paths,
@@ -96,7 +141,7 @@ impl Shell {
             session,
             sidebar,
             surfaces,
-            _appearance: appearance,
+            _subscriptions: vec![appearance, selection],
         }
     }
 
@@ -519,9 +564,15 @@ impl Shell {
                     )
                     .child(div().text_color(tokens.colors().text_muted).child(":"))
                     .child(
-                        div()
-                            .text_color(tokens.colors().accent)
-                            .child("~/.ginka/worktrees/ginka/bright-harbor"),
+                        div().text_color(tokens.colors().accent).child(
+                            // The real worktree, not a stand-in: a prompt that
+                            // names a directory the user is not in is worse than
+                            // no prompt.
+                            self.session
+                                .as_ref()
+                                .map(|session| session.path.display().to_string())
+                                .unwrap_or_else(|| "~".to_string()),
+                        ),
                     )
                     .child(div().text_color(tokens.colors().text_muted).child("$"))
                     .child(
@@ -584,7 +635,6 @@ impl MonoFont for App {
 impl Render for Shell {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        let bg = tokens.colors().bg_window;
         let sidebar_open = self.layout.is_open(Panel::Sidebar);
         let right_open = self.layout.is_open(Panel::RightPanel);
         let sidebar_width = self.layout.size(Panel::Sidebar);
@@ -596,7 +646,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .size_full()
-            .bg(bg)
+            // No background here: `Root` already paints the translucent window
+            // and painting it again composites the alpha away.
             .text_color(tokens.colors().text_primary)
             .child(self.title_bar(cx))
             .child(

@@ -169,10 +169,112 @@ fn parse_worktree_list(output: &str) -> Vec<GitWorktree> {
     worktrees
 }
 
-/// Create a worktree at `path` on a new branch cut from `base`.
+/// How a worktree stands against its upstream.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BranchStatus {
+    /// Tracked files are modified, staged or untracked files exist.
+    pub dirty: bool,
+    /// A merge or rebase left unresolved paths.
+    pub conflict: bool,
+    /// Commits the worktree has that its upstream does not.
+    pub ahead: u32,
+    /// Commits the upstream has that the worktree does not.
+    pub behind: u32,
+    /// There is no upstream to compare against, so `ahead` and `behind` mean
+    /// nothing and the UI must not render them as zeroes.
+    pub untracked_branch: bool,
+}
+
+impl BranchStatus {
+    /// Whether there is anything worth drawing next to the branch name.
+    pub fn is_clean(&self) -> bool {
+        !self.dirty && !self.conflict && self.ahead == 0 && self.behind == 0
+    }
+}
+
+/// Read the status of the worktree at `path`.
+pub fn branch_status(path: &Path) -> Result<BranchStatus> {
+    Ok(parse_status(&git(
+        path,
+        &["status", "--porcelain=v2", "--branch"],
+    )?))
+}
+
+/// Parse `git status --porcelain=v2 --branch`.
+///
+/// Header lines start with `#`; `# branch.ab +N -M` carries the divergence and
+/// is absent when the branch has no upstream. Entry lines are `1` (ordinary),
+/// `2` (renamed), `u` (unmerged) and `?` (untracked); anything but a header
+/// means the worktree is dirty, and `u` specifically means a conflict.
+fn parse_status(output: &str) -> BranchStatus {
+    let mut status = BranchStatus {
+        untracked_branch: true,
+        ..Default::default()
+    };
+
+    for line in output.lines() {
+        if let Some(header) = line.strip_prefix("# ") {
+            if let Some(counts) = header.strip_prefix("branch.ab ") {
+                status.untracked_branch = false;
+                for field in counts.split_whitespace() {
+                    let (sign, number) = field.split_at(1);
+                    let value: u32 = number.parse().unwrap_or(0);
+                    match sign {
+                        "+" => status.ahead = value,
+                        "-" => status.behind = value,
+                        _ => {}
+                    }
+                }
+            }
+            continue;
+        }
+        if line.is_empty() {
+            continue;
+        }
+        status.dirty = true;
+        if line.starts_with("u ") {
+            status.conflict = true;
+        }
+    }
+    status
+}
+
+/// When the worktree's HEAD commit was made, as a Unix timestamp.
+///
+/// Returned as a number rather than git's own relative string: `%cr` is
+/// localized and its wording changes between versions, so formatting it is our
+/// job, not git's.
+pub fn last_commit_time(path: &Path) -> Option<i64> {
+    git(path, &["log", "-1", "--format=%ct"]).ok()?.parse().ok()
+}
+
+/// Whether `branch` already exists locally.
+pub fn branch_exists(repo: &Path, branch: &str) -> bool {
+    git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ],
+    )
+    .is_ok()
+}
+
+/// Create a worktree at `path` for `branch`, cutting it from `base` if it does
+/// not exist yet.
+///
+/// Removing a workspace deliberately leaves its branch behind — the work on it
+/// may still matter — so asking for the same workspace again is a normal thing
+/// to do, and it checks the existing branch out instead of failing.
 pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<()> {
     let path = path.to_string_lossy().to_string();
-    git(repo, &["worktree", "add", "-b", branch, &path, base])?;
+    if branch_exists(repo, branch) {
+        git(repo, &["worktree", "add", &path, branch])?;
+    } else {
+        git(repo, &["worktree", "add", "-b", branch, &path, base])?;
+    }
     Ok(())
 }
 
@@ -257,6 +359,51 @@ prunable
         let parsed = parse_worktree_list("worktree /only\nHEAD a1\nbranch refs/heads/main");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].branch.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn a_clean_tracked_branch_reads_as_clean() {
+        let status = parse_status(
+            "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n",
+        );
+        assert!(status.is_clean());
+        assert!(!status.untracked_branch);
+    }
+
+    #[test]
+    fn divergence_is_read_from_the_branch_ab_header() {
+        let status = parse_status("# branch.ab +3 -2\n");
+        assert_eq!(status.ahead, 3);
+        assert_eq!(status.behind, 2);
+        assert!(!status.is_clean());
+    }
+
+    #[test]
+    fn a_branch_with_no_upstream_is_marked_rather_than_reported_as_level() {
+        // Without `branch.ab` there is nothing to compare against; rendering
+        // "0 ahead, 0 behind" would claim the branch is in sync when it simply
+        // has no upstream.
+        let status = parse_status("# branch.oid abc\n# branch.head feature\n");
+        assert!(status.untracked_branch);
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+    }
+
+    #[test]
+    fn entries_make_the_worktree_dirty_and_unmerged_ones_signal_a_conflict() {
+        let modified =
+            parse_status("# branch.ab +0 -0\n1 .M N... 100644 100644 100644 a b file.rs\n");
+        assert!(modified.dirty);
+        assert!(!modified.conflict);
+
+        let untracked = parse_status("# branch.ab +0 -0\n? new-file.rs\n");
+        assert!(untracked.dirty, "untracked files count as dirty");
+
+        let unmerged = parse_status(
+            "# branch.ab +0 -0\nu UU N... 100644 100644 100644 100644 a b c d file.rs\n",
+        );
+        assert!(unmerged.conflict);
+        assert!(unmerged.dirty);
     }
 
     #[test]

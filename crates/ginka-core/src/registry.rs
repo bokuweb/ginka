@@ -345,6 +345,36 @@ mod tests {
     }
 
     #[test]
+    fn a_workspace_can_be_recreated_after_removal() {
+        // Removal leaves the branch behind on purpose, so asking for the same
+        // workspace again must check it out rather than fail on a name clash.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("comet");
+        repository(&root);
+        let conn = db::open_in_memory().unwrap();
+        let project = register_project(&conn, &root).unwrap();
+        sync_worktrees(&conn, &project).unwrap();
+
+        let path = dir.path().join("harbor");
+        git::add_worktree(&project.path, &path, "harbor", "main").unwrap();
+        git::remove_worktree(&project.path, &path, false).unwrap();
+        assert!(
+            git::branch_exists(&project.path, "harbor"),
+            "the branch survives removal"
+        );
+
+        git::add_worktree(&project.path, &path, "harbor", "main")
+            .expect("recreating a workspace on an existing branch must work");
+        sync_worktrees(&conn, &project).unwrap();
+        assert!(
+            list_worktrees(&conn, &project.name)
+                .unwrap()
+                .iter()
+                .any(|w| w.branch == "harbor")
+        );
+    }
+
+    #[test]
     fn colliding_slugs_get_distinct_names() {
         let known = vec![Worktree {
             project: ProjectName("p".into()),

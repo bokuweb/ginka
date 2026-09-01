@@ -4,64 +4,24 @@
 //! state and nothing authoritative: closing this window must never lose work
 //! (`AGENTS.md` rule 1).
 
+mod sessions;
 mod shell;
 mod sidebar;
 mod surfaces;
 
 use anyhow::Result;
-use ginka_core::{Paths, db, project, registry, settings};
-use ginka_ui::workspace::SessionRow;
+use ginka_core::{Paths, settings};
 use gpui::{
     App, AppContext as _, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
 };
 use gpui_component::{Root, TitleBar};
-
-/// Read the registered projects and their worktrees into sidebar rows.
-///
-/// Storage problems are logged and yield an empty list rather than stopping the
-/// launch: an app that will not open is a worse failure than one that opens
-/// empty and says so, and the empty state tells the user how to register a
-/// project.
-fn load_sessions(paths: &Paths) -> Vec<SessionRow> {
-    let conn = match db::open(&paths.database()) {
-        Ok(conn) => conn,
-        Err(error) => {
-            tracing::error!(%error, "could not open the database; starting with no sessions");
-            return Vec::new();
-        }
-    };
-
-    let projects = match project::list_projects(&conn) {
-        Ok(projects) => projects,
-        Err(error) => {
-            tracing::error!(%error, "could not read projects");
-            return Vec::new();
-        }
-    };
-
-    let mut rows = Vec::new();
-    for project in projects {
-        // Adopt anything created outside the app since we last looked. A failure
-        // here is not fatal: show what is stored rather than nothing.
-        if let Err(error) = registry::sync_worktrees(&conn, &project) {
-            tracing::warn!(project = %project.name, %error, "could not sync worktrees");
-        }
-        match project::list_worktrees(&conn, &project.name) {
-            Ok(worktrees) => rows.extend(SessionRow::from_worktrees(&project, &worktrees)),
-            Err(error) => {
-                tracing::warn!(project = %project.name, %error, "could not list worktrees")
-            }
-        }
-    }
-    rows
-}
 
 fn main() -> Result<()> {
     let paths = Paths::from_env()?;
     paths.ensure()?;
     let _log_guard = ginka_core::logging::init(&paths, "app")?;
     let app_settings: settings::AppSettings = settings::load(&paths.app_settings());
-    let rows = load_sessions(&paths);
+    let rows = sessions::load(&paths);
     let shell_paths = paths.clone();
 
     let application = gpui_platform::application().with_assets(ginka_ui::Assets);

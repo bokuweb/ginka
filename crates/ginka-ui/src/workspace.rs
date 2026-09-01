@@ -6,9 +6,11 @@
 //! here should have to change when it does.
 
 use crate::assets::icon;
+use ginka_core::git::BranchStatus;
 use ginka_core::project::{Project, Worktree};
 use gpui::SharedString;
 use gpui_component::Icon;
+use std::path::PathBuf;
 
 /// Turn a worktree's slug into something readable.
 ///
@@ -31,6 +33,23 @@ fn title_for(name: &str) -> String {
         name.to_string()
     } else {
         title
+    }
+}
+
+/// Compress an age into the two or three characters the sidebar has room for.
+///
+/// Not git's `%cr`: that is localized and its wording has changed between
+/// versions, so a row would read "vor 4 Stunden" on one machine and "4 hours
+/// ago" on another. A clock skew that puts the commit in the future reads as
+/// "now" rather than a negative number.
+pub fn relative_age(now: i64, then: i64) -> String {
+    let seconds = (now - then).max(0);
+    match seconds {
+        ..60 => "now".to_string(),
+        60..3_600 => format!("{}m", seconds / 60),
+        3_600..86_400 => format!("{}h", seconds / 3_600),
+        86_400..2_592_000 => format!("{}d", seconds / 86_400),
+        _ => format!("{}mo", seconds / 2_592_000),
     }
 }
 
@@ -90,6 +109,10 @@ impl AgentState {
 pub struct SessionRow {
     pub title: SharedString,
     pub agent: Agent,
+    /// How the worktree stands against its upstream, drawn beside the branch.
+    pub status: BranchStatus,
+    /// The worktree on disk, shown by the terminal and the context bar.
+    pub path: PathBuf,
     /// `project @ device`, the muted line above the title.
     pub origin: SharedString,
     /// The worktree branch, truncated from the left when it does not fit.
@@ -106,19 +129,44 @@ impl SessionRow {
     /// A workspace with no agent session yet is still a row -- that is how the
     /// user starts one. The agent shown is the project's default until sessions
     /// exist to say otherwise (M2).
-    pub fn from_worktrees(project: &Project, worktrees: &[Worktree]) -> Vec<Self> {
-        worktrees
-            .iter()
-            .map(|worktree| Self {
-                title: title_for(&worktree.name).into(),
-                agent: Agent::Claude,
-                origin: project.name.0.clone().into(),
-                branch: worktree.branch.clone().into(),
-                state: AgentState::Idle,
-                age: "".into(),
-                archived: false,
-            })
-            .collect()
+    pub fn from_worktree(
+        project: &Project,
+        worktree: &Worktree,
+        status: BranchStatus,
+        last_commit: Option<i64>,
+        now: i64,
+    ) -> Self {
+        Self {
+            title: title_for(&worktree.name).into(),
+            agent: Agent::Claude,
+            status,
+            path: worktree.path.clone(),
+            origin: project.name.0.clone().into(),
+            branch: worktree.branch.clone().into(),
+            state: AgentState::Idle,
+            age: last_commit
+                .map(|then| relative_age(now, then))
+                .unwrap_or_default()
+                .into(),
+            archived: false,
+        }
+    }
+
+    /// A short summary of the worktree's divergence, or `None` when there is
+    /// nothing to say.
+    ///
+    /// A branch with no upstream reports nothing rather than "0↑ 0↓", which
+    /// would claim it is in sync with something that does not exist.
+    pub fn divergence(&self) -> Option<String> {
+        if self.status.untracked_branch {
+            return None;
+        }
+        match (self.status.ahead, self.status.behind) {
+            (0, 0) => None,
+            (ahead, 0) => Some(format!("{ahead}↑")),
+            (0, behind) => Some(format!("{behind}↓")),
+            (ahead, behind) => Some(format!("{ahead}↑ {behind}↓")),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -134,6 +182,8 @@ impl SessionRow {
         Self {
             title: title.into(),
             agent,
+            status: BranchStatus::default(),
+            path: PathBuf::new(),
             origin: origin.into(),
             branch: branch.into(),
             state,
@@ -242,6 +292,56 @@ mod tests {
             .collect();
         assert_eq!(idle[0].title, "Repository Story Creation");
         assert_eq!(idle[1].title, "Local First");
+    }
+
+    #[test]
+    fn ages_compress_to_what_the_row_can_hold() {
+        assert_eq!(relative_age(1_000_000, 1_000_000), "now");
+        assert_eq!(relative_age(1_000_000, 999_970), "now");
+        assert_eq!(relative_age(1_000_000, 999_400), "10m");
+        assert_eq!(relative_age(1_000_000, 985_600), "4h");
+        assert_eq!(relative_age(1_000_000, 900_000), "1d");
+        assert_eq!(relative_age(10_000_000, 1_000_000), "3mo");
+    }
+
+    #[test]
+    fn a_commit_in_the_future_reads_as_now_rather_than_a_negative_age() {
+        // Clock skew between machines sharing a repository is ordinary.
+        assert_eq!(relative_age(1_000, 9_999), "now");
+    }
+
+    #[test]
+    fn divergence_stays_silent_without_an_upstream() {
+        let mut row = SessionRow::samples().remove(0);
+        row.status = BranchStatus {
+            untracked_branch: true,
+            ahead: 0,
+            behind: 0,
+            ..Default::default()
+        };
+        assert_eq!(row.divergence(), None);
+
+        row.status = BranchStatus {
+            untracked_branch: false,
+            ahead: 2,
+            behind: 0,
+            ..Default::default()
+        };
+        assert_eq!(row.divergence().as_deref(), Some("2↑"));
+
+        row.status = BranchStatus {
+            untracked_branch: false,
+            ahead: 2,
+            behind: 3,
+            ..Default::default()
+        };
+        assert_eq!(row.divergence().as_deref(), Some("2↑ 3↓"));
+
+        row.status = BranchStatus {
+            untracked_branch: false,
+            ..Default::default()
+        };
+        assert_eq!(row.divergence(), None, "in sync says nothing");
     }
 
     #[test]
