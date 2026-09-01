@@ -92,6 +92,14 @@ enum WorkspaceCommand {
         #[arg(long)]
         base: Option<String>,
     },
+    /// Make somewhere to work with no project at all.
+    ///
+    /// Creates a dated directory under Ginka's own state and registers it, so
+    /// a question that needs a scratch folder does not need a repository.
+    Scratch {
+        /// What to call it. Defaults to `scratch`.
+        name: Option<String>,
+    },
     /// Remove a workspace's worktree.
     Remove {
         project: String,
@@ -215,6 +223,9 @@ fn request_for(command: Command) -> Result<Request> {
             branch,
             base,
         },
+        Command::Workspace(WorkspaceCommand::Scratch { name }) => {
+            Request::CreateScratchWorkspace { name }
+        }
         Command::Workspace(WorkspaceCommand::Remove {
             project,
             name,

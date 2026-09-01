@@ -35,6 +35,13 @@ pub enum Request {
         branch: String,
         base: Option<String>,
     },
+    /// Make somewhere to work with no project at all.
+    ///
+    /// The daemon creates a dated directory under its own state, registers it
+    /// as a plain project and answers with its workspace. This is the "just
+    /// start an agent" flow: a question that needs a scratch directory should
+    /// not need a repository first.
+    CreateScratchWorkspace { name: Option<String> },
     /// Remove a workspace's worktree. `force` is required when it is dirty.
     RemoveWorkspace { workspace: WorkspaceId, force: bool },
     /// Pin or unpin a workspace.

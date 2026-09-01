@@ -327,7 +327,9 @@ fn naming_a_workspace_that_does_not_exist_is_a_not_found_error() {
 }
 
 #[test]
-fn a_plain_folder_is_a_project_with_one_implicit_workspace() {
+fn a_plain_folder_has_one_workspace_an_agent_can_run_in() {
+    // Plenty of useful agent work happens outside a repository. The folder is
+    // the workspace; there is nothing to branch.
     let mut fixture = Fixture::new();
     let notes = fixture.work.path().join("notes");
     std::fs::create_dir_all(&notes).unwrap();
@@ -337,15 +339,106 @@ fn a_plain_folder_is_a_project_with_one_implicit_workspace() {
         Response::Project { project } => project,
         other => panic!("expected a project, got {other:?}"),
     };
-    assert_eq!(project.kind, ginka_protocol::ProjectKind::Plain);
 
-    // Listing must not fail on a folder git knows nothing about.
-    match fixture.ask(Request::ListWorkspaces {
-        project: Some(project.name),
+    let workspaces = match fixture.ask(Request::ListWorkspaces {
+        project: Some(project.name.clone()),
     }) {
-        Response::Workspaces { workspaces } => assert!(workspaces.is_empty()),
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert_eq!(workspaces.len(), 1);
+    assert_eq!(
+        workspaces[0].worktree.path.canonicalize().unwrap(),
+        notes.canonicalize().unwrap()
+    );
+    // And it is addressable, which is what an agent needs.
+    fixture.ask(Request::PinWorkspace {
+        workspace: workspaces[0].id(),
+        pinned: true,
+    });
+}
+
+#[test]
+fn a_scratch_workspace_needs_no_project_at_all() {
+    // waku's "just start an agent" flow: somewhere to work, made on the spot.
+    let mut fixture = Fixture::new();
+    let workspace = match fixture.ask(Request::CreateScratchWorkspace {
+        name: Some("Try the parser".into()),
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+
+    assert!(workspace.worktree.path.is_dir(), "it exists on disk");
+    assert!(
+        workspace.worktree.path.canonicalize().unwrap().starts_with(
+            fixture
+                .service
+                .paths()
+                .scratch_projects()
+                .canonicalize()
+                .unwrap()
+        ),
+        "scratch work lives under Ginka's own directory: {}",
+        workspace.worktree.path.display()
+    );
+    // Dated, so a week of scratch work is still findable.
+    let dated = workspace
+        .worktree
+        .path
+        .parent()
+        .unwrap()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    assert_eq!(dated.len(), 10, "a YYYY-MM-DD directory, got {dated}");
+    assert!(dated.starts_with("20"), "{dated}");
+    assert!(workspace.worktree.path.ends_with("try-the-parser"));
+
+    // It shows up like any other workspace.
+    match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => {
+            assert!(
+                workspaces
+                    .iter()
+                    .any(|listed| listed.id() == workspace.id())
+            )
+        }
         other => panic!("expected workspaces, got {other:?}"),
     }
+}
+
+#[test]
+fn a_second_scratch_of_the_same_name_gets_its_own_directory() {
+    // Names repeat -- "fix", "test", "try again" -- and the second must not
+    // land an agent in the first one's files.
+    let mut fixture = Fixture::new();
+    let first = match fixture.ask(Request::CreateScratchWorkspace {
+        name: Some("fix".into()),
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let second = match fixture.ask(Request::CreateScratchWorkspace {
+        name: Some("fix".into()),
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    assert_ne!(first.worktree.path, second.worktree.path);
+    assert_ne!(first.id(), second.id());
+}
+
+#[test]
+fn a_scratch_workspace_with_no_name_is_still_named() {
+    let mut fixture = Fixture::new();
+    let workspace = match fixture.ask(Request::CreateScratchWorkspace { name: None }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    assert!(!workspace.worktree.name.is_empty());
+    assert!(workspace.worktree.path.is_dir());
 }
 
 #[test]

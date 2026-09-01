@@ -198,6 +198,21 @@ fn the_daemon_can_be_asked_about_and_stopped() {
 }
 
 #[test]
+fn a_scratch_workspace_needs_no_repository() {
+    // The "just start an agent" flow: somewhere to work, made on the spot.
+    let home = Home::new();
+    let made = home.ok(&["workspace", "scratch", "try the parser"]);
+    assert!(made.contains("try-the-parser"), "{made}");
+
+    let listed = home.ok(&["workspace", "list"]);
+    assert!(listed.contains("try-the-parser"), "{listed}");
+    assert!(
+        home.root().join("projects").is_dir(),
+        "scratch work lives under Ginka's own state"
+    );
+}
+
+#[test]
 fn sessions_and_checkpoints_are_listable_before_any_agent_has_run() {
     // An empty list is an answer; a user asking what is going on in a fresh
     // workspace should not meet an error.

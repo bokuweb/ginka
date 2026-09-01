@@ -198,6 +198,30 @@ impl Service {
                     workspace: self.summarize(worktree),
                 })
             }
+            Request::CreateScratchWorkspace { name } => {
+                let project = registry::create_scratch_workspace(
+                    &self.conn(),
+                    &self.paths,
+                    name.as_deref(),
+                    &today(),
+                )
+                .map_err(failed)?;
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: project.name.clone(),
+                });
+
+                let worktree = project::list_worktrees(&self.conn(), &project.name)
+                    .map_err(failed)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        RpcError::failed("the scratch directory was made but not registered")
+                    })?;
+                Ok(Response::Workspace {
+                    workspace: self.summarize(worktree),
+                })
+            }
             Request::RemoveWorkspace { workspace, force } => {
                 let worktree = self.worktree(&workspace)?;
                 let project = self.project(&worktree.project)?;
@@ -426,6 +450,14 @@ impl Service {
 /// Unix seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// Today's date, for the scratch directory a user reads.
+///
+/// Local rather than UTC: the directory is a human's filing, and work done at
+/// 23:00 belongs under the day they did it on.
+fn today() -> String {
+    chrono::Local::now().format("%Y-%m-%d").to_string()
 }
 
 /// Turn a domain failure into the protocol's generic failure.
