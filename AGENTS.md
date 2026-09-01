@@ -27,7 +27,10 @@ Two other projects inform the design:
 - **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
 - The three-column shell renders with a resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser. **Not yet visually signed off** (see roadmap M0).
 
-The **transcript is not rendered yet**: the centre column still shows placeholder content, and the sidebar's rows are real. Chat rendering and the composer are M2's remaining work.
+- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; the composer starts an agent or sends a follow-up.
+- **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
+
+What is *not* there yet: the terminal and the diff review loop (M3), the code surface (M4), a virtualized transcript, `@file` mentions and slash commands, and `rust-i18n` — every user-visible string is still English in the source.
 
 ## Commands
 

@@ -53,6 +53,13 @@ Orca is the sharpest expression of "the IDE is for agents, not for humans typing
 
 waku is the existence proof that this app can be built in Rust + GPUI, and its structure is the closest thing we have to a reference implementation. We follow it on:
 
+> **Where this stands (2026-09-02):** the crate split, the authenticated
+> client–daemon RPC, the driver abstraction with `claude` and `codex`, the
+> git-backed checkpoints, the TypeScript export, the config split and the
+> scratch workspaces are all in. What is left from this list is scheduled
+> rather than skipped: ACP (M5), `alacritty_terminal` (M3), `ropey` and
+> `nucleo-matcher` (M4), and `rust-i18n`, which is not yet wired up.
+
 - **Crate split**: `waku-protocol` (wire types) / `waku-core` (domain + drivers) / `waku-daemon` (headless server) / `waku-client` (RPC client) / root binary (GPUI UI). Ginka mirrors this.
 - **Client–daemon split over authenticated WebSocket RPC**, with the daemon owning SQLite, the agent processes and git. The UI holds no authoritative state.
 - **Provider drivers** as one module per agent (`claude`, `codex`, `amp`, `opencode`, `acp`, …) behind a common trait, with ACP used where the vendor supports it.
@@ -267,11 +274,14 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Request/response + server-push event streams with sequence numbers, a bounded replay window, and an explicit `gap` frame when a cursor falls out of it
 - [x] `AgentDriver` trait + `claude` driver (stream-json over stdio), process supervision, cancellation by process group
 - [x] Session persistence: sessions and transcripts as normalized events; resume from the vendor session id
-- [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination — the events and the paged transcript request exist; nothing renders them yet
+- [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, paged from a cursor and followed live off the daemon's push stream
+- [ ] Virtualize the transcript list (§6.2's budget is lost here first)
 - [x] Message queueing while the agent is busy
+- [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace
 - [ ] Plan approval and ask-user-question interaction modes. The events and the `respond_to_agent` request exist; no shipped driver can interrupt a turn to raise them, so this waits on ACP
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
+- [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
 - [x] `codex` driver (both generations of its JSONL)
 
 **Exit criteria:** two agents run concurrently in two worktrees for 30+ minutes; killing and restarting the UI loses no transcript; cancel actually kills the process tree.
@@ -320,7 +330,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Embedded browser surface via `gpui-component`'s `webview` crate: address bar with history autocomplete, find-in-page, per-workspace history with frecency
 - [ ] Design mode: click an element → send HTML/CSS/screenshot to the agent
 - [ ] Notifications + sounds on agent completion / attention needed
-- [ ] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts
+- [x] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts, and plain folders as workspaces
 - [ ] Remaining drivers: `acp`, `opencode`, `gemini`, `cursor`, `amp`
 
 ---
