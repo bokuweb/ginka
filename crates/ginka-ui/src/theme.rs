@@ -223,7 +223,12 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.sidebar_accent = tokens.bg_raised;
     theme.colors.sidebar_accent_foreground = tokens.text_primary;
 
-    theme.colors.title_bar = tokens.bg_window;
+    // Transparent, not `bg_window`. `Root` already paints the window's
+    // translucent background; a second layer of the same colour composites with
+    // it -- two coats of 82% is 97% -- and the glass turns opaque. Everything
+    // stacked on top of `Root` must either be opaque by design (a card) or
+    // paint nothing at all.
+    theme.colors.title_bar = gpui::transparent_black();
     theme.colors.title_bar_border = tokens.border_subtle;
     theme.colors.window_border = tokens.border_subtle;
 
@@ -246,6 +251,11 @@ pub fn apply(mode: Mode, cx: &mut App) {
 
     theme.radius = gpui::px(radii.row);
     theme.radius_lg = gpui::px(radii.panel);
+
+    // `Root` and several components paint from the derived semantic tokens
+    // rather than from `colors`. Without regenerating them the window keeps the
+    // toolkit's opaque default background, which cancels the glass surface.
+    theme.tokens = (&theme.colors).into();
 
     // The Base layer mirrors radius/colour for scrollbars and resize handles;
     // without this they keep the previous theme's values.
@@ -285,6 +295,20 @@ mod tests {
     fn appearance_matches_the_file_it_came_from() {
         assert_eq!(Tokens::load(Mode::Dark).appearance, ThemeAppearance::Dark);
         assert_eq!(Tokens::load(Mode::Light).appearance, ThemeAppearance::Light);
+    }
+
+    #[test]
+    fn the_window_background_is_painted_once() {
+        // Regression: `Root` paints `bg.window`, so any full-bleed surface
+        // stacked on it must not paint the same translucent colour again. Two
+        // coats of 82% composite to 97% and the glass reads as solid.
+        let dark = Tokens::load(Mode::Dark);
+        let once = dark.colors.bg_window.a;
+        let twice = once + (1.0 - once) * once;
+        assert!(
+            twice > 0.95,
+            "double-painting must be understood as the failure it is: {twice}"
+        );
     }
 
     #[test]

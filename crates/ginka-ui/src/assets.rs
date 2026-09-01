@@ -20,12 +20,27 @@ const ICONS: &[(&str, &str)] = &[
         "icons/paperclip.svg",
         include_str!("../../../assets/icons/paperclip.svg"),
     ),
+    (
+        "icons/agent-cube.svg",
+        include_str!("../../../assets/icons/agent-cube.svg"),
+    ),
+    (
+        "icons/agent-orbit.svg",
+        include_str!("../../../assets/icons/agent-orbit.svg"),
+    ),
+    (
+        "icons/agent-spark.svg",
+        include_str!("../../../assets/icons/agent-spark.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
 pub mod icon {
     pub const GIT_BRANCH: &str = "icons/git-branch.svg";
     pub const PAPERCLIP: &str = "icons/paperclip.svg";
+    pub const AGENT_CUBE: &str = "icons/agent-cube.svg";
+    pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
+    pub const AGENT_SPARK: &str = "icons/agent-spark.svg";
 }
 
 impl AssetSource for Assets {
@@ -68,7 +83,13 @@ mod tests {
 
     #[test]
     fn every_declared_icon_constant_resolves() {
-        for path in [icon::GIT_BRANCH, icon::PAPERCLIP] {
+        for path in [
+            icon::GIT_BRANCH,
+            icon::PAPERCLIP,
+            icon::AGENT_CUBE,
+            icon::AGENT_ORBIT,
+            icon::AGENT_SPARK,
+        ] {
             assert!(
                 ICONS.iter().any(|(name, _)| *name == path),
                 "{path} is not embedded"

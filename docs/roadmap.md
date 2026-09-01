@@ -222,7 +222,9 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] Cargo workspace with the five crates from §4.2, `rust-toolchain.toml`
 - [x] Add `gpui-component`; take its `gpui` rev transitively. Bump procedure in `docs/gpui-upgrades.md`
 - [x] App shell matching `docs/ui.md`: custom title bar, three resizable columns, composer, context bar, terminal dock, right-panel surface chooser
-- [x] Design tokens: `assets/themes/{dark,light}.json` implementing `docs/ui.md` §2, installed globally and bridged onto the toolkit's `Theme`
+- [x] Design tokens: `assets/themes/{dark,light}.json` implementing `docs/ui.md` §2, installed globally and bridged onto the toolkit's `Theme` **and its derived semantic tokens**
+- [x] Title bar in three regions, agent glyphs per session row, app-owned icon set
+- [x] VS Code-style panel toggles: sidebar, right panel and terminal dock open and close independently by keyboard or title-bar control, keep their size while closed, and persist across restarts
 - [x] Appearance follows the system setting, and an explicit choice overrides it
 - [x] App-owned icon asset source layered over the toolkit's
 - [x] Settings: `~/.ginka/app.json` (UI) and `~/.ginka/settings.json` (daemon), atomic writes, corrupt files fall back without being overwritten
@@ -232,7 +234,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] CI: fmt, clippy, test on macOS + Linux
 - [x] `AGENTS.md` / `CLAUDE.md` conventions kept in sync with reality
 - [ ] **Visual sign-off against `docs/ui.md` (R8).** Blocked: this environment has neither screen-recording nor accessibility permission, so the window cannot be captured or measured here. Run `cargo run` and look.
-- [ ] Glass/vibrancy window layer ported from bezel (the translucent surface in `docs/ui.md` §1)
+- [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
 - [ ] Motion helpers ported from bezel; 260 ms list reordering
 - [ ] `export_types` binary for the protocol crate
 - [ ] Hot-reload settings on change
@@ -251,7 +253,9 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [ ] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [ ] `syncWorktrees` equivalent: reconcile DB against `git worktree list` on a tick, updating `branch` / `head` / `has_origin`
 - [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
-- [ ] Sidebar per `docs/ui.md` §3.2: virtualized session list, three-line rows, status pills, archived section, attention sort on the 260 ms curve, user footer
+- [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
+- [ ] Virtualize the session list; animate the reorder on the 260 ms curve
+- [x] `ginka project add|list` and `ginka workspace list|new|remove`
 - [ ] Command palette + global keymap infrastructure
 - [ ] Workspace picker / quick switcher
 
@@ -398,4 +402,6 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-08-31 | Zed's `editor` crate is not embedded; the code surface stays `gpui-component`'s `CodeEditor` | `editor` is `GPL-3.0-or-later` and would relicense the binary ahead of Q3, and its 73 in-workspace dependencies drag in most of Zed (including a rival `workspace`/`theme`/`ui` stack) with no published API to depend on. See §4.6. |
 | 2026-08-31 | **Q2 resolved:** `rusqlite` with a hand-rolled `user_version` migration runner, not `sqlx` or `refinery` | The database is owned by one synchronous daemon, so async SQL buys nothing and costs a runtime. The runner is ~30 lines, embeds migrations at compile time, and refuses to open a database written by a newer build rather than silently downgrading it. |
 | 2026-08-31 | CI lints with `cargo clippy -- -D warnings`, not a global `RUSTFLAGS` | `RUSTFLAGS` promotes warnings in third-party crates too, which makes the build fail on a dependency's schedule rather than on ours. |
+| 2026-09-01 | Git goes through the `git` binary, not `gix` | Worktree plumbing has to use the binary anyway — it is the only implementation that agrees with the user's own `git worktree list`, hooks and config. Splitting reads into a second implementation would put the truth in two places to save a subprocess. Revisit only if a read shows up in a profile. |
+| 2026-09-01 | The CLI's development binary is `ginka-cli`, installed as `ginka` at packaging time | The app crate at the workspace root already produces a `ginka` binary; two targets with one name silently overwrite each other in `target/debug`, which is how the app binary went missing until the sizes were compared. |
 | 2026-08-31 | Testable UI code lives in `ginka-ui`; the binary crate holds views only | `rustc` overflows its stack expanding `#[test]` in a crate that also contains the toolkit's deeply nested builder chains — raising `recursion_limit` turns the error into a SIGBUS rather than fixing it. The split is forced by the compiler, and happens to be the structure rule 2 wanted anyway. |

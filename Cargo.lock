@@ -2311,6 +2311,8 @@ dependencies = [
  "clap",
  "ginka-client",
  "ginka-core",
+ "ginka-protocol",
+ "rusqlite",
 ]
 
 [[package]]
@@ -2372,6 +2374,7 @@ dependencies = [
  "gpui-component-assets",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

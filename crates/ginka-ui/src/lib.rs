@@ -6,9 +6,11 @@
 //! the toolkit's builder chains, so the split is load-bearing, not cosmetic.
 
 pub mod assets;
+pub mod layout;
 pub mod surface;
 pub mod theme;
 pub mod workspace;
 
 pub use assets::Assets;
+pub use layout::{Layout, Panel};
 pub use theme::{Mode, Tokens};

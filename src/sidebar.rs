@@ -10,6 +10,18 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
 
+/// Emitted when the user picks a row.
+///
+/// No payload: the shell reads the selection back through `selected_row`, so
+/// there is one place that decides what "selected" means. The sidebar does not
+/// know what the centre column does with it, and the shell does not know how
+/// the sidebar is drawn.
+pub enum SidebarEvent {
+    Selected,
+}
+
+impl EventEmitter<SidebarEvent> for SessionSidebar {}
+
 pub struct SessionSidebar {
     rows: Vec<SessionRow>,
     selected: usize,
@@ -23,6 +35,33 @@ impl SessionSidebar {
             selected: 0,
             archived_open: true,
         }
+    }
+
+    /// Replace the rows after a refresh.
+    ///
+    /// The selection follows the *workspace*, not the index: rows are sorted by
+    /// attention, so an index means nothing across a reload and keeping one
+    /// would move the user's selection whenever an agent started somewhere else.
+    pub fn set_rows(&mut self, rows: Vec<SessionRow>, cx: &mut Context<Self>) {
+        let selected_branch = self.rows.get(self.selected).map(|row| row.branch.clone());
+        self.selected = selected_branch
+            .and_then(|branch| rows.iter().position(|row| row.branch == branch))
+            .unwrap_or(0);
+        self.rows = rows;
+        cx.notify();
+    }
+
+    pub fn selected_row(&self) -> Option<&SessionRow> {
+        self.rows.get(self.selected)
+    }
+
+    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.selected == index {
+            return;
+        }
+        self.selected = index;
+        cx.emit(SidebarEvent::Selected);
+        cx.notify();
     }
 
     fn header(&self, cx: &App) -> impl IntoElement {
@@ -96,7 +135,12 @@ impl SessionSidebar {
             })
     }
 
-    fn row(&self, index: usize, row: &SessionRow, cx: &App) -> impl IntoElement {
+    fn session_row(
+        &self,
+        index: usize,
+        row: &SessionRow,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let selected = index == self.selected;
 
@@ -109,6 +153,7 @@ impl SessionSidebar {
             .rounded(px(tokens.radius.row))
             .when(selected, |this| this.bg(tokens.colors().bg_raised))
             .hover(|this| this.bg(tokens.colors().bg_raised.opacity(0.6)))
+            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -139,6 +184,12 @@ impl SessionSidebar {
                     .gap_1()
                     .items_center()
                     .child(
+                        row.agent
+                            .glyph()
+                            .size_3p5()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .child(
                         Icon::empty()
                             .path(ginka_ui::assets::icon::GIT_BRANCH)
                             .size_3()
@@ -153,7 +204,32 @@ impl SessionSidebar {
                             // tail, so the head is what gets dropped.
                             .truncate()
                             .child(row.branch.clone()),
-                    ),
+                    )
+                    .when(row.status.conflict, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child("!"),
+                        )
+                    })
+                    .when(row.status.dirty && !row.status.conflict, |this| {
+                        // An unlabelled dot: the sidebar has no room for the
+                        // word, and "there are changes here" is the whole
+                        // message.
+                        this.child(
+                            div()
+                                .size_1p5()
+                                .rounded_full()
+                                .bg(tokens.colors().status_attention),
+                        )
+                    })
+                    .children(row.divergence().map(|summary| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(summary)
+                    })),
             )
     }
 
@@ -187,7 +263,12 @@ impl SessionSidebar {
             }))
     }
 
-    fn archived_row(&self, index: usize, row: &SessionRow, cx: &App) -> impl IntoElement {
+    fn archived_row(
+        &self,
+        index: usize,
+        row: &SessionRow,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .id(("archived", index))
@@ -216,6 +297,36 @@ impl SessionSidebar {
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
                     .child(row.age.clone()),
+            )
+    }
+
+    /// First run: nothing is registered yet.
+    ///
+    /// Says how to fix it rather than only that the list is empty. The command
+    /// is the real one, so it can be copied straight into a terminal.
+    fn empty_state(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        v_flex()
+            .flex_1()
+            .px_4()
+            .gap_2()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(tokens.colors().text_secondary)
+                    .child("No projects yet"),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().code_bg)
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .child("ginka project add ."),
             )
     }
 
@@ -286,42 +397,45 @@ impl Render for SessionSidebar {
             .collect();
         let archived_count = archived.len();
 
+        let is_empty = self.rows.is_empty();
+
         v_flex()
             .size_full()
             .bg(sidebar_bg)
             .border_r_1()
             .border_color(border)
             .child(self.header(cx))
-            .child(
-                v_flex()
-                    .id("session-list")
-                    .flex_1()
-                    .px_1p5()
-                    .gap_0p5()
-                    .overflow_y_scroll()
-                    .children(
-                        active
-                            .iter()
-                            .map(|(index, row)| self.row(*index, row, cx).into_any_element()),
-                    )
-                    .child(div().h_2())
-                    .child(self.archived_header(cx))
-                    .when(self.archived_open, |this| {
-                        this.children(archived.iter().map(|(index, row)| {
-                            self.archived_row(*index, row, cx).into_any_element()
+            .when(is_empty, |this| this.child(self.empty_state(cx)))
+            .when(!is_empty, |this| {
+                this.child(
+                    v_flex()
+                        .id("session-list")
+                        .flex_1()
+                        .px_1p5()
+                        .gap_0p5()
+                        .overflow_y_scroll()
+                        .children(active.iter().map(|(index, row)| {
+                            self.session_row(*index, row, cx).into_any_element()
                         }))
-                    })
-                    .when(self.archived_open && archived_count > 0, |this| {
-                        this.child(
-                            div()
-                                .px_2p5()
-                                .py_1p5()
-                                .text_xs()
-                                .text_color(Tokens::global(cx).colors().text_muted)
-                                .child("Show more"),
-                        )
-                    }),
-            )
+                        .child(div().h_2())
+                        .child(self.archived_header(cx))
+                        .when(self.archived_open, |this| {
+                            this.children(archived.iter().map(|(index, row)| {
+                                self.archived_row(*index, row, cx).into_any_element()
+                            }))
+                        })
+                        .when(self.archived_open && archived_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2p5()
+                                    .py_1p5()
+                                    .text_xs()
+                                    .text_color(Tokens::global(cx).colors().text_muted)
+                                    .child("Show 25 more"),
+                            )
+                        }),
+                )
+            })
             .child(self.footer(cx))
     }
 }
