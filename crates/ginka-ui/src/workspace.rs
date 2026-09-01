@@ -132,10 +132,14 @@ impl AgentState {
         }
     }
 
-    pub fn label(self) -> Option<&'static str> {
+    /// What the row says it is doing, in the user's language.
+    ///
+    /// `None` for an idle row: it shows the age of its last commit instead,
+    /// and a word there would be noise on every quiet workspace.
+    pub fn label(self) -> Option<SharedString> {
         match self {
-            Self::Working => Some("Working"),
-            Self::NeedsAttention => Some("Needs you"),
+            Self::Working => Some(rust_i18n::t!("status.working").to_string().into()),
+            Self::NeedsAttention => Some(rust_i18n::t!("status.attention").to_string().into()),
             Self::Idle => None,
         }
     }
@@ -408,7 +412,21 @@ mod tests {
     #[test]
     fn idle_rows_show_a_timestamp_rather_than_a_status_word() {
         assert_eq!(AgentState::Idle.label(), None);
-        assert_eq!(AgentState::Working.label(), Some("Working"));
+        assert!(AgentState::Working.label().is_some());
+    }
+
+    #[test]
+    fn status_words_are_translated() {
+        // The locale is one global for the process, so this test puts it back.
+        // No other test here asserts an English string while it is switched.
+        ginka_core::i18n::apply("ja");
+        assert_eq!(
+            AgentState::Working.label().as_deref(),
+            Some("実行中"),
+            "a Japanese desktop should not be shown English status words"
+        );
+        ginka_core::i18n::apply("en");
+        assert_eq!(AgentState::Working.label().as_deref(), Some("Working"));
     }
 
     fn summary(session: Option<ginka_protocol::model::Session>) -> WorkspaceSummary {

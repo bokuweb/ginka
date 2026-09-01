@@ -30,7 +30,9 @@ Two other projects inform the design:
 - **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; the composer starts an agent or sends a follow-up.
 - **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
 
-What is *not* there yet: the terminal and the diff review loop (M3), the code surface (M4), a virtualized transcript, `@file` mentions and slash commands, and `rust-i18n` — every user-visible string is still English in the source.
+- **English and Japanese.** Every user-visible string is in `locales/app.yml` in both; the language follows `app.json`, then the environment, then English.
+
+What is *not* there yet: the terminal and the diff review loop (M3), the code surface (M4), a virtualized transcript, and `@file` mentions and slash commands in the composer.
 
 ## Commands
 
@@ -69,7 +71,7 @@ ginka/
 │  ├─ ginka-client/     # async RPC client used by the app and the CLI
 │  └─ ginka-cli/        # binary: the `ginka` command
 ├─ db/migrations/       # SQL migrations, embedded at compile time
-├─ locales/             # rust-i18n yml (en, ja) -- not wired up yet
+├─ locales/app.yml      # every user-visible string, en and ja side by side
 ├─ assets/themes/       # design tokens (dark.json, light.json)
 ├─ assets/icons/        # app-owned icons, layered over the toolkit's set
 └─ docs/

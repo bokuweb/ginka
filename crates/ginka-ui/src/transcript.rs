@@ -235,7 +235,11 @@ pub fn head_of(text: &str, limit: usize) -> String {
     if rest == 0 {
         return head.join("\n");
     }
-    format!("{}\n… {rest} more lines", head.join("\n"))
+    format!(
+        "{}\n{}",
+        head.join("\n"),
+        rust_i18n::t!("transcript.truncated", count = rest)
+    )
 }
 
 /// A tool's arguments as one line.
@@ -530,7 +534,7 @@ mod tests {
         let shown = head_of(&output, 4);
         assert!(shown.starts_with("1\n2\n3\n4"));
         assert!(
-            shown.ends_with("… 26 more lines"),
+            shown.ends_with("26 more lines"),
             "a reader has to know something was left out: {shown}"
         );
         assert_eq!(

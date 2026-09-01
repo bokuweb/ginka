@@ -1,0 +1,105 @@
+# Every user-visible string in Ginka, in both languages it ships with.
+#
+# `_version: 2` keeps the languages side by side so a missing translation is
+# visible in review rather than in a running window. Keys are namespaced by the
+# region of the UI they belong to; the CLI's own output is under `cli`.
+_version: 2
+
+sidebar.archived:
+  en: Archived
+  ja: アーカイブ
+sidebar.empty.title:
+  en: No projects yet
+  ja: プロジェクトがありません
+sidebar.empty.hint:
+  en: ginka project add .
+  ja: ginka project add .
+sidebar.show_more:
+  en: "Show %{count} more"
+  ja: "他 %{count} 件を表示"
+sidebar.footer.device:
+  en: Local
+  ja: ローカル
+
+status.working:
+  en: Working
+  ja: 実行中
+status.attention:
+  en: Needs you
+  ja: 要対応
+
+composer.placeholder:
+  en: Do anything…
+  ja: なんでもどうぞ…
+composer.no_agent:
+  en: No agent
+  ja: エージェントなし
+composer.agent:
+  en: Agent
+  ja: エージェント
+composer.context.worktree:
+  en: Worktree
+  ja: ワークツリー
+
+transcript.empty.ready:
+  en: "%{title} is checked out on %{branch}. Say what you want done."
+  ja: "%{title} は %{branch} にチェックアウトされています。やりたいことを書いてください。"
+transcript.empty.no_project:
+  en: No project is registered yet. Run `ginka project add .` in a repository, then reopen this window.
+  ja: プロジェクトがまだ登録されていません。リポジトリで `ginka project add .` を実行してから、このウィンドウを開き直してください。
+transcript.turn:
+  en: "turn %{turn}"
+  ja: "ターン %{turn}"
+transcript.tool:
+  en: tool
+  ja: ツール
+transcript.truncated:
+  en: "… %{count} more lines"
+  ja: "… 他 %{count} 行"
+
+surface.terminal.pending:
+  en: The terminal surface lands in M3.
+  ja: ターミナルサーフェスは M3 で実装されます。
+surface.git.pending:
+  en: The git surface lands in M3.
+  ja: git サーフェスは M3 で実装されます。
+surface.empty.title:
+  en: Open a surface
+  ja: サーフェスを開く
+surface.empty.hint:
+  en: Choose what to show in the right panel.
+  ja: 右パネルに表示するものを選んでください。
+
+cli.projects.empty:
+  en: "no projects registered; try `ginka project add <path>`"
+  ja: "登録されたプロジェクトはありません。`ginka project add <path>` を試してください"
+cli.workspaces.empty:
+  en: "no workspaces; try `ginka workspace new <project> <branch>`"
+  ja: "ワークスペースがありません。`ginka workspace new <project> <branch>` を試してください"
+cli.sessions.empty:
+  en: "no sessions yet; try `ginka session start <workspace> <prompt>`"
+  ja: "セッションはまだありません。`ginka session start <workspace> <prompt>` を試してください"
+cli.checkpoints.empty:
+  en: "no checkpoints yet; they are taken as an agent works"
+  ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"
+cli.transcript.empty:
+  en: no transcript yet
+  ja: トランスクリプトはまだありません
+cli.done:
+  en: done
+  ja: 完了
+cli.daemon.running:
+  en: "running (pid %{pid}, port %{port}, version %{version})"
+  ja: "実行中 (pid %{pid}, ポート %{port}, バージョン %{version})"
+cli.daemon.stopped:
+  en: not running
+  ja: 停止中
+cli.daemon.listening:
+  en: "daemon %{version} is listening"
+  ja: "デーモン %{version} が待ち受けています"
+cli.daemon.stopping:
+  en: asked the daemon to stop
+  ja: デーモンに停止を要求しました
+cli.daemon.none:
+  en: no daemon is running
+  ja: デーモンは実行されていません

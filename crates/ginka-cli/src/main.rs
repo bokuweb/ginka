@@ -8,6 +8,10 @@
 //! `--json` prints the protocol's own response instead of a table, which is
 //! what makes the command line usable by an agent as well as by a person.
 
+// The CLI prints to a human too, so its own messages are translated. The
+// protocol's shapes, printed by `--json`, are not: those are for programs.
+rust_i18n::i18n!("../../locales", fallback = "en");
+
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
@@ -165,6 +169,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::from_env()?;
     paths.ensure()?;
+    let app: settings::AppSettings = settings::load(&paths.app_settings());
+    ginka_core::i18n::init(app.locale.as_deref());
 
     match cli.command {
         Command::Doctor => doctor(&paths),
@@ -313,7 +319,10 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
         }
         DaemonCommand::Start => {
             let client = smol::block_on(discovery.connect(None))?;
-            println!("daemon {} is listening", client.daemon_version());
+            println!(
+                "{}",
+                rust_i18n::t!("cli.daemon.listening", version = client.daemon_version())
+            );
             Ok(())
         }
         DaemonCommand::Stop => smol::block_on(async {
@@ -323,12 +332,12 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
                         .request(Request::Shutdown)
                         .await
                         .map_err(|error| anyhow::anyhow!("{error}"))?;
-                    println!("asked the daemon to stop");
+                    println!("{}", rust_i18n::t!("cli.daemon.stopping"));
                     Ok(())
                 }
                 // Nothing to stop is the state the user asked for.
                 Err(_) => {
-                    println!("no daemon is running");
+                    println!("{}", rust_i18n::t!("cli.daemon.none"));
                     Ok(())
                 }
             }
@@ -338,18 +347,21 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
 
 fn describe_daemon(paths: &Paths) -> String {
     match Discovery::new(paths.daemon_handshake()).published() {
-        Some(handshake) => format!(
-            "running (pid {}, port {}, version {})",
-            handshake.pid, handshake.port, handshake.version
-        ),
-        None => "not running".to_string(),
+        Some(handshake) => rust_i18n::t!(
+            "cli.daemon.running",
+            pid = handshake.pid,
+            port = handshake.port,
+            version = handshake.version
+        )
+        .to_string(),
+        None => rust_i18n::t!("cli.daemon.stopped").to_string(),
     }
 }
 
 /// Print a response as a person reads it.
 fn print(response: Response) {
     match response {
-        Response::Ack => println!("done"),
+        Response::Ack => println!("{}", rust_i18n::t!("cli.done")),
         Response::Projects { projects } => print_projects(&projects),
         Response::Project { project } => print_projects(std::slice::from_ref(&project)),
         Response::Workspaces { workspaces } => print_workspaces(&workspaces),
@@ -359,7 +371,7 @@ fn print(response: Response) {
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Transcript { entries } => {
             if entries.is_empty() {
-                println!("no transcript yet");
+                println!("{}", rust_i18n::t!("cli.transcript.empty"));
             }
             for entry in entries {
                 println!("{}", ginka_cli_format::transcript_line(&entry));
@@ -370,7 +382,7 @@ fn print(response: Response) {
 
 fn print_projects(projects: &[Project]) {
     if projects.is_empty() {
-        println!("no projects registered; try `ginka project add <path>`");
+        println!("{}", rust_i18n::t!("cli.projects.empty"));
         return;
     }
     for project in projects {
@@ -385,7 +397,7 @@ fn print_projects(projects: &[Project]) {
 
 fn print_workspaces(workspaces: &[WorkspaceSummary]) {
     if workspaces.is_empty() {
-        println!("no workspaces; try `ginka workspace new <project> <branch>`");
+        println!("{}", rust_i18n::t!("cli.workspaces.empty"));
         return;
     }
     for summary in workspaces {
@@ -401,7 +413,7 @@ fn print_workspaces(workspaces: &[WorkspaceSummary]) {
 
 fn print_sessions(sessions: &[Session]) {
     if sessions.is_empty() {
-        println!("no sessions yet; try `ginka session start <workspace> <prompt>`");
+        println!("{}", rust_i18n::t!("cli.sessions.empty"));
         return;
     }
     for session in sessions {
@@ -418,7 +430,7 @@ fn print_sessions(sessions: &[Session]) {
 
 fn print_checkpoints(checkpoints: &[Checkpoint]) {
     if checkpoints.is_empty() {
-        println!("no checkpoints yet; they are taken as an agent works");
+        println!("{}", rust_i18n::t!("cli.checkpoints.empty"));
         return;
     }
     for checkpoint in checkpoints {

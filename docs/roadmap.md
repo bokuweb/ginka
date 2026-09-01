@@ -56,9 +56,9 @@ waku is the existence proof that this app can be built in Rust + GPUI, and its s
 > **Where this stands (2026-09-02):** the crate split, the authenticated
 > client–daemon RPC, the driver abstraction with `claude` and `codex`, the
 > git-backed checkpoints, the TypeScript export, the config split and the
-> scratch workspaces are all in. What is left from this list is scheduled
-> rather than skipped: ACP (M5), `alacritty_terminal` (M3), `ropey` and
-> `nucleo-matcher` (M4), and `rust-i18n`, which is not yet wired up.
+> scratch workspaces, and `rust-i18n` with `en` and `ja`, are all in. What is
+> left from this list is scheduled rather than skipped: ACP (M5),
+> `alacritty_terminal` (M3), and `ropey` and `nucleo-matcher` (M4).
 
 - **Crate split**: `waku-protocol` (wire types) / `waku-core` (domain + drivers) / `waku-daemon` (headless server) / `waku-client` (RPC client) / root binary (GPUI UI). Ginka mirrors this.
 - **Client–daemon split over authenticated WebSocket RPC**, with the daemon owning SQLite, the agent processes and git. The UI holds no authoritative state.
@@ -379,7 +379,7 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 
 ### 6.4 i18n / a11y
 
-`rust-i18n` with `en` and `ja` from M0 (retrofitting localization is expensive). Keyboard-first navigation for every action; no action reachable only by mouse.
+`rust-i18n` with `en` and `ja` from M0 (retrofitting localization is expensive). **Done:** every user-visible string in the window and the CLI resolves through `locales/app.yml`, which keeps both languages side by side so a gap is visible in review; the language follows `app.json`, then `LC_ALL`/`LC_MESSAGES`/`LANG`, then English. Keyboard-first navigation for every action; no action reachable only by mouse.
 
 ## 7. Risks and open questions
 

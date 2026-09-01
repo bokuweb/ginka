@@ -28,10 +28,13 @@ impl Surface {
     }
 
     /// Shown in the placeholder until the surface is implemented.
-    pub fn availability(self) -> &'static str {
+    ///
+    /// The labels above are proper nouns and stay as they are; this is a
+    /// sentence, so it is translated.
+    pub fn availability(self) -> String {
         match self {
-            Self::Terminal => "Terminal surface lands in M3.",
-            Self::Git => "Git surface lands in M3.",
+            Self::Terminal => rust_i18n::t!("surface.terminal.pending").to_string(),
+            Self::Git => rust_i18n::t!("surface.git.pending").to_string(),
         }
     }
 }

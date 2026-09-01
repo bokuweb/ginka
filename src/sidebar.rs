@@ -246,7 +246,7 @@ impl SessionSidebar {
                 div()
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
-                    .child("Archived"),
+                    .child(rust_i18n::t!("sidebar.archived").to_string()),
             )
             .child(
                 Icon::new(if self.archived_open {
@@ -316,7 +316,7 @@ impl SessionSidebar {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_secondary)
-                    .child("No projects yet"),
+                    .child(rust_i18n::t!("sidebar.empty.title").to_string()),
             )
             .child(
                 div()
@@ -326,7 +326,7 @@ impl SessionSidebar {
                     .bg(tokens.colors().code_bg)
                     .text_xs()
                     .text_color(tokens.colors().text_secondary)
-                    .child("ginka project add ."),
+                    .child(rust_i18n::t!("sidebar.empty.hint").to_string()),
             )
     }
 
@@ -360,7 +360,7 @@ impl SessionSidebar {
                             .text_sm()
                             .font_medium()
                             .text_color(tokens.colors().text_primary)
-                            .child("Local"),
+                            .child(rust_i18n::t!("sidebar.footer.device").to_string()),
                     )
                     .child(
                         div()
@@ -431,7 +431,11 @@ impl Render for SessionSidebar {
                                     .py_1p5()
                                     .text_xs()
                                     .text_color(Tokens::global(cx).colors().text_muted)
-                                    .child("Show 25 more"),
+                                    // The count is a placeholder until the
+                                    // archived list is paged (M1).
+                                    .child(
+                                        rust_i18n::t!("sidebar.show_more", count = 25).to_string(),
+                                    ),
                             )
                         }),
                 )

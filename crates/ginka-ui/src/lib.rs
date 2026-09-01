@@ -5,6 +5,11 @@
 //! `rustc` overflows its stack expanding `#[test]` in a crate that also holds
 //! the toolkit's builder chains, so the split is load-bearing, not cosmetic.
 
+// The strings live in the workspace's own `locales/`, shared by every crate
+// that shows one. English is the fallback, so a key a translator has not
+// reached yet still renders as words.
+rust_i18n::i18n!("../../locales", fallback = "en");
+
 pub mod assets;
 pub mod layout;
 pub mod surface;

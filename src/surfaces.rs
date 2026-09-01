@@ -96,13 +96,13 @@ impl SurfacePanel {
                         div()
                             .text_lg()
                             .text_color(tokens.colors().text_primary)
-                            .child("Open a surface"),
+                            .child(rust_i18n::t!("surface.empty.title").to_string()),
                     )
                     .child(
                         div()
                             .text_sm()
                             .text_color(tokens.colors().text_muted)
-                            .child("Choose what to show in the right panel."),
+                            .child(rust_i18n::t!("surface.empty.hint").to_string()),
                     ),
             )
             .child(

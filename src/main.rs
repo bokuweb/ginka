@@ -4,6 +4,11 @@
 //! closing this window must never lose work, and the agents it was watching
 //! keep running without it (`AGENTS.md` rule 1).
 
+// The window's strings come from the workspace's `locales/`; `ginka-core`
+// decides which language, because the CLI has to make the same choice without
+// linking a UI toolkit.
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod daemon;
 mod shell;
 mod sidebar;
@@ -21,6 +26,8 @@ fn main() -> Result<()> {
     paths.ensure()?;
     let _log_guard = ginka_core::logging::init(&paths, "app")?;
     let app_settings: settings::AppSettings = settings::load(&paths.app_settings());
+    let locale = ginka_core::i18n::init(app_settings.locale.as_deref());
+    tracing::info!(%locale, "language");
     let shell_paths = paths.clone();
 
     let application = gpui_platform::application().with_assets(ginka_ui::Assets);

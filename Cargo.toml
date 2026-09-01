@@ -49,6 +49,7 @@ futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink", "async-await"] }
 parking_lot = "0.12"
 rusqlite = { version = "0.37", features = ["bundled"] }
+rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
@@ -60,6 +61,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 
 [dependencies]
 ginka-client.workspace = true
+rust-i18n.workspace = true
 ginka-core.workspace = true
 ginka-protocol.workspace = true
 ginka-ui.workspace = true

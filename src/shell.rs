@@ -132,7 +132,7 @@ impl Shell {
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Do anything…")
+                .placeholder(rust_i18n::t!("composer.placeholder").to_string())
                 // Grows with the prompt up to a point, then scrolls: a long
                 // paste must not swallow the transcript.
                 .auto_grow(1, 8)
@@ -536,13 +536,13 @@ impl Shell {
     fn transcript_empty_state(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let body = match &self.session {
-            Some(session) => format!(
-                "{} is checked out on {}. Say what you want done.",
-                session.title, session.branch
-            ),
-            None => "No project is registered yet. Run `ginka project add .` in a repository, \
-                     then reopen this window."
-                .to_string(),
+            Some(session) => rust_i18n::t!(
+                "transcript.empty.ready",
+                title = session.title,
+                branch = session.branch
+            )
+            .to_string(),
+            None => rust_i18n::t!("transcript.empty.no_project").to_string(),
         };
         div()
             .max_w(px(720.))
@@ -629,7 +629,7 @@ impl Shell {
                         .text_color(tokens.colors().text_muted)
                         // A turn boundary is also where a checkpoint was taken,
                         // which is what makes it worth drawing at all.
-                        .child(format!("turn {turn}")),
+                        .child(rust_i18n::t!("transcript.turn", turn = turn).to_string()),
                 )
                 .child(div().h(px(1.)).flex_1().bg(tokens.colors().border_subtle))
                 .into_any_element(),
@@ -685,7 +685,7 @@ impl Shell {
                             .text_xs()
                             .text_color(tokens.colors().text_secondary)
                             .child(if name.is_empty() {
-                                "tool".to_string()
+                                rust_i18n::t!("transcript.tool").to_string()
                             } else {
                                 name.to_string()
                             }),
@@ -742,7 +742,7 @@ impl Shell {
                     .border_color(tokens.colors().border_subtle)
                     .child(div().flex_1().child(Textarea::new(&self.composer)))
                     .child(self.model_chip(cx))
-                    .child(self.chip("Agent", cx))
+                    .child(self.chip(&rust_i18n::t!("composer.agent"), cx))
                     .child(
                         Icon::empty()
                             .path(ginka_ui::assets::icon::PAPERCLIP)
@@ -796,12 +796,13 @@ impl Shell {
                         self.session
                             .as_ref()
                             .map(|session| session.agent.label())
-                            .unwrap_or("No agent"),
+                            .map(|label| label.to_string())
+                            .unwrap_or_else(|| rust_i18n::t!("composer.no_agent").to_string()),
                     ),
             )
     }
 
-    fn chip(&self, label: &'static str, cx: &App) -> impl IntoElement {
+    fn chip(&self, label: &str, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         div()
             .px_2()
@@ -810,7 +811,7 @@ impl Shell {
             .bg(tokens.colors().bg_raised)
             .text_xs()
             .text_color(tokens.colors().text_secondary)
-            .child(label)
+            .child(label.to_string())
     }
 
     /// The hairline strip under the composer: worktree left, branch right.
@@ -834,7 +835,7 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child("Worktree"),
+                            .child(rust_i18n::t!("composer.context.worktree").to_string()),
                     ),
             )
             .child(
