@@ -179,6 +179,31 @@ impl Fixture {
         }
     }
 
+    /// Wait until the transcript holds the turn boundaries `done` accepts.
+    fn wait_for(&mut self, session: &SessionId, done: impl Fn(&[u32]) -> bool) -> Vec<u32> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let turns: Vec<u32> = self
+                .transcript(session)
+                .iter()
+                .filter_map(|entry| match entry {
+                    TranscriptPayload::Agent {
+                        event: AgentEvent::TurnEnd { turn },
+                    } => Some(*turn),
+                    _ => None,
+                })
+                .collect();
+            if done(&turns) {
+                return turns;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the turns never arrived: {turns:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     fn transcript(&mut self, id: &SessionId) -> Vec<TranscriptPayload> {
         match self
             .service
@@ -469,6 +494,48 @@ fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
         );
         std::thread::sleep(Duration::from_millis(25));
     }
+}
+
+#[test]
+fn turns_keep_counting_across_the_processes_that_ran_them() {
+    // Each turn is its own process, so a driver's own count restarts every
+    // time. A transcript that says "end of turn 1" twice, and two checkpoints
+    // both labelled turn 1, describe a conversation that did not happen.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    fixture
+        .service
+        .handle(Request::SendMessage {
+            session: session.clone(),
+            text: "second".into(),
+        })
+        .unwrap();
+
+    // The second turn starts asynchronously, so waiting on the session state
+    // would see the first turn's `finished` and stop too early.
+    let turns = fixture.wait_for(&session, |turns| turns.len() == 2);
+    assert_eq!(turns, vec![1, 2]);
+
+    let mut checkpoint_turns: Vec<u32> = fixture
+        .checkpoints()
+        .iter()
+        .map(|checkpoint| checkpoint.turn)
+        .collect();
+    checkpoint_turns.sort_unstable();
+    assert_eq!(
+        checkpoint_turns,
+        vec![0, 1, 2],
+        "each turn's checkpoint has to be tellable from the others"
+    );
 }
 
 #[test]

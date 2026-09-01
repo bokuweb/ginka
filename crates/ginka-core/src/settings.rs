@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 /// Settings the UI owns: `~/.ginka/app.json`.
@@ -62,6 +63,23 @@ pub struct DaemonSettings {
     pub status_poll_secs: u64,
     /// Days of task and usage history to keep.
     pub retention_days: u32,
+    /// Per-agent overrides, keyed by driver id (`claude`, `codex`, …).
+    ///
+    /// A user whose agent CLI is version-managed, behind a wrapper script or
+    /// pointed at a gateway configures it here; an id this build has no driver
+    /// for is ignored rather than refused, so a settings file can outlive the
+    /// build that reads it.
+    pub agents: BTreeMap<String, AgentSettings>,
+}
+
+/// How to run one agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSettings {
+    /// The binary to run instead of the driver's default.
+    pub program: Option<String>,
+    /// Environment for the agent's process, on top of the inherited one.
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for DaemonSettings {
@@ -71,6 +89,7 @@ impl Default for DaemonSettings {
             sync_interval_secs: 15,
             status_poll_secs: 60,
             retention_days: 30,
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -146,6 +165,27 @@ mod tests {
         assert_eq!(load::<AppSettings>(&path), AppSettings::default());
         // The user's file is still theirs to fix.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn an_agent_can_be_pointed_at_another_binary() {
+        let settings: DaemonSettings = serde_json::from_str(
+            r#"{"agents":{"claude":{"program":"/opt/homebrew/bin/claude",
+                 "env":{"ANTHROPIC_BASE_URL":"http://localhost:8080"}}}}"#,
+        )
+        .expect("agent overrides parse");
+        let claude = &settings.agents["claude"];
+        assert_eq!(claude.program.as_deref(), Some("/opt/homebrew/bin/claude"));
+        assert_eq!(
+            claude.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("http://localhost:8080")
+        );
+    }
+
+    #[test]
+    fn a_settings_file_with_no_agents_still_loads() {
+        let settings: DaemonSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.agents.is_empty());
     }
 
     #[test]

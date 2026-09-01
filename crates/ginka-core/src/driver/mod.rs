@@ -188,11 +188,42 @@ impl Registry {
         }
     }
 
-    /// Every driver this build ships.
+    /// Every driver this build ships, with their default binaries.
     pub fn with_defaults() -> Self {
+        Self::from_settings(&Default::default())
+    }
+
+    /// Every driver this build ships, with the user's overrides applied.
+    ///
+    /// An override for an id this build has no driver for is ignored rather
+    /// than refused: a settings file outlives the build that reads it, and a
+    /// daemon that will not start because of a stale key is worse than one
+    /// that starts without it.
+    pub fn from_settings(settings: &crate::settings::DaemonSettings) -> Self {
         let mut registry = Self::empty();
-        registry.insert(Arc::new(claude::ClaudeDriver::default()));
-        registry.insert(Arc::new(codex::CodexDriver::default()));
+
+        let claude = settings.agents.get("claude");
+        let mut driver = claude::ClaudeDriver::with_program(
+            claude
+                .and_then(|agent| agent.program.clone())
+                .unwrap_or_else(|| "claude".to_string()),
+        );
+        for (key, value) in claude.iter().flat_map(|agent| agent.env.iter()) {
+            driver = driver.with_env(key, value);
+        }
+        registry.insert(Arc::new(driver));
+
+        let codex = settings.agents.get("codex");
+        let mut driver = codex::CodexDriver::with_program(
+            codex
+                .and_then(|agent| agent.program.clone())
+                .unwrap_or_else(|| "codex".to_string()),
+        );
+        for (key, value) in codex.iter().flat_map(|agent| agent.env.iter()) {
+            driver = driver.with_env(key, value);
+        }
+        registry.insert(Arc::new(driver));
+
         registry
     }
 
@@ -250,6 +281,59 @@ mod tests {
             registry.get("claude").unwrap().probe_command().program,
             "/bin/echo"
         );
+    }
+
+    #[test]
+    fn a_configured_binary_is_what_gets_started() {
+        // A version-managed install, a wrapper script, or -- in the tests -- a
+        // scripted stand-in.
+        let mut settings = crate::settings::DaemonSettings::default();
+        settings.agents.insert(
+            "claude".to_string(),
+            crate::settings::AgentSettings {
+                program: Some("/opt/ginka/claude".to_string()),
+                env: [(
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    "http://gateway".to_string(),
+                )]
+                .into_iter()
+                .collect(),
+            },
+        );
+        let registry = Registry::from_settings(&settings);
+        let command = registry
+            .get("claude")
+            .unwrap()
+            .start_command(&SessionSpec::new("/tmp/wt", "hello"));
+        assert_eq!(command.program, "/opt/ginka/claude");
+        assert_eq!(
+            command.env,
+            vec![(
+                "ANTHROPIC_BASE_URL".to_string(),
+                "http://gateway".to_string()
+            )]
+        );
+        assert_eq!(
+            registry
+                .get("codex")
+                .unwrap()
+                .start_command(&SessionSpec::new("/tmp/wt", "x"))
+                .program,
+            "codex",
+            "an agent with no override keeps its default"
+        );
+    }
+
+    #[test]
+    fn an_override_for_an_agent_this_build_does_not_have_is_ignored() {
+        // A settings file outlives the build that reads it.
+        let mut settings = crate::settings::DaemonSettings::default();
+        settings.agents.insert(
+            "telepath".to_string(),
+            crate::settings::AgentSettings::default(),
+        );
+        let registry = Registry::from_settings(&settings);
+        assert_eq!(registry.ids(), vec!["claude", "codex"]);
     }
 
     #[test]

@@ -56,6 +56,12 @@ impl Shared {
         Ok(seq)
     }
 
+    /// How many turns this session has already run.
+    fn turns_completed(&self, session: &SessionId) -> u32 {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        session::turns_completed(&conn, session).unwrap_or(0)
+    }
+
     /// Snapshot the worktree so this point in the transcript can be returned
     /// to.
     ///
@@ -256,6 +262,9 @@ impl Supervisor {
             let session = session.clone();
             let cancelled = cancelled.clone();
             let workspace_path = spec.workspace_path.clone();
+            // A turn is one process, so the driver's own counter restarts with
+            // it; the session's count is what the transcript is numbered by.
+            let turns_so_far = self.context.turns_completed(&session);
             async move {
                 let state = pump(
                     &context,
@@ -264,6 +273,7 @@ impl Supervisor {
                     child,
                     &cancelled,
                     &workspace_path,
+                    turns_so_far,
                 )
                 .await;
                 running
@@ -331,12 +341,16 @@ async fn pump(
     mut child: smol::process::Child,
     cancelled: &AtomicBool,
     workspace_path: &Path,
+    turns_so_far: u32,
 ) -> SessionState {
     context.set_state(session, SessionState::Running, None);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let mut parse = ParseState::default();
+    let mut parse = ParseState {
+        turn: turns_so_far,
+        ..ParseState::default()
+    };
     let mut reported: Option<(SessionState, Option<String>)> = None;
     // What the agent last said, which is the useful label for the checkpoint
     // taken at the end of the turn.

@@ -77,7 +77,8 @@ impl Daemon {
         };
 
         let hub = Arc::new(Hub::new(EVENT_WINDOW));
-        let service = Service::open(paths.clone(), hub.clone())?;
+        let service = Service::open(paths.clone(), hub.clone())?
+            .with_drivers(ginka_core::driver::Registry::from_settings(&settings));
         handshake::write(&handshake_path, &handshake)?;
 
         Ok(Self {

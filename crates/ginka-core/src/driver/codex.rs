@@ -17,6 +17,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct CodexDriver {
     program: String,
+    env: Vec<(String, String)>,
 }
 
 impl Default for CodexDriver {
@@ -30,7 +31,14 @@ impl CodexDriver {
     pub fn with_program(program: impl Into<String>) -> Self {
         Self {
             program: program.into(),
+            env: Vec::new(),
         }
+    }
+
+    /// Set an environment variable for every process this driver starts.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
     }
 
     fn model_args(spec: &SessionSpec) -> Vec<String> {
@@ -67,7 +75,7 @@ impl AgentDriver for CodexDriver {
             .arg("--json")
             .args(Self::model_args(spec));
         command.args.push(spec.prompt.clone());
-        for (key, value) in &spec.env {
+        for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
         command
@@ -81,7 +89,7 @@ impl AgentDriver for CodexDriver {
             .arg("--json")
             .args(Self::model_args(spec));
         command.args.push(spec.prompt.clone());
-        for (key, value) in &spec.env {
+        for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
         command

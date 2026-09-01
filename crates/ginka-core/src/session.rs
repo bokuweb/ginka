@@ -157,6 +157,22 @@ pub fn transcript(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// How many turns a session has already completed.
+///
+/// Each turn is its own process, so a driver's own counter restarts every
+/// time; the session's count is the one the transcript and the checkpoints are
+/// numbered by. Counted from the stored events rather than held in memory,
+/// because a resume may be the first thing a restarted daemon does.
+pub fn turns_completed(conn: &Connection, id: &SessionId) -> Result<u32> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM session_events
+          WHERE session_id = ?1 AND json_extract(payload, '$.event.kind') = 'turn_end'",
+        [&id.0],
+        |row| row.get(0),
+    )?;
+    Ok(count as u32)
+}
+
 /// Sessions the daemon thought were live when it stopped.
 ///
 /// Their processes died with it, so on startup they are marked failed rather
@@ -377,6 +393,30 @@ mod tests {
             .query_row("SELECT count(*) FROM session_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn completed_turns_are_counted_from_the_transcript() {
+        let conn = db::open_in_memory().unwrap();
+        insert(&conn, &session("s", "comet/harbor", 100)).unwrap();
+        let id = SessionId("s".into());
+        assert_eq!(turns_completed(&conn, &id).unwrap(), 0);
+
+        for (at, event) in [
+            (1, AgentEvent::TextDelta { text: "hi".into() }),
+            (2, AgentEvent::TurnEnd { turn: 1 }),
+            (
+                3,
+                AgentEvent::TextDelta {
+                    text: "again".into(),
+                },
+            ),
+            (4, AgentEvent::TurnEnd { turn: 1 }),
+        ] {
+            append(&conn, &id, &TranscriptPayload::Agent { event }, at).unwrap();
+        }
+        // Two turns ran, even though the second process numbered its own as 1.
+        assert_eq!(turns_completed(&conn, &id).unwrap(), 2);
     }
 
     #[test]
