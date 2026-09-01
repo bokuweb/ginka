@@ -331,7 +331,9 @@ fn a_plain_folder_is_a_project_with_one_implicit_workspace() {
     let mut fixture = Fixture::new();
     let notes = fixture.work.path().join("notes");
     std::fs::create_dir_all(&notes).unwrap();
-    let project = match fixture.ask(Request::AddProject { path: notes.clone() }) {
+    let project = match fixture.ask(Request::AddProject {
+        path: notes.clone(),
+    }) {
         Response::Project { project } => project,
         other => panic!("expected a project, got {other:?}"),
     };

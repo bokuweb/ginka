@@ -48,6 +48,13 @@ pub enum ServerMessage {
     Error { id: RequestId, error: RpcError },
     /// An unsolicited push. Every event carries a `seq` so gaps are detectable.
     Event { seq: Seq, payload: DaemonEvent },
+    /// The cursor in a [`ClientMessage::Resume`] is older than the daemon's
+    /// replay window, so the events in between are gone.
+    ///
+    /// A client that gets this must re-read what it cares about rather than
+    /// carrying on patching: a short replay would leave it believing it was
+    /// caught up. `oldest` is the earliest sequence number still replayable.
+    Gap { oldest: Seq },
 }
 
 /// Why a request failed.
@@ -101,6 +108,13 @@ mod tests {
     fn a_resume_with_no_cursor_asks_for_everything_after_the_start() {
         let parsed: ClientMessage = serde_json::from_str(r#"{"type":"resume","after":0}"#).unwrap();
         assert_eq!(parsed, ClientMessage::Resume { after: 0 });
+    }
+
+    #[test]
+    fn a_gap_names_the_oldest_event_the_daemon_can_still_replay() {
+        let wired = serde_json::to_value(ServerMessage::Gap { oldest: 12 }).unwrap();
+        assert_eq!(wired["type"], serde_json::json!("gap"));
+        assert_eq!(wired["oldest"], serde_json::json!(12));
     }
 
     #[test]

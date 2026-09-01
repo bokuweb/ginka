@@ -5,11 +5,34 @@ edition.workspace = true
 publish.workspace = true
 description = "The Ginka daemon: owns storage, agent processes, PTYs and git"
 
+# The daemon is a library with a thin binary on top: the RPC surface has to be
+# reachable from an integration test, and a `src/main.rs` alone is not.
+[lib]
+name = "ginka_daemon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ginka-daemon"
+path = "src/main.rs"
+
 [dependencies]
 ginka-core.workspace = true
 ginka-protocol.workspace = true
 anyhow.workspace = true
+async-channel.workspace = true
+async-net.workspace = true
+async-tungstenite.workspace = true
+futures-lite.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smol.workspace = true
 tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+ginka-client.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true
