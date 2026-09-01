@@ -5,7 +5,7 @@
 //! rather than a domain copy and a wire copy that drift.
 
 use anyhow::Result;
-use ginka_protocol::ProjectName;
+use ginka_protocol::{ProjectName, WorkspaceId};
 use rusqlite::Connection;
 use std::path::PathBuf;
 
@@ -76,6 +76,40 @@ pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Wo
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Forget a project. Cascades to its worktrees; leaves the user's code alone.
+pub fn remove_project(conn: &Connection, project: &ProjectName) -> Result<bool> {
+    let removed = conn.execute("DELETE FROM projects WHERE name = ?1", [&project.0])?;
+    Ok(removed > 0)
+}
+
+/// The worktree a workspace id names, if it is still stored.
+///
+/// The id carries the project and the immutable worktree name, which is why
+/// this lookup keeps working after an agent switches branches inside it.
+pub fn find_worktree(conn: &Connection, workspace: &WorkspaceId) -> Result<Option<Worktree>> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(None);
+    };
+    Ok(list_worktrees(conn, &project)?
+        .into_iter()
+        .find(|worktree| worktree.name == name))
+}
+
+/// Pin or unpin a workspace. Returns whether a row was affected.
+///
+/// Pinning is ours rather than git's, so it lives only here and reconciliation
+/// must never write over it.
+pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> Result<bool> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    let updated = conn.execute(
+        "UPDATE worktrees SET pinned = ?1 WHERE project_name = ?2 AND name = ?3",
+        rusqlite::params![pinned, project.0, name],
+    )?;
+    Ok(updated > 0)
 }
 
 #[cfg(test)]

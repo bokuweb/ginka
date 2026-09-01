@@ -10,6 +10,7 @@ pub mod logging;
 pub mod paths;
 pub mod project;
 pub mod registry;
+pub mod service;
 pub mod settings;
 
 pub use paths::Paths;
