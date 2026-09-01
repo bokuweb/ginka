@@ -2335,6 +2335,9 @@ dependencies = [
  "ginka-core",
  "ginka-protocol",
  "rusqlite",
+ "serde_json",
+ "smol",
+ "tempfile",
 ]
 
 [[package]]

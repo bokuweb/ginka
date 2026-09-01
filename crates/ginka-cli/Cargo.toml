@@ -20,6 +20,12 @@ ginka-protocol.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 rusqlite.workspace = true
+serde_json.workspace = true
+smol.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile = "3"
 
 [lints]
 workspace = true

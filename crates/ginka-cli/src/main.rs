@@ -1,14 +1,20 @@
 //! The `ginka` command.
 //!
 //! Everything the UI can do, this can do, because both speak the same daemon
-//! protocol (`AGENTS.md` rule 3). Until the daemon's RPC lands in M2 these
-//! subcommands call `ginka-core` directly; the surface is the same either way,
-//! so moving them behind the protocol is a change of transport, not of shape.
+//! protocol (`AGENTS.md` rule 3). Every subcommand here is one `Request`: the
+//! CLI holds no state, opens no database and runs no git — it finds a daemon,
+//! starting one if there is none, and asks.
+//!
+//! `--json` prints the protocol's own response instead of a table, which is
+//! what makes the command line usable by an agent as well as by a person.
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use ginka_core::{Paths, db, git, project, registry, settings};
-use rusqlite::Connection;
+use ginka_client::{Client, Discovery};
+use ginka_core::{Paths, project, settings};
+use ginka_protocol::model::{Checkpoint, Project, Session, WorkspaceSummary};
+use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -18,6 +24,10 @@ use std::path::PathBuf;
     about = "IDE-agnostic coding-agent orchestrator"
 )]
 struct Cli {
+    /// Print the daemon's own response as JSON instead of a table.
+    #[arg(long, global = true)]
+    json: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -26,12 +36,31 @@ struct Cli {
 enum Command {
     /// Report where Ginka keeps its state and whether that state is healthy.
     Doctor,
+    /// Inspect and control the background daemon.
+    #[command(subcommand)]
+    Daemon(DaemonCommand),
     /// Manage registered projects.
     #[command(subcommand)]
     Project(ProjectCommand),
     /// Manage workspaces, which are git worktrees.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// Start and steer agent sessions.
+    #[command(subcommand)]
+    Session(SessionCommand),
+    /// Rewind a workspace to a saved state.
+    #[command(subcommand)]
+    Checkpoint(CheckpointCommand),
+}
+
+#[derive(Subcommand)]
+enum DaemonCommand {
+    /// Report whether a daemon is running, and where.
+    Status,
+    /// Start a daemon if there is not one already.
+    Start,
+    /// Ask the running daemon to exit. Agents it is running are stopped.
+    Stop,
 }
 
 #[derive(Subcommand)]
@@ -43,6 +72,8 @@ enum ProjectCommand {
     },
     /// List registered projects.
     List,
+    /// Forget a project. Its files are left alone.
+    Remove { project: String },
 }
 
 #[derive(Subcommand)]
@@ -70,6 +101,56 @@ enum WorkspaceCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Pin a workspace so it sorts first.
+    Pin {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Unpin instead.
+        #[arg(long)]
+        off: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// List sessions, most recently active first.
+    List {
+        /// Limit to one workspace, by id.
+        workspace: Option<String>,
+    },
+    /// Start an agent in a workspace.
+    Start {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The opening prompt.
+        prompt: String,
+        /// Which agent to run.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+        #[arg(long)]
+        model: Option<String>,
+    },
+    /// Send a follow-up. Queued if the agent is still working.
+    Send { session: String, text: String },
+    /// Stop an agent's process tree.
+    Cancel { session: String },
+    /// Print a session's transcript.
+    Log {
+        session: String,
+        /// Start after this transcript position.
+        #[arg(long)]
+        after: Option<u64>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CheckpointCommand {
+    /// List a workspace's checkpoints, newest first.
+    List { workspace: String },
+    /// Put a workspace back to a checkpoint's state.
+    ///
+    /// What is there now is snapshotted first, so this is reversible.
+    Restore { checkpoint: String },
 }
 
 fn main() -> Result<()> {
@@ -79,160 +160,388 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => doctor(&paths),
-        Command::Project(command) => {
-            let conn = db::open(&paths.database())?;
-            match command {
-                ProjectCommand::Add { path } => project_add(&conn, path),
-                ProjectCommand::List => project_list(&conn),
+        Command::Daemon(command) => daemon(&paths, command, cli.json),
+        command => {
+            let request = request_for(command)?;
+            let response = smol::block_on(async {
+                let client = connect(&paths).await?;
+                client
+                    .request(request)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            })?;
+            if cli.json {
+                println!("{}", serde_json::to_string_pretty(&response)?);
+            } else {
+                print(response);
             }
-        }
-        Command::Workspace(command) => {
-            let conn = db::open(&paths.database())?;
-            match command {
-                WorkspaceCommand::List { project } => workspace_list(&conn, project),
-                WorkspaceCommand::New {
-                    project,
-                    branch,
-                    base,
-                } => workspace_new(&paths, &conn, &project, &branch, base),
-                WorkspaceCommand::Remove {
-                    project,
-                    name,
-                    force,
-                } => workspace_remove(&conn, &project, &name, force),
-            }
+            Ok(())
         }
     }
 }
 
+/// Find the daemon, starting one if there is none.
+async fn connect(paths: &Paths) -> Result<Client> {
+    Discovery::new(paths.daemon_handshake())
+        .with_home(paths.root())
+        .connect(None)
+        .await
+        .context("could not reach the daemon")
+}
+
+/// Turn a subcommand into the one request that carries it out.
+fn request_for(command: Command) -> Result<Request> {
+    Ok(match command {
+        Command::Project(ProjectCommand::Add { path }) => Request::AddProject {
+            path: match path {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            },
+        },
+        Command::Project(ProjectCommand::List) => Request::ListProjects,
+        Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
+            project: ProjectName(project),
+        },
+
+        Command::Workspace(WorkspaceCommand::List { project }) => Request::ListWorkspaces {
+            project: project.map(ProjectName),
+        },
+        Command::Workspace(WorkspaceCommand::New {
+            project,
+            branch,
+            base,
+        }) => Request::CreateWorkspace {
+            project: ProjectName(project),
+            branch,
+            base,
+        },
+        Command::Workspace(WorkspaceCommand::Remove {
+            project,
+            name,
+            force,
+        }) => Request::RemoveWorkspace {
+            workspace: WorkspaceId::new(&ProjectName(project), &name),
+            force,
+        },
+        Command::Workspace(WorkspaceCommand::Pin { workspace, off }) => Request::PinWorkspace {
+            workspace: WorkspaceId(workspace),
+            pinned: !off,
+        },
+
+        Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
+            workspace: workspace.map(WorkspaceId),
+        },
+        Command::Session(SessionCommand::Start {
+            workspace,
+            prompt,
+            agent,
+            model,
+        }) => Request::StartSession {
+            workspace: WorkspaceId(workspace),
+            agent,
+            prompt,
+            model,
+        },
+        Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
+            session: SessionId(session),
+            text,
+        },
+        Command::Session(SessionCommand::Cancel { session }) => Request::CancelSession {
+            session: SessionId(session),
+        },
+        Command::Session(SessionCommand::Log { session, after }) => Request::SessionTranscript {
+            session: SessionId(session),
+            after,
+            limit: None,
+        },
+
+        Command::Checkpoint(CheckpointCommand::List { workspace }) => Request::ListCheckpoints {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Checkpoint(CheckpointCommand::Restore { checkpoint }) => {
+            Request::RestoreCheckpoint {
+                checkpoint: CheckpointId(checkpoint),
+            }
+        }
+
+        // Handled before this point, without a daemon.
+        Command::Doctor | Command::Daemon(_) => unreachable!("handled in main"),
+    })
+}
+
+/// Where state lives and whether it is healthy.
+///
+/// This is the command someone runs when something is wrong, so it reads the
+/// state directly rather than through the daemon: a daemon that will not start
+/// is exactly what it has to be able to report.
 fn doctor(paths: &Paths) -> Result<()> {
     println!("root          {}", paths.root().display());
     println!("database      {}", paths.database().display());
 
-    let conn = db::open(&paths.database())?;
+    let conn = ginka_core::db::open(&paths.database())?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
     println!("schema        v{version}");
 
     let app: settings::AppSettings = settings::load(&paths.app_settings());
     println!("appearance    {:?}", app.appearance);
     println!("projects      {}", project::list_projects(&conn)?.len());
-    println!(
-        "daemon        {}",
-        if paths.daemon_handshake().exists() {
-            "handshake present"
-        } else {
-            "not running"
+    println!("daemon        {}", describe_daemon(paths));
+    Ok(())
+}
+
+fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
+    let discovery = Discovery::new(paths.daemon_handshake()).with_home(paths.root());
+    match command {
+        DaemonCommand::Status => {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&discovery.published())?);
+            } else {
+                println!("{}", describe_daemon(paths));
+            }
+            Ok(())
         }
-    );
-    Ok(())
-}
-
-fn project_add(conn: &Connection, path: Option<PathBuf>) -> Result<()> {
-    let path = path.unwrap_or(std::env::current_dir()?);
-    let project = registry::register_project(conn, &path)?;
-    let report = registry::sync_worktrees(conn, &project)?;
-    println!(
-        "registered {} ({:?}) at {}",
-        project.name,
-        project.kind,
-        project.path.display()
-    );
-    if report.added > 0 {
-        println!("adopted {} worktree(s)", report.added);
+        DaemonCommand::Start => {
+            let client = smol::block_on(discovery.connect(None))?;
+            println!("daemon {} is listening", client.daemon_version());
+            Ok(())
+        }
+        DaemonCommand::Stop => smol::block_on(async {
+            match discovery.connect_existing(None).await {
+                Ok(client) => {
+                    client
+                        .request(Request::Shutdown)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    println!("asked the daemon to stop");
+                    Ok(())
+                }
+                // Nothing to stop is the state the user asked for.
+                Err(_) => {
+                    println!("no daemon is running");
+                    Ok(())
+                }
+            }
+        }),
     }
-    Ok(())
 }
 
-fn project_list(conn: &Connection) -> Result<()> {
-    let projects = project::list_projects(conn)?;
+fn describe_daemon(paths: &Paths) -> String {
+    match Discovery::new(paths.daemon_handshake()).published() {
+        Some(handshake) => format!(
+            "running (pid {}, port {}, version {})",
+            handshake.pid, handshake.port, handshake.version
+        ),
+        None => "not running".to_string(),
+    }
+}
+
+/// Print a response as a person reads it.
+fn print(response: Response) {
+    match response {
+        Response::Ack => println!("done"),
+        Response::Projects { projects } => print_projects(&projects),
+        Response::Project { project } => print_projects(std::slice::from_ref(&project)),
+        Response::Workspaces { workspaces } => print_workspaces(&workspaces),
+        Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
+        Response::Sessions { sessions } => print_sessions(&sessions),
+        Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
+        Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
+        Response::Transcript { entries } => {
+            if entries.is_empty() {
+                println!("no transcript yet");
+            }
+            for entry in entries {
+                println!("{}", ginka_cli_format::transcript_line(&entry));
+            }
+        }
+    }
+}
+
+fn print_projects(projects: &[Project]) {
     if projects.is_empty() {
         println!("no projects registered; try `ginka project add <path>`");
-        return Ok(());
+        return;
     }
     for project in projects {
         println!(
             "{:<24} {:<6} {}",
             project.name.0,
-            format!("{:?}", project.kind).to_lowercase(),
+            project.kind.as_str(),
             project.path.display()
         );
     }
-    Ok(())
 }
 
-/// Resolve a project by name, with a message that says what is available
-/// rather than only that the name was wrong.
-fn find_project(conn: &Connection, name: &str) -> Result<project::Project> {
-    let projects = project::list_projects(conn)?;
-    projects
-        .iter()
-        .find(|project| project.name.0 == name)
-        .cloned()
-        .with_context(|| {
-            let known: Vec<&str> = projects.iter().map(|p| p.name.0.as_str()).collect();
-            if known.is_empty() {
-                format!("no project named {name}; none are registered")
-            } else {
-                format!("no project named {name}; registered: {}", known.join(", "))
+fn print_workspaces(workspaces: &[WorkspaceSummary]) {
+    if workspaces.is_empty() {
+        println!("no workspaces; try `ginka workspace new <project> <branch>`");
+        return;
+    }
+    for summary in workspaces {
+        println!(
+            "{:<32} {:<24} {:<10} {}",
+            summary.id().0,
+            summary.worktree.branch,
+            ginka_cli_format::status_label(&summary.status),
+            summary.worktree.path.display()
+        );
+    }
+}
+
+fn print_sessions(sessions: &[Session]) {
+    if sessions.is_empty() {
+        println!("no sessions yet; try `ginka session start <workspace> <prompt>`");
+        return;
+    }
+    for session in sessions {
+        println!(
+            "{:<34} {:<24} {:<10} {:<8} {}",
+            session.id.0,
+            session.workspace.0,
+            session.agent,
+            session.state.as_str(),
+            session.summary.clone().unwrap_or_default()
+        );
+    }
+}
+
+fn print_checkpoints(checkpoints: &[Checkpoint]) {
+    if checkpoints.is_empty() {
+        println!("no checkpoints yet; they are taken as an agent works");
+        return;
+    }
+    for checkpoint in checkpoints {
+        println!(
+            "{:<34} turn {:<4} {:<12} {}",
+            checkpoint.id.0,
+            checkpoint.turn,
+            &checkpoint.commit[..checkpoint.commit.len().min(12)],
+            checkpoint.label
+        );
+    }
+}
+
+/// Formatting shared by the printers, kept apart so it can be tested.
+mod ginka_cli_format {
+    use ginka_protocol::AgentEvent;
+    use ginka_protocol::model::{BranchStatus, TranscriptEntry, TranscriptPayload};
+
+    /// A one-word summary of a worktree's git status.
+    pub fn status_label(status: &BranchStatus) -> String {
+        if status.conflict {
+            return "conflict".to_string();
+        }
+        let mut parts = Vec::new();
+        if status.dirty {
+            parts.push("dirty".to_string());
+        }
+        if status.ahead > 0 {
+            parts.push(format!("+{}", status.ahead));
+        }
+        if status.behind > 0 {
+            parts.push(format!("-{}", status.behind));
+        }
+        if parts.is_empty() {
+            return "clean".to_string();
+        }
+        parts.join(" ")
+    }
+
+    /// One transcript entry as a line of output.
+    pub fn transcript_line(entry: &TranscriptEntry) -> String {
+        match &entry.payload {
+            TranscriptPayload::User { text } => format!("{:>4}  you  {text}", entry.seq),
+            TranscriptPayload::Agent { event } => {
+                format!("{:>4}  {}", entry.seq, describe(event))
             }
-        })
-}
-
-fn workspace_list(conn: &Connection, only: Option<String>) -> Result<()> {
-    let projects = match only {
-        Some(name) => vec![find_project(conn, &name)?],
-        None => project::list_projects(conn)?,
-    };
-
-    for project in projects {
-        registry::sync_worktrees(conn, &project)?;
-        for worktree in project::list_worktrees(conn, &project.name)? {
-            println!(
-                "{:<32} {:<24} {}",
-                worktree.workspace_id().0,
-                worktree.branch,
-                worktree.path.display()
-            );
         }
     }
-    Ok(())
-}
 
-fn workspace_new(
-    paths: &Paths,
-    conn: &Connection,
-    project: &str,
-    branch: &str,
-    base: Option<String>,
-) -> Result<()> {
-    let project = find_project(conn, project)?;
-    let base = base.unwrap_or_else(|| project.default_branch.clone());
-
-    // Worktrees live under Ginka's own directory rather than beside the user's
-    // checkout, so the app never litters the repository it was pointed at.
-    let path = paths
-        .worktrees()
-        .join(&project.name.0)
-        .join(ginka_protocol::ids::slugify(branch));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    fn describe(event: &AgentEvent) -> String {
+        match event {
+            AgentEvent::TextDelta { text } => text.clone(),
+            AgentEvent::Reasoning { text } => format!("(thinking) {text}"),
+            AgentEvent::ToolCall { name, input, .. } => format!("[{name}] {input}"),
+            AgentEvent::ToolResult {
+                output, is_error, ..
+            } => {
+                let marker = if *is_error { "!" } else { " " };
+                format!("[result]{marker} {}", output.lines().next().unwrap_or(""))
+            }
+            AgentEvent::AskUser { question, .. } => format!("? {question}"),
+            AgentEvent::PlanProposal { plan, .. } => format!("plan: {plan}"),
+            AgentEvent::Usage { usage } => format!(
+                "usage: {} in, {} out",
+                usage.input_tokens, usage.output_tokens
+            ),
+            AgentEvent::TurnEnd { turn } => format!("-- end of turn {turn} --"),
+            AgentEvent::SessionResult { state, summary } => format!(
+                "== {} {}",
+                state.as_str(),
+                summary.clone().unwrap_or_default()
+            ),
+        }
     }
 
-    git::add_worktree(&project.path, &path, branch, &base)?;
-    registry::sync_worktrees(conn, &project)?;
-    println!("created {} at {}", branch, path.display());
-    Ok(())
-}
+    #[cfg(test)]
+    mod tests {
+        use super::*;
 
-fn workspace_remove(conn: &Connection, project: &str, name: &str, force: bool) -> Result<()> {
-    let project = find_project(conn, project)?;
-    let worktree = project::list_worktrees(conn, &project.name)?
-        .into_iter()
-        .find(|worktree| worktree.name == name)
-        .with_context(|| format!("no workspace named {name} in {}", project.name))?;
+        #[test]
+        fn a_clean_worktree_says_so_rather_than_showing_nothing() {
+            assert_eq!(status_label(&BranchStatus::default()), "clean");
+        }
 
-    git::remove_worktree(&project.path, &worktree.path, force)?;
-    registry::sync_worktrees(conn, &project)?;
-    println!("removed {}", worktree.workspace_id().0);
-    Ok(())
+        #[test]
+        fn a_conflict_outranks_everything_else_worth_saying() {
+            let status = BranchStatus {
+                conflict: true,
+                dirty: true,
+                ahead: 2,
+                ..BranchStatus::default()
+            };
+            assert_eq!(status_label(&status), "conflict");
+        }
+
+        #[test]
+        fn divergence_is_shown_next_to_dirtiness() {
+            let status = BranchStatus {
+                dirty: true,
+                ahead: 2,
+                behind: 1,
+                ..BranchStatus::default()
+            };
+            assert_eq!(status_label(&status), "dirty +2 -1");
+        }
+
+        #[test]
+        fn a_transcript_line_says_who_spoke() {
+            let entry = TranscriptEntry {
+                seq: 7,
+                at: 0,
+                payload: TranscriptPayload::User {
+                    text: "write the test first".into(),
+                },
+            };
+            assert!(transcript_line(&entry).contains("you  write the test first"));
+        }
+
+        #[test]
+        fn a_failing_tool_result_is_marked_in_the_log() {
+            let entry = TranscriptEntry {
+                seq: 1,
+                at: 0,
+                payload: TranscriptPayload::Agent {
+                    event: AgentEvent::ToolResult {
+                        id: "t".into(),
+                        output: "no such file\nmore".into(),
+                        is_error: true,
+                    },
+                },
+            };
+            let line = transcript_line(&entry);
+            assert!(line.contains("[result]!"), "{line}");
+            assert!(!line.contains("more"), "only the first line: {line}");
+        }
+    }
 }
