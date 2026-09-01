@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Something a client asks the daemon to do.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
@@ -86,6 +87,7 @@ pub enum Request {
 /// One variant per shape rather than per request: several requests legitimately
 /// answer `Ack`, and a client that has to match on the request it sent to
 /// understand the reply is a client that cannot be written generically.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {

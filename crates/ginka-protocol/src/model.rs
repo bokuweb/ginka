@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// A registered repository or folder.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     /// Stable key, slugified from the directory name.
@@ -29,6 +30,7 @@ pub struct Project {
 }
 
 /// Whether a project has git features at all.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectKind {
@@ -60,6 +62,7 @@ impl ProjectKind {
 }
 
 /// One git worktree; the unit of isolation a workspace is scoped to.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Worktree {
     pub project: ProjectName,
@@ -82,6 +85,7 @@ impl Worktree {
 }
 
 /// How a worktree stands against its upstream.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchStatus {
     /// Tracked files are modified, staged or untracked files exist.
@@ -105,6 +109,7 @@ impl BranchStatus {
 }
 
 /// One agent conversation, scoped to one workspace and one driver.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
     pub id: SessionId,
@@ -150,6 +155,7 @@ impl Session {
 /// The daemon is the only writer. `Idle` means the process is gone but the
 /// transcript can be resumed; `AwaitingInput` means the process is alive and
 /// blocked on the user.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionState {
@@ -206,6 +212,7 @@ impl SessionState {
 /// The transcript is an append-only log of normalized events, not a list of
 /// rendered messages: the UI folds deltas into paragraphs, and re-folding is
 /// cheaper than losing the tool calls and reasoning that sat between them.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptEntry {
     /// Position within the session, from 1. Also the pagination cursor.
@@ -216,6 +223,7 @@ pub struct TranscriptEntry {
 }
 
 /// Who produced a transcript entry.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum TranscriptPayload {
@@ -227,6 +235,7 @@ pub enum TranscriptPayload {
 
 /// A workspace state snapshotted at a turn boundary, so a transcript position
 /// maps to a working tree the user can go back to.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
     pub id: CheckpointId,
@@ -244,6 +253,7 @@ pub struct Checkpoint {
 }
 
 /// A workspace with everything the dashboard draws for it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSummary {
     pub worktree: Worktree,

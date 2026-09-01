@@ -17,6 +17,7 @@ pub type Seq = u64;
 pub type RequestId = u64;
 
 /// A frame from a client to the daemon.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ClientMessage {
@@ -31,6 +32,7 @@ pub enum ClientMessage {
 }
 
 /// A frame from the daemon to a client.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ServerMessage {
@@ -60,6 +62,7 @@ pub enum ServerMessage {
 /// Why a request failed.
 ///
 /// `code` is stable and matchable; `message` is for a human and may change.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpcError {
     pub code: String,

@@ -5,8 +5,10 @@ use std::fmt;
 
 /// A project's stable key. Projects are keyed by name rather than by path so a
 /// repository can be moved on disk without orphaning its workspaces.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct ProjectName(pub String);
 
 /// Identifies one workspace (one git worktree).
@@ -14,8 +16,10 @@ pub struct ProjectName(pub String);
 /// Derived from the worktree's immutable `name`, **never** from the live branch
 /// — an agent switching branches inside a worktree must not re-key everything
 /// that hangs off this id. See `docs/roadmap.md` §4.4.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct WorkspaceId(pub String);
 
 impl WorkspaceId {
@@ -40,13 +44,17 @@ impl WorkspaceId {
 
 /// Identifies one agent session — a single conversation with one driver in one
 /// workspace. Opaque, assigned by the daemon; clients never construct one.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct SessionId(pub String);
 
 /// Identifies one checkpoint: a workspace state snapshotted at a turn boundary.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct CheckpointId(pub String);
 
 /// Lowercase, collapse every run of non-alphanumeric characters to a single

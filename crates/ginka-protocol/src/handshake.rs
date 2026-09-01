@@ -9,6 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The contents of `~/.ginka/daemon.json`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handshake {
     /// The loopback port the daemon accepted on. Never a wildcard: the daemon

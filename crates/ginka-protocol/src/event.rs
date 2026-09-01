@@ -10,6 +10,7 @@ use crate::model::{BranchStatus, Session, SessionState};
 use serde::{Deserialize, Serialize};
 
 /// One normalized thing an agent did.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AgentEvent {
@@ -59,6 +60,7 @@ pub enum AgentEvent {
 /// Counts are cumulative for the session as the vendor reports them, not
 /// per-turn deltas — vendors disagree about which they emit, and the drivers
 /// normalize to cumulative because it is the one that survives a dropped event.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
     pub input_tokens: u64,
@@ -74,6 +76,7 @@ pub struct Usage {
 /// Pushes are how the CLI, the app and a second window stay in step without
 /// polling. Each is delivered with a sequence number so a reconnecting client
 /// can ask for everything after the last one it saw.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum DaemonEvent {
