@@ -10,7 +10,7 @@
 //! starts a new one, because a UI that has to be relaunched to reconnect is a
 //! UI that gets relaunched.
 
-use ginka_client::{Client, Discovery};
+use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{Session, TranscriptEntry};
 use ginka_protocol::rpc::{Request, Response};
@@ -46,6 +46,22 @@ impl DaemonLink {
                 .map(|summary| SessionRow::from_summary(summary, now))
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// The next thing the daemon announced.
+    ///
+    /// `None` means the stream ended — the daemon stopped, or the connection
+    /// dropped — and the caller should wait before asking again rather than
+    /// spinning on a socket that is not there.
+    pub async fn next_event(&self) -> Option<Event> {
+        let client = self.client().await?;
+        match client.next_event().await {
+            Some(event) => Some(event),
+            None => {
+                self.forget();
+                None
+            }
         }
     }
 

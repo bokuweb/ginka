@@ -7,11 +7,13 @@
 //! already running there, and the transcript is folded from the daemon's event
 //! stream. The terminal is still a placeholder (M3).
 
+use crate::daemon::DaemonLink;
 use crate::sidebar::{SessionSidebar, SidebarEvent};
 use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::SessionId;
+use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{SessionState, TranscriptEntry};
 use ginka_ui::Tokens;
 use ginka_ui::layout::{Layout, Panel};
@@ -55,9 +57,14 @@ pub fn init(cx: &mut App) {
 
 /// How often worktrees and their git status are re-read.
 ///
-/// Matches the daemon's planned sync cadence (`DaemonSettings::sync_interval_secs`).
-/// When the daemon owns this in M2 the UI will be told rather than polling.
+/// The daemon pushes what it changes, so this is the backstop rather than the
+/// mechanism: it catches what happens outside the daemon — a branch switched
+/// in someone's terminal, a `git worktree add` — and it is what reconnects
+/// after the daemon has been restarted.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+
+/// How long to wait before reaching for a daemon that was not there.
+const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 /// Width macOS reserves for the traffic lights before our own content starts.
 const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
@@ -157,47 +164,71 @@ impl Shell {
                 loop {
                     cx.background_executor().timer(delay).await;
                     delay = REFRESH_INTERVAL;
-                    // One request to the daemon, which does the storage and the
-                    // `git status` per worktree: off the main thread, or the
-                    // window stalls every tick.
-                    let listing = link.clone();
-                    let rows = cx
-                        .background_spawn(
-                            async move { listing.workspaces(crate::daemon::now()).await },
-                        )
-                        .await;
-                    tracing::debug!(rows = rows.len(), "refreshed sessions");
-                    let updated = this.update(cx, |this, cx| {
-                        this.sidebar
-                            .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
-                        this.session = this.sidebar.read(cx).selected_row().cloned();
-                        cx.notify();
-                        this.session.as_ref().and_then(|row| row.session.clone())
-                    });
-                    let Ok(session) = updated else {
+                    let Ok(session) = pull_rows(&this, &link, cx).await else {
                         // The window is gone; stop ticking.
                         break;
                     };
+                    if let Some(session) = session
+                        && pull_transcript(&this, &link, session, cx).await.is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        })
+        .detach();
 
-                    // Only the tail: opening a long session reads it once, and
-                    // every tick after that asks for what it has not folded in.
-                    if let Some(session) = session {
-                        let after = this
-                            .update(cx, |this, _| this.transcript_cursor(&session))
-                            .unwrap_or(0);
-                        let reading = link.clone();
-                        let asked = session.clone();
-                        let entries = cx
-                            .background_spawn(
-                                async move { reading.transcript(&asked, after).await },
-                            )
-                            .await;
-                        if this
-                            .update(cx, |this, cx| this.fold(&session, &entries, cx))
-                            .is_err()
-                        {
-                            break;
+        // The tick is the backstop. What makes the window feel live is the
+        // daemon's own stream: an agent's text arrives as it is produced,
+        // rather than up to a tick later.
+        cx.spawn({
+            let link = link.clone();
+            async move |this, cx| {
+                loop {
+                    let waiting = link.clone();
+                    let event = cx
+                        .background_spawn(async move { waiting.next_event().await })
+                        .await;
+                    let Some(event) = event else {
+                        // No daemon, or it stopped. Wait rather than spinning
+                        // on a socket that is not there; the tick reconnects.
+                        cx.background_executor().timer(RECONNECT_DELAY).await;
+                        continue;
+                    };
+
+                    let followed = match event.payload {
+                        // A session's own output: fold in the tail if it is the
+                        // one on screen, and otherwise leave it to the tick —
+                        // another workspace's typing is not this column's news.
+                        DaemonEvent::SessionEvent { session, .. } => {
+                            let showing = this
+                                .update(cx, |this, _| {
+                                    this.session.as_ref().and_then(|row| row.session.clone())
+                                })
+                                .ok()
+                                .flatten();
+                            match showing {
+                                Some(showing) if showing == session => {
+                                    pull_transcript(&this, &link, session, cx).await
+                                }
+                                _ => Ok(()),
+                            }
                         }
+                        // Anything that changes what the sidebar says.
+                        DaemonEvent::ProjectsChanged
+                        | DaemonEvent::WorkspacesChanged { .. }
+                        | DaemonEvent::WorkspaceStatusChanged { .. }
+                        | DaemonEvent::SessionStarted { .. }
+                        | DaemonEvent::SessionEnded { .. } => {
+                            pull_rows(&this, &link, cx).await.map(|_| ())
+                        }
+                        DaemonEvent::Shutdown => {
+                            cx.background_executor().timer(RECONNECT_DELAY).await;
+                            Ok(())
+                        }
+                    };
+                    if followed.is_err() {
+                        break;
                     }
                 }
             }
@@ -956,6 +987,50 @@ impl Shell {
                 }),
         )
     }
+}
+
+/// Re-read the workspaces and hand back the selected session, if any.
+///
+/// `Err` means the window has gone, which is how both loops know to stop.
+async fn pull_rows(
+    this: &WeakEntity<Shell>,
+    link: &Arc<DaemonLink>,
+    cx: &mut AsyncApp,
+) -> Result<Option<SessionId>, ()> {
+    let listing = link.clone();
+    // A request to the daemon, which does the storage and one `git status` per
+    // worktree: off the main thread, or the window stalls on every refresh.
+    let rows = cx
+        .background_spawn(async move { listing.workspaces(crate::daemon::now()).await })
+        .await;
+    tracing::debug!(rows = rows.len(), "refreshed workspaces");
+    this.update(cx, |this, cx| {
+        this.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        this.session = this.sidebar.read(cx).selected_row().cloned();
+        cx.notify();
+        this.session.as_ref().and_then(|row| row.session.clone())
+    })
+    .map_err(|_| ())
+}
+
+/// Fold in whatever the session has said since this window last looked.
+async fn pull_transcript(
+    this: &WeakEntity<Shell>,
+    link: &Arc<DaemonLink>,
+    session: SessionId,
+    cx: &mut AsyncApp,
+) -> Result<(), ()> {
+    let after = this
+        .update(cx, |this, _| this.transcript_cursor(&session))
+        .map_err(|_| ())?;
+    let reading = link.clone();
+    let asked = session.clone();
+    let entries = cx
+        .background_spawn(async move { reading.transcript(&asked, after).await })
+        .await;
+    this.update(cx, |this, cx| this.fold(&session, &entries, cx))
+        .map_err(|_| ())
 }
 
 /// The mono family is a theme concern, not a per-view constant.
