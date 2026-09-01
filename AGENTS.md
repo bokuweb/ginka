@@ -19,22 +19,35 @@ Two other projects inform the design:
 
 ## Current state
 
-**Milestone 0 is largely landed** (see `docs/roadmap.md` §5 for what remains: the glass window layer, motion helpers, type export, settings hot-reload, crash handler). What works today:
+**M0 and M1 are largely landed, and M2's process split is in.** See `docs/roadmap.md` §5 for what each milestone still owes. What works today:
 
-- The three-column shell renders with resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser — all against sample data. **Not yet visually signed off** (see roadmap M0).
-- Design tokens load from `assets/themes/` and are bridged onto the toolkit's theme; the appearance follows the system unless overridden.
-- Storage boots: SQLite migrations, settings, logging. `ginka doctor` verifies it.
+- A **daemon** owns the state: SQLite, git and agent processes. It binds loopback, publishes its port and a bearer token to `~/.ginka/daemon.json`, and pushes every mutation to connected clients with a sequence number and a bounded replay window.
+- The **CLI and the app are both clients of it.** `ginka` registers projects, creates and removes worktrees, starts agents, reads transcripts, lists and restores checkpoints — and starts the daemon when there is none.
+- **Agents run.** `claude` and `codex` drivers normalize their output into one `AgentEvent` stream; a turn is one process, follow-ups resume the vendor's session, and cancelling signals the process group. Transcripts are persisted as events.
+- **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
+- The three-column shell renders with a resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser. **Not yet visually signed off** (see roadmap M0).
 
-Everything in the sidebar and the transcript is **placeholder content** (`src/workspace.rs::SessionRow::samples`). M1 replaces it with real projects and worktrees.
+The **transcript is not rendered yet**: the centre column still shows placeholder content, and the sidebar's rows are real. Chat rendering and the composer are M2's remaining work.
 
 ## Commands
 
 ```bash
-cargo run                  # the desktop app
-cargo run -p ginka-cli -- doctor   # where state lives and whether it is healthy
-cargo test --workspace
+cargo run                                   # the desktop app
+cargo test --workspace                      # run this rather than `-p`: the CLI's
+                                            # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+
+cargo run -p ginka-cli -- doctor            # where state lives and whether it is healthy
+cargo run -p ginka-cli -- daemon status
+cargo run -p ginka-cli -- project add .
+cargo run -p ginka-cli -- workspace new <project> <branch>
+cargo run -p ginka-cli -- session start <workspace> "<prompt>"
+cargo run -p ginka-cli -- session log <session>
+cargo run -p ginka-cli -- checkpoint list <workspace>
+cargo run -p ginka-cli -- --json project list   # the protocol's own shapes, for agents
+
+cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```
 
 `GINKA_HOME` overrides `~/.ginka`; point it at a temp directory rather than testing against your real state. `GINKA_LOG` sets the tracing filter.
@@ -47,7 +60,8 @@ ginka/
 ├─ src/                 # GPUI app: views only -- shell, sidebar, surfaces
 ├─ crates/
 │  ├─ ginka-protocol/   # serde wire types shared by every process; ts-rs export
-│  ├─ ginka-core/       # domain: projects, worktrees, sessions, drivers, git, cron
+│  ├─ ginka-core/       # domain: projects, worktrees, sessions, drivers, git,
+│  │                    # checkpoints, and the daemon's request handling
 │  ├─ ginka-daemon/     # binary: WebSocket RPC server, owns SQLite + processes
 │  ├─ ginka-client/     # async RPC client used by the app and the CLI
 │  └─ ginka-cli/        # binary: the `ginka` command
