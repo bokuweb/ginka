@@ -10,6 +10,7 @@
 //! anyway, and one owner means no half-applied mutation can be observed.
 
 use crate::agent::Supervisor;
+use crate::checkpoint;
 use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
@@ -20,7 +21,7 @@ use ginka_protocol::model::{
     Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{ProjectName, RpcError, SessionId, WorkspaceId};
+use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -255,17 +256,20 @@ impl Service {
                 })
             }
 
+            Request::ListCheckpoints { workspace } => {
+                self.worktree(&workspace)?;
+                Ok(Response::Checkpoints {
+                    checkpoints: checkpoint::list(&self.conn(), &workspace).map_err(failed)?,
+                })
+            }
+            Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
+
             Request::Shutdown => {
                 // The transport is listening for this: it is the one event a
                 // client cannot poll for after the fact.
                 self.events.emit(DaemonEvent::Shutdown);
                 Ok(Response::Ack)
             }
-
-            other => Err(RpcError {
-                code: "unsupported".into(),
-                message: format!("this daemon does not implement {other:?} yet"),
-            }),
         }
     }
 
@@ -312,6 +316,35 @@ impl Service {
         self.sessions
             .send(id.clone(), driver, spec, stored.vendor_session_id)
             .map_err(failed)?;
+        Ok(Response::Ack)
+    }
+
+    /// Put a workspace back to the state a checkpoint captured.
+    ///
+    /// Restoring is destructive — files written since are removed — so the
+    /// state being replaced is snapshotted first. A rewind must never be the
+    /// thing that loses work, including work the user wanted after all.
+    fn restore(&mut self, id: &CheckpointId) -> Result<Response, RpcError> {
+        let checkpoint = checkpoint::get(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::not_found(format!("no checkpoint with id {}", id.0)))?;
+        let worktree = self.worktree(&checkpoint.workspace)?;
+
+        checkpoint::take(
+            &self.conn(),
+            &worktree.path,
+            &checkpoint.workspace,
+            &checkpoint.session,
+            checkpoint.turn,
+            &format!("before restoring: {}", checkpoint.label),
+            now(),
+        )
+        .map_err(failed)?;
+
+        git::restore_snapshot(&worktree.path, &checkpoint.commit).map_err(failed)?;
+        self.events.emit(DaemonEvent::WorkspacesChanged {
+            project: worktree.project.clone(),
+        });
         Ok(Response::Ack)
     }
 
@@ -413,8 +446,9 @@ mod tests {
     }
 
     #[test]
-    fn an_unimplemented_request_says_so_rather_than_answering_ack() {
-        // A client must be able to tell "done" from "this build cannot do it".
+    fn a_request_naming_a_workspace_that_is_not_there_is_not_found() {
+        // Every method in the protocol is implemented, so the interesting
+        // failure is a bad argument rather than a missing capability.
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths::with_root(dir.path().join("state"));
         let mut service = Service::open(paths, Arc::new(NullSink)).unwrap();
@@ -423,7 +457,7 @@ mod tests {
                 workspace: WorkspaceId("comet/harbor".into()),
             })
             .unwrap_err();
-        assert_eq!(error.code, "unsupported");
+        assert_eq!(error.code, "not_found");
     }
 
     #[test]

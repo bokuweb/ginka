@@ -12,7 +12,7 @@
 
 use crate::driver::{AgentDriver, CommandSpec, ParseState, SessionSpec};
 use crate::service::EventSink;
-use crate::session;
+use crate::{checkpoint, session};
 use anyhow::{Context, Result};
 use futures_lite::io::BufReader;
 use futures_lite::{AsyncBufReadExt, StreamExt};
@@ -20,6 +20,7 @@ use ginka_protocol::model::{SessionState, TranscriptPayload};
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
+use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +54,30 @@ impl Shared {
             });
         }
         Ok(seq)
+    }
+
+    /// Snapshot the worktree so this point in the transcript can be returned
+    /// to.
+    ///
+    /// A workspace that is not a repository, or one whose directory has gone,
+    /// cannot be snapshotted; that is logged and the turn carries on, because
+    /// losing the ability to rewind is not a reason to stop an agent.
+    fn checkpoint(&self, session: &SessionId, workspace_path: &Path, turn: u32, label: &str) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(Some(stored)) = session::get(&conn, session) else {
+            return;
+        };
+        if let Err(error) = checkpoint::take(
+            &conn,
+            workspace_path,
+            &stored.workspace,
+            session,
+            turn,
+            label,
+            now(),
+        ) {
+            tracing::warn!(%error, session = %session, turn, "could not take a checkpoint");
+        }
     }
 
     fn set_state(&self, session: &SessionId, state: SessionState, summary: Option<&str>) {
@@ -116,6 +141,14 @@ impl Supervisor {
                 text: spec.prompt.clone(),
             },
         )?;
+        // Before the agent has touched anything, so there is a state to
+        // rewind all the way back to.
+        self.context.checkpoint(
+            &session,
+            &spec.workspace_path,
+            0,
+            &format!("before: {}", spec.prompt),
+        );
         self.run_turn(session, driver, spec, None);
         Ok(())
     }
@@ -222,8 +255,17 @@ impl Supervisor {
         let task = smol::spawn({
             let session = session.clone();
             let cancelled = cancelled.clone();
+            let workspace_path = spec.workspace_path.clone();
             async move {
-                let state = pump(&context, &session, driver.as_ref(), child, &cancelled).await;
+                let state = pump(
+                    &context,
+                    &session,
+                    driver.as_ref(),
+                    child,
+                    &cancelled,
+                    &workspace_path,
+                )
+                .await;
                 running
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
@@ -288,6 +330,7 @@ async fn pump(
     driver: &dyn AgentDriver,
     mut child: smol::process::Child,
     cancelled: &AtomicBool,
+    workspace_path: &Path,
 ) -> SessionState {
     context.set_state(session, SessionState::Running, None);
 
@@ -295,14 +338,32 @@ async fn pump(
     let stderr = child.stderr.take();
     let mut parse = ParseState::default();
     let mut reported: Option<(SessionState, Option<String>)> = None;
+    // What the agent last said, which is the useful label for the checkpoint
+    // taken at the end of the turn.
+    let mut last_text = String::new();
 
     if let Some(stdout) = stdout {
         let mut lines = BufReader::new(stdout).lines();
         while let Some(line) = lines.next().await {
             let Ok(line) = line else { break };
             for event in driver.parse_line(&line, &mut parse) {
-                if let AgentEvent::SessionResult { state, summary } = &event {
-                    reported = Some((*state, summary.clone()));
+                match &event {
+                    AgentEvent::SessionResult { state, summary } => {
+                        reported = Some((*state, summary.clone()));
+                    }
+                    AgentEvent::TextDelta { text } if !text.trim().is_empty() => {
+                        last_text.push_str(text);
+                    }
+                    AgentEvent::TurnEnd { turn } => {
+                        let label = if last_text.trim().is_empty() {
+                            format!("turn {turn}")
+                        } else {
+                            last_text.clone()
+                        };
+                        context.checkpoint(session, workspace_path, *turn, &label);
+                        last_text.clear();
+                    }
+                    _ => {}
                 }
                 if let Err(error) = context.record(session, TranscriptPayload::Agent { event }) {
                     tracing::error!(%error, "could not record an agent event");

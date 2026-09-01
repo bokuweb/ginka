@@ -272,6 +272,103 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Snapshot everything in a worktree, and return the commit holding it.
+///
+/// The snapshot is taken through a scratch index so the user's own index is
+/// untouched, and it is committed onto no branch: it exists only as a ref
+/// under `refs/ginka/checkpoints/`, which keeps it out of `git log` and out of
+/// reach of garbage collection at the same time. Nothing about the user's
+/// history moves, which is the whole point — a checkpoint has to be safe to
+/// take in the middle of someone else's work.
+///
+/// Untracked files are included; ignored ones are not, because that is where
+/// `node_modules` and `.env` live.
+pub fn snapshot(worktree: &Path, reference: &str, message: &str) -> Result<String> {
+    let index = scratch_index(worktree)?;
+    let index = index.to_string_lossy().to_string();
+    let env = [("GIT_INDEX_FILE", index.as_str())];
+
+    // Seed the scratch index from HEAD when there is one, so files that are
+    // unchanged are recorded as they already are rather than re-hashed.
+    if head_commit(worktree).is_some() {
+        git_with_env(worktree, &["read-tree", "HEAD"], &env)?;
+    }
+    git_with_env(worktree, &["add", "-A"], &env)?;
+    let tree = git_with_env(worktree, &["write-tree"], &env)?;
+    std::fs::remove_file(&index).ok();
+
+    let commit = match head_commit(worktree) {
+        Some(parent) => git(
+            worktree,
+            &["commit-tree", &tree, "-p", &parent, "-m", message],
+        )?,
+        // An empty repository has nothing to hang the snapshot off.
+        None => git(worktree, &["commit-tree", &tree, "-m", message])?,
+    };
+    git(worktree, &["update-ref", reference, &commit])?;
+    Ok(commit)
+}
+
+/// Put a worktree back to the state a snapshot captured.
+///
+/// Files the snapshot had are restored, and files created since are removed —
+/// a rewind that left new files behind would not be one. Ignored files are
+/// left alone, because they were never in the snapshot to restore.
+///
+/// This is destructive by construction, so callers take a snapshot of the
+/// current state first: rewinding must never be the thing that loses work.
+pub fn restore_snapshot(worktree: &Path, commit: &str) -> Result<()> {
+    git(worktree, &["read-tree", "-u", "--reset", commit])?;
+    // Everything in the snapshot is in the index now, so what `clean` can see
+    // is exactly what was added afterwards.
+    git(worktree, &["clean", "-fd"])?;
+    Ok(())
+}
+
+/// Delete a checkpoint's ref, letting git collect the commit.
+pub fn drop_snapshot(worktree: &Path, reference: &str) -> Result<()> {
+    git(worktree, &["update-ref", "-d", reference])?;
+    Ok(())
+}
+
+/// The commit HEAD points at, or `None` in a repository with no commits.
+pub fn head_commit(worktree: &Path) -> Option<String> {
+    git(worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .ok()
+        .filter(|commit| !commit.is_empty())
+}
+
+/// A private index file to build a snapshot in.
+///
+/// It lives beside the worktree's own index — inside the git directory, which
+/// for a linked worktree is its own directory under `.git/worktrees/` — so two
+/// workspaces snapshotting at once cannot write over each other.
+fn scratch_index(worktree: &Path) -> Result<PathBuf> {
+    let git_dir = git(worktree, &["rev-parse", "--absolute-git-dir"])?;
+    Ok(PathBuf::from(git_dir).join("ginka-snapshot-index"))
+}
+
+/// Run `git` with extra environment, and return stdout, trimmed.
+fn git_with_env(repo: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<String> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).args(args);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 /// Drop git's records of worktrees whose directories are gone.
 pub fn prune_worktrees(repo: &Path) -> Result<()> {
     git(repo, &["worktree", "prune"])?;
@@ -391,5 +488,170 @@ prunable
     #[test]
     fn empty_output_yields_no_worktrees() {
         assert!(parse_worktree_list("").is_empty());
+    }
+
+    /// A repository with one commit, `.env` ignored, and no remote.
+    fn repository(root: &Path) {
+        std::fs::create_dir_all(root).unwrap();
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec!["config", "user.email", "test@example.com"],
+            vec!["config", "user.name", "Test"],
+            vec!["config", "commit.gpgsign", "false"],
+        ] {
+            git(root, &args).unwrap();
+        }
+        std::fs::write(root.join(".gitignore"), ".env\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        git(root, &["add", "."]).unwrap();
+        git(root, &["commit", "-m", "first"]).unwrap();
+    }
+
+    const REF: &str = "refs/ginka/checkpoints/test";
+
+    #[test]
+    fn a_snapshot_captures_modified_and_untracked_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(root.join("new.txt"), "fresh\n").unwrap();
+
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+        let listed = git(&root, &["ls-tree", "-r", "--name-only", &commit]).unwrap();
+        assert!(
+            listed.contains("new.txt"),
+            "untracked work is part of the state"
+        );
+        assert_eq!(
+            git(&root, &["show", &format!("{commit}:tracked.txt")]).unwrap(),
+            "edited"
+        );
+    }
+
+    #[test]
+    fn taking_a_snapshot_leaves_the_branch_and_the_index_alone() {
+        // It runs in the middle of someone else's work; moving HEAD or staging
+        // their files would be unforgivable.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        let head_before = head_commit(&root).unwrap();
+        let status_before = branch_status(&root).unwrap();
+
+        snapshot(&root, REF, "checkpoint").unwrap();
+
+        assert_eq!(head_commit(&root).unwrap(), head_before);
+        assert_eq!(branch_status(&root).unwrap(), status_before);
+        assert_eq!(
+            git(&root, &["diff", "--cached", "--name-only"]).unwrap(),
+            "",
+            "nothing was staged"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_is_not_on_any_branch_but_survives_garbage_collection() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("new.txt"), "fresh\n").unwrap();
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+
+        assert!(
+            !git(&root, &["log", "--oneline", "main"])
+                .unwrap()
+                .contains(&commit[..7]),
+            "checkpoints must not appear in the user's history"
+        );
+        git(&root, &["gc", "--prune=now", "--quiet"]).unwrap();
+        assert!(
+            git(&root, &["cat-file", "-e", &commit]).is_ok(),
+            "a collected checkpoint is a rewind that cannot happen"
+        );
+    }
+
+    #[test]
+    fn restoring_puts_files_back_and_removes_what_came_after() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "the good version\n").unwrap();
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+
+        // The agent carries on and makes a mess.
+        std::fs::write(root.join("tracked.txt"), "the bad version\n").unwrap();
+        std::fs::write(root.join("regret.txt"), "should not survive\n").unwrap();
+        std::fs::create_dir_all(root.join("junk")).unwrap();
+        std::fs::write(root.join("junk/more.txt"), "nor this\n").unwrap();
+
+        restore_snapshot(&root, &commit).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "the good version\n"
+        );
+        assert!(!root.join("regret.txt").exists());
+        assert!(
+            !root.join("junk").exists(),
+            "a rewind removes new directories too"
+        );
+    }
+
+    #[test]
+    fn restoring_leaves_ignored_files_alone() {
+        // `.env` and `node_modules` were never in the snapshot; deleting them
+        // would turn a rewind into a re-setup.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        restore_snapshot(&root, &commit).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join(".env")).unwrap(),
+            "SECRET=1\n"
+        );
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_can_still_be_snapshotted() {
+        // The first thing an agent does in a fresh worktree may be its own
+        // first commit; there has to be something to rewind to before that.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("empty");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "--initial-branch=main"]).unwrap();
+        std::fs::write(root.join("draft.txt"), "first words\n").unwrap();
+
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+        assert!(
+            git(&root, &["ls-tree", "-r", "--name-only", &commit])
+                .unwrap()
+                .contains("draft.txt")
+        );
+    }
+
+    #[test]
+    fn the_scratch_index_does_not_outlive_the_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        snapshot(&root, REF, "checkpoint").unwrap();
+        let git_dir = git(&root, &["rev-parse", "--absolute-git-dir"]).unwrap();
+        assert!(!Path::new(&git_dir).join("ginka-snapshot-index").exists());
+    }
+
+    #[test]
+    fn a_dropped_snapshot_is_no_longer_referenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        snapshot(&root, REF, "checkpoint").unwrap();
+        drop_snapshot(&root, REF).unwrap();
+        assert!(git(&root, &["rev-parse", "--verify", "--quiet", REF]).is_err());
     }
 }

@@ -147,6 +147,38 @@ impl Fixture {
         }
     }
 
+    /// Where the workspace's worktree is on disk.
+    fn workspace_path(&mut self) -> std::path::PathBuf {
+        match self
+            .service
+            .handle(Request::ListWorkspaces { project: None })
+            .unwrap()
+        {
+            Response::Workspaces { workspaces } => {
+                workspaces
+                    .into_iter()
+                    .find(|summary| summary.id() == self.workspace)
+                    .expect("the workspace is listed")
+                    .worktree
+                    .path
+            }
+            other => panic!("expected workspaces, got {other:?}"),
+        }
+    }
+
+    fn checkpoints(&mut self) -> Vec<ginka_protocol::model::Checkpoint> {
+        match self
+            .service
+            .handle(Request::ListCheckpoints {
+                workspace: self.workspace.clone(),
+            })
+            .unwrap()
+        {
+            Response::Checkpoints { checkpoints } => checkpoints,
+            other => panic!("expected checkpoints, got {other:?}"),
+        }
+    }
+
     fn transcript(&mut self, id: &SessionId) -> Vec<TranscriptPayload> {
         match self
             .service
@@ -468,4 +500,92 @@ fn asking_for_an_agent_this_build_does_not_have_names_the_ones_it_does() {
         .expect_err("there is no such agent");
     assert_eq!(error.code, "not_found");
     assert!(error.message.contains("claude"), "{}", error.message);
+}
+
+#[test]
+fn every_turn_leaves_a_checkpoint_the_workspace_can_be_rewound_to() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"renamed the parser"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "rename the parser",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let checkpoints = fixture.checkpoints();
+    assert_eq!(
+        checkpoints.len(),
+        2,
+        "one before the agent started and one at the turn boundary: {checkpoints:?}"
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|point| point.turn == 0 && point.label.starts_with("before: rename the parser")),
+        "there has to be a state from before the agent touched anything: {checkpoints:?}"
+    );
+    assert!(
+        checkpoints
+            .iter()
+            .any(|point| point.turn == 1 && point.label == "renamed the parser"),
+        "a checkpoint is labelled with what the agent said: {checkpoints:?}"
+    );
+}
+
+#[test]
+fn restoring_a_checkpoint_rewinds_the_worktree_and_keeps_what_it_replaced() {
+    let mut fixture = Fixture::new();
+    let path = fixture.workspace_path();
+    std::fs::write(path.join("README.md"), "the good version\n").unwrap();
+
+    let session = fixture.start(
+        &[r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#].join("\n"),
+        "leave it alone",
+    );
+    fixture.settle(&session);
+
+    // Whatever happened next was a mistake.
+    std::fs::write(path.join("README.md"), "the bad version\n").unwrap();
+    std::fs::write(path.join("regret.txt"), "should not survive\n").unwrap();
+
+    let before_the_agent = fixture
+        .checkpoints()
+        .into_iter()
+        .find(|point| point.turn == 0)
+        .expect("the pre-flight checkpoint");
+    fixture
+        .service
+        .handle(Request::RestoreCheckpoint {
+            checkpoint: before_the_agent.id.clone(),
+        })
+        .unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "the good version\n"
+    );
+    assert!(!path.join("regret.txt").exists());
+    assert!(
+        fixture
+            .checkpoints()
+            .iter()
+            .any(|point| point.label.starts_with("before restoring:")),
+        "the state a rewind replaced has to be reachable too"
+    );
+}
+
+#[test]
+fn restoring_a_checkpoint_that_does_not_exist_is_not_found() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .service
+        .handle(Request::RestoreCheckpoint {
+            checkpoint: ginka_protocol::CheckpointId("absent".into()),
+        })
+        .expect_err("there is no such checkpoint");
+    assert_eq!(error.code, "not_found");
 }

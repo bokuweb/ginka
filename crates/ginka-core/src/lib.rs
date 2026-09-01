@@ -5,6 +5,7 @@
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
 pub mod agent;
+pub mod checkpoint;
 pub mod db;
 pub mod driver;
 pub mod git;
