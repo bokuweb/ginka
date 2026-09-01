@@ -140,7 +140,34 @@ impl Daemon {
             }
         };
 
-        futures_util::future::select(Box::pin(accepting), Box::pin(stopping)).await;
+        // `pkill ginka-daemon`, a logout, a machine shutting down. Without
+        // this the daemon dies where it stands and leaves a handshake file
+        // pointing at a port nothing answers.
+        let signalled = async {
+            match async_signal::Signals::new([
+                async_signal::Signal::Term,
+                async_signal::Signal::Int,
+                async_signal::Signal::Hup,
+            ]) {
+                Ok(mut signals) => {
+                    if let Some(Ok(signal)) = signals.next().await {
+                        tracing::info!(?signal, "stopping on a signal");
+                    }
+                }
+                Err(error) => {
+                    // Without a handler the default disposition still applies,
+                    // so the daemon stops -- just not tidily.
+                    tracing::warn!(%error, "could not listen for signals");
+                    std::future::pending::<()>().await;
+                }
+            }
+        };
+
+        futures_util::future::select(
+            Box::pin(accepting),
+            futures_util::future::select(Box::pin(stopping), Box::pin(signalled)),
+        )
+        .await;
         handshake::remove(&handshake_path)?;
         tracing::info!("daemon stopped");
         Ok(())

@@ -38,6 +38,8 @@ gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 anyhow = "1"
 async-channel = "2"
 async-net = "2"
+# Signals as a stream, from the same ecosystem as the rest of the async stack.
+async-signal = "0.2"
 # WebSocket without a runtime feature: it works over any futures `AsyncRead +
 # AsyncWrite`, which is what keeps the daemon on smol rather than dragging a
 # second reactor in behind tokio. See docs/roadmap.md §4.3.

@@ -21,6 +21,7 @@ ginka-protocol.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
 async-net.workspace = true
+async-signal.workspace = true
 async-tungstenite.workspace = true
 futures-lite.workspace = true
 futures-util.workspace = true

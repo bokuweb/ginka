@@ -163,3 +163,31 @@ fn a_spawned_daemon_keeps_the_state_it_was_given() {
     );
     stop(&discovery);
 }
+
+#[test]
+fn a_daemon_asked_to_stop_by_signal_leaves_nothing_behind() {
+    // `pkill ginka-daemon`, a logout, a machine shutting down: the daemon has
+    // to go, and it must not leave a file pointing at a port nothing answers.
+    let home = Home::new();
+    let discovery = home.discovery();
+    smol::block_on(async {
+        discovery.connect(None).await.expect("a daemon starts");
+    });
+    let published = discovery.published().expect("it published itself");
+
+    let killed = std::process::Command::new("kill")
+        .arg(published.pid.to_string())
+        .status()
+        .expect("kill is on PATH");
+    assert!(killed.success());
+
+    for _ in 0..200 {
+        if discovery.published().is_none() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Leave nothing running for the next test either.
+    stop(&discovery);
+    panic!("the daemon ignored the signal, or left its handshake behind");
+}
