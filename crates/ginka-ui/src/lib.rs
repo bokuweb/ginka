@@ -9,8 +9,10 @@ pub mod assets;
 pub mod layout;
 pub mod surface;
 pub mod theme;
+pub mod transcript;
 pub mod workspace;
 
 pub use assets::Assets;
 pub use layout::{Layout, Panel};
 pub use theme::{Mode, Tokens};
+pub use transcript::{Block, Transcript};

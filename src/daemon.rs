@@ -12,7 +12,9 @@
 
 use ginka_client::{Client, Discovery};
 use ginka_core::Paths;
+use ginka_protocol::model::{Session, TranscriptEntry};
 use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::{SessionId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -38,27 +40,74 @@ impl DaemonLink {
     /// error: the window opening empty and saying so is a better failure than
     /// the window not opening.
     pub async fn workspaces(&self, now: i64) -> Vec<SessionRow> {
-        let Some(client) = self.client().await else {
-            return Vec::new();
-        };
-        match client
-            .request(Request::ListWorkspaces { project: None })
-            .await
-        {
-            Ok(Response::Workspaces { workspaces }) => workspaces
+        match self.ask(Request::ListWorkspaces { project: None }).await {
+            Some(Response::Workspaces { workspaces }) => workspaces
                 .iter()
                 .map(|summary| SessionRow::from_summary(summary, now))
                 .collect(),
-            Ok(other) => {
-                tracing::error!(?other, "the daemon answered a workspace listing with this");
-                Vec::new()
-            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// A page of a session's transcript, from after `after`.
+    ///
+    /// The centre column asks for what it has not folded in yet, so opening a
+    /// long session reads it once and every later tick reads only the tail.
+    pub async fn transcript(&self, session: &SessionId, after: u64) -> Vec<TranscriptEntry> {
+        match self
+            .ask(Request::SessionTranscript {
+                session: session.clone(),
+                after: (after > 0).then_some(after),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::Transcript { entries }) => entries,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Start an agent in a workspace, and return the session it created.
+    pub async fn start_session(
+        &self,
+        workspace: &WorkspaceId,
+        agent: &str,
+        prompt: String,
+    ) -> Option<Session> {
+        match self
+            .ask(Request::StartSession {
+                workspace: workspace.clone(),
+                agent: agent.to_string(),
+                prompt,
+                model: None,
+            })
+            .await
+        {
+            Some(Response::Session { session }) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Send a follow-up to a running session.
+    pub async fn send_message(&self, session: &SessionId, text: String) {
+        self.ask(Request::SendMessage {
+            session: session.clone(),
+            text,
+        })
+        .await;
+    }
+
+    /// Ask the daemon one question, reconnecting next time if it fails.
+    async fn ask(&self, request: Request) -> Option<Response> {
+        let client = self.client().await?;
+        match client.request(request).await {
+            Ok(response) => Some(response),
             Err(error) => {
-                tracing::warn!(%error, "could not list workspaces; dropping the connection");
+                tracing::warn!(%error, "the daemon refused a request");
                 // Whatever went wrong, the next request reconnects rather than
                 // retrying down a socket that may already be closed.
                 self.forget();
-                Vec::new()
+                None
             }
         }
     }

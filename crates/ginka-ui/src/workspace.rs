@@ -7,6 +7,7 @@
 
 use crate::assets::icon;
 use ginka_protocol::model::{BranchStatus, SessionState, WorkspaceSummary};
+use ginka_protocol::{SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
 use std::path::PathBuf;
@@ -78,6 +79,18 @@ impl Agent {
         }
     }
 
+    /// The driver id this agent is started with.
+    ///
+    /// The inverse of [`Agent::from_id`]: the sidebar shows a glyph, and
+    /// starting a session from that row has to name the driver again.
+    pub fn driver_id(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Gemini => "gemini",
+        }
+    }
+
     pub fn glyph(self) -> Icon {
         Icon::empty().path(match self {
             Self::Claude => icon::AGENT_SPARK,
@@ -131,6 +144,11 @@ impl AgentState {
 /// One row in the session list.
 #[derive(Debug, Clone)]
 pub struct SessionRow {
+    /// What the row is about. Every request the centre column makes — start an
+    /// agent, read a transcript, list checkpoints — is addressed by this.
+    pub workspace: WorkspaceId,
+    /// The session running in it, when there is one.
+    pub session: Option<SessionId>,
     pub title: SharedString,
     pub agent: Agent,
     /// How the worktree stands against its upstream, drawn beside the branch.
@@ -156,6 +174,8 @@ impl SessionRow {
     pub fn from_summary(summary: &WorkspaceSummary, now: i64) -> Self {
         let session = summary.session.as_ref();
         Self {
+            workspace: summary.id(),
+            session: session.map(|session| session.id.clone()),
             title: title_for(&summary.worktree.name).into(),
             agent: session
                 .map(|session| Agent::from_id(&session.agent))
@@ -206,6 +226,8 @@ impl SessionRow {
         archived: bool,
     ) -> Self {
         Self {
+            workspace: WorkspaceId(format!("sample/{}", title.to_lowercase().replace(' ', "-"))),
+            session: None,
             title: title.into(),
             agent,
             status: BranchStatus::default(),
@@ -423,6 +445,8 @@ mod tests {
     fn a_workspace_with_no_session_is_still_a_row() {
         // It is how the user starts one; hiding it would hide the way in.
         let row = SessionRow::from_summary(&summary(None), 1_000_000);
+        assert_eq!(row.workspace.0, "comet/remove-r2-file-uploads");
+        assert_eq!(row.session, None);
         assert_eq!(row.title, "Remove R2 File Uploads");
         assert_eq!(row.origin, "comet");
         assert_eq!(row.branch, "remove/r2-file-uploads");
@@ -438,6 +462,11 @@ mod tests {
         );
         assert_eq!(row.agent, Agent::Codex);
         assert_eq!(row.state, AgentState::Working);
+        assert_eq!(
+            row.session,
+            Some(ginka_protocol::SessionId("s".into())),
+            "the centre column addresses the transcript by this"
+        );
     }
 
     #[test]
@@ -460,5 +489,14 @@ mod tests {
     fn an_agent_this_build_has_no_glyph_for_still_marks_its_row() {
         assert_eq!(Agent::from_id("amp"), Agent::Claude);
         assert_eq!(Agent::from_id("codex"), Agent::Codex);
+    }
+
+    #[test]
+    fn a_glyph_names_the_driver_it_came_from() {
+        // The row is what the user starts an agent from, so the mapping has to
+        // survive the round trip.
+        for agent in [Agent::Claude, Agent::Codex, Agent::Gemini] {
+            assert_eq!(Agent::from_id(agent.driver_id()), agent);
+        }
     }
 }

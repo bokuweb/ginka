@@ -2,24 +2,30 @@
 //! `docs/ui.md` §1.
 //!
 //! The centre column carries the transcript, the composer, the context bar and
-//! the terminal dock. In M0 the transcript and terminal are placeholders — the
-//! point of this milestone is that the *layout* is right and the theme reaches
-//! every corner of it before there is any content to argue about.
+//! the terminal dock. The transcript and composer are live: the composer starts
+//! an agent in the selected workspace, or sends a follow-up to the session
+//! already running there, and the transcript is folded from the daemon's event
+//! stream. The terminal is still a placeholder (M3).
 
 use crate::sidebar::{SessionSidebar, SidebarEvent};
 use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
+use ginka_protocol::SessionId;
+use ginka_protocol::model::{SessionState, TranscriptEntry};
 use ginka_ui::Tokens;
 use ginka_ui::layout::{Layout, Panel};
+use ginka_ui::transcript::{Applied, Block as TranscriptBlock, Transcript, head_of};
 use ginka_ui::workspace::SessionRow;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
     Icon, IconName, StyledExt as _, TitleBar, h_flex,
+    input::{InputEvent, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
@@ -64,6 +70,14 @@ pub struct Shell {
     /// The row the centre column is showing. `None` when nothing is
     /// registered, which is the first-run state rather than an error.
     session: Option<SessionRow>,
+    /// Everything the app knows is behind this.
+    link: Arc<crate::daemon::DaemonLink>,
+    /// The selected session's transcript, folded from the daemon's events.
+    transcript: Transcript,
+    /// Which session the transcript belongs to, so switching rows replaces it
+    /// rather than appending one conversation to another.
+    transcript_of: Option<SessionId>,
+    composer: Entity<TextareaState>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -102,9 +116,32 @@ impl Shell {
         let selection = cx.subscribe(&sidebar, |this, sidebar, event, cx| match event {
             SidebarEvent::Selected => {
                 this.session = sidebar.read(cx).selected_row().cloned();
+                // A different workspace is a different conversation.
+                this.transcript = Transcript::new();
+                this.transcript_of = None;
                 cx.notify();
             }
         });
+
+        let composer = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder("Do anything…")
+                // Grows with the prompt up to a point, then scrolls: a long
+                // paste must not swallow the transcript.
+                .auto_grow(1, 8)
+                // Enter sends, shift-Enter is a newline -- the convention
+                // every chat surface the user already has works this way.
+                .submit_on_enter(true)
+        });
+        let submitted = cx.subscribe_in(
+            &composer,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { shift: false, .. } = event {
+                    this.submit(window, cx);
+                }
+            },
+        );
 
         // Worktrees change outside the app -- an agent commits, the user
         // switches a branch in a terminal, someone runs `git worktree add`. A
@@ -120,13 +157,13 @@ impl Shell {
                 loop {
                     cx.background_executor().timer(delay).await;
                     delay = REFRESH_INTERVAL;
-                    let link = link.clone();
                     // One request to the daemon, which does the storage and the
                     // `git status` per worktree: off the main thread, or the
                     // window stalls every tick.
+                    let listing = link.clone();
                     let rows = cx
                         .background_spawn(
-                            async move { link.workspaces(crate::daemon::now()).await },
+                            async move { listing.workspaces(crate::daemon::now()).await },
                         )
                         .await;
                     tracing::debug!(rows = rows.len(), "refreshed sessions");
@@ -135,10 +172,32 @@ impl Shell {
                             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
                         this.session = this.sidebar.read(cx).selected_row().cloned();
                         cx.notify();
+                        this.session.as_ref().and_then(|row| row.session.clone())
                     });
-                    if updated.is_err() {
+                    let Ok(session) = updated else {
                         // The window is gone; stop ticking.
                         break;
+                    };
+
+                    // Only the tail: opening a long session reads it once, and
+                    // every tick after that asks for what it has not folded in.
+                    if let Some(session) = session {
+                        let after = this
+                            .update(cx, |this, _| this.transcript_cursor(&session))
+                            .unwrap_or(0);
+                        let reading = link.clone();
+                        let asked = session.clone();
+                        let entries = cx
+                            .background_spawn(
+                                async move { reading.transcript(&asked, after).await },
+                            )
+                            .await;
+                        if this
+                            .update(cx, |this, cx| this.fold(&session, &entries, cx))
+                            .is_err()
+                        {
+                            break;
+                        }
                     }
                 }
             }
@@ -146,13 +205,104 @@ impl Shell {
         .detach();
         Self {
             layout: Layout::from_settings(&settings),
+            link,
+            transcript: Transcript::new(),
+            transcript_of: None,
+            composer,
             paths,
             settings,
             session,
             sidebar,
             surfaces,
-            _subscriptions: vec![appearance, selection],
+            _subscriptions: vec![appearance, selection, submitted],
         }
+    }
+
+    /// Where the folded transcript for `session` has reached.
+    ///
+    /// A different session reads as position zero, because its transcript has
+    /// not been read at all yet.
+    fn transcript_cursor(&self, session: &SessionId) -> u64 {
+        match &self.transcript_of {
+            Some(current) if current == session => self.transcript.cursor(),
+            _ => 0,
+        }
+    }
+
+    /// Fold a page of transcript entries in.
+    ///
+    /// A page that reveals a hole — the daemon published something this window
+    /// never saw — drops the folded transcript and starts again from the
+    /// beginning of the session, because a transcript with a gap in it reads
+    /// as a conversation that did not happen.
+    fn fold(&mut self, session: &SessionId, entries: &[TranscriptEntry], cx: &mut Context<Self>) {
+        if self.transcript_of.as_ref() != Some(session) {
+            self.transcript = Transcript::new();
+            self.transcript_of = Some(session.clone());
+        }
+        if entries.is_empty() {
+            return;
+        }
+        if let Applied::Gap { expected } = self.transcript.extend(entries) {
+            tracing::warn!(%session, expected, "transcript gap; re-reading the session");
+            self.transcript = Transcript::new();
+        }
+        cx.notify();
+    }
+
+    /// Send what is in the composer.
+    ///
+    /// With a session already in the workspace this is a follow-up, queued by
+    /// the daemon if the agent is mid-turn. Without one it starts an agent.
+    /// Either way the box is cleared straight away: the prompt is the daemon's
+    /// now, and leaving it behind invites sending it twice.
+    fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        let Some(row) = self.session.clone() else {
+            tracing::warn!("nothing to send to: no workspace is selected");
+            return;
+        };
+        self.composer
+            .update(cx, |state, cx| state.set_value("", window, cx));
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            match row.session.clone() {
+                Some(session) => {
+                    let sending = link.clone();
+                    let text = text.clone();
+                    cx.background_spawn(async move { sending.send_message(&session, text).await })
+                        .await;
+                }
+                None => {
+                    let workspace = row.workspace.clone();
+                    let agent = row.agent.driver_id().to_string();
+                    let started = cx
+                        .background_spawn(async move {
+                            link.start_session(&workspace, &agent, text).await
+                        })
+                        .await;
+                    // Adopt the new session immediately rather than waiting for
+                    // the next tick: the user has just pressed enter and wants
+                    // to see their prompt.
+                    if let Some(session) = started {
+                        this.update(cx, |this, cx| {
+                            if let Some(row) = this.session.as_mut() {
+                                row.session = Some(session.id.clone());
+                            }
+                            this.transcript = Transcript::new();
+                            this.transcript_of = Some(session.id);
+                            cx.notify();
+                        })
+                        .ok();
+                    }
+                }
+            }
+        })
+        .detach();
     }
 
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
@@ -328,19 +478,8 @@ impl Shell {
         )
     }
 
-    /// Placeholder transcript. M2 replaces this with the streaming event views.
+    /// The conversation, folded from the daemon's event stream.
     fn transcript(&self, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
-        let body = match &self.session {
-            Some(session) => format!(
-                "{} is checked out on {}. Streaming agent output lands in M2.",
-                session.title, session.branch
-            ),
-            None => "No project is registered yet. Run `ginka project add .` in a repository, \
-                     then reopen this window."
-                .to_string(),
-        };
-
         v_flex()
             .id("transcript")
             .flex_1()
@@ -348,20 +487,211 @@ impl Shell {
             .py_6()
             .gap_4()
             .overflow_y_scroll()
-            .child(
-                div()
-                    // The measure from docs/ui.md: long-form text stays
-                    // readable because the column stops growing, not because
-                    // the window does.
-                    .max_w(px(720.))
-                    .text_size(px(15.))
-                    .line_height(px(25.))
-                    .text_color(tokens.colors().text_primary)
-                    .child(body),
+            .when(self.transcript.is_empty(), |this| {
+                this.child(self.transcript_empty_state(cx))
+            })
+            .children(
+                self.transcript
+                    .blocks()
+                    .iter()
+                    .map(|block| self.block(block, cx)),
             )
+            // The measure from docs/ui.md: long-form text stays readable
+            // because the column stops growing, not because the window does.
+            .child(div().w_full().max_w(px(720.)).h_0())
     }
 
-    fn composer(&self, cx: &App) -> impl IntoElement {
+    /// What the centre column says before there is a conversation in it.
+    fn transcript_empty_state(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        let body = match &self.session {
+            Some(session) => format!(
+                "{} is checked out on {}. Say what you want done.",
+                session.title, session.branch
+            ),
+            None => "No project is registered yet. Run `ginka project add .` in a repository, \
+                     then reopen this window."
+                .to_string(),
+        };
+        div()
+            .max_w(px(720.))
+            .text_size(px(15.))
+            .line_height(px(25.))
+            .text_color(tokens.colors().text_muted)
+            .child(body)
+    }
+
+    /// One folded block of the transcript.
+    ///
+    /// Each kind is drawn differently on purpose: the reader has to be able to
+    /// tell what the agent said from what it was thinking, and both from what
+    /// it did.
+    fn block(&self, block: &TranscriptBlock, cx: &App) -> AnyElement {
+        let tokens = Tokens::global(cx);
+        let prose = |text: &str, color: Hsla| {
+            div()
+                .max_w(px(720.))
+                .text_size(px(15.))
+                .line_height(px(25.))
+                .text_color(color)
+                .child(text.to_string())
+        };
+
+        match block {
+            TranscriptBlock::User { text } => h_flex()
+                .w_full()
+                .justify_end()
+                .child(
+                    div()
+                        .max_w(px(560.))
+                        .px_3p5()
+                        .py_2()
+                        .rounded(px(tokens.radius.panel))
+                        .bg(tokens.colors().bg_raised)
+                        .text_size(px(15.))
+                        .line_height(px(25.))
+                        .text_color(tokens.colors().text_primary)
+                        .child(text.clone()),
+                )
+                .into_any_element(),
+            TranscriptBlock::Assistant { text } => {
+                prose(text, tokens.colors().text_primary).into_any_element()
+            }
+            TranscriptBlock::Reasoning { text } => prose(text, tokens.colors().text_muted)
+                .italic()
+                .into_any_element(),
+            TranscriptBlock::Tool {
+                name,
+                input,
+                output,
+                is_error,
+                ..
+            } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
+            TranscriptBlock::Question { question, options } => v_flex()
+                .max_w(px(720.))
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(15.))
+                        .text_color(tokens.colors().accent)
+                        .child(question.clone()),
+                )
+                .children(options.iter().map(|option| {
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(format!("· {option}"))
+                }))
+                .into_any_element(),
+            TranscriptBlock::Plan { plan } => {
+                prose(plan, tokens.colors().text_secondary).into_any_element()
+            }
+            TranscriptBlock::TurnEnd { turn } => h_flex()
+                .w_full()
+                .max_w(px(720.))
+                .items_center()
+                .gap_2()
+                .child(div().h(px(1.)).flex_1().bg(tokens.colors().border_subtle))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        // A turn boundary is also where a checkpoint was taken,
+                        // which is what makes it worth drawing at all.
+                        .child(format!("turn {turn}")),
+                )
+                .child(div().h(px(1.)).flex_1().bg(tokens.colors().border_subtle))
+                .into_any_element(),
+            TranscriptBlock::Outcome { state, summary } => {
+                let colour = match state {
+                    SessionState::Failed => tokens.colors().status_error,
+                    _ => tokens.colors().text_muted,
+                };
+                prose(
+                    &match summary {
+                        Some(summary) => format!("{} — {summary}", state.as_str()),
+                        None => state.as_str().to_string(),
+                    },
+                    colour,
+                )
+                .text_sm()
+                .into_any_element()
+            }
+        }
+    }
+
+    /// A tool call and, once it has one, its result.
+    fn tool_card(
+        &self,
+        name: &str,
+        input: &str,
+        output: Option<&str>,
+        is_error: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx);
+        let font = cx.theme_mono_font();
+        v_flex()
+            .max_w(px(720.))
+            .w_full()
+            .rounded(px(tokens.radius.row))
+            .border_1()
+            .border_color(if is_error {
+                tokens.colors().status_error
+            } else {
+                tokens.colors().border_subtle
+            })
+            .bg(tokens.colors().bg_surface)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(if name.is_empty() {
+                                "tool".to_string()
+                            } else {
+                                name.to_string()
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .font_family(font.clone())
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(input.to_string()),
+                    ),
+            )
+            .children(output.map(|output| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .border_t_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .font_family(font)
+                    .text_xs()
+                    .line_height(px(18.))
+                    .text_color(if is_error {
+                        tokens.colors().status_error
+                    } else {
+                        tokens.colors().text_secondary
+                    })
+                    // Bounded: a tool that printed a megabyte must not push the
+                    // conversation off the screen.
+                    .child(head_of(output, 24))
+            }))
+            .into_any_element()
+    }
+
+    fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         v_flex()
             .w_full()
@@ -379,13 +709,7 @@ impl Shell {
                     .bg(tokens.colors().bg_surface)
                     .border_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .text_color(tokens.colors().text_muted)
-                            .child("Do anything…"),
-                    )
+                    .child(div().flex_1().child(Textarea::new(&self.composer)))
                     .child(self.model_chip(cx))
                     .child(self.chip("Agent", cx))
                     .child(
@@ -396,12 +720,15 @@ impl Shell {
                     )
                     .child(
                         div()
+                            .id("send")
                             .size_7()
                             .rounded_full()
                             .bg(tokens.colors().text_primary)
                             .flex()
                             .items_center()
                             .justify_center()
+                            .cursor_pointer()
+                            .on_click(cx.listener(|this, _, window, cx| this.submit(window, cx)))
                             .child(
                                 Icon::new(IconName::ArrowUp)
                                     .size_4()
