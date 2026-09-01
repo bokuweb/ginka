@@ -1,3 +1,5 @@
+//! Stable identifiers, and the slug rule every one of them is built with.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -21,7 +23,31 @@ impl WorkspaceId {
     pub fn new(project: &ProjectName, worktree_name: &str) -> Self {
         Self(format!("{}/{}", project.0, slugify(worktree_name)))
     }
+
+    /// Split the id back into the project name and the worktree name.
+    ///
+    /// Returns `None` for a string that was not produced by [`WorkspaceId::new`],
+    /// which is how a request naming a workspace that cannot exist is rejected
+    /// before it reaches the database.
+    pub fn parts(&self) -> Option<(ProjectName, &str)> {
+        let (project, name) = self.0.split_once('/')?;
+        if project.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some((ProjectName(project.to_string()), name))
+    }
 }
+
+/// Identifies one agent session — a single conversation with one driver in one
+/// workspace. Opaque, assigned by the daemon; clients never construct one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(pub String);
+
+/// Identifies one checkpoint: a workspace state snapshotted at a turn boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CheckpointId(pub String);
 
 /// Lowercase, collapse every run of non-alphanumeric characters to a single
 /// `-`, and trim the result. Branch names carry `/`, `.` and unicode; ids must
@@ -55,6 +81,12 @@ impl fmt::Display for WorkspaceId {
     }
 }
 
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -75,5 +107,20 @@ mod tests {
         let project = ProjectName("comet".into());
         let id = WorkspaceId::new(&project, "bright-harbor");
         assert_eq!(id.0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn a_workspace_id_splits_back_into_its_parts() {
+        let id = WorkspaceId::new(&ProjectName("comet".into()), "bright-harbor");
+        let (project, name) = id.parts().expect("a well-formed id splits");
+        assert_eq!(project.0, "comet");
+        assert_eq!(name, "bright-harbor");
+    }
+
+    #[test]
+    fn a_malformed_workspace_id_has_no_parts() {
+        assert!(WorkspaceId("comet".into()).parts().is_none());
+        assert!(WorkspaceId("/harbor".into()).parts().is_none());
+        assert!(WorkspaceId("comet/".into()).parts().is_none());
     }
 }

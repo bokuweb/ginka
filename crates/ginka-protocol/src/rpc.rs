@@ -1,0 +1,167 @@
+//! The request/response surface of the daemon.
+//!
+//! This enum *is* the app's capability list. Anything the UI can do appears
+//! here, which is what makes the same operation reachable from `ginka` on the
+//! command line and from the MCP server (`AGENTS.md` rule 3). Adding a private
+//! path from a view into `ginka-core` is how that guarantee gets lost.
+
+use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+use crate::model::{Checkpoint, Project, Session, TranscriptEntry, WorkspaceSummary};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Something a client asks the daemon to do.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Request {
+    /// Liveness, and the cheapest way to confirm the token was accepted.
+    Ping,
+
+    /// Every registered project, in sidebar order.
+    ListProjects,
+    /// Register a repository or folder, adopting the worktrees it already has.
+    AddProject { path: PathBuf },
+    /// Forget a project. The worktrees on disk are left alone: the daemon
+    /// registered them, it did not create the user's code.
+    RemoveProject { project: ProjectName },
+
+    /// Every workspace, reconciled against git first. `project` limits it.
+    ListWorkspaces { project: Option<ProjectName> },
+    /// Create a worktree on `branch`, cutting it from `base` when the branch
+    /// does not exist yet.
+    CreateWorkspace {
+        project: ProjectName,
+        branch: String,
+        base: Option<String>,
+    },
+    /// Remove a workspace's worktree. `force` is required when it is dirty.
+    RemoveWorkspace { workspace: WorkspaceId, force: bool },
+    /// Pin or unpin a workspace.
+    PinWorkspace {
+        workspace: WorkspaceId,
+        pinned: bool,
+    },
+
+    /// Sessions, newest first. `workspace` limits it.
+    ListSessions { workspace: Option<WorkspaceId> },
+    /// Start an agent in a workspace and send it `prompt`.
+    StartSession {
+        workspace: WorkspaceId,
+        /// A driver id: `claude`, `codex`, …
+        agent: String,
+        prompt: String,
+        model: Option<String>,
+    },
+    /// Send a follow-up. Queued when the agent is mid-turn, which is why this
+    /// answers `Ack` rather than waiting for the reply.
+    SendMessage { session: SessionId, text: String },
+    /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser) or approve a
+    /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal).
+    RespondToAgent {
+        session: SessionId,
+        /// The `id` from the event being answered.
+        request_id: String,
+        response: String,
+    },
+    /// Kill the agent's process tree.
+    CancelSession { session: SessionId },
+    /// Read a transcript. `after` pages forward from a sequence number.
+    SessionTranscript {
+        session: SessionId,
+        after: Option<u64>,
+        limit: Option<u32>,
+    },
+
+    /// Every checkpoint taken in a workspace, newest first.
+    ListCheckpoints { workspace: WorkspaceId },
+    /// Put the worktree back to a checkpoint's state.
+    RestoreCheckpoint { checkpoint: CheckpointId },
+
+    /// Ask the daemon to exit once it has flushed its state.
+    Shutdown,
+}
+
+/// What the daemon answers with.
+///
+/// One variant per shape rather than per request: several requests legitimately
+/// answer `Ack`, and a client that has to match on the request it sent to
+/// understand the reply is a client that cannot be written generically.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum Response {
+    /// The request succeeded and there is nothing to return.
+    Ack,
+    Projects {
+        projects: Vec<Project>,
+    },
+    Project {
+        project: Project,
+    },
+    Workspaces {
+        workspaces: Vec<WorkspaceSummary>,
+    },
+    Workspace {
+        workspace: WorkspaceSummary,
+    },
+    Sessions {
+        sessions: Vec<Session>,
+    },
+    Session {
+        session: Session,
+    },
+    Transcript {
+        entries: Vec<TranscriptEntry>,
+    },
+    Checkpoints {
+        checkpoints: Vec<Checkpoint>,
+    },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_fields_may_be_omitted_by_a_client_that_does_not_care() {
+        // The CLI writes these by hand in its tests and an MCP caller writes
+        // them from a schema; neither should have to send explicit nulls.
+        let request: Request =
+            serde_json::from_str(r#"{"method":"list_workspaces"}"#).expect("omitted option");
+        assert_eq!(request, Request::ListWorkspaces { project: None });
+    }
+
+    #[test]
+    fn a_misspelled_field_is_refused_rather_than_dropped() {
+        // Without `deny_unknown_fields` a typo'd `branch` would start a
+        // workspace on an empty branch name instead of failing.
+        let parsed = serde_json::from_str::<Request>(
+            r#"{"method":"create_workspace","project":"comet","branchh":"x"}"#,
+        );
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn requests_round_trip() {
+        let cases = [
+            Request::Ping,
+            Request::AddProject {
+                path: PathBuf::from("/tmp/comet"),
+            },
+            Request::StartSession {
+                workspace: WorkspaceId("comet/harbor".into()),
+                agent: "claude".into(),
+                prompt: "write the test first".into(),
+                model: Some("opus".into()),
+            },
+            Request::SessionTranscript {
+                session: SessionId("s-1".into()),
+                after: Some(10),
+                limit: None,
+            },
+        ];
+        for request in cases {
+            let text = serde_json::to_string(&request).unwrap();
+            assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), request);
+        }
+    }
+}

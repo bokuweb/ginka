@@ -9,6 +9,11 @@
 //! can be exercised against a throwaway repository in a temporary directory.
 
 use anyhow::{Context, Result, bail};
+
+/// Re-exported so callers can read a status without naming the protocol crate;
+/// it is a wire type because the daemon pushes it to every client.
+pub use ginka_protocol::model::BranchStatus;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -167,29 +172,6 @@ fn parse_worktree_list(output: &str) -> Vec<GitWorktree> {
     }
     worktrees.extend(current);
     worktrees
-}
-
-/// How a worktree stands against its upstream.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct BranchStatus {
-    /// Tracked files are modified, staged or untracked files exist.
-    pub dirty: bool,
-    /// A merge or rebase left unresolved paths.
-    pub conflict: bool,
-    /// Commits the worktree has that its upstream does not.
-    pub ahead: u32,
-    /// Commits the upstream has that the worktree does not.
-    pub behind: u32,
-    /// There is no upstream to compare against, so `ahead` and `behind` mean
-    /// nothing and the UI must not render them as zeroes.
-    pub untracked_branch: bool,
-}
-
-impl BranchStatus {
-    /// Whether there is anything worth drawing next to the branch name.
-    pub fn is_clean(&self) -> bool {
-        !self.dirty && !self.conflict && self.ahead == 0 && self.behind == 0
-    }
 }
 
 /// Read the status of the worktree at `path`.

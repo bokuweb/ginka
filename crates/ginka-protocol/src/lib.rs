@@ -4,9 +4,25 @@
 //! it is linked by the app, the daemon and the CLI alike, and it is the source
 //! the TypeScript exporter reads. Anything that needs the filesystem, git or a
 //! database belongs in `ginka-core`.
+//!
+//! The four layers, innermost first:
+//!
+//! - [`ids`] — the stable keys everything else is addressed by.
+//! - [`model`] — the domain objects as they appear on the wire.
+//! - [`event`] — the normalized agent stream and the daemon's pushes.
+//! - [`rpc`] and [`envelope`] — the request surface and the frames carrying it.
 
 pub mod envelope;
+pub mod event;
 pub mod ids;
+pub mod model;
+pub mod rpc;
 
-pub use envelope::{ClientMessage, RpcError, ServerMessage};
-pub use ids::{ProjectName, WorkspaceId};
+pub use envelope::{ClientMessage, RequestId, RpcError, Seq, ServerMessage};
+pub use event::{AgentEvent, DaemonEvent, Usage};
+pub use ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+pub use model::{
+    BranchStatus, Checkpoint, Project, ProjectKind, Session, SessionState, TranscriptEntry,
+    TranscriptPayload, WorkspaceSummary, Worktree,
+};
+pub use rpc::{Request, Response};
