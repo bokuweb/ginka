@@ -88,8 +88,9 @@ These are load-bearing. Violating them creates work that has to be undone.
 - **Async:** `smol` and GPUI's executor. Do not introduce a second reactor without a note in the roadmap's decision log.
 - **Tests:** every bug fix lands with a regression test. Agent-session behaviour is tested against the fake-agent test binary, never against a live vendor CLI.
 - **i18n:** user-visible strings go through `rust-i18n`. `en` and `ja` are both maintained.
-- **Commits:** imperative subject, explain *why* in the body. Reference the roadmap milestone when the change advances one.
-- **Comments:** explain non-obvious constraints (why the workspace id is derived from `name`, why a poll is throttled), not what the code plainly says.
+- **English in the repository.** Code, comments, docs, commit messages and pull requests are written in English, no matter what language the conversation that produced them was in.
+- **Commits and pull requests:** imperative subject, explain *why* in the body. Reference the roadmap milestone when the change advances one. A PR description says what changed and what it is for, in the same voice as the commit.
+- **Comments are rustdoc.** Every public item — module, type, trait, function, field, variant — carries a `///` comment; every crate and module root carries a `//!` header saying what lives there and what it owns. Document what a caller must know: invariants, panics, errors, units, and the constraint that made the code look the way it does (why the workspace id is derived from `name`, why a poll is throttled). Do not restate what the signature already says, and do not leave a public item undocumented because it looks obvious.
 
 ## Working agreements for agents
 
