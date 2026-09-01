@@ -9,16 +9,20 @@
 //! requests through it. That is deliberate — SQLite writes are serialised
 //! anyway, and one owner means no half-applied mutation can be observed.
 
+use crate::agent::Supervisor;
+use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
-use crate::{Paths, git, project};
+use crate::{Paths, git, project, session};
 use anyhow::Result;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::ids::slugify;
-use ginka_protocol::model::{Project, ProjectKind, WorkspaceSummary, Worktree};
+use ginka_protocol::model::{
+    Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
+};
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{ProjectName, RpcError, WorkspaceId};
+use ginka_protocol::{ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Where the service announces things that happened.
 ///
@@ -39,31 +43,63 @@ impl EventSink for NullSink {
 /// The daemon's request handler.
 pub struct Service {
     paths: Paths,
-    conn: Connection,
+    /// Shared with the supervisor's turn tasks, which append to transcripts
+    /// while requests are being served. Every guard taken here is short-lived:
+    /// nothing holds it across a git subprocess or a spawn.
+    conn: Arc<Mutex<Connection>>,
     events: Arc<dyn EventSink>,
+    drivers: Arc<Registry>,
+    sessions: Supervisor,
 }
 
 impl Service {
     /// Build a service around an already-open database.
     pub fn new(paths: Paths, conn: Connection, events: Arc<dyn EventSink>) -> Self {
+        let conn = Arc::new(Mutex::new(conn));
         Self {
             paths,
+            sessions: Supervisor::new(conn.clone(), events.clone()),
             conn,
             events,
+            drivers: Arc::new(Registry::with_defaults()),
         }
+    }
+
+    /// Use these drivers rather than the ones this build ships.
+    ///
+    /// This is how the tests put a scripted agent behind the `claude` id, and
+    /// how a user's configured binaries will be installed later.
+    pub fn with_drivers(mut self, drivers: Registry) -> Self {
+        self.drivers = Arc::new(drivers);
+        self
     }
 
     /// Open the database `paths` points at, running migrations, and build a
     /// service around it.
+    ///
+    /// Sessions the previous daemon was running are marked failed here: their
+    /// processes died with it, and leaving them looking like working agents is
+    /// a lie the user would act on.
     pub fn open(paths: Paths, events: Arc<dyn EventSink>) -> Result<Self> {
         paths.ensure()?;
         let conn = crate::db::open(&paths.database())?;
+        let orphans = session::mark_orphans_failed(&conn, now())?;
+        if orphans > 0 {
+            tracing::warn!(orphans, "sessions did not survive the previous daemon");
+        }
         Ok(Self::new(paths, conn, events))
     }
 
     /// Where this service keeps its state.
     pub fn paths(&self) -> &Paths {
         &self.paths
+    }
+
+    /// The database, locked for as long as the caller holds the guard.
+    fn conn(&self) -> MutexGuard<'_, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// Answer one request.
@@ -79,8 +115,8 @@ impl Service {
                 projects: self.projects()?,
             }),
             Request::AddProject { path } => {
-                let project = registry::register_project(&self.conn, &path).map_err(failed)?;
-                registry::sync_worktrees(&self.conn, &project).map_err(failed)?;
+                let project = registry::register_project(&self.conn(), &path).map_err(failed)?;
+                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::ProjectsChanged);
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
@@ -88,7 +124,7 @@ impl Service {
                 Ok(Response::Project { project })
             }
             Request::RemoveProject { project } => {
-                if !project::remove_project(&self.conn, &project).map_err(failed)? {
+                if !project::remove_project(&self.conn(), &project).map_err(failed)? {
                     return Err(self.no_such_project(&project));
                 }
                 self.events.emit(DaemonEvent::ProjectsChanged);
@@ -102,10 +138,13 @@ impl Service {
                 };
                 let mut workspaces = Vec::new();
                 for project in &projects {
-                    registry::sync_worktrees(&self.conn, project).map_err(failed)?;
-                    for worktree in
-                        project::list_worktrees(&self.conn, &project.name).map_err(failed)?
-                    {
+                    registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
+                    // Bound to a local first: a guard taken in a `for`'s
+                    // iterator expression lives for the whole loop body, and
+                    // `summarize` needs the connection too.
+                    let worktrees =
+                        project::list_worktrees(&self.conn(), &project.name).map_err(failed)?;
+                    for worktree in worktrees {
                         workspaces.push(self.summarize(worktree));
                     }
                 }
@@ -139,12 +178,12 @@ impl Service {
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
-                registry::sync_worktrees(&self.conn, &project).map_err(failed)?;
+                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
                 });
 
-                let worktree = project::list_worktrees(&self.conn, &project.name)
+                let worktree = project::list_worktrees(&self.conn(), &project.name)
                     .map_err(failed)?
                     .into_iter()
                     .find(|worktree| worktree.path == path || worktree.branch == branch)
@@ -162,14 +201,14 @@ impl Service {
                 let worktree = self.worktree(&workspace)?;
                 let project = self.project(&worktree.project)?;
                 git::remove_worktree(&project.path, &worktree.path, force).map_err(failed)?;
-                registry::sync_worktrees(&self.conn, &project).map_err(failed)?;
+                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name,
                 });
                 Ok(Response::Ack)
             }
             Request::PinWorkspace { workspace, pinned } => {
-                if !project::set_pinned(&self.conn, &workspace, pinned).map_err(failed)? {
+                if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
                     return Err(RpcError::not_found(format!(
                         "no workspace named {workspace}"
                     )));
@@ -178,6 +217,42 @@ impl Service {
                     self.events.emit(DaemonEvent::WorkspacesChanged { project });
                 }
                 Ok(Response::Ack)
+            }
+
+            Request::ListSessions { workspace } => Ok(Response::Sessions {
+                sessions: session::list(&self.conn(), workspace.as_ref()).map_err(failed)?,
+            }),
+            Request::StartSession {
+                workspace,
+                agent,
+                prompt,
+                model,
+            } => self.start_session(workspace, &agent, prompt, model),
+            Request::SendMessage { session, text } => self.send_message(&session, text),
+            Request::RespondToAgent {
+                session, response, ..
+            } => {
+                // Every driver this build ships runs its vendor's
+                // non-interactive mode, which never asks a question mid-turn.
+                // An answer is therefore a follow-up like any other; drivers
+                // that can interrupt a turn will override this.
+                self.send_message(&session, response)
+            }
+            Request::CancelSession { session } => {
+                self.session(&session)?;
+                self.sessions.cancel(&session);
+                Ok(Response::Ack)
+            }
+            Request::SessionTranscript {
+                session,
+                after,
+                limit,
+            } => {
+                self.session(&session)?;
+                Ok(Response::Transcript {
+                    entries: session::transcript(&self.conn(), &session, after, limit)
+                        .map_err(failed)?,
+                })
             }
 
             Request::Shutdown => {
@@ -194,9 +269,72 @@ impl Service {
         }
     }
 
+    /// Start an agent in a workspace.
+    fn start_session(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: &str,
+        prompt: String,
+        model: Option<String>,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(&workspace)?;
+        let driver = self.driver(agent)?;
+        let now = now();
+        let session = Session {
+            id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+            workspace,
+            agent: driver.id().to_string(),
+            model: model.clone(),
+            state: SessionState::Starting,
+            summary: None,
+            vendor_session_id: None,
+            created_at: now,
+            updated_at: now,
+        };
+        session::insert(&self.conn(), &session).map_err(failed)?;
+        self.events.emit(DaemonEvent::SessionStarted {
+            session: session.clone(),
+        });
+
+        let spec = SessionSpec::new(worktree.path, prompt).with_model(model);
+        self.sessions
+            .start(session.id.clone(), driver, spec)
+            .map_err(failed)?;
+        Ok(Response::Session { session })
+    }
+
+    /// Send a follow-up to a session, queued if its agent is still working.
+    fn send_message(&mut self, id: &SessionId, text: String) -> Result<Response, RpcError> {
+        let stored = self.session(id)?;
+        let worktree = self.worktree(&stored.workspace)?;
+        let driver = self.driver(&stored.agent)?;
+        let spec = SessionSpec::new(worktree.path, text).with_model(stored.model.clone());
+        self.sessions
+            .send(id.clone(), driver, spec, stored.vendor_session_id)
+            .map_err(failed)?;
+        Ok(Response::Ack)
+    }
+
+    /// Resolve a session, or say it is not there.
+    fn session(&self, id: &SessionId) -> Result<Session, RpcError> {
+        session::get(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::not_found(format!("no session with id {id}")))
+    }
+
+    /// Resolve a driver by id, naming the ones this build has.
+    fn driver(&self, agent: &str) -> Result<Arc<dyn AgentDriver>, RpcError> {
+        self.drivers.get(agent).ok_or_else(|| {
+            RpcError::not_found(format!(
+                "no agent named {agent}; available: {}",
+                self.drivers.ids().join(", ")
+            ))
+        })
+    }
+
     /// Every registered project.
     fn projects(&self) -> Result<Vec<Project>, RpcError> {
-        project::list_projects(&self.conn).map_err(failed)
+        project::list_projects(&self.conn()).map_err(failed)
     }
 
     /// Resolve a project by name, or say what is registered.
@@ -226,7 +364,7 @@ impl Service {
 
     /// Resolve a workspace id to the worktree it names.
     fn worktree(&self, workspace: &WorkspaceId) -> Result<Worktree, RpcError> {
-        project::find_worktree(&self.conn, workspace)
+        project::find_worktree(&self.conn(), workspace)
             .map_err(failed)?
             .ok_or_else(|| RpcError::not_found(format!("no workspace named {workspace}")))
     }
@@ -241,13 +379,20 @@ impl Service {
     fn summarize(&self, worktree: Worktree) -> WorkspaceSummary {
         let status = git::branch_status(&worktree.path).unwrap_or_default();
         let last_commit_at = git::last_commit_time(&worktree.path);
+        let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
+            .unwrap_or_default();
         WorkspaceSummary {
             worktree,
             status,
-            session: None,
+            session,
             last_commit_at,
         }
     }
+}
+
+/// Unix seconds.
+fn now() -> i64 {
+    chrono::Utc::now().timestamp()
 }
 
 /// Turn a domain failure into the protocol's generic failure.
@@ -279,5 +424,18 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.code, "unsupported");
+    }
+
+    #[test]
+    fn asking_about_a_session_that_does_not_exist_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = Paths::with_root(dir.path().join("state"));
+        let mut service = Service::open(paths, Arc::new(NullSink)).unwrap();
+        let error = service
+            .handle(Request::CancelSession {
+                session: SessionId("absent".into()),
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "not_found");
     }
 }

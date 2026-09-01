@@ -2363,15 +2363,18 @@ dependencies = [
  "anyhow",
  "chrono",
  "dirs",
+ "futures-lite",
  "ginka-protocol",
  "rusqlite",
  "serde",
  "serde_json",
+ "smol",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

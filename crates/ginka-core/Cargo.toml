@@ -5,18 +5,28 @@ edition.workspace = true
 publish.workspace = true
 description = "Ginka domain logic: paths, settings, storage, projects and worktrees"
 
+# A scripted stand-in for a vendor CLI, so session behaviour is testable
+# without a network or a token budget. It lives in this package because
+# `CARGO_BIN_EXE_` is only set for binaries of the package under test.
+[[bin]]
+name = "ginka-fake-agent"
+path = "src/bin/fake_agent.rs"
+
 [dependencies]
 ginka-protocol.workspace = true
 anyhow.workspace = true
 chrono.workspace = true
+futures-lite.workspace = true
 dirs.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smol.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

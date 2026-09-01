@@ -1,0 +1,471 @@
+//! Running an agent, end to end, against the fake agent binary.
+//!
+//! Nothing here talks to a vendor: the scripted stand-in speaks Claude Code's
+//! `stream-json`, so the real driver parses it and only the process on the far
+//! end is fake. That is what makes supervision, cancellation, queued follow-ups
+//! and resume testable without a network or a token budget.
+
+mod support;
+
+use ginka_core::driver::{Registry, claude::ClaudeDriver};
+use ginka_core::service::{EventSink, Service};
+use ginka_core::{Paths, db};
+use ginka_protocol::event::DaemonEvent;
+use ginka_protocol::model::{SessionState, TranscriptPayload};
+use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::{AgentEvent, ProjectName, SessionId, WorkspaceId};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The scripted agent this test run built.
+const FAKE_AGENT: &str = env!("CARGO_BIN_EXE_ginka-fake-agent");
+
+#[derive(Default)]
+struct Recorder {
+    events: Mutex<Vec<DaemonEvent>>,
+}
+
+impl Recorder {
+    fn all(&self) -> Vec<DaemonEvent> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+impl EventSink for Recorder {
+    fn emit(&self, event: DaemonEvent) {
+        self.events.lock().unwrap().push(event);
+    }
+}
+
+struct Fixture {
+    service: Service,
+    recorder: Arc<Recorder>,
+    workspace: WorkspaceId,
+    script: std::path::PathBuf,
+    _home: tempfile::TempDir,
+    /// Kept alive: dropping it removes the repository under test.
+    _work: tempfile::TempDir,
+}
+
+impl Fixture {
+    /// A registered project with one workspace, and a `claude` driver that
+    /// actually runs the fake agent.
+    fn new() -> Self {
+        let home = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let paths = Paths::with_root(home.path().join("state"));
+        paths.ensure().unwrap();
+
+        // One script file per fixture, rewritten before each turn: the agent
+        // reads it when it starts, so a follow-up re-runs whatever is there.
+        let script = work.path().join("agent-script.txt");
+        let recorder = Arc::new(Recorder::default());
+        let mut drivers = Registry::with_defaults();
+        drivers.insert(Arc::new(
+            ClaudeDriver::with_program(FAKE_AGENT)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        ));
+        let mut service = Service::new(paths, db::open_in_memory().unwrap(), recorder.clone())
+            .with_drivers(drivers);
+
+        let root = work.path().join("comet");
+        support::repository(&root);
+        service.handle(Request::AddProject { path: root }).unwrap();
+        let workspace = match service
+            .handle(Request::CreateWorkspace {
+                project: ProjectName("comet".into()),
+                branch: "harbor".into(),
+                base: None,
+            })
+            .unwrap()
+        {
+            Response::Workspace { workspace } => workspace.id(),
+            other => panic!("expected a workspace, got {other:?}"),
+        };
+
+        Self {
+            service,
+            recorder,
+            workspace,
+            script,
+            _home: home,
+            _work: work,
+        }
+    }
+
+    /// Point the agent at `script`, and start a session with `prompt`.
+    fn start(&mut self, script: &str, prompt: &str) -> SessionId {
+        std::fs::write(&self.script, script).unwrap();
+        match self
+            .service
+            .handle(Request::StartSession {
+                workspace: self.workspace.clone(),
+                agent: "claude".into(),
+                prompt: prompt.into(),
+                model: None,
+            })
+            .unwrap()
+        {
+            Response::Session { session } => session.id,
+            other => panic!("expected a session, got {other:?}"),
+        }
+    }
+
+    fn state(&mut self, id: &SessionId) -> SessionState {
+        match self
+            .service
+            .handle(Request::ListSessions { workspace: None })
+            .unwrap()
+        {
+            Response::Sessions { sessions } => {
+                sessions
+                    .into_iter()
+                    .find(|session| &session.id == id)
+                    .expect("the session is stored")
+                    .state
+            }
+            other => panic!("expected sessions, got {other:?}"),
+        }
+    }
+
+    /// Wait for a session to reach a state it will not leave.
+    fn settle(&mut self, id: &SessionId) -> SessionState {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = self.state(id);
+            if !matches!(
+                state,
+                SessionState::Starting | SessionState::Running | SessionState::AwaitingInput
+            ) {
+                return state;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the session never left {state:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn transcript(&mut self, id: &SessionId) -> Vec<TranscriptPayload> {
+        match self
+            .service
+            .handle(Request::SessionTranscript {
+                session: id.clone(),
+                after: None,
+                limit: None,
+            })
+            .unwrap()
+        {
+            Response::Transcript { entries } => {
+                entries.into_iter().map(|entry| entry.payload).collect()
+            }
+            other => panic!("expected a transcript, got {other:?}"),
+        }
+    }
+}
+
+/// The text an agent produced, concatenated.
+fn spoken(transcript: &[TranscriptPayload]) -> String {
+    transcript
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::Agent {
+                event: AgentEvent::TextDelta { text },
+            } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_session_records_the_prompt_and_the_agents_answer() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"on it"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"on it","session_id":"vendor-1","usage":{"input_tokens":3,"output_tokens":2}}"#,
+        ]
+        .join("\n"),
+        "write the test first",
+    );
+
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    let transcript = fixture.transcript(&session);
+    assert_eq!(
+        transcript.first(),
+        Some(&TranscriptPayload::User {
+            text: "write the test first".into()
+        }),
+        "the prompt opens the transcript"
+    );
+    assert_eq!(spoken(&transcript), "on it");
+    assert!(
+        transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptPayload::Agent {
+                event: AgentEvent::TurnEnd { turn: 1 }
+            }
+        )),
+        "the turn boundary is recorded: {transcript:?}"
+    );
+}
+
+#[test]
+fn the_vendors_session_id_is_kept_so_the_conversation_can_be_continued() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-42"}"#,
+        "hello",
+    );
+    fixture.settle(&session);
+
+    match fixture
+        .service
+        .handle(Request::ListSessions { workspace: None })
+        .unwrap()
+    {
+        Response::Sessions { sessions } => assert_eq!(
+            sessions[0].vendor_session_id.as_deref(),
+            Some("vendor-42"),
+            "without this the session could be replayed but not resumed"
+        ),
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn events_reach_clients_while_the_agent_is_still_working() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "hello",
+    );
+    fixture.settle(&session);
+
+    let events = fixture.recorder.all();
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, DaemonEvent::SessionStarted { .. })),
+        "a new session is announced: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::SessionEvent {
+                agent_event: AgentEvent::TextDelta { .. },
+                ..
+            }
+        )),
+        "text is pushed as it arrives: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::SessionEnded {
+                state: SessionState::Finished,
+                ..
+            }
+        )),
+        "the end of the session is announced: {events:?}"
+    );
+}
+
+#[test]
+fn the_workspace_summary_carries_the_latest_session() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "hello",
+    );
+    fixture.settle(&session);
+
+    match fixture
+        .service
+        .handle(Request::ListWorkspaces { project: None })
+        .unwrap()
+    {
+        Response::Workspaces { workspaces } => {
+            let summary = workspaces
+                .iter()
+                .find(|summary| summary.id() == fixture.workspace)
+                .expect("the workspace is listed");
+            assert_eq!(
+                summary.session.as_ref().map(|session| session.id.clone()),
+                Some(session),
+                "the sidebar needs the session without a second request"
+            );
+        }
+        other => panic!("expected workspaces, got {other:?}"),
+    }
+}
+
+#[test]
+fn cancelling_stops_the_agent_rather_than_waiting_for_it() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+        "take your time",
+    );
+
+    // Wait until the agent has actually started talking, so the cancel lands
+    // on a running process rather than on one that has not spawned yet.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+}
+
+#[test]
+fn an_agent_that_exits_badly_leaves_a_failed_session() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            "#stderr not authenticated",
+            "#exit 3",
+        ]
+        .join("\n"),
+        "hello",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Failed);
+}
+
+#[test]
+fn a_vendor_that_changed_its_format_fails_loudly_rather_than_reporting_silence() {
+    // Exit code 0 with output the driver cannot read is the dangerous case: it
+    // looks like a session that simply had nothing to say.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &["some new banner", "another unparseable line"].join("\n"),
+        "hello",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Failed);
+
+    match fixture
+        .service
+        .handle(Request::ListSessions { workspace: None })
+        .unwrap()
+    {
+        Response::Sessions { sessions } => {
+            let summary = sessions[0].summary.clone().unwrap_or_default();
+            assert!(
+                summary.contains("understand") || summary.contains("version"),
+                "the failure has to name the cause: {summary}"
+            );
+        }
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-9"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[turn:{args}]"}]}}"#,
+            "#sleep 400",
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-9"}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+
+    // Queued while the first turn is still going.
+    fixture
+        .service
+        .handle(Request::SendMessage {
+            session: session.clone(),
+            text: "second".into(),
+        })
+        .unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let transcript = fixture.transcript(&session);
+        let turns = transcript
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry,
+                    TranscriptPayload::Agent {
+                        event: AgentEvent::TurnEnd { .. }
+                    }
+                )
+            })
+            .count();
+        if turns >= 2 {
+            let spoken = spoken(&transcript);
+            assert!(
+                spoken.contains("--resume vendor-9"),
+                "the follow-up must continue the vendor's session: {spoken}"
+            );
+            assert_eq!(
+                transcript
+                    .iter()
+                    .filter(|entry| matches!(entry, TranscriptPayload::User { .. }))
+                    .count(),
+                2,
+                "both prompts are in the transcript"
+            );
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the queued follow-up never ran: {transcript:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .service
+        .handle(Request::StartSession {
+            workspace: WorkspaceId("comet/absent".into()),
+            agent: "claude".into(),
+            prompt: "hello".into(),
+            model: None,
+        })
+        .expect_err("there is no such workspace");
+    assert_eq!(error.code, "not_found");
+}
+
+#[test]
+fn asking_for_an_agent_this_build_does_not_have_names_the_ones_it_does() {
+    let mut fixture = Fixture::new();
+    let error = fixture
+        .service
+        .handle(Request::StartSession {
+            workspace: fixture.workspace.clone(),
+            agent: "telepath".into(),
+            prompt: "hello".into(),
+            model: None,
+        })
+        .expect_err("there is no such agent");
+    assert_eq!(error.code, "not_found");
+    assert!(error.message.contains("claude"), "{}", error.message);
+}

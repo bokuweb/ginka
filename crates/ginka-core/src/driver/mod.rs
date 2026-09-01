@@ -1,0 +1,268 @@
+//! The agent driver abstraction.
+//!
+//! A driver knows two things no other layer does: how to invoke one vendor's
+//! CLI, and how to turn its output into [`AgentEvent`]s. Everything else about
+//! running an agent — spawning, cancelling, persisting, pushing to clients —
+//! is the same for every vendor and lives in [`crate::agent`].
+//!
+//! Both halves of a driver are pure: [`AgentDriver::start_command`] returns a
+//! description of a command rather than running one, and
+//! [`AgentDriver::parse_line`] is a function from a line to events. That is
+//! what makes vendor formats testable against recorded fixtures instead of
+//! against a live CLI (`docs/roadmap.md` §7 R6).
+
+pub mod claude;
+pub mod codex;
+
+use ginka_protocol::AgentEvent;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// A model a driver can be asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderModel {
+    /// What is passed to the vendor's `--model` flag.
+    pub id: String,
+    /// What the model picker shows.
+    pub label: String,
+}
+
+/// A command to run, described rather than executed.
+///
+/// Returning this instead of a `std::process::Command` is what lets a test
+/// assert which flags a driver chose without spawning anything.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CommandSpec {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Extra environment for the child, on top of the sanitized inherited one.
+    pub env: Vec<(String, String)>,
+}
+
+impl CommandSpec {
+    /// Build a spec for `program` with no arguments.
+    pub fn new(program: impl Into<String>) -> Self {
+        Self {
+            program: program.into(),
+            args: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+
+    /// Append one argument.
+    pub fn arg(mut self, arg: impl Into<String>) -> Self {
+        self.args.push(arg.into());
+        self
+    }
+
+    /// Append several arguments.
+    pub fn args<I, S>(mut self, args: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.args.extend(args.into_iter().map(Into::into));
+        self
+    }
+
+    /// Add an environment variable for the child.
+    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+}
+
+/// What a session is being started with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionSpec {
+    /// The worktree the agent runs in. Agents are scoped to one workspace.
+    pub workspace_path: PathBuf,
+    /// The opening prompt.
+    pub prompt: String,
+    pub model: Option<String>,
+    /// Extra environment, used by tests to point a driver at a fake agent.
+    pub env: Vec<(String, String)>,
+}
+
+impl SessionSpec {
+    /// A session in `workspace_path` opening with `prompt`.
+    pub fn new(workspace_path: impl Into<PathBuf>, prompt: impl Into<String>) -> Self {
+        Self {
+            workspace_path: workspace_path.into(),
+            prompt: prompt.into(),
+            model: None,
+            env: Vec::new(),
+        }
+    }
+
+    /// Ask for a specific model.
+    pub fn with_model(mut self, model: Option<String>) -> Self {
+        self.model = model;
+        self
+    }
+
+    /// Add an environment variable for the agent process.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+}
+
+/// What a driver carries between the lines of one session.
+///
+/// Vendors put the session id in a preamble and the accounting in a postscript,
+/// and some of them stream a message twice — once as deltas and once whole. The
+/// state is where that context lives, so `parse_line` stays a function.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ParseState {
+    /// The vendor's own id for this conversation, once it has told us. This is
+    /// what a resume is built from.
+    pub vendor_session_id: Option<String>,
+    /// Set once the vendor has streamed a text delta, after which whole
+    /// messages are ignored — otherwise every reply would be recorded twice.
+    pub streaming: bool,
+    /// Turn boundaries seen so far. Checkpoints are taken at these.
+    pub turn: u32,
+    /// Lines this driver understood.
+    pub recognized: usize,
+    /// Lines it did not. A session that ends with only these has hit a format
+    /// change, and says so rather than reporting an empty success.
+    pub unrecognized: usize,
+}
+
+impl ParseState {
+    /// Whether the driver failed to understand anything the agent said.
+    ///
+    /// This is the honest reading of a vendor that changed its output format:
+    /// the process may well have exited zero, and reporting that as a finished
+    /// session with an empty transcript is worse than reporting a failure.
+    pub fn understood_nothing(&self) -> bool {
+        self.recognized == 0 && self.unrecognized > 0
+    }
+}
+
+/// One vendor's CLI, normalized.
+pub trait AgentDriver: Send + Sync + 'static {
+    /// The stable id used in the protocol and stored on sessions.
+    fn id(&self) -> &'static str;
+
+    /// What the agent picker shows.
+    fn display_name(&self) -> &'static str;
+
+    /// The models this driver offers. May be empty when the vendor decides.
+    fn models(&self) -> Vec<ProviderModel>;
+
+    /// A command that reports whether the CLI is installed, and its version.
+    fn probe_command(&self) -> CommandSpec;
+
+    /// The command that starts a fresh session.
+    fn start_command(&self, spec: &SessionSpec) -> CommandSpec;
+
+    /// The command that continues the vendor session `vendor_session_id`.
+    ///
+    /// Resume is what makes a transcript worth persisting: the daemon can be
+    /// restarted and the conversation picked up rather than replayed.
+    fn resume_command(&self, spec: &SessionSpec, vendor_session_id: &str) -> CommandSpec;
+
+    /// Normalize one line of the agent's stdout.
+    ///
+    /// Returns every event the line carried, which may be none. Unrecognized
+    /// lines are counted in `state` rather than raised: vendors print
+    /// diagnostics on stdout, and one unknown line is not a failed session.
+    fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent>;
+}
+
+/// The drivers this build knows about.
+///
+/// Order is the order they are offered in; `claude` is first because it is the
+/// one the roadmap makes load-bearing.
+pub struct Registry {
+    drivers: Vec<Arc<dyn AgentDriver>>,
+}
+
+impl Registry {
+    /// An empty registry.
+    pub fn empty() -> Self {
+        Self {
+            drivers: Vec::new(),
+        }
+    }
+
+    /// Every driver this build ships.
+    pub fn with_defaults() -> Self {
+        let mut registry = Self::empty();
+        registry.insert(Arc::new(claude::ClaudeDriver::default()));
+        registry.insert(Arc::new(codex::CodexDriver::default()));
+        registry
+    }
+
+    /// Add a driver, replacing any with the same id.
+    ///
+    /// Replacing rather than appending is what lets a test point the `claude`
+    /// id at a fake agent binary without the real one shadowing it.
+    pub fn insert(&mut self, driver: Arc<dyn AgentDriver>) {
+        self.drivers.retain(|existing| existing.id() != driver.id());
+        self.drivers.push(driver);
+    }
+
+    /// The driver with this id.
+    pub fn get(&self, id: &str) -> Option<Arc<dyn AgentDriver>> {
+        self.drivers
+            .iter()
+            .find(|driver| driver.id() == id)
+            .cloned()
+    }
+
+    /// Every id, in offering order.
+    pub fn ids(&self) -> Vec<&'static str> {
+        self.drivers.iter().map(|driver| driver.id()).collect()
+    }
+}
+
+impl Default for Registry {
+    fn default() -> Self {
+        Self::with_defaults()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_default_registry_offers_claude_first() {
+        let registry = Registry::with_defaults();
+        assert_eq!(registry.ids().first(), Some(&"claude"));
+        assert!(registry.get("claude").is_some());
+        assert!(registry.get("codex").is_some());
+        assert!(registry.get("nonesuch").is_none());
+    }
+
+    #[test]
+    fn inserting_an_id_that_exists_replaces_it() {
+        // A test points `claude` at a fake agent; the real driver must not
+        // still be there to answer first.
+        let mut registry = Registry::with_defaults();
+        let before = registry.ids().len();
+        registry.insert(Arc::new(claude::ClaudeDriver::with_program("/bin/echo")));
+        assert_eq!(registry.ids().len(), before);
+        assert_eq!(
+            registry.get("claude").unwrap().probe_command().program,
+            "/bin/echo"
+        );
+    }
+
+    #[test]
+    fn a_state_that_understood_nothing_is_distinguishable_from_a_quiet_session() {
+        let quiet = ParseState::default();
+        assert!(
+            !quiet.understood_nothing(),
+            "no output is not a format change"
+        );
+        let changed = ParseState {
+            unrecognized: 12,
+            ..ParseState::default()
+        };
+        assert!(changed.understood_nothing());
+    }
+}

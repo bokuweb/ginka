@@ -7,10 +7,16 @@ use std::path::Path;
 /// Never edit a shipped migration — add a new one. The applied count is stored
 /// in SQLite's `user_version`, so reordering or rewriting history silently
 /// skips work on machines that already ran it.
-const MIGRATIONS: &[(&str, &str)] = &[(
-    "0001_projects_and_worktrees",
-    include_str!("../../../db/migrations/0001_projects_and_worktrees.sql"),
-)];
+const MIGRATIONS: &[(&str, &str)] = &[
+    (
+        "0001_projects_and_worktrees",
+        include_str!("../../../db/migrations/0001_projects_and_worktrees.sql"),
+    ),
+    (
+        "0002_sessions_and_checkpoints",
+        include_str!("../../../db/migrations/0002_sessions_and_checkpoints.sql"),
+    ),
+];
 
 /// Open the database, applying any migrations the file has not seen.
 pub fn open(path: &Path) -> Result<Connection> {
@@ -80,6 +86,9 @@ mod tests {
             .unwrap();
         assert!(tables.contains(&"projects".to_string()));
         assert!(tables.contains(&"worktrees".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"session_events".to_string()));
+        assert!(tables.contains(&"checkpoints".to_string()));
     }
 
     #[test]
