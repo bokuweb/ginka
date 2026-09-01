@@ -147,6 +147,11 @@ impl Fixture {
         }
     }
 
+    /// A path in the test's own scratch directory.
+    fn path(&self, name: &str) -> std::path::PathBuf {
+        self._work.path().join(name)
+    }
+
     /// Where the workspace's worktree is on disk.
     fn workspace_path(&mut self) -> std::path::PathBuf {
         match self
@@ -391,6 +396,115 @@ fn cancelling_stops_the_agent_rather_than_waiting_for_it() {
         })
         .unwrap();
     assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+}
+
+#[test]
+fn cancelling_reaches_the_tools_the_agent_started() {
+    // An agent's compiler or test runner is a child of the agent, and killing
+    // only the agent leaves it running against the worktree.
+    let mut fixture = Fixture::new();
+    let pidfile = fixture.path("child.pid");
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"building"}]}}"#,
+            &format!("#spawn {}", pidfile.display()),
+            "#sleep 60000",
+        ]
+        .join("\n"),
+        "build it",
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !pidfile.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never started its child"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let child: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(alive(child), "the child is running before the cancel");
+
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the agent's child survived the cancel"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Whether a pid is still there, asked the way the supervisor asks.
+fn alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(false)
+}
+
+#[test]
+fn two_agents_run_in_two_workspaces_at_once() {
+    // The point of worktree-per-task: one workspace's agent must not wait on
+    // another's, and neither transcript may pick up the other's events.
+    let mut fixture = Fixture::new();
+    let second = match fixture
+        .service
+        .handle(Request::CreateWorkspace {
+            project: ProjectName("comet".into()),
+            branch: "second".into(),
+            base: None,
+        })
+        .unwrap()
+    {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+
+    let script = [
+        r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[{prompt}]"}]}}"#,
+        "#sleep 300",
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+    ]
+    .join("\n");
+    let first_session = fixture.start(&script, "first workspace");
+    let second_session = match fixture
+        .service
+        .handle(Request::StartSession {
+            workspace: second,
+            agent: "claude".into(),
+            prompt: "second workspace".into(),
+            model: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session } => session.id,
+        other => panic!("expected a session, got {other:?}"),
+    };
+
+    assert_eq!(fixture.settle(&first_session), SessionState::Finished);
+    assert_eq!(fixture.settle(&second_session), SessionState::Finished);
+    assert!(spoken(&fixture.transcript(&first_session)).contains("first workspace"));
+    let second_text = spoken(&fixture.transcript(&second_session));
+    assert!(second_text.contains("second workspace"), "{second_text}");
+    assert!(
+        !second_text.contains("first workspace"),
+        "the transcripts must not mix: {second_text}"
+    );
 }
 
 #[test]

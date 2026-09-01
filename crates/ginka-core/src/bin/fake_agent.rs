@@ -11,6 +11,9 @@
 //! - `#sleep <ms>` — wait, so a test can cancel mid-turn.
 //! - `#read` — block until a line arrives on stdin.
 //! - `#stderr <text>` — write to stderr.
+//! - `#spawn <file>` — start a long-lived child and write its pid to `file`,
+//!   so a test can check that cancelling reached the whole process tree and
+//!   not only the agent.
 //! - `#exit <code>` — exit immediately with that status.
 //! - anything else — write the line to stdout verbatim.
 //!
@@ -55,6 +58,16 @@ fn main() {
             if stdin.read_line(&mut buffer).unwrap_or(0) == 0 {
                 return;
             }
+        } else if let Some(rest) = line.strip_prefix("#spawn ") {
+            // A stand-in for the compiler or test runner a real agent starts.
+            // Deliberately not waited on: the point is that it outlives this
+            // process unless something kills the whole group.
+            #[allow(clippy::zombie_processes)]
+            let child = std::process::Command::new("sleep")
+                .arg("300")
+                .spawn()
+                .expect("sleep is on PATH");
+            std::fs::write(rest.trim(), child.id().to_string()).expect("the pid file is writable");
         } else if let Some(rest) = line.strip_prefix("#stderr ") {
             eprintln!("{rest}");
         } else if let Some(rest) = line.strip_prefix("#exit ") {
