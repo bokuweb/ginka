@@ -2311,6 +2311,8 @@ dependencies = [
  "clap",
  "ginka-client",
  "ginka-core",
+ "ginka-protocol",
+ "rusqlite",
 ]
 
 [[package]]

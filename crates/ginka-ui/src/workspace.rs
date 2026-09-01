@@ -6,8 +6,33 @@
 //! here should have to change when it does.
 
 use crate::assets::icon;
+use ginka_core::project::{Project, Worktree};
 use gpui::SharedString;
 use gpui_component::Icon;
+
+/// Turn a worktree's slug into something readable.
+///
+/// `remove-r2-file-uploads` reads as a machine key; `Remove R2 File Uploads`
+/// reads as a task. Until sessions carry their own titles (M2), the workspace
+/// name is the only thing there is to show.
+fn title_for(name: &str) -> String {
+    let mut title = String::with_capacity(name.len());
+    for (index, word) in name.split('-').filter(|word| !word.is_empty()).enumerate() {
+        if index > 0 {
+            title.push(' ');
+        }
+        let mut chars = word.chars();
+        if let Some(first) = chars.next() {
+            title.extend(first.to_uppercase());
+            title.push_str(chars.as_str());
+        }
+    }
+    if title.is_empty() {
+        name.to_string()
+    } else {
+        title
+    }
+}
 
 /// Which coding agent owns a session.
 ///
@@ -76,6 +101,26 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
+    /// Build the sidebar's rows from what is registered.
+    ///
+    /// A workspace with no agent session yet is still a row -- that is how the
+    /// user starts one. The agent shown is the project's default until sessions
+    /// exist to say otherwise (M2).
+    pub fn from_worktrees(project: &Project, worktrees: &[Worktree]) -> Vec<Self> {
+        worktrees
+            .iter()
+            .map(|worktree| Self {
+                title: title_for(&worktree.name).into(),
+                agent: Agent::Claude,
+                origin: project.name.0.clone().into(),
+                branch: worktree.branch.clone().into(),
+                state: AgentState::Idle,
+                age: "".into(),
+                archived: false,
+            })
+            .collect()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn new(
         title: &str,
@@ -197,6 +242,19 @@ mod tests {
             .collect();
         assert_eq!(idle[0].title, "Repository Story Creation");
         assert_eq!(idle[1].title, "Local First");
+    }
+
+    #[test]
+    fn slugs_become_readable_titles() {
+        assert_eq!(
+            title_for("remove-r2-file-uploads"),
+            "Remove R2 File Uploads"
+        );
+        assert_eq!(title_for("main"), "Main");
+        // Degenerate input still produces something to render rather than an
+        // empty row.
+        assert_eq!(title_for(""), "");
+        assert_eq!(title_for("--"), "--");
     }
 
     #[test]

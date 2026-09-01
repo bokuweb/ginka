@@ -54,8 +54,9 @@ pub struct Shell {
     paths: Paths,
     settings: AppSettings,
     layout: Layout,
-    /// The row the centre column is showing.
-    session: SessionRow,
+    /// The row the centre column is showing. `None` when nothing is
+    /// registered, which is the first-run state rather than an error.
+    session: Option<SessionRow>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping this stops the app following the system appearance.
@@ -66,6 +67,7 @@ impl Shell {
     pub fn new(
         paths: Paths,
         settings: AppSettings,
+        rows: Vec<SessionRow>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -82,10 +84,9 @@ impl Shell {
             window.refresh();
         });
 
-        let rows = SessionRow::samples();
         // The centre column shows whichever row the sidebar has selected; until
-        // selection is wired in M1 that is simply the first.
-        let session = rows[0].clone();
+        // selection is wired up that is simply the first.
+        let session = rows.first().cloned();
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|_| SurfacePanel::new());
         Self {
@@ -198,9 +199,16 @@ impl Shell {
         let muted = tokens.colors().text_muted;
         let secondary = tokens.colors().text_secondary;
         let primary = tokens.colors().text_primary;
-        let title = self.session.title.clone();
-        let origin = self.session.origin.clone();
-        let glyph = self.session.agent.glyph();
+        let session = self.session.clone();
+        let title: SharedString = session
+            .as_ref()
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| "Ginka".into());
+        let origin: SharedString = session
+            .as_ref()
+            .map(|session| session.origin.clone())
+            .unwrap_or_else(|| "no project registered".into());
+        let glyph = session.as_ref().map(|session| session.agent.glyph());
         // Track the column beneath. macOS already reserves the leading inset for
         // the traffic lights; with the sidebar closed there is no column to
         // align to, so the controls sit directly after them.
@@ -234,7 +242,7 @@ impl Shell {
                         .gap_2()
                         .items_center()
                         .overflow_hidden()
-                        .child(glyph.size_4().text_color(secondary))
+                        .children(glyph.map(|glyph| glyph.size_4().text_color(secondary)))
                         .child(
                             div()
                                 .text_sm()
@@ -268,6 +276,16 @@ impl Shell {
     /// Placeholder transcript. M2 replaces this with the streaming event views.
     fn transcript(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
+        let body = match &self.session {
+            Some(session) => format!(
+                "{} is checked out on {}. Streaming agent output lands in M2.",
+                session.title, session.branch
+            ),
+            None => "No project is registered yet. Run `ginka project add .` in a repository, \
+                     then reopen this window."
+                .to_string(),
+        };
+
         v_flex()
             .id("transcript")
             .flex_1()
@@ -284,23 +302,7 @@ impl Shell {
                     .text_size(px(15.))
                     .line_height(px(25.))
                     .text_color(tokens.colors().text_primary)
-                    .child(
-                        "The shell is in place: a session list on the left, the transcript and \
-                         composer here, surfaces on the right, and a terminal dock below. \
-                         Streaming agent output lands in M2.",
-                    ),
-            )
-            .child(
-                div()
-                    .max_w(px(720.))
-                    .text_size(px(15.))
-                    .line_height(px(25.))
-                    .text_color(tokens.colors().text_secondary)
-                    .child(
-                        "Resize the sidebar and the right panel to check the columns hold their \
-                         ranges, and switch the system appearance to check the tokens reach \
-                         every surface.",
-                    ),
+                    .child(body),
             )
     }
 
@@ -366,18 +368,23 @@ impl Shell {
             .items_center()
             .rounded_full()
             .bg(tokens.colors().bg_raised)
-            .child(
-                self.session
+            .children(self.session.as_ref().map(|session| {
+                session
                     .agent
                     .glyph()
                     .size_3()
-                    .text_color(tokens.colors().text_secondary),
-            )
+                    .text_color(tokens.colors().text_secondary)
+            }))
             .child(
                 div()
                     .text_xs()
                     .text_color(tokens.colors().text_secondary)
-                    .child(self.session.agent.label()),
+                    .child(
+                        self.session
+                            .as_ref()
+                            .map(|session| session.agent.label())
+                            .unwrap_or("No agent"),
+                    ),
             )
     }
 
@@ -431,7 +438,12 @@ impl Shell {
                         div()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child(self.session.branch.clone()),
+                            .child(
+                                self.session
+                                    .as_ref()
+                                    .map(|session| session.branch.clone())
+                                    .unwrap_or_else(|| "—".into()),
+                            ),
                     ),
             )
     }

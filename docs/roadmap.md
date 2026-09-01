@@ -246,7 +246,9 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [ ] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [ ] `syncWorktrees` equivalent: reconcile DB against `git worktree list` on a tick, updating `branch` / `head` / `has_origin`
 - [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
-- [ ] Sidebar per `docs/ui.md` §3.2: virtualized session list, three-line rows, status pills, archived section, attention sort on the 260 ms curve, user footer
+- [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
+- [ ] Virtualize the session list; animate the reorder on the 260 ms curve
+- [x] `ginka project add|list` and `ginka workspace list|new|remove`
 - [ ] Command palette + global keymap infrastructure
 - [ ] Workspace picker / quick switcher
 
@@ -392,4 +394,6 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-08-31 | The `gpui` rev is owned transitively by the UI toolkit | Pinning it independently guarantees a conflict on the next toolkit upgrade. |
 | 2026-08-31 | **Q2 resolved:** `rusqlite` with a hand-rolled `user_version` migration runner, not `sqlx` or `refinery` | The database is owned by one synchronous daemon, so async SQL buys nothing and costs a runtime. The runner is ~30 lines, embeds migrations at compile time, and refuses to open a database written by a newer build rather than silently downgrading it. |
 | 2026-08-31 | CI lints with `cargo clippy -- -D warnings`, not a global `RUSTFLAGS` | `RUSTFLAGS` promotes warnings in third-party crates too, which makes the build fail on a dependency's schedule rather than on ours. |
+| 2026-09-01 | Git goes through the `git` binary, not `gix` | Worktree plumbing has to use the binary anyway — it is the only implementation that agrees with the user's own `git worktree list`, hooks and config. Splitting reads into a second implementation would put the truth in two places to save a subprocess. Revisit only if a read shows up in a profile. |
+| 2026-09-01 | The CLI's development binary is `ginka-cli`, installed as `ginka` at packaging time | The app crate at the workspace root already produces a `ginka` binary; two targets with one name silently overwrite each other in `target/debug`, which is how the app binary went missing until the sizes were compared. |
 | 2026-08-31 | Testable UI code lives in `ginka-ui`; the binary crate holds views only | `rustc` overflows its stack expanding `#[test]` in a crate that also contains the toolkit's deeply nested builder chains — raising `recursion_limit` turns the error into a SIGBUS rather than fixing it. The split is forced by the compiler, and happens to be the structure rule 2 wanted anyway. |

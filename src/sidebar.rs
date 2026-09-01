@@ -225,6 +225,36 @@ impl SessionSidebar {
             )
     }
 
+    /// First run: nothing is registered yet.
+    ///
+    /// Says how to fix it rather than only that the list is empty. The command
+    /// is the real one, so it can be copied straight into a terminal.
+    fn empty_state(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        v_flex()
+            .flex_1()
+            .px_4()
+            .gap_2()
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(tokens.colors().text_secondary)
+                    .child("No projects yet"),
+            )
+            .child(
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().code_bg)
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .child("ginka project add ."),
+            )
+    }
+
     fn footer(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
@@ -292,42 +322,47 @@ impl Render for SessionSidebar {
             .collect();
         let archived_count = archived.len();
 
+        let is_empty = self.rows.is_empty();
+
         v_flex()
             .size_full()
             .bg(sidebar_bg)
             .border_r_1()
             .border_color(border)
             .child(self.header(cx))
-            .child(
-                v_flex()
-                    .id("session-list")
-                    .flex_1()
-                    .px_1p5()
-                    .gap_0p5()
-                    .overflow_y_scroll()
-                    .children(
-                        active
-                            .iter()
-                            .map(|(index, row)| self.row(*index, row, cx).into_any_element()),
-                    )
-                    .child(div().h_2())
-                    .child(self.archived_header(cx))
-                    .when(self.archived_open, |this| {
-                        this.children(archived.iter().map(|(index, row)| {
-                            self.archived_row(*index, row, cx).into_any_element()
-                        }))
-                    })
-                    .when(self.archived_open && archived_count > 0, |this| {
-                        this.child(
-                            div()
-                                .px_2p5()
-                                .py_1p5()
-                                .text_xs()
-                                .text_color(Tokens::global(cx).colors().text_muted)
-                                .child("Show 25 more"),
+            .when(is_empty, |this| this.child(self.empty_state(cx)))
+            .when(!is_empty, |this| {
+                this.child(
+                    v_flex()
+                        .id("session-list")
+                        .flex_1()
+                        .px_1p5()
+                        .gap_0p5()
+                        .overflow_y_scroll()
+                        .children(
+                            active
+                                .iter()
+                                .map(|(index, row)| self.row(*index, row, cx).into_any_element()),
                         )
-                    }),
-            )
+                        .child(div().h_2())
+                        .child(self.archived_header(cx))
+                        .when(self.archived_open, |this| {
+                            this.children(archived.iter().map(|(index, row)| {
+                                self.archived_row(*index, row, cx).into_any_element()
+                            }))
+                        })
+                        .when(self.archived_open && archived_count > 0, |this| {
+                            this.child(
+                                div()
+                                    .px_2p5()
+                                    .py_1p5()
+                                    .text_xs()
+                                    .text_color(Tokens::global(cx).colors().text_muted)
+                                    .child("Show 25 more"),
+                            )
+                        }),
+                )
+            })
             .child(self.footer(cx))
     }
 }

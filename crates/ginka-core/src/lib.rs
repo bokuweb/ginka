@@ -5,9 +5,11 @@
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
 pub mod db;
+pub mod git;
 pub mod logging;
 pub mod paths;
 pub mod project;
+pub mod registry;
 pub mod settings;
 
 pub use paths::Paths;
