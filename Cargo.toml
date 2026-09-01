@@ -59,6 +59,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 [dependencies]
+ginka-client.workspace = true
 ginka-core.workspace = true
 ginka-protocol.workspace = true
 ginka-ui.workspace = true

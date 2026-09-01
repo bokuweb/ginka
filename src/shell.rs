@@ -75,10 +75,11 @@ impl Shell {
     pub fn new(
         paths: Paths,
         settings: AppSettings,
-        rows: Vec<SessionRow>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let rows: Vec<SessionRow> = Vec::new();
+        let link = crate::daemon::DaemonLink::new(&paths);
         // The window knows the real system appearance; the App-level default
         // applied at startup was a guess made before any window existed.
         ginka_ui::theme::apply(
@@ -108,16 +109,25 @@ impl Shell {
         // Worktrees change outside the app -- an agent commits, the user
         // switches a branch in a terminal, someone runs `git worktree add`. A
         // tick is how those reach the window without the user reopening it.
+        // The daemon pushes those same changes as events; following the push
+        // instead of polling is M2's remaining piece.
         cx.spawn({
-            let paths = paths.clone();
+            let link = link.clone();
             async move |this, cx| {
+                // The first pass is immediate: the window is already open and
+                // empty, and waiting a whole tick to fill it reads as a stall.
+                let mut delay = std::time::Duration::ZERO;
                 loop {
-                    cx.background_executor().timer(REFRESH_INTERVAL).await;
-                    let paths = paths.clone();
-                    // Storage and one `git status` per worktree: off the main
-                    // thread, or the window stalls every tick.
+                    cx.background_executor().timer(delay).await;
+                    delay = REFRESH_INTERVAL;
+                    let link = link.clone();
+                    // One request to the daemon, which does the storage and the
+                    // `git status` per worktree: off the main thread, or the
+                    // window stalls every tick.
                     let rows = cx
-                        .background_spawn(async move { crate::sessions::load(&paths) })
+                        .background_spawn(
+                            async move { link.workspaces(crate::daemon::now()).await },
+                        )
                         .await;
                     tracing::debug!(rows = rows.len(), "refreshed sessions");
                     let updated = this.update(cx, |this, cx| {

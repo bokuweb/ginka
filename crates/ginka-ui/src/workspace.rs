@@ -1,13 +1,12 @@
 //! View models for the shell.
 //!
-//! M0 renders the layout with sample rows so the design in `docs/ui.md` can be
-//! judged before the data layer exists. M1 replaces `SessionRow::samples()`
-//! with real projects and worktrees read through `ginka-core`; nothing else
-//! here should have to change when it does.
+//! A row is built from one `WorkspaceSummary` — the daemon's answer, already
+//! carrying the worktree, its git status and whatever session is running in
+//! it. Nothing here reads a database or shells out to git: by the time a
+//! summary arrives, that work is done.
 
 use crate::assets::icon;
-use ginka_core::git::BranchStatus;
-use ginka_core::project::{Project, Worktree};
+use ginka_protocol::model::{BranchStatus, SessionState, WorkspaceSummary};
 use gpui::SharedString;
 use gpui_component::Icon;
 use std::path::PathBuf;
@@ -66,6 +65,19 @@ pub enum Agent {
 }
 
 impl Agent {
+    /// The agent a driver id names.
+    ///
+    /// An id this build has no glyph for reads as Claude rather than as
+    /// nothing: a row with no mark is harder to scan than a row with the wrong
+    /// one, and the agent's name is on the row's detail anyway.
+    pub fn from_id(id: &str) -> Self {
+        match id {
+            "codex" => Self::Codex,
+            "gemini" => Self::Gemini,
+            _ => Self::Claude,
+        }
+    }
+
     pub fn glyph(self) -> Icon {
         Icon::empty().path(match self {
             Self::Claude => icon::AGENT_SPARK,
@@ -95,6 +107,18 @@ pub enum AgentState {
 }
 
 impl AgentState {
+    /// How a session's state reads in the sidebar.
+    ///
+    /// A failed session needs the user as much as a question does — it is the
+    /// row they have to go and look at — so both sort into `NeedsAttention`.
+    pub fn from_session(state: SessionState) -> Self {
+        match state {
+            SessionState::Starting | SessionState::Running => Self::Working,
+            SessionState::AwaitingInput | SessionState::Failed => Self::NeedsAttention,
+            SessionState::Idle | SessionState::Finished | SessionState::Cancelled => Self::Idle,
+        }
+    }
+
     pub fn label(self) -> Option<&'static str> {
         match self {
             Self::Working => Some("Working"),
@@ -124,27 +148,29 @@ pub struct SessionRow {
 }
 
 impl SessionRow {
-    /// Build the sidebar's rows from what is registered.
+    /// Build a sidebar row from the daemon's summary of a workspace.
     ///
-    /// A workspace with no agent session yet is still a row -- that is how the
-    /// user starts one. The agent shown is the project's default until sessions
-    /// exist to say otherwise (M2).
-    pub fn from_worktree(
-        project: &Project,
-        worktree: &Worktree,
-        status: BranchStatus,
-        last_commit: Option<i64>,
-        now: i64,
-    ) -> Self {
+    /// A workspace with no session yet is still a row — that is how the user
+    /// starts one — and it shows the age of its last commit instead of a
+    /// status word.
+    pub fn from_summary(summary: &WorkspaceSummary, now: i64) -> Self {
+        let session = summary.session.as_ref();
         Self {
-            title: title_for(&worktree.name).into(),
-            agent: Agent::Claude,
-            status,
-            path: worktree.path.clone(),
-            origin: project.name.0.clone().into(),
-            branch: worktree.branch.clone().into(),
-            state: AgentState::Idle,
-            age: last_commit
+            title: title_for(&summary.worktree.name).into(),
+            agent: session
+                .map(|session| Agent::from_id(&session.agent))
+                .unwrap_or(Agent::Claude),
+            status: summary.status,
+            path: summary.worktree.path.clone(),
+            origin: summary.worktree.project.0.clone().into(),
+            branch: summary.worktree.branch.clone().into(),
+            state: session
+                .map(|session| AgentState::from_session(session.state))
+                .unwrap_or(AgentState::Idle),
+            // A running agent shows what it is doing; the timestamp is for the
+            // rows that have nothing to say.
+            age: summary
+                .last_commit_at
                 .map(|then| relative_age(now, then))
                 .unwrap_or_default()
                 .into(),
@@ -361,5 +387,78 @@ mod tests {
     fn idle_rows_show_a_timestamp_rather_than_a_status_word() {
         assert_eq!(AgentState::Idle.label(), None);
         assert_eq!(AgentState::Working.label(), Some("Working"));
+    }
+
+    fn summary(session: Option<ginka_protocol::model::Session>) -> WorkspaceSummary {
+        WorkspaceSummary {
+            worktree: ginka_protocol::model::Worktree {
+                project: ginka_protocol::ProjectName("comet".into()),
+                name: "remove-r2-file-uploads".into(),
+                branch: "remove/r2-file-uploads".into(),
+                path: PathBuf::from("/tmp/wt"),
+                head: None,
+                pinned: false,
+            },
+            status: BranchStatus::default(),
+            session,
+            last_commit_at: Some(900_000),
+        }
+    }
+
+    fn session(agent: &str, state: SessionState) -> ginka_protocol::model::Session {
+        ginka_protocol::model::Session {
+            id: ginka_protocol::SessionId("s".into()),
+            workspace: ginka_protocol::WorkspaceId("comet/remove-r2-file-uploads".into()),
+            agent: agent.into(),
+            model: None,
+            state,
+            summary: None,
+            vendor_session_id: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn a_workspace_with_no_session_is_still_a_row() {
+        // It is how the user starts one; hiding it would hide the way in.
+        let row = SessionRow::from_summary(&summary(None), 1_000_000);
+        assert_eq!(row.title, "Remove R2 File Uploads");
+        assert_eq!(row.origin, "comet");
+        assert_eq!(row.branch, "remove/r2-file-uploads");
+        assert_eq!(row.state, AgentState::Idle);
+        assert_eq!(row.age, "1d");
+    }
+
+    #[test]
+    fn a_row_takes_its_glyph_and_status_from_the_session_running_in_it() {
+        let row = SessionRow::from_summary(
+            &summary(Some(session("codex", SessionState::Running))),
+            1_000_000,
+        );
+        assert_eq!(row.agent, Agent::Codex);
+        assert_eq!(row.state, AgentState::Working);
+    }
+
+    #[test]
+    fn a_failed_session_pulls_its_row_up_beside_the_ones_asking_a_question() {
+        let asked = SessionRow::from_summary(
+            &summary(Some(session("claude", SessionState::AwaitingInput))),
+            0,
+        );
+        let failed =
+            SessionRow::from_summary(&summary(Some(session("claude", SessionState::Failed))), 0);
+        assert_eq!(asked.state, AgentState::NeedsAttention);
+        assert_eq!(
+            failed.attention_rank(),
+            asked.attention_rank(),
+            "a failure is something to go and look at, like a question"
+        );
+    }
+
+    #[test]
+    fn an_agent_this_build_has_no_glyph_for_still_marks_its_row() {
+        assert_eq!(Agent::from_id("amp"), Agent::Claude);
+        assert_eq!(Agent::from_id("codex"), Agent::Codex);
     }
 }

@@ -2313,6 +2313,7 @@ name = "ginka"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "ginka-client",
  "ginka-core",
  "ginka-protocol",
  "ginka-ui",
@@ -2416,6 +2417,7 @@ name = "ginka-ui"
 version = "0.0.0"
 dependencies = [
  "ginka-core",
+ "ginka-protocol",
  "gpui",
  "gpui-component",
  "gpui-component-assets",
