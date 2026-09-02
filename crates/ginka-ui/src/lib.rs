@@ -20,4 +20,4 @@ pub mod workspace;
 pub use assets::Assets;
 pub use layout::{Layout, Panel};
 pub use theme::{Mode, Tokens};
-pub use transcript::{Activity, Block, Reveal, Transcript};
+pub use transcript::{Activity, Block, Reveal, Transcript, following, settled};

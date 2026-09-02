@@ -43,6 +43,9 @@ composer.agent.signed_out:
 composer.agent.missing:
   en: not installed
   ja: 未インストール
+composer.stop:
+  en: Stop the agent
+  ja: エージェントを停止
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー

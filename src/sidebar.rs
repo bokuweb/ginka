@@ -42,10 +42,17 @@ impl SessionSidebar {
     /// The selection follows the *workspace*, not the index: rows are sorted by
     /// attention, so an index means nothing across a reload and keeping one
     /// would move the user's selection whenever an agent started somewhere else.
+    ///
+    /// By workspace id rather than by branch, because the branch is the live
+    /// one: an agent that checks out something else inside the worktree would
+    /// otherwise move the selection out from under the user mid-answer.
     pub fn set_rows(&mut self, rows: Vec<SessionRow>, cx: &mut Context<Self>) {
-        let selected_branch = self.rows.get(self.selected).map(|row| row.branch.clone());
-        self.selected = selected_branch
-            .and_then(|branch| rows.iter().position(|row| row.branch == branch))
+        let selected = self
+            .rows
+            .get(self.selected)
+            .map(|row| row.workspace.clone());
+        self.selected = selected
+            .and_then(|workspace| rows.iter().position(|row| row.workspace == workspace))
             .unwrap_or(0);
         self.rows = rows;
         cx.notify();

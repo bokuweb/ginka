@@ -23,6 +23,8 @@ use ginka_ui::transcript::{
 use ginka_ui::workspace::SessionRow;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::text::TextView;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     Icon, IconName, StyledExt as _, TitleBar, h_flex,
     input::{InputEvent, Textarea, TextareaState},
@@ -72,6 +74,11 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// the 15px body size. Reading is what this column is for.
 const TRANSCRIPT_MEASURE: f32 = 720.;
 
+/// How far from the foot still counts as being at it. About a line of text:
+/// enough that an answer growing between one frame and the next does not read
+/// as the reader scrolling away.
+const NEARLY_THE_FOOT: f32 = 24.;
+
 /// Width macOS reserves for the traffic lights before our own content starts.
 const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
@@ -95,6 +102,11 @@ pub struct Shell {
     agents: Vec<AgentStatus>,
     /// How much of the answer being written is on screen.
     reveal: Reveal,
+    /// The transcript's scroll position, so the answer can be followed.
+    transcript_scroll: ScrollHandle,
+    /// Whether the transcript is still following the answer. Dropped by the
+    /// reader scrolling away, restored by them coming back to the foot.
+    transcript_follows: bool,
     composer: Entity<TextareaState>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
@@ -276,6 +288,8 @@ impl Shell {
             transcript_of: None,
             agents: Vec::new(),
             reveal: Reveal::new(),
+            transcript_scroll: ScrollHandle::new(),
+            transcript_follows: true,
             composer,
             paths,
             settings,
@@ -366,6 +380,8 @@ impl Shell {
     /// keeps it going; with nothing left to write nothing is asked for, and
     /// the window goes back to sleep.
     fn write_a_little_more(&mut self, window: &mut Window) {
+        self.follow_the_answer();
+
         let arrived = self
             .transcript
             .tail()
@@ -374,6 +390,49 @@ impl Shell {
         if self.reveal.advance(arrived) {
             window.request_animation_frame();
         }
+    }
+
+    /// Keep the foot of the conversation in view while it is being written.
+    fn follow_the_answer(&mut self) {
+        let (pull, follows) = ginka_ui::transcript::following(
+            self.is_working(),
+            self.transcript_follows,
+            self.transcript_at_foot(),
+        );
+        self.transcript_follows = follows;
+        if pull {
+            self.transcript_scroll.scroll_to_bottom();
+        }
+    }
+
+    /// Whether the transcript is scrolled to its foot, near enough.
+    ///
+    /// Near enough because the foot moves as the answer grows: by the time a
+    /// frame is drawn the text is a line longer than when the offset was set.
+    fn transcript_at_foot(&self) -> bool {
+        let offset = f32::from(self.transcript_scroll.offset().y);
+        let furthest = f32::from(self.transcript_scroll.max_offset().y);
+        // Scrolling down counts down from zero, so the foot is the most
+        // negative the offset gets.
+        furthest + offset <= NEARLY_THE_FOOT
+    }
+
+    /// The reader has taken the transcript somewhere themselves.
+    fn transcript_scrolled(&mut self) {
+        self.transcript_follows = false;
+    }
+
+    /// Stop the agent working in the workspace on screen.
+    fn stop(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_spawn(async move { link.cancel_session(&session).await })
+                .await;
+        })
+        .detach();
     }
 
     /// Whether the workspace on screen has an agent working in it.
@@ -612,13 +671,17 @@ impl Shell {
     }
 
     /// The conversation, folded from the daemon's event stream.
-    fn transcript(&self, cx: &App) -> impl IntoElement {
+    fn transcript(&self, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("transcript")
             .flex_1()
             .px_8()
             .py_6()
             .overflow_y_scroll()
+            .track_scroll(&self.transcript_scroll)
+            // The gesture, not the resulting offset: an answer that grows
+            // moves the foot away from the reader too.
+            .on_scroll_wheel(cx.listener(|this, _, _, _| this.transcript_scrolled()))
             .child(
                 // One column for the whole conversation, at the measure from
                 // docs/ui.md §3.3: long-form text stays readable because the
@@ -643,12 +706,13 @@ impl Shell {
                                 // Only the tail is still being written; every
                                 // block before it is finished text.
                                 TranscriptBlock::Assistant { text } if index == last => self.block(
+                                    index,
                                     &TranscriptBlock::Assistant {
                                         text: self.reveal.shown(text).to_string(),
                                     },
                                     cx,
                                 ),
-                                block => self.block(block, cx),
+                                block => self.block(index, block, cx),
                             })
                             .collect::<Vec<_>>()
                     })
@@ -735,7 +799,7 @@ impl Shell {
     /// Each kind is drawn differently on purpose: the reader has to be able to
     /// tell what the agent said from what it was thinking, and both from what
     /// it did.
-    fn block(&self, block: &TranscriptBlock, cx: &App) -> AnyElement {
+    fn block(&self, index: usize, block: &TranscriptBlock, cx: &App) -> AnyElement {
         let tokens = Tokens::global(cx);
         let prose = |text: &str, color: Hsla| {
             div()
@@ -766,7 +830,24 @@ impl Shell {
                 )
                 .into_any_element(),
             TranscriptBlock::Assistant { text } => {
-                prose(text, tokens.colors().text_primary).into_any_element()
+                // Agents answer in markdown — headings, lists, fenced code —
+                // and reading it raw is reading the punctuation instead of the
+                // answer. Only the finished blocks are formatted: markdown of
+                // half a document re-flows the text under the reader on every
+                // frame, so the line still being written is drawn as the plain
+                // text it is until its block is done.
+                let (formatted, writing) = ginka_ui::transcript::settled(text);
+                v_flex()
+                    .w_full()
+                    .text_size(px(15.))
+                    .line_height(px(25.))
+                    .text_color(tokens.colors().text_primary)
+                    .children((!formatted.is_empty()).then(|| {
+                        TextView::markdown(("assistant", index), formatted.to_string())
+                            .selectable(true)
+                    }))
+                    .children((!writing.is_empty()).then(|| div().child(writing.to_string())))
+                    .into_any_element()
             }
             TranscriptBlock::Reasoning { text } => prose(text, tokens.colors().text_muted)
                 .italic()
@@ -927,7 +1008,34 @@ impl Shell {
                             .size_4()
                             .text_color(tokens.colors().text_muted),
                     )
-                    .child(
+                    .child(if self.is_working() {
+                        // An agent that cannot be stopped is an agent the user
+                        // has to wait out. The composer keeps working: what is
+                        // typed while it runs is queued, not lost.
+                        div()
+                            .id("stop")
+                            .size_7()
+                            .rounded_full()
+                            .bg(tokens.colors().bg_raised)
+                            .border_1()
+                            .border_color(tokens.colors().border_strong)
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .cursor_pointer()
+                            .tooltip(|window, cx| {
+                                Tooltip::new(rust_i18n::t!("composer.stop").to_string())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                            .child(
+                                div()
+                                    .size(px(9.))
+                                    .rounded(px(2.))
+                                    .bg(tokens.colors().text_primary),
+                            )
+                            .into_any_element()
+                    } else {
                         div()
                             .id("send")
                             .size_7()
@@ -942,8 +1050,9 @@ impl Shell {
                                 Icon::new(IconName::ArrowUp)
                                     .size_4()
                                     .text_color(tokens.colors().bg_window),
-                            ),
-                    ),
+                            )
+                            .into_any_element()
+                    }),
             )
             .child(self.context_bar(cx))
     }

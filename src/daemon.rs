@@ -115,6 +115,14 @@ impl DaemonLink {
         }
     }
 
+    /// Stop the agent working in a session.
+    pub async fn cancel_session(&self, session: &SessionId) {
+        self.ask(Request::CancelSession {
+            session: session.clone(),
+        })
+        .await;
+    }
+
     /// Send a follow-up to a running session.
     pub async fn send_message(&self, session: &SessionId, text: String) {
         self.ask(Request::SendMessage {

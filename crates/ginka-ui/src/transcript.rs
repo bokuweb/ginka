@@ -400,6 +400,50 @@ impl Reveal {
     }
 }
 
+/// Split assistant text into the part that is safe to format and the part
+/// that is not.
+///
+/// Markdown of half a document is not markdown of anything: a heading with no
+/// line after it, a fence with no closing fence. So the text is cut at the
+/// last blank line — the end of the last block that is definitely finished —
+/// and only what precedes it is formatted. The tail is drawn as the plain text
+/// it still is, and moves across as soon as its block is done.
+///
+/// The cut never lands inside a fenced block, which a blank line does not end.
+/// Ported from bokuweb/pedro, which hit the same problem: a markdown view
+/// re-parsing text that changes every frame makes a streaming answer land in
+/// slabs.
+pub fn settled(text: &str) -> (&str, &str) {
+    let mut cut = 0;
+    let mut fences = 0;
+    let mut at = 0;
+
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fences += 1;
+        }
+        at += line.len();
+        if line.trim().is_empty() && fences % 2 == 0 {
+            cut = at;
+        }
+    }
+
+    text.split_at(cut)
+}
+
+/// Whether to pull the transcript to its foot, and whether it is still
+/// following.
+///
+/// Told by the reader's gesture rather than worked out from where the view
+/// ends up: an answer that grows moves the foot away from the reader too, and a
+/// rule that could not tell those apart would either stop following on its own
+/// or drag the reader back from a paragraph they had gone to read. Ported from
+/// bokuweb/pedro.
+pub fn following(working: bool, follows: bool, at_foot: bool) -> (bool, bool) {
+    let follows = follows || at_foot;
+    (working && follows, follows)
+}
+
 /// The first `limit` lines of `text`, with a note when there were more.
 ///
 /// A tool that printed a megabyte must not push the conversation off the
@@ -825,6 +869,49 @@ mod tests {
 
         transcript.apply(&text(4, "here is what I found"));
         assert_eq!(transcript.activity(), Activity::Writing);
+    }
+
+    #[test]
+    fn only_finished_blocks_are_handed_to_the_formatter() {
+        // Half a markdown document is not a markdown document: formatting a
+        // heading with no line after it re-flows the text under the reader.
+        let (formatted, writing) = settled("# Title\n\nA finished paragraph.\n\n## Half a hea");
+        assert_eq!(formatted, "# Title\n\nA finished paragraph.\n\n");
+        assert_eq!(writing, "## Half a hea");
+    }
+
+    #[test]
+    fn the_cut_never_lands_inside_a_fence() {
+        // A blank line does not end a fenced block, and formatting one that is
+        // still open turns the rest of the answer into code.
+        let text = "Here:\n\n```rust\nfn main() {\n\n    println!(\"hi\");\n";
+        let (formatted, writing) = settled(text);
+        assert_eq!(formatted, "Here:\n\n");
+        assert!(writing.starts_with("```rust"));
+    }
+
+    #[test]
+    fn text_with_nothing_finished_is_all_still_being_written() {
+        let (formatted, writing) = settled("just started");
+        assert_eq!(formatted, "");
+        assert_eq!(writing, "just started");
+    }
+
+    #[test]
+    fn a_reader_who_scrolled_away_is_not_dragged_back() {
+        // The answer growing moves the foot away from them too; a rule that
+        // could not tell that apart would pull them off the paragraph they
+        // went to read.
+        assert_eq!(following(true, false, false), (false, false));
+        // Until they come back to the foot themselves.
+        assert_eq!(following(true, false, true), (true, true));
+    }
+
+    #[test]
+    fn a_reader_at_the_foot_is_kept_there_while_the_agent_writes() {
+        assert_eq!(following(true, true, false), (true, true));
+        // Nothing is being written, so nothing needs pulling.
+        assert_eq!(following(false, true, true), (false, true));
     }
 
     #[test]
