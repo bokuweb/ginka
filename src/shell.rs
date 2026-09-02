@@ -1105,15 +1105,15 @@ impl Shell {
                             .w_full()
                             .gap_2()
                             .items_center()
-                            .child(self.model_chip(cx))
-                            .child(self.chip(&rust_i18n::t!("composer.agent"), cx))
-                            .child(div().flex_1())
                             .child(
                                 Icon::empty()
                                     .path(ginka_ui::assets::icon::PAPERCLIP)
                                     .size_4()
                                     .text_color(tokens.colors().text_muted),
                             )
+                            .child(div().flex_1())
+                            .child(self.model_chip(cx))
+                            .child(self.chip(&rust_i18n::t!("composer.agent"), cx))
                             .child(if working {
                                 // An agent that cannot be stopped is one the
                                 // user has to wait out. The composer keeps

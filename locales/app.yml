@@ -5,6 +5,9 @@
 # region of the UI they belong to; the CLI's own output is under `cli`.
 _version: 2
 
+sidebar.projects:
+  en: Projects
+  ja: プロジェクト
 sidebar.archived:
   en: Archived
   ja: アーカイブ
@@ -56,6 +59,9 @@ transcript.empty.ready:
 transcript.empty.no_project:
   en: No project is registered yet. Run `ginka project add .` in a repository, then reopen this window.
   ja: プロジェクトがまだ登録されていません。リポジトリで `ginka project add .` を実行してから、このウィンドウを開き直してください。
+transcript.copy:
+  en: Copy the answer
+  ja: 返答をコピー
 transcript.thinking:
   en: Thinking…
   ja: 考えています…
