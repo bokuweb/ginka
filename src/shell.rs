@@ -876,15 +876,13 @@ impl Shell {
                         // Never the full measure: a message that fills the
                         // column is indistinguishable from the agent's reply.
                         .max_w(px(TRANSCRIPT_MEASURE * 0.8))
-                        .px_3p5()
-                        .py_2()
-                        .rounded(px(tokens.radius.panel))
+                        .px(px(13.))
+                        .py(px(9.))
+                        .rounded(px(tokens.radius.panel + 2.))
                         // Tinted rather than another grey box: the reader's
                         // own words are the one thing on screen that is not
                         // the agent's.
-                        .bg(tokens.colors().accent.opacity(0.16))
-                        .border_1()
-                        .border_color(tokens.colors().accent.opacity(0.28))
+                        .bg(tokens.colors().row_active())
                         .text_size(px(15.))
                         .line_height(px(25.))
                         .text_color(tokens.colors().text_primary)
@@ -1086,10 +1084,10 @@ impl Shell {
             .child(
                 v_flex()
                     .w_full()
-                    .px_3p5()
-                    .py_3()
-                    .gap_2p5()
-                    .rounded(px(tokens.radius.panel))
+                    .px(px(14.))
+                    .py(px(9.))
+                    .gap(px(7.))
+                    .rounded(px(tokens.radius.card))
                     .bg(tokens.colors().bg_surface)
                     .border_1()
                     // The border carries the focus, so the field inside needs
@@ -1121,7 +1119,7 @@ impl Shell {
                                 // queued, not lost.
                                 div()
                                     .id("stop")
-                                    .size_7()
+                                    .size(px(30.))
                                     .rounded_full()
                                     .bg(tokens.colors().bg_raised)
                                     .border_1()
@@ -1130,7 +1128,7 @@ impl Shell {
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().bg_window))
+                                    .hover(|this| this.bg(tokens.colors().row_active()))
                                     .tooltip(|window, cx| {
                                         Tooltip::new(rust_i18n::t!("composer.stop").to_string())
                                             .build(window, cx)
@@ -1146,14 +1144,14 @@ impl Shell {
                             } else {
                                 div()
                                     .id("send")
-                                    .size_7()
+                                    .size(px(30.))
                                     .rounded_full()
                                     .bg(tokens.colors().text_primary)
                                     .flex()
                                     .items_center()
                                     .justify_center()
                                     .cursor_pointer()
-                                    .hover(|this| this.opacity(0.85))
+                                    .hover(|this| this.bg(tokens.colors().accent))
                                     .on_click(
                                         cx.listener(|this, _, window, cx| this.submit(window, cx)),
                                     )
@@ -1216,21 +1214,21 @@ impl Shell {
         };
 
         h_flex()
-            .px_2()
-            .py_0p5()
-            .gap_1p5()
+            .h(px(28.))
+            .px(px(9.))
+            .gap(px(6.))
             .items_center()
-            .rounded_full()
-            .bg(tokens.colors().bg_raised)
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().row_hover())
             .children(
                 self.session
                     .as_ref()
-                    .map(|session| session.agent.glyph().size_3().text_color(colour)),
+                    .map(|session| session.agent.glyph().size(px(14.)).text_color(colour)),
             )
-            .child(div().text_xs().text_color(colour).child(name))
+            .child(div().text_size(px(12.)).text_color(colour).child(name))
             .children(note.map(|note| {
                 div()
-                    .text_xs()
+                    .text_size(px(12.))
                     .text_color(colour)
                     .child(format!("· {note}"))
             }))
@@ -1238,12 +1236,13 @@ impl Shell {
 
     fn chip(&self, label: &str, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        div()
-            .px_2()
-            .py_0p5()
-            .rounded_full()
-            .bg(tokens.colors().bg_raised)
-            .text_xs()
+        h_flex()
+            .h(px(28.))
+            .px(px(9.))
+            .items_center()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().row_hover())
+            .text_size(px(12.))
             .text_color(tokens.colors().text_secondary)
             .child(label.to_string())
     }
@@ -1253,7 +1252,7 @@ impl Shell {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
-            .px_1()
+            .px(px(6.))
             .justify_between()
             .items_center()
             .child(
@@ -1267,7 +1266,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(11.))
                             .text_color(tokens.colors().text_muted)
                             .child(rust_i18n::t!("composer.context.worktree").to_string()),
                     ),
@@ -1284,7 +1283,7 @@ impl Shell {
                     )
                     .child(
                         div()
-                            .text_xs()
+                            .text_size(px(11.))
                             .text_color(tokens.colors().text_muted)
                             .child(
                                 self.session

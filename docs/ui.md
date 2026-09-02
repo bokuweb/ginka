@@ -48,8 +48,8 @@ Defined once in `assets/themes/*.json`, installed into GPUI's global context at 
 | --- | --- | --- |
 | `bg.window` | `#0E0A14` @ 82 % + blur | window base, translucent |
 | `bg.sidebar` | `#120D19` @ 70 % | left column |
-| `bg.surface` | `#17121F` | cards, composer, right-panel buttons |
-| `bg.raised` | `#1E1829` | popovers, menus, hover |
+| `bg.surface` | `#1B1426` @ 66 % | cards, composer, fields |
+| `bg.raised` | `#241A33` @ 72 % | popovers, menus |
 | `bg.terminal` | `#0A0710` | terminal pane |
 | `border.subtle` | `#FFFFFF` @ 6 % | panel separators |
 | `border.strong` | `#FFFFFF` @ 12 % | focused input, selected row |
@@ -62,6 +62,19 @@ Defined once in `assets/themes/*.json`, installed into GPUI's global context at 
 | `status.done` | `#4ADE80` | completed |
 | `status.error` | `#F87171` | failed |
 | `code.bg` | `#A78BFA` @ 10 % | inline code |
+
+Two derived tints, computed from `accent` rather than stored: `row.hover` (14 %)
+and `row.active` (22 %). Rows are otherwise transparent — they are told apart by
+the space between them, and a grey fill over a translucent window is what turns
+glass into cardboard.
+
+**Every surface carries alpha**, not only the window: a fully opaque panel over
+a blurred window looks like a mistake rather than a choice. What keeps them from
+stacking into an opaque sheet is that **exactly one surface paints each pixel** —
+the toolkit's own background is clear, `Root` paints the window once, and the
+sidebar, the centre column and each card paint themselves once. Three coats of
+70 % is 97 %, which is no longer glass. (Both rules are pedro's, whose palette
+solved the same problem.)
 
 A light theme ships with the same token names and WCAG AA contrast pairs. Every colour is referenced by token; adding a theme must never require touching a view.
 
@@ -76,7 +89,12 @@ A light theme ships with the same token names and WCAG AA contrast pairs. Every 
 
 ### Geometry
 
-4 px spacing grid. Radii: window 12, panel 10, row 8, chip/pill full. Sidebar default 250 px (resizable 200–400). Right panel default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre column height.
+4 px spacing grid. Radii: window 12, **card 16** (the composer and anything else
+holding a group of controls — a card is an object on the surface and the corner
+is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
+radius, 12 px type. Sidebar default 250 px (resizable 200–400). Right panel
+default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
+column height.
 
 ## 3. Regions
 

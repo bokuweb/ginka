@@ -194,8 +194,8 @@ impl SessionSidebar {
             .py_1p5()
             .gap_0p5()
             .rounded(px(tokens.radius.row))
-            .when(selected, |this| this.bg(tokens.colors().bg_raised))
-            .hover(|this| this.bg(tokens.colors().bg_raised.opacity(0.55)))
+            .when(selected, |this| this.bg(tokens.colors().row_active()))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
             .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
             .child(
                 h_flex()
@@ -322,7 +322,7 @@ impl SessionSidebar {
             .gap_2()
             .items_center()
             .rounded(px(tokens.radius.row))
-            .hover(|this| this.bg(tokens.colors().bg_raised.opacity(0.6)))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
             .child(
                 Icon::new(IconName::Inbox)
                     .size_3p5()

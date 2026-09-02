@@ -110,6 +110,10 @@ pub struct Colors {
 #[allow(dead_code)]
 pub struct Radii {
     pub window: f32,
+    /// The composer and other cards that hold a group of controls. Larger than
+    /// a panel on purpose: a card is an object on the surface, and the corner
+    /// is what says so.
+    pub card: f32,
     pub panel: f32,
     pub row: f32,
 }
@@ -210,19 +214,33 @@ pub fn apply(mode: Mode, cx: &mut App) {
 
     theme.colors.background = tokens.bg_window;
     theme.colors.foreground = tokens.text_primary;
+    theme.colors.muted = tokens.bg_surface;
     theme.colors.muted_foreground = tokens.text_secondary;
     theme.colors.border = tokens.border_subtle;
-    theme.colors.accent = tokens.bg_raised;
+    theme.colors.accent = tokens.row_active();
     theme.colors.accent_foreground = tokens.text_primary;
-    // The focus ring is the accent at a fraction of its strength: a hard
-    // outline around the composer reads as an error state, not as focus.
+    // A field paints the same surface a card does, so an input inside one
+    // disappears into it and the card's own border is what carries focus. The
+    // ring is the accent at a fraction of itself: a hard outline around the
+    // composer reads as an error state, not as focus.
+    theme.colors.input = tokens.bg_surface;
     theme.colors.ring = tokens.accent.opacity(0.45);
-    theme.colors.selection = tokens.accent.opacity(0.3);
+    theme.colors.selection = tokens.accent.opacity(0.32);
+    theme.colors.caret = tokens.accent;
+
+    theme.colors.secondary = tokens.bg_surface;
+    theme.colors.secondary_foreground = tokens.text_primary;
+    theme.colors.secondary_hover = tokens.surface_hover();
+    theme.colors.secondary_active = tokens.surface_hover();
+
+    theme.colors.scrollbar = tokens.transparent_surface();
+    theme.colors.scrollbar_thumb = tokens.row_active();
+    theme.colors.scrollbar_thumb_hover = tokens.surface_hover();
 
     theme.colors.sidebar = tokens.bg_sidebar;
     theme.colors.sidebar_foreground = tokens.text_primary;
     theme.colors.sidebar_border = tokens.border_subtle;
-    theme.colors.sidebar_accent = tokens.bg_raised;
+    theme.colors.sidebar_accent = tokens.row_active();
     theme.colors.sidebar_accent_foreground = tokens.text_primary;
 
     // Transparent, not `bg_window`. `Root` already paints the window's
@@ -237,22 +255,25 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.popover = tokens.bg_raised;
     theme.colors.popover_foreground = tokens.text_primary;
     theme.colors.list = tokens.transparent_surface();
-    theme.colors.list_hover = tokens.bg_raised;
-    theme.colors.list_active = tokens.bg_raised;
+    theme.colors.list_hover = tokens.row_hover();
+    theme.colors.list_active = tokens.row_active();
     theme.colors.list_active_border = tokens.accent;
 
-    theme.colors.tab_bar = tokens.bg_surface;
-    theme.colors.tab = tokens.bg_surface;
+    theme.colors.tab_bar = tokens.transparent_surface();
+    theme.colors.tab = tokens.transparent_surface();
     theme.colors.tab_active = tokens.bg_raised;
     theme.colors.tab_foreground = tokens.text_secondary;
     theme.colors.tab_active_foreground = tokens.text_primary;
 
     theme.colors.primary = tokens.accent;
     theme.colors.primary_foreground = tokens.bg_window;
+    theme.colors.primary_hover = tokens.accent.opacity(0.85);
+    theme.colors.primary_active = tokens.accent.opacity(0.7);
     theme.colors.danger = tokens.status_error;
+    theme.colors.success = tokens.status_done;
 
     theme.radius = gpui::px(radii.row);
-    theme.radius_lg = gpui::px(radii.panel);
+    theme.radius_lg = gpui::px(radii.card);
 
     // `Root` and several components paint from the derived semantic tokens
     // rather than from `colors`. Without regenerating them the window keeps the
@@ -277,6 +298,26 @@ impl Colors {
         let mut color = self.bg_surface;
         color.a = 0.0;
         color
+    }
+
+    /// A row under the pointer.
+    ///
+    /// The accent at a fraction of itself rather than a grey fill: rows are
+    /// told apart by the space between them, and the one being pointed at only
+    /// needs a tint to say so. Ported from bokuweb/pedro's palette, where the
+    /// same rule keeps a translucent window from turning into a grey one.
+    pub fn row_hover(&self) -> Hsla {
+        self.accent.opacity(0.14)
+    }
+
+    /// The row you are on.
+    pub fn row_active(&self) -> Hsla {
+        self.accent.opacity(0.22)
+    }
+
+    /// A raised control the pointer is over.
+    pub fn surface_hover(&self) -> Hsla {
+        self.bg_raised.opacity((self.bg_raised.a + 0.14).min(1.0))
     }
 }
 
@@ -314,15 +355,33 @@ mod tests {
     }
 
     #[test]
-    fn alpha_is_carried_through() {
-        // The window background is translucent by design; losing the alpha
-        // would silently turn the glass surface opaque.
+    fn every_surface_lets_the_blur_through() {
+        // A fully opaque panel over a blurred window looks like a mistake
+        // rather than a choice, so the surfaces carry alpha as well as the
+        // window does. What keeps them from stacking into an opaque sheet is
+        // that exactly one of them paints each pixel — see `docs/ui.md` §1.
         let dark = Tokens::load(Mode::Dark);
-        assert!(
-            dark.colors.bg_window.a < 1.0,
-            "window background must stay translucent"
-        );
-        assert_eq!(dark.colors.bg_surface.a, 1.0, "cards are opaque");
+        for (name, colour) in [
+            ("bg.window", dark.colors.bg_window),
+            ("bg.sidebar", dark.colors.bg_sidebar),
+            ("bg.surface", dark.colors.bg_surface),
+            ("bg.raised", dark.colors.bg_raised),
+        ] {
+            assert!(colour.a < 1.0, "{name} must let the blur through");
+        }
+    }
+
+    #[test]
+    fn a_row_is_tinted_by_the_accent_rather_than_filled_with_grey() {
+        // Rows are told apart by the space between them; the one being pointed
+        // at only needs a tint, and a grey fill over a translucent window is
+        // what turns glass into cardboard.
+        let dark = Tokens::load(Mode::Dark);
+        let hover = dark.colors.row_hover();
+        let active = dark.colors.row_active();
+        assert_eq!(hover.h, dark.colors.accent.h, "the tint is the accent");
+        assert!(hover.a < active.a, "the row you are on is the stronger one");
+        assert!(active.a < 0.4, "a tint, not a fill");
     }
 
     #[test]
