@@ -11,7 +11,7 @@ use ginka_core::driver::{Registry, claude::ClaudeDriver};
 use ginka_core::service::{EventSink, Service};
 use ginka_core::{Paths, db};
 use ginka_protocol::event::DaemonEvent;
-use ginka_protocol::model::{SessionState, TranscriptPayload};
+use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{AgentEvent, ProjectName, SessionId, WorkspaceId};
 use std::sync::{Arc, Mutex};
@@ -321,7 +321,12 @@ fn events_reach_clients_while_the_agent_is_still_working() {
         events.iter().any(|event| matches!(
             event,
             DaemonEvent::SessionEvent {
-                agent_event: AgentEvent::TextDelta { .. },
+                entry: TranscriptEntry {
+                    payload: TranscriptPayload::Agent {
+                        event: AgentEvent::TextDelta { .. }
+                    },
+                    ..
+                },
                 ..
             }
         )),
@@ -330,7 +335,31 @@ fn events_reach_clients_while_the_agent_is_still_working() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            DaemonEvent::SessionEnded {
+            DaemonEvent::SessionEvent {
+                entry: TranscriptEntry {
+                    payload: TranscriptPayload::User { .. },
+                    ..
+                },
+                ..
+            }
+        )),
+        "the user's own prompt is pushed too, or a window has to wait for a \
+         poll to show what was just typed: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::SessionStateChanged {
+                state: SessionState::Running,
+                ..
+            }
+        )),
+        "a window has to be able to show that the agent started: {events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            DaemonEvent::SessionStateChanged {
                 state: SessionState::Finished,
                 ..
             }

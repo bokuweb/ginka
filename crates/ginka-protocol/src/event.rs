@@ -6,7 +6,7 @@
 //! talking to (`AGENTS.md` rule 6).
 
 use crate::ids::{ProjectName, SessionId, WorkspaceId};
-use crate::model::{BranchStatus, Session, SessionState};
+use crate::model::{BranchStatus, Session, SessionState, TranscriptEntry};
 use serde::{Deserialize, Serialize};
 
 /// One normalized thing an agent did.
@@ -93,19 +93,23 @@ pub enum DaemonEvent {
     /// A session was created; carries the whole record so a client that has
     /// never seen it does not have to ask.
     SessionStarted { session: Session },
-    /// A driver produced an event. `seq` is the transcript position, so a
-    /// client can tell whether it already has this entry.
+    /// Something was added to a transcript: a prompt the user sent, or an
+    /// event a driver produced.
     ///
-    /// The field is `agent_event` rather than `event` because the variant tag
-    /// is already called `event`, and two keys of that name in one object is
-    /// not a document any parser agrees on.
+    /// The whole entry rather than the event alone, so a client can fold it in
+    /// where it belongs without asking for the page it is in — and so a user's
+    /// own prompt appears in every window as soon as it is sent, rather than
+    /// on whatever tick notices it next.
     SessionEvent {
         session: SessionId,
-        seq: u64,
-        agent_event: AgentEvent,
+        entry: TranscriptEntry,
     },
-    /// A session reached a terminal state.
-    SessionEnded {
+    /// A session moved: started working, blocked on the user, or ended.
+    ///
+    /// Every transition, not only the last one. A client that only heard about
+    /// the end could not tell an agent that is thinking from one that has not
+    /// started, and would wait for a poll to find out.
+    SessionStateChanged {
         session: SessionId,
         state: SessionState,
     },
@@ -150,9 +154,14 @@ mod tests {
     fn a_daemon_event_round_trips() {
         let event = DaemonEvent::SessionEvent {
             session: SessionId("s-1".into()),
-            seq: 3,
-            agent_event: AgentEvent::TextDelta {
-                text: "hello".into(),
+            entry: TranscriptEntry {
+                seq: 3,
+                at: 1_700_000_000,
+                payload: crate::model::TranscriptPayload::Agent {
+                    event: AgentEvent::TextDelta {
+                        text: "hello".into(),
+                    },
+                },
             },
         };
         let text = serde_json::to_string(&event).unwrap();

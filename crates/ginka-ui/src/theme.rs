@@ -214,7 +214,9 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.border = tokens.border_subtle;
     theme.colors.accent = tokens.bg_raised;
     theme.colors.accent_foreground = tokens.text_primary;
-    theme.colors.ring = tokens.accent;
+    // The focus ring is the accent at a fraction of its strength: a hard
+    // outline around the composer reads as an error state, not as focus.
+    theme.colors.ring = tokens.accent.opacity(0.45);
     theme.colors.selection = tokens.accent.opacity(0.3);
 
     theme.colors.sidebar = tokens.bg_sidebar;

@@ -16,7 +16,7 @@ use crate::{checkpoint, session};
 use anyhow::{Context, Result};
 use futures_lite::io::BufReader;
 use futures_lite::{AsyncBufReadExt, StreamExt};
-use ginka_protocol::model::{SessionState, TranscriptPayload};
+use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
@@ -41,18 +41,18 @@ struct Shared {
 impl Shared {
     /// Append to the transcript and push the event to every client.
     fn record(&self, session: &SessionId, payload: TranscriptPayload) -> Result<u64> {
-        let now = now();
+        let at = now();
         let seq = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            session::append(&conn, session, &payload, now)?
+            session::append(&conn, session, &payload, at)?
         };
-        if let TranscriptPayload::Agent { event } = payload {
-            self.events.emit(DaemonEvent::SessionEvent {
-                session: session.clone(),
-                seq,
-                agent_event: event,
-            });
-        }
+        // Prompts are pushed as well as events: a window that had to wait for
+        // a poll to see what the user just typed reads as a window that lost
+        // it.
+        self.events.emit(DaemonEvent::SessionEvent {
+            session: session.clone(),
+            entry: TranscriptEntry { seq, at, payload },
+        });
         Ok(seq)
     }
 
@@ -86,11 +86,21 @@ impl Shared {
         }
     }
 
+    /// Move a session, and tell every client it moved.
+    ///
+    /// The push is what lets a window show that an agent is thinking the
+    /// moment it starts, rather than on whatever tick notices next.
     fn set_state(&self, session: &SessionId, state: SessionState, summary: Option<&str>) {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(error) = session::update_state(&conn, session, state, summary, now()) {
-            tracing::error!(%error, session = %session, "could not record a session state");
+        {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(error) = session::update_state(&conn, session, state, summary, now()) {
+                tracing::error!(%error, session = %session, "could not record a session state");
+            }
         }
+        self.events.emit(DaemonEvent::SessionStateChanged {
+            session: session.clone(),
+            state,
+        });
     }
 }
 
@@ -244,15 +254,13 @@ impl Supervisor {
             Ok(child) => child,
             Err(error) => {
                 tracing::error!(%error, agent = driver.id(), "could not start the agent");
+                // `set_state` publishes the move, so there is nothing else to
+                // announce: the failure is the state.
                 context.set_state(
                     &session,
                     SessionState::Failed,
                     Some(&format!("could not start {}: {error}", command.program)),
                 );
-                context.events.emit(DaemonEvent::SessionEnded {
-                    session,
-                    state: SessionState::Failed,
-                });
                 return;
             }
         };
@@ -280,10 +288,6 @@ impl Supervisor {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&session);
-                context.events.emit(DaemonEvent::SessionEnded {
-                    session: session.clone(),
-                    state,
-                });
 
                 // A turn that ended cleanly hands over to whatever the user
                 // sent while it was working.
