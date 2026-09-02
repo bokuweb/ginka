@@ -152,9 +152,23 @@ impl Layout {
 mod tests {
     use super::*;
 
+    /// Settings with every panel open.
+    ///
+    /// The defaults start the right panel and the dock closed — they have
+    /// nothing in them until M3 — but these tests are about how the
+    /// arrangement behaves, not about what it starts as.
+    fn all_open() -> AppSettings {
+        AppSettings {
+            sidebar_open: true,
+            right_panel_open: true,
+            terminal_dock_open: true,
+            ..AppSettings::default()
+        }
+    }
+
     #[test]
     fn round_trips_through_settings() {
-        let mut settings = AppSettings::default();
+        let mut settings = all_open();
         let mut layout = Layout::from_settings(&settings);
         layout.toggle(Panel::RightPanel);
         layout.toggle(Panel::TerminalDock);
@@ -190,7 +204,7 @@ mod tests {
 
     #[test]
     fn slots_track_which_panels_are_open() {
-        let mut layout = Layout::from_settings(&AppSettings::default());
+        let mut layout = Layout::from_settings(&all_open());
         assert_eq!(
             layout.columns(),
             vec![Some(Panel::Sidebar), None, Some(Panel::RightPanel)]
@@ -203,7 +217,7 @@ mod tests {
 
     #[test]
     fn a_resize_with_the_sidebar_closed_does_not_write_the_centre_width_into_it() {
-        let mut layout = Layout::from_settings(&AppSettings::default());
+        let mut layout = Layout::from_settings(&all_open());
         let original = layout.size(Panel::Sidebar);
         layout.set_open(Panel::Sidebar, false);
 
@@ -216,7 +230,7 @@ mod tests {
 
     #[test]
     fn record_sizes_ignores_a_length_mismatch_rather_than_guessing() {
-        let mut layout = Layout::from_settings(&AppSettings::default());
+        let mut layout = Layout::from_settings(&all_open());
         let slots = layout.columns();
         // One size short: the right panel keeps whatever it had.
         let right = layout.size(Panel::RightPanel);
@@ -227,7 +241,7 @@ mod tests {
 
     #[test]
     fn rows_carry_the_dock_only_when_it_is_open() {
-        let mut layout = Layout::from_settings(&AppSettings::default());
+        let mut layout = Layout::from_settings(&all_open());
         assert_eq!(layout.rows(), vec![None, Some(Panel::TerminalDock)]);
         layout.set_open(Panel::TerminalDock, false);
         assert_eq!(layout.rows(), vec![None]);
@@ -240,7 +254,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("app.json");
 
-        let mut settings = AppSettings::default();
+        let mut settings = all_open();
         let mut layout = Layout::from_settings(&settings);
         layout.toggle(Panel::RightPanel);
         layout.set_size(Panel::Sidebar, px(312.));

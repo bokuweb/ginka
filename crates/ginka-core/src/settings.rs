@@ -31,9 +31,13 @@ impl Default for AppSettings {
             // The defaults in docs/ui.md §2.
             sidebar_open: true,
             sidebar_width: 250.0,
-            right_panel_open: true,
+            // Closed until they have something in them: the right panel's
+            // surfaces and the terminal both land in M3, and two empty panels
+            // either side of the conversation is a worse first impression than
+            // a window that is only what works.
+            right_panel_open: false,
             right_panel_width: 420.0,
-            terminal_dock_open: true,
+            terminal_dock_open: false,
             terminal_dock_height: 220.0,
             last_workspace: None,
             locale: None,
@@ -136,6 +140,18 @@ pub fn save<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_panels_that_have_nothing_in_them_start_closed() {
+        let settings = AppSettings::default();
+        assert!(settings.sidebar_open, "the workspace list is the way in");
+        assert!(!settings.right_panel_open);
+        assert!(!settings.terminal_dock_open);
+        // Their sizes are remembered even while they are closed, so opening
+        // one does not start from a default width.
+        assert!(settings.right_panel_width > 0.);
+        assert!(settings.terminal_dock_height > 0.);
+    }
 
     #[test]
     fn missing_file_yields_defaults() {

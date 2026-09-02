@@ -53,6 +53,15 @@ transcript.empty.ready:
 transcript.empty.no_project:
   en: No project is registered yet. Run `ginka project add .` in a repository, then reopen this window.
   ja: プロジェクトがまだ登録されていません。リポジトリで `ginka project add .` を実行してから、このウィンドウを開き直してください。
+transcript.thinking:
+  en: Thinking…
+  ja: 考えています…
+transcript.working:
+  en: Working…
+  ja: 実行中…
+transcript.running:
+  en: "Running %{tool}…"
+  ja: "%{tool} を実行中…"
 transcript.turn:
   en: "turn %{turn}"
   ja: "ターン %{turn}"

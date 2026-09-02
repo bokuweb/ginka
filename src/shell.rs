@@ -14,10 +14,12 @@ use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::SessionId;
 use ginka_protocol::event::DaemonEvent;
-use ginka_protocol::model::{AgentStatus, SessionState, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_ui::Tokens;
 use ginka_ui::layout::{Layout, Panel};
-use ginka_ui::transcript::{Applied, Block as TranscriptBlock, Transcript, head_of};
+use ginka_ui::transcript::{
+    Activity, Applied, Block as TranscriptBlock, Reveal, Transcript, head_of,
+};
 use ginka_ui::workspace::SessionRow;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -91,6 +93,8 @@ pub struct Shell {
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
+    /// How much of the answer being written is on screen.
+    reveal: Reveal,
     composer: Entity<TextareaState>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
@@ -207,18 +211,42 @@ impl Shell {
                         // A session's own output: fold in the tail if it is the
                         // one on screen, and otherwise leave it to the tick —
                         // another workspace's typing is not this column's news.
-                        DaemonEvent::SessionEvent { session, .. } => {
-                            let showing = this
-                                .update(cx, |this, _| {
-                                    this.session.as_ref().and_then(|row| row.session.clone())
-                                })
-                                .ok()
-                                .flatten();
-                            match showing {
-                                Some(showing) if showing == session => {
-                                    pull_transcript(&this, &link, session, cx).await
+                        // The push carries the event and its position, so it
+                        // goes straight in: that is what makes an agent's text
+                        // appear as it is produced rather than a round trip
+                        // later. A push this window cannot place — a gap, or a
+                        // session it is not showing — falls back to a read.
+                        DaemonEvent::SessionEvent {
+                            session,
+                            seq,
+                            agent_event,
+                        } => {
+                            let entry = TranscriptEntry {
+                                seq,
+                                at: crate::daemon::now(),
+                                payload: TranscriptPayload::Agent { event: agent_event },
+                            };
+                            let folded =
+                                this.update(cx, |this, cx| this.fold_pushed(&session, entry, cx));
+                            match folded {
+                                Err(_) => Err(()),
+                                Ok(true) => Ok(()),
+                                Ok(false) => {
+                                    let showing = this
+                                        .update(cx, |this, _| {
+                                            this.session
+                                                .as_ref()
+                                                .and_then(|row| row.session.clone())
+                                        })
+                                        .ok()
+                                        .flatten();
+                                    match showing {
+                                        Some(showing) if showing == session => {
+                                            pull_transcript(&this, &link, session, cx).await
+                                        }
+                                        _ => Ok(()),
+                                    }
                                 }
-                                _ => Ok(()),
                             }
                         }
                         // Anything that changes what the sidebar says.
@@ -247,6 +275,7 @@ impl Shell {
             transcript: Transcript::new(),
             transcript_of: None,
             agents: Vec::new(),
+            reveal: Reveal::new(),
             composer,
             paths,
             settings,
@@ -275,9 +304,14 @@ impl Shell {
     /// beginning of the session, because a transcript with a gap in it reads
     /// as a conversation that did not happen.
     fn fold(&mut self, session: &SessionId, entries: &[TranscriptEntry], cx: &mut Context<Self>) {
-        if self.transcript_of.as_ref() != Some(session) {
+        // A transcript read from storage is history, and history is shown
+        // whole: watching a conversation you have already had being typed out
+        // is a pointless wait.
+        let opening = self.transcript_of.as_ref() != Some(session);
+        if opening {
             self.transcript = Transcript::new();
             self.transcript_of = Some(session.clone());
+            self.reveal.reset();
         }
         if entries.is_empty() {
             return;
@@ -285,8 +319,68 @@ impl Shell {
         if let Applied::Gap { expected } = self.transcript.extend(entries) {
             tracing::warn!(%session, expected, "transcript gap; re-reading the session");
             self.transcript = Transcript::new();
+            self.reveal.reset();
+        }
+        if opening {
+            self.reveal.show_all(
+                self.transcript
+                    .tail()
+                    .map(|tail| tail.chars().count())
+                    .unwrap_or(0),
+            );
         }
         cx.notify();
+    }
+
+    /// Fold one pushed event straight in.
+    ///
+    /// The push carries the event and its position, so there is nothing to go
+    /// back and fetch: this is what makes an agent's text appear as it is
+    /// produced rather than a round trip later. A push from beyond the next
+    /// position means something was missed, and the caller re-reads instead.
+    fn fold_pushed(
+        &mut self,
+        session: &SessionId,
+        entry: TranscriptEntry,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.transcript_of.as_ref() != Some(session) {
+            return false;
+        }
+        match self.transcript.apply(&entry) {
+            Applied::Added => {
+                cx.notify();
+                true
+            }
+            Applied::AlreadySeen => true,
+            Applied::Gap { .. } => false,
+        }
+    }
+
+    /// Walk the answer onto the screen, one drawn frame at a time.
+    ///
+    /// Ported from bokuweb/pedro: this runs from `render` rather than from a
+    /// timer, and that is the point. At a fixed beat each step has to carry
+    /// whatever the agent produced in that beat, which is a chunk however
+    /// smoothly the rate was eased into it. Asking for the next frame is what
+    /// keeps it going; with nothing left to write nothing is asked for, and
+    /// the window goes back to sleep.
+    fn write_a_little_more(&mut self, window: &mut Window) {
+        let arrived = self
+            .transcript
+            .tail()
+            .map(|tail| tail.chars().count())
+            .unwrap_or(0);
+        if self.reveal.advance(arrived) {
+            window.request_animation_frame();
+        }
+    }
+
+    /// Whether the workspace on screen has an agent working in it.
+    fn is_working(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|row| row.state == ginka_ui::workspace::AgentState::Working)
     }
 
     /// Send what is in the composer.
@@ -539,13 +633,81 @@ impl Shell {
                     .when(self.transcript.is_empty(), |this| {
                         this.child(self.transcript_empty_state(cx))
                     })
-                    .children(
+                    .children({
+                        let last = self.transcript.blocks().len().saturating_sub(1);
                         self.transcript
                             .blocks()
                             .iter()
-                            .map(|block| self.block(block, cx)),
-                    ),
+                            .enumerate()
+                            .map(|(index, block)| match block {
+                                // Only the tail is still being written; every
+                                // block before it is finished text.
+                                TranscriptBlock::Assistant { text } if index == last => self.block(
+                                    &TranscriptBlock::Assistant {
+                                        text: self.reveal.shown(text).to_string(),
+                                    },
+                                    cx,
+                                ),
+                                block => self.block(block, cx),
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .children(self.activity_line(cx)),
             )
+    }
+
+    /// The line that says the agent is still there.
+    ///
+    /// An agent between tokens looks exactly like one that has died, and the
+    /// first token can take a few seconds. Saying which is which is the
+    /// difference between waiting and wondering. It is not shown while text is
+    /// arriving: the words are the indicator then.
+    fn activity_line(&self, cx: &App) -> Option<AnyElement> {
+        if !self.is_working() {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let label = match self.transcript.activity() {
+            Activity::Writing => return None,
+            Activity::Thinking => rust_i18n::t!("transcript.thinking").to_string(),
+            Activity::Running { tool } if tool.is_empty() => {
+                rust_i18n::t!("transcript.working").to_string()
+            }
+            Activity::Running { tool } => {
+                rust_i18n::t!("transcript.running", tool = tool).to_string()
+            }
+        };
+
+        Some(
+            h_flex()
+                .w_full()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(tokens.colors().status_working)
+                        // Breathing rather than blinking: the point is that
+                        // something is alive, not that something is wrong.
+                        .with_animation(
+                            "thinking-pulse",
+                            Animation::new(Duration::from_millis(1_400))
+                                .repeat_synced()
+                                .with_easing(gpui::ease_in_out),
+                            |this, delta| {
+                                this.opacity(0.35 + 0.65 * (1. - (delta - 0.5).abs() * 2.))
+                            },
+                        ),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(label),
+                )
+                .into_any_element(),
+        )
     }
 
     /// What the centre column says before there is a conversation in it.
@@ -1108,7 +1270,10 @@ impl MonoFont for App {
 }
 
 impl Render for Shell {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Before anything is measured: the tail on screen is whatever the
+        // reveal has walked out so far.
+        self.write_a_little_more(window);
         let tokens = Tokens::global(cx);
         let sidebar_open = self.layout.is_open(Panel::Sidebar);
         let right_open = self.layout.is_open(Panel::RightPanel);
