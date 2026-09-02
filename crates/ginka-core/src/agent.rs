@@ -446,15 +446,69 @@ fn outcome(
     }
 }
 
+/// Whether a variable belongs to the session that started the daemon rather
+/// than to the agent it is about to run.
+///
+/// A daemon is often started from inside another agent's shell — that is how
+/// an agent drives Ginka at all — and that shell exports its own session,
+/// endpoint and credentials. Passing them on makes every agent behave like
+/// whatever happened to launch the daemon: pointed at someone else's gateway,
+/// carrying someone else's token, and reporting itself as not logged in.
+///
+/// A user who does want a gateway or an API key sets it per agent in
+/// `settings.json`, which is applied after this and therefore wins. That is
+/// the difference between a deliberate choice and an accident of how the
+/// daemon was started (`docs/roadmap.md` §6.3).
+pub(crate) fn is_inherited_session_state(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "CLAUDE_CODE_",
+        "CLAUDE_AGENT_SDK_",
+        "CLAUDE_PREVIEW_",
+        "CODEX_",
+        "GEMINI_",
+    ];
+    const NAMES: &[&str] = &[
+        "CLAUDECODE",
+        "CLAUDE_EFFORT",
+        "CLAUDE_PID",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "GOOGLE_API_KEY",
+    ];
+    PREFIXES.iter().any(|prefix| name.starts_with(prefix)) || NAMES.contains(&name)
+}
+
+/// Strip the daemon's own inherited session state from a command.
+///
+/// Shared with the probe, so what an agent is asked about itself is asked in
+/// the environment it would actually run in.
+pub(crate) fn sanitize(process: &mut std::process::Command) {
+    for (name, _) in std::env::vars() {
+        if is_inherited_session_state(&name) {
+            process.env_remove(&name);
+        }
+    }
+}
+
 /// Start the agent in its workspace.
 ///
 /// The child is put in its own process group so cancelling stops the tools it
 /// spawned too, not just the CLI that spawned them. Its stdin is closed: the
 /// non-interactive modes this drives read their prompt from the command line,
 /// and leaving stdin open makes an agent that expects a terminal hang.
+///
+/// The environment is sanitized first: see [`is_inherited_session_state`].
 fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Child> {
     let mut base = std::process::Command::new(&command.program);
     base.args(&command.args).current_dir(&spec.workspace_path);
+    sanitize(&mut base);
+    // After the sanitizing, so what the user configured wins over what the
+    // daemon happened to inherit.
     for (key, value) in command.env.iter().chain(spec.env.iter()) {
         base.env(key, value);
     }
@@ -532,6 +586,49 @@ mod tests {
             .arg(format!("exit {code}"))
             .status()?;
         Ok(status)
+    }
+
+    #[test]
+    fn the_session_that_started_the_daemon_does_not_reach_the_agent() {
+        // The failure this prevents: a daemon started from inside another
+        // agent's shell hands every agent that shell's endpoint and token, and
+        // they all report themselves as not logged in.
+        for name in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_AGENT_SDK_VERSION",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "CODEX_HOME",
+        ] {
+            assert!(
+                is_inherited_session_state(name),
+                "{name} must not be passed on"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rest_of_the_environment_is_left_alone() {
+        // An agent needs a shell, a home and a terminal like any other program.
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "SHELL",
+            "SSH_AUTH_SOCK",
+            "GIT_AUTHOR_NAME",
+            "NODE_OPTIONS",
+        ] {
+            assert!(
+                !is_inherited_session_state(name),
+                "{name} is the user's own"
+            );
+        }
     }
 
     #[test]

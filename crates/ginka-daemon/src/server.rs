@@ -174,6 +174,21 @@ impl Daemon {
     }
 }
 
+/// Dig the request id out of a frame that would not parse.
+///
+/// Only the id is wanted, and only well enough to answer: a frame that has no
+/// readable id gets 0, which is the "nobody is waiting for this" id.
+fn recover_request_id(text: &str) -> ginka_protocol::RequestId {
+    #[derive(serde::Deserialize)]
+    struct JustTheId {
+        id: Option<ginka_protocol::RequestId>,
+    }
+    serde_json::from_str::<JustTheId>(text)
+        .ok()
+        .and_then(|frame| frame.id)
+        .unwrap_or(0)
+}
+
 /// Whether something is accepting connections on a loopback port.
 ///
 /// This is how a stale handshake file is told from a live daemon: probing the
@@ -309,10 +324,13 @@ impl Connection {
         let message: ClientMessage = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(error) => {
-                // The frame carried no id, so there is nothing to correlate a
-                // response to; id 0 is reserved for exactly this.
+                // The id is recovered from the raw frame so the client that
+                // sent it gets an answer. This is the case of a client newer
+                // than its daemon — a method this build has never heard of —
+                // and answering id 0 would leave that client waiting forever
+                // for a reply that had already been sent.
                 return vec![ServerMessage::Error {
-                    id: 0,
+                    id: recover_request_id(text),
                     error: RpcError::malformed(error.to_string()),
                 }];
             }
@@ -354,5 +372,31 @@ impl Connection {
             service.handle(request)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_that_will_not_parse_is_still_answered_to_its_sender() {
+        // A client newer than its daemon sends a method this build has never
+        // heard of. Answering id 0 leaves that client waiting for a reply it
+        // has already been sent -- which is what a `ginka` that outran its
+        // running daemon looks like: a command that hangs.
+        assert_eq!(
+            recover_request_id(
+                r#"{"type":"request","id":7,"payload":{"method":"from_the_future"}}"#
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_id_at_all_is_answered_to_nobody() {
+        assert_eq!(recover_request_id("not json"), 0);
+        assert_eq!(recover_request_id(r#"{"type":"resume"}"#), 0);
+        assert_eq!(recover_request_id(r#"{"id":"not a number"}"#), 0);
     }
 }

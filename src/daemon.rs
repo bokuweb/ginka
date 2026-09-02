@@ -12,7 +12,7 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
-use ginka_protocol::model::{Session, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, Session, TranscriptEntry};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{SessionId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
@@ -45,6 +45,17 @@ impl DaemonLink {
                 .iter()
                 .map(|summary| SessionRow::from_summary(summary, now))
                 .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// What each agent CLI on this machine says about itself.
+    ///
+    /// The daemon caches the probe, so asking on every tick costs a request
+    /// rather than two subprocesses per agent.
+    pub async fn agents(&self) -> Vec<AgentStatus> {
+        match self.ask(Request::ListAgents).await {
+            Some(Response::Agents { agents }) => agents,
             _ => Vec::new(),
         }
     }

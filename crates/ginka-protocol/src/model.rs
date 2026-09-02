@@ -252,6 +252,42 @@ pub struct Checkpoint {
     pub created_at: i64,
 }
 
+/// What is known about one agent CLI on this machine.
+///
+/// Answered by probing: an agent that is not installed, or installed but not
+/// signed in, is something the user has to be told *before* they send a
+/// prompt. Finding out from a failed session is finding out too late.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentStatus {
+    /// The driver id: `claude`, `codex`, …
+    pub id: String,
+    /// What the agent picker shows.
+    pub display_name: String,
+    /// The binary that would be run, after any override in `settings.json`.
+    pub program: String,
+    /// Whether the binary could be run at all.
+    pub installed: bool,
+    /// What it reported as its version.
+    pub version: Option<String>,
+    /// `None` when this driver has no way to ask; the agent may still work.
+    pub authenticated: Option<bool>,
+    /// What the CLI said about itself, when it said anything useful.
+    pub detail: Option<String>,
+    /// The models this driver offers, empty when the vendor decides.
+    pub models: Vec<String>,
+}
+
+impl AgentStatus {
+    /// Whether a session started with this agent has a chance of working.
+    ///
+    /// An agent that cannot say whether it is signed in counts as ready: the
+    /// alternative is refusing to start an agent that would have worked.
+    pub fn is_ready(&self) -> bool {
+        self.installed && self.authenticated != Some(false)
+    }
+}
+
 /// A workspace with everything the dashboard draws for it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

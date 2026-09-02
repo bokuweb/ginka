@@ -6,7 +6,7 @@
 //! summary arrives, that work is done.
 
 use crate::assets::icon;
-use ginka_protocol::model::{BranchStatus, SessionState, WorkspaceSummary};
+use ginka_protocol::model::{AgentStatus, BranchStatus, SessionState, WorkspaceSummary};
 use ginka_protocol::{SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
@@ -200,6 +200,24 @@ impl SessionRow {
                 .into(),
             archived: false,
         }
+    }
+
+    /// Which agent the composer would start here.
+    ///
+    /// A workspace that already has a session continues with the agent running
+    /// it — switching agents mid-conversation would abandon the transcript the
+    /// vendor is holding. A workspace with no session gets the first agent that
+    /// is actually usable, because starting one that is signed out only
+    /// produces a failed session and a puzzled user.
+    pub fn agent_to_start(&self, agents: &[AgentStatus]) -> String {
+        if self.session.is_some() {
+            return self.agent.driver_id().to_string();
+        }
+        agents
+            .iter()
+            .find(|agent| agent.is_ready())
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| self.agent.driver_id().to_string())
     }
 
     /// A short summary of the worktree's divergence, or `None` when there is
@@ -507,6 +525,52 @@ mod tests {
     fn an_agent_this_build_has_no_glyph_for_still_marks_its_row() {
         assert_eq!(Agent::from_id("amp"), Agent::Claude);
         assert_eq!(Agent::from_id("codex"), Agent::Codex);
+    }
+
+    fn status(id: &str, installed: bool, authenticated: Option<bool>) -> AgentStatus {
+        AgentStatus {
+            id: id.into(),
+            display_name: id.into(),
+            program: id.into(),
+            installed,
+            version: None,
+            authenticated,
+            detail: None,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_fresh_workspace_starts_the_agent_that_is_actually_usable() {
+        // Starting one that is signed out produces a failed session and a
+        // puzzled user; the one next to it would have worked.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        let agents = vec![
+            status("claude", true, Some(false)),
+            status("codex", true, Some(true)),
+        ];
+        assert_eq!(row.agent_to_start(&agents), "codex");
+    }
+
+    #[test]
+    fn a_workspace_with_a_session_stays_with_the_agent_running_it() {
+        // Switching mid-conversation would abandon the transcript the vendor
+        // is holding.
+        let row = SessionRow::from_summary(&summary(Some(session("codex", SessionState::Idle))), 0);
+        let agents = vec![status("claude", true, Some(true))];
+        assert_eq!(row.agent_to_start(&agents), "codex");
+    }
+
+    #[test]
+    fn with_nothing_usable_the_default_is_still_offered() {
+        // The failure then comes from the agent, with its own words, rather
+        // than from a composer that refused to do anything.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        assert_eq!(row.agent_to_start(&[]), "claude");
+        assert_eq!(
+            row.agent_to_start(&[status("claude", false, None)]),
+            "claude"
+        );
     }
 
     #[test]

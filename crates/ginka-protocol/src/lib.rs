@@ -25,7 +25,7 @@ pub use event::{AgentEvent, DaemonEvent, Usage};
 pub use handshake::Handshake;
 pub use ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 pub use model::{
-    BranchStatus, Checkpoint, Project, ProjectKind, Session, SessionState, TranscriptEntry,
-    TranscriptPayload, WorkspaceSummary, Worktree,
+    AgentStatus, BranchStatus, Checkpoint, Project, ProjectKind, Session, SessionState,
+    TranscriptEntry, TranscriptPayload, WorkspaceSummary, Worktree,
 };
 pub use rpc::{Request, Response};

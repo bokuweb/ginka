@@ -14,7 +14,7 @@ use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::SessionId;
 use ginka_protocol::event::DaemonEvent;
-use ginka_protocol::model::{SessionState, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, SessionState, TranscriptEntry};
 use ginka_ui::Tokens;
 use ginka_ui::layout::{Layout, Panel};
 use ginka_ui::transcript::{Applied, Block as TranscriptBlock, Transcript, head_of};
@@ -66,6 +66,10 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 /// How long to wait before reaching for a daemon that was not there.
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
+/// The transcript's measure, in pixels: `docs/ui.md` §3.3's ~72 characters at
+/// the 15px body size. Reading is what this column is for.
+const TRANSCRIPT_MEASURE: f32 = 720.;
+
 /// Width macOS reserves for the traffic lights before our own content starts.
 const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
@@ -84,6 +88,9 @@ pub struct Shell {
     /// Which session the transcript belongs to, so switching rows replaces it
     /// rather than appending one conversation to another.
     transcript_of: Option<SessionId>,
+    /// What each agent CLI on this machine says about itself, so the composer
+    /// can say which agent it would start and whether it will work.
+    agents: Vec<AgentStatus>,
     composer: Entity<TextareaState>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
@@ -239,6 +246,7 @@ impl Shell {
             link,
             transcript: Transcript::new(),
             transcript_of: None,
+            agents: Vec::new(),
             composer,
             paths,
             settings,
@@ -300,6 +308,7 @@ impl Shell {
             .update(cx, |state, cx| state.set_value("", window, cx));
 
         let link = self.link.clone();
+        let agent = row.agent_to_start(&self.agents);
         cx.spawn(async move |this, cx| {
             match row.session.clone() {
                 Some(session) => {
@@ -310,7 +319,6 @@ impl Shell {
                 }
                 None => {
                     let workspace = row.workspace.clone();
-                    let agent = row.agent.driver_id().to_string();
                     let started = cx
                         .background_spawn(async move {
                             link.start_session(&workspace, &agent, text).await
@@ -516,20 +524,28 @@ impl Shell {
             .flex_1()
             .px_8()
             .py_6()
-            .gap_4()
             .overflow_y_scroll()
-            .when(self.transcript.is_empty(), |this| {
-                this.child(self.transcript_empty_state(cx))
-            })
-            .children(
-                self.transcript
-                    .blocks()
-                    .iter()
-                    .map(|block| self.block(block, cx)),
+            .child(
+                // One column for the whole conversation, at the measure from
+                // docs/ui.md §3.3: long-form text stays readable because the
+                // column stops growing, not because the window does. The
+                // blocks size themselves against *this*, which is what keeps a
+                // user's message beside the reply it answers rather than out
+                // at the far edge of a wide window.
+                v_flex()
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_MEASURE))
+                    .gap_4()
+                    .when(self.transcript.is_empty(), |this| {
+                        this.child(self.transcript_empty_state(cx))
+                    })
+                    .children(
+                        self.transcript
+                            .blocks()
+                            .iter()
+                            .map(|block| self.block(block, cx)),
+                    ),
             )
-            // The measure from docs/ui.md: long-form text stays readable
-            // because the column stops growing, not because the window does.
-            .child(div().w_full().max_w(px(720.)).h_0())
     }
 
     /// What the centre column says before there is a conversation in it.
@@ -545,7 +561,7 @@ impl Shell {
             None => rust_i18n::t!("transcript.empty.no_project").to_string(),
         };
         div()
-            .max_w(px(720.))
+            .w_full()
             .text_size(px(15.))
             .line_height(px(25.))
             .text_color(tokens.colors().text_muted)
@@ -561,7 +577,7 @@ impl Shell {
         let tokens = Tokens::global(cx);
         let prose = |text: &str, color: Hsla| {
             div()
-                .max_w(px(720.))
+                .w_full()
                 .text_size(px(15.))
                 .line_height(px(25.))
                 .text_color(color)
@@ -574,7 +590,9 @@ impl Shell {
                 .justify_end()
                 .child(
                     div()
-                        .max_w(px(560.))
+                        // Never the full measure: a message that fills the
+                        // column is indistinguishable from the agent's reply.
+                        .max_w(px(TRANSCRIPT_MEASURE * 0.78))
                         .px_3p5()
                         .py_2()
                         .rounded(px(tokens.radius.panel))
@@ -599,7 +617,7 @@ impl Shell {
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
             TranscriptBlock::Question { question, options } => v_flex()
-                .max_w(px(720.))
+                .w_full()
                 .gap_1()
                 .child(
                     div()
@@ -619,7 +637,6 @@ impl Shell {
             }
             TranscriptBlock::TurnEnd { turn } => h_flex()
                 .w_full()
-                .max_w(px(720.))
                 .items_center()
                 .gap_2()
                 .child(div().h(px(1.)).flex_1().bg(tokens.colors().border_subtle))
@@ -663,7 +680,6 @@ impl Shell {
         let tokens = Tokens::global(cx);
         let font = cx.theme_mono_font();
         v_flex()
-            .max_w(px(720.))
             .w_full()
             .rounded(px(tokens.radius.row))
             .border_1()
@@ -770,10 +786,52 @@ impl Shell {
             .child(self.context_bar(cx))
     }
 
-    /// The model picker carries the agent's glyph so the row reads as
-    /// "which agent, which model" at a glance.
+    /// The agent chip: which agent the composer would start, and whether it
+    /// can be.
+    ///
+    /// The readiness is the point. An agent that is missing or signed out used
+    /// to be discoverable only by sending a prompt and reading the failure it
+    /// produced; saying so here is the difference between a tool that works
+    /// and one that appears not to.
     fn model_chip(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
+        let chosen = self
+            .session
+            .as_ref()
+            .map(|row| row.agent_to_start(&self.agents));
+        let status = chosen
+            .as_ref()
+            .and_then(|id| self.agents.iter().find(|agent| &agent.id == id));
+
+        let (name, note, colour) = match (&chosen, status) {
+            (None, _) => (
+                rust_i18n::t!("composer.no_agent").to_string(),
+                None,
+                tokens.colors().text_muted,
+            ),
+            (Some(id), None) => (
+                // Probed but unknown, or not probed yet.
+                id.clone(),
+                None,
+                tokens.colors().text_secondary,
+            ),
+            (Some(_), Some(agent)) if !agent.installed => (
+                agent.display_name.clone(),
+                Some(rust_i18n::t!("composer.agent.missing").to_string()),
+                tokens.colors().status_error,
+            ),
+            (Some(_), Some(agent)) if agent.authenticated == Some(false) => (
+                agent.display_name.clone(),
+                Some(rust_i18n::t!("composer.agent.signed_out").to_string()),
+                tokens.colors().status_attention,
+            ),
+            (Some(_), Some(agent)) => (
+                agent.display_name.clone(),
+                None,
+                tokens.colors().text_secondary,
+            ),
+        };
+
         h_flex()
             .px_2()
             .py_0p5()
@@ -781,25 +839,18 @@ impl Shell {
             .items_center()
             .rounded_full()
             .bg(tokens.colors().bg_raised)
-            .children(self.session.as_ref().map(|session| {
-                session
-                    .agent
-                    .glyph()
-                    .size_3()
-                    .text_color(tokens.colors().text_secondary)
-            }))
-            .child(
+            .children(
+                self.session
+                    .as_ref()
+                    .map(|session| session.agent.glyph().size_3().text_color(colour)),
+            )
+            .child(div().text_xs().text_color(colour).child(name))
+            .children(note.map(|note| {
                 div()
                     .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .child(
-                        self.session
-                            .as_ref()
-                            .map(|session| session.agent.label())
-                            .map(|label| label.to_string())
-                            .unwrap_or_else(|| rust_i18n::t!("composer.no_agent").to_string()),
-                    ),
-            )
+                    .text_color(colour)
+                    .child(format!("· {note}"))
+            }))
     }
 
     fn chip(&self, label: &str, cx: &App) -> impl IntoElement {
@@ -1001,11 +1052,22 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let rows = cx
-        .background_spawn(async move { listing.workspaces(crate::daemon::now()).await })
+    let (rows, agents) = cx
+        .background_spawn(async move {
+            let rows = listing.workspaces(crate::daemon::now()).await;
+            // Cached by the daemon, so this is a request rather than two
+            // subprocesses per agent every tick.
+            let agents = listing.agents().await;
+            (rows, agents)
+        })
         .await;
-    tracing::debug!(rows = rows.len(), "refreshed workspaces");
+    tracing::debug!(
+        rows = rows.len(),
+        agents = agents.len(),
+        "refreshed workspaces"
+    );
     this.update(cx, |this, cx| {
+        this.agents = agents;
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         this.session = this.sidebar.read(cx).selected_row().cloned();

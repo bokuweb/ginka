@@ -37,6 +37,12 @@ composer.no_agent:
 composer.agent:
   en: Agent
   ja: エージェント
+composer.agent.signed_out:
+  en: not signed in
+  ja: 未ログイン
+composer.agent.missing:
+  en: not installed
+  ja: 未インストール
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー
@@ -70,6 +76,15 @@ surface.empty.hint:
   en: Choose what to show in the right panel.
   ja: 右パネルに表示するものを選んでください。
 
+cli.agent.ready:
+  en: ready
+  ja: 利用可能
+cli.agent.signed_out:
+  en: not signed in
+  ja: 未ログイン
+cli.agent.missing:
+  en: not installed
+  ja: 未インストール
 cli.projects.empty:
   en: "no projects registered; try `ginka project add <path>`"
   ja: "登録されたプロジェクトはありません。`ginka project add <path>` を試してください"

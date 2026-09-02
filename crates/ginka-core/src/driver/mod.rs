@@ -13,6 +13,7 @@
 
 pub mod claude;
 pub mod codex;
+pub mod probe;
 
 use ginka_protocol::AgentEvent;
 use std::path::PathBuf;
@@ -152,8 +153,33 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// The models this driver offers. May be empty when the vendor decides.
     fn models(&self) -> Vec<ProviderModel>;
 
+    /// The binary this driver would run.
+    fn program(&self) -> &str;
+
     /// A command that reports whether the CLI is installed, and its version.
     fn probe_command(&self) -> CommandSpec;
+
+    /// Read a version out of what [`AgentDriver::probe_command`] printed.
+    ///
+    /// Vendors decorate it — `2.1.241 (Claude Code)`, `codex-cli 0.144.1` — so
+    /// each driver knows where its own number is.
+    fn parse_version(&self, output: &str) -> Option<String>;
+
+    /// A command that reports whether the user is signed in, when the vendor
+    /// offers one. `None` means this driver cannot tell, which is different
+    /// from knowing the user is signed out.
+    fn auth_command(&self) -> Option<CommandSpec> {
+        None
+    }
+
+    /// Read the answer to [`AgentDriver::auth_command`].
+    ///
+    /// Returns `(signed in, what it said)`. A driver that cannot make sense of
+    /// the output returns `None` rather than guessing: reporting a working
+    /// agent as signed out would stop a user from starting it.
+    fn parse_auth(&self, _output: &str) -> Option<(bool, Option<String>)> {
+        None
+    }
 
     /// The command that starts a fresh session.
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec;
