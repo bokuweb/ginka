@@ -13,6 +13,7 @@
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_protocol::{AgentEvent, Usage};
+use std::time::{Duration, Instant};
 
 /// One drawable piece of a transcript.
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +90,30 @@ impl Transcript {
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// The assistant text still being written, if that is what the last block
+    /// is. This is the only part of a transcript that is revealed gradually.
+    pub fn tail(&self) -> Option<&str> {
+        match self.blocks.last() {
+            Some(Block::Assistant { text }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// What the agent appears to be doing, for the line under the transcript.
+    ///
+    /// Read from the end of the transcript rather than from the session's
+    /// state, because the session is `running` for the whole turn and the
+    /// interesting question is what it is running *on*.
+    pub fn activity(&self) -> Activity {
+        match self.blocks.last() {
+            Some(Block::Assistant { .. }) => Activity::Writing,
+            Some(Block::Tool {
+                name, output: None, ..
+            }) => Activity::Running { tool: name.clone() },
+            _ => Activity::Thinking,
+        }
     }
 
     /// The session's accounting so far, as the last `Usage` event reported it.
@@ -221,6 +246,202 @@ impl Transcript {
             }),
         }
     }
+}
+
+/// What the agent is doing, for the line under the transcript.
+///
+/// An agent between tokens looks identical to an agent that has died. Saying
+/// which is which is the difference between waiting and wondering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// Nothing has arrived for this turn yet.
+    Thinking,
+    /// A tool is running and has not answered.
+    Running { tool: String },
+    /// Text is arriving; the words themselves are the indicator.
+    Writing,
+}
+
+// Every constant below is per second rather than per frame, because the frame
+// is not a fixed length: the writing is driven by the display, and the same
+// answer has to be written at the same speed on a 60Hz screen and a 120Hz one.
+//
+// The mechanism — and these numbers — are ported from bokuweb/pedro's chat
+// reveal, which solved the same problem: an agent does not produce text evenly,
+// and drawing exactly what has arrived puts its burstiness on the screen.
+
+/// The slowest the text is ever written, in characters per second: the pace of
+/// the trickle between bursts.
+const SLOWEST: f32 = 90.;
+
+/// The fastest. Well above what any CLI produces, so the writing can always
+/// catch up in the end; it is the easing, not this ceiling, that keeps a burst
+/// from landing as a block.
+const FASTEST: f32 = 1200.;
+
+/// How long the writing aims to take to drain what is waiting, in seconds.
+/// Also how far behind the agent the text settles while a stream runs steadily.
+const CATCH_UP: f32 = 0.6;
+
+/// How quickly the rate moves towards that aim, as a time constant in seconds.
+///
+/// Easing the *rate* rather than the step is what stops a burst landing as a
+/// block: stepping by a fraction of what is waiting puts the biggest jump on
+/// the frame the chunk arrived, which is the chunk, redrawn.
+const EASE: f32 = 0.25;
+
+/// A frame is never treated as longer than this. A window that was occluded
+/// should not dump a second of text in one step.
+const LONGEST_FRAME: Duration = Duration::from_millis(100);
+
+/// What the first frame is assumed to have taken.
+const A_FRAME: Duration = Duration::from_millis(8);
+
+/// Walks arrived text onto the screen at a pace a person can read.
+///
+/// The transcript already holds everything the agent has said; this decides
+/// how much of the tail is on screen. History is shown whole — nobody wants to
+/// watch a transcript they have already read being typed — and only text that
+/// arrives while the window is watching is written out.
+#[derive(Debug)]
+pub struct Reveal {
+    revealed: usize,
+    rate: f32,
+    carry: f32,
+    last_frame: Option<Instant>,
+}
+
+impl Default for Reveal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reveal {
+    /// Nothing revealed, at the resting pace.
+    pub fn new() -> Self {
+        Self {
+            revealed: 0,
+            rate: SLOWEST,
+            carry: 0.,
+            last_frame: None,
+        }
+    }
+
+    /// How many characters are on screen.
+    pub fn revealed(&self) -> usize {
+        self.revealed
+    }
+
+    /// Start again from nothing: a different session is a different answer.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Show everything at once.
+    ///
+    /// For a transcript that was read from storage rather than watched as it
+    /// arrived: typing out a conversation the user has already had would be a
+    /// pointless wait.
+    pub fn show_all(&mut self, arrived: usize) {
+        self.revealed = arrived;
+        self.rate = SLOWEST;
+        self.carry = 0.;
+        self.last_frame = None;
+    }
+
+    /// Show a little more, and say whether anything is still hidden.
+    ///
+    /// Driven from the window's draw rather than a timer: at a fixed beat each
+    /// step carries whatever arrived in that beat, which is a chunk however
+    /// smoothly the rate was eased into it. The display is the clock that
+    /// divides the same text into the most steps a reader can see.
+    pub fn advance(&mut self, arrived: usize) -> bool {
+        let now = Instant::now();
+        let since = self
+            .last_frame
+            .replace(now)
+            .map_or(A_FRAME, |last| now.saturating_duration_since(last))
+            .min(LONGEST_FRAME);
+        self.advance_over(arrived, since)
+    }
+
+    /// The same, over a frame of a stated length, which is what a test can
+    /// hold still.
+    fn advance_over(&mut self, arrived: usize, frame: Duration) -> bool {
+        let waiting = arrived.saturating_sub(self.revealed);
+        if waiting == 0 {
+            // Come back at the resting pace rather than at whatever speed the
+            // last burst worked it up to.
+            self.rate = SLOWEST;
+            self.carry = 0.;
+            self.revealed = self.revealed.min(arrived);
+            return false;
+        }
+
+        let seconds = frame.as_secs_f32();
+        let aim = (waiting as f32 / CATCH_UP).clamp(SLOWEST, FASTEST);
+        self.rate += (aim - self.rate) * (seconds / EASE).min(1.);
+
+        self.carry += self.rate * seconds;
+        let whole = self.carry.floor();
+        self.carry -= whole;
+
+        self.revealed = (self.revealed + whole as usize).min(arrived);
+        self.revealed < arrived
+    }
+
+    /// The part of `text` that is on screen, cut on a character boundary.
+    pub fn shown<'a>(&self, text: &'a str) -> &'a str {
+        match text.char_indices().nth(self.revealed) {
+            Some((at, _)) => &text[..at],
+            None => text,
+        }
+    }
+}
+
+/// Split assistant text into the part that is safe to format and the part
+/// that is not.
+///
+/// Markdown of half a document is not markdown of anything: a heading with no
+/// line after it, a fence with no closing fence. So the text is cut at the
+/// last blank line — the end of the last block that is definitely finished —
+/// and only what precedes it is formatted. The tail is drawn as the plain text
+/// it still is, and moves across as soon as its block is done.
+///
+/// The cut never lands inside a fenced block, which a blank line does not end.
+/// Ported from bokuweb/pedro, which hit the same problem: a markdown view
+/// re-parsing text that changes every frame makes a streaming answer land in
+/// slabs.
+pub fn settled(text: &str) -> (&str, &str) {
+    let mut cut = 0;
+    let mut fences = 0;
+    let mut at = 0;
+
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fences += 1;
+        }
+        at += line.len();
+        if line.trim().is_empty() && fences % 2 == 0 {
+            cut = at;
+        }
+    }
+
+    text.split_at(cut)
+}
+
+/// Whether to pull the transcript to its foot, and whether it is still
+/// following.
+///
+/// Told by the reader's gesture rather than worked out from where the view
+/// ends up: an answer that grows moves the foot away from the reader too, and a
+/// rule that could not tell those apart would either stop following on its own
+/// or drag the reader back from a paragraph they had gone to read. Ported from
+/// bokuweb/pedro.
+pub fn following(working: bool, follows: bool, at_foot: bool) -> (bool, bool) {
+    let follows = follows || at_foot;
+    (working && follows, follows)
 }
 
 /// The first `limit` lines of `text`, with a note when there were more.
@@ -523,6 +744,174 @@ mod tests {
                 },
             ]
         );
+    }
+
+    /// A frame at 120Hz, which is what the reveal is driven by.
+    const FRAME: Duration = Duration::from_millis(8);
+
+    #[test]
+    fn a_burst_is_written_out_rather_than_landing_whole() {
+        // An agent produces a hundred characters at once and then nothing for
+        // a second; drawing exactly what arrived puts that on the screen.
+        let mut reveal = Reveal::new();
+        let arrived = 400;
+        assert!(reveal.advance_over(arrived, FRAME));
+        let after_one_frame = reveal.revealed();
+        assert!(
+            after_one_frame < arrived,
+            "the whole burst landed in one frame: {after_one_frame}"
+        );
+
+        let mut frames = 1;
+        while reveal.advance_over(arrived, FRAME) {
+            frames += 1;
+            assert!(frames < 10_000, "the writing never finished");
+        }
+        assert_eq!(reveal.revealed(), arrived);
+        assert!(
+            frames > 8,
+            "it was written in {frames} frames, which is a jump"
+        );
+    }
+
+    #[test]
+    fn the_writing_never_runs_past_what_has_arrived() {
+        let mut reveal = Reveal::new();
+        while reveal.advance_over(20, FRAME) {}
+        assert_eq!(reveal.revealed(), 20);
+        assert!(
+            !reveal.advance_over(20, FRAME),
+            "it kept going after the end"
+        );
+    }
+
+    #[test]
+    fn it_comes_back_to_the_resting_pace_between_bursts() {
+        // Otherwise the next burst starts at the speed the last one ended at,
+        // and a one-word reply appears instantly.
+        let mut reveal = Reveal::new();
+        while reveal.advance_over(2_000, FRAME) {}
+        let before = reveal.revealed();
+
+        reveal.advance_over(before, FRAME);
+        reveal.advance_over(before + 4, FRAME);
+        assert!(
+            reveal.revealed() - before <= 2,
+            "the next burst started at the last one's speed"
+        );
+    }
+
+    #[test]
+    fn history_is_shown_whole_rather_than_typed_out() {
+        // Reopening a workspace must not replay a conversation the user has
+        // already read.
+        let mut reveal = Reveal::new();
+        reveal.show_all(500);
+        assert_eq!(reveal.revealed(), 500);
+        assert!(!reveal.advance_over(500, FRAME));
+    }
+
+    #[test]
+    fn what_is_shown_is_cut_on_a_character_not_a_byte() {
+        let mut reveal = Reveal::new();
+        reveal.show_all(3);
+        assert_eq!(reveal.shown("日本語です"), "日本語");
+        reveal.show_all(99);
+        assert_eq!(reveal.shown("日本語です"), "日本語です");
+    }
+
+    #[test]
+    fn the_tail_is_the_only_thing_still_being_written() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[user(1, "hello"), text(2, "on it")]);
+        assert_eq!(transcript.tail(), Some("on it"));
+
+        // A finished turn has nothing left to write.
+        transcript.apply(&agent(3, AgentEvent::TurnEnd { turn: 1 }));
+        assert_eq!(transcript.tail(), None);
+    }
+
+    #[test]
+    fn the_activity_says_what_the_agent_is_doing() {
+        // An agent between tokens looks exactly like one that has died.
+        let mut transcript = Transcript::new();
+        transcript.apply(&user(1, "go"));
+        assert_eq!(transcript.activity(), Activity::Thinking);
+
+        transcript.apply(&agent(
+            2,
+            AgentEvent::ToolCall {
+                id: "t".into(),
+                name: "Bash".into(),
+                input: json!({}),
+            },
+        ));
+        assert_eq!(
+            transcript.activity(),
+            Activity::Running {
+                tool: "Bash".into()
+            }
+        );
+
+        transcript.apply(&agent(
+            3,
+            AgentEvent::ToolResult {
+                id: "t".into(),
+                output: "done".into(),
+                is_error: false,
+            },
+        ));
+        assert_eq!(
+            transcript.activity(),
+            Activity::Thinking,
+            "a finished tool is not still running"
+        );
+
+        transcript.apply(&text(4, "here is what I found"));
+        assert_eq!(transcript.activity(), Activity::Writing);
+    }
+
+    #[test]
+    fn only_finished_blocks_are_handed_to_the_formatter() {
+        // Half a markdown document is not a markdown document: formatting a
+        // heading with no line after it re-flows the text under the reader.
+        let (formatted, writing) = settled("# Title\n\nA finished paragraph.\n\n## Half a hea");
+        assert_eq!(formatted, "# Title\n\nA finished paragraph.\n\n");
+        assert_eq!(writing, "## Half a hea");
+    }
+
+    #[test]
+    fn the_cut_never_lands_inside_a_fence() {
+        // A blank line does not end a fenced block, and formatting one that is
+        // still open turns the rest of the answer into code.
+        let text = "Here:\n\n```rust\nfn main() {\n\n    println!(\"hi\");\n";
+        let (formatted, writing) = settled(text);
+        assert_eq!(formatted, "Here:\n\n");
+        assert!(writing.starts_with("```rust"));
+    }
+
+    #[test]
+    fn text_with_nothing_finished_is_all_still_being_written() {
+        let (formatted, writing) = settled("just started");
+        assert_eq!(formatted, "");
+        assert_eq!(writing, "just started");
+    }
+
+    #[test]
+    fn a_reader_who_scrolled_away_is_not_dragged_back() {
+        // The answer growing moves the foot away from them too; a rule that
+        // could not tell that apart would pull them off the paragraph they
+        // went to read.
+        assert_eq!(following(true, false, false), (false, false));
+        // Until they come back to the foot themselves.
+        assert_eq!(following(true, false, true), (true, true));
+    }
+
+    #[test]
+    fn a_reader_at_the_foot_is_kept_there_while_the_agent_writes() {
+        assert_eq!(following(true, true, false), (true, true));
+        // Nothing is being written, so nothing needs pulling.
+        assert_eq!(following(false, true, true), (false, true));
     }
 
     #[test]

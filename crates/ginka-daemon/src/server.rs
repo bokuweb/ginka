@@ -27,6 +27,13 @@ use ginka_protocol::{
 };
 use std::sync::{Arc, Mutex};
 
+/// How long a stopping daemon waits for its connections to flush.
+///
+/// Bounded: a client that has stopped reading its socket must not be able to
+/// keep the daemon alive. The ordering is what makes the wait correct; this is
+/// only the limit on how long correctness is worth waiting for.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How many events the daemon keeps for reconnecting clients.
 ///
 /// A client that has been away longer than this re-reads instead of patching.
@@ -41,6 +48,8 @@ pub struct Daemon {
     service: Arc<Mutex<Service>>,
     handshake: Handshake,
     paths: Paths,
+    /// Connections that have not finished writing yet.
+    live: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Daemon {
@@ -87,6 +96,7 @@ impl Daemon {
             service: Arc::new(Mutex::new(service)),
             handshake,
             paths,
+            live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -117,10 +127,13 @@ impl Daemon {
                             token: self.handshake.token.clone(),
                             version: self.handshake.version.clone(),
                         };
+                        let live = self.live.clone();
+                        live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         smol::spawn(async move {
                             if let Err(error) = connection.serve(stream).await {
                                 tracing::debug!(%peer, %error, "connection closed");
                             }
+                            live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                         })
                         .detach();
                     }
@@ -168,10 +181,39 @@ impl Daemon {
             futures_util::future::select(Box::pin(stopping), Box::pin(signalled)),
         )
         .await;
+
+        // Closing the event streams ends every connection's pump, which closes
+        // its write queue, which lets the writer flush what is already in it.
+        // Then wait for those writers: the client that asked the daemon to stop
+        // is owed the answer, and a daemon that exits first hands it a closed
+        // connection instead.
+        self.hub.close();
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while self.live.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && std::time::Instant::now() < deadline
+        {
+            smol::Timer::after(std::time::Duration::from_millis(5)).await;
+        }
+
         handshake::remove(&handshake_path)?;
         tracing::info!("daemon stopped");
         Ok(())
     }
+}
+
+/// Dig the request id out of a frame that would not parse.
+///
+/// Only the id is wanted, and only well enough to answer: a frame that has no
+/// readable id gets 0, which is the "nobody is waiting for this" id.
+fn recover_request_id(text: &str) -> ginka_protocol::RequestId {
+    #[derive(serde::Deserialize)]
+    struct JustTheId {
+        id: Option<ginka_protocol::RequestId>,
+    }
+    serde_json::from_str::<JustTheId>(text)
+        .ok()
+        .and_then(|frame| frame.id)
+        .unwrap_or(0)
 }
 
 /// Whether something is accepting connections on a loopback port.
@@ -184,6 +226,25 @@ fn is_listening(port: u16) -> bool {
         std::time::Duration::from_millis(200),
     )
     .is_ok()
+}
+
+/// What one client frame produced.
+struct Dispatched {
+    /// What to answer with, in order.
+    messages: Vec<ServerMessage>,
+    /// Whether this frame asked the daemon to stop, in which case the
+    /// connection ends once these have been queued.
+    stop: bool,
+}
+
+impl Dispatched {
+    /// One message, and nothing else to do.
+    fn just(message: ServerMessage) -> Self {
+        Self {
+            messages: vec![message],
+            stop: false,
+        }
+    }
 }
 
 /// One client connection.
@@ -227,7 +288,12 @@ impl Connection {
             }
         };
 
-        let pushing = {
+        // Spawned rather than raced with the reader: the queue is closed by
+        // whoever is still putting things in it, and that is the reader. A
+        // pusher that closed it could do so between the reader handling a
+        // request and queueing the answer to it, which is exactly how the
+        // reply to `daemon stop` went missing.
+        let pushing = smol::spawn({
             let outbound = outbound.clone();
             async move {
                 while let Some(entry) = events.next().await {
@@ -240,9 +306,9 @@ impl Connection {
                     }
                 }
             }
-        };
+        });
 
-        let reading = async move {
+        let reading = async {
             while let Some(frame) = incoming.next().await {
                 let text = match frame {
                     Ok(Message::Text(text)) => text.to_string(),
@@ -254,19 +320,35 @@ impl Connection {
                     // Ping/Pong are answered by the library.
                     Ok(_) => continue,
                 };
-                for message in self.dispatch(&text).await {
+                let dispatched = self.dispatch(&text).await;
+                for message in dispatched.messages {
                     if outbound.send(message).await.is_err() {
                         return;
                     }
                 }
+                // The client asked the daemon to stop, and has been answered.
+                // Ending here is what lets the writer flush that answer before
+                // the process goes.
+                if dispatched.stop {
+                    return;
+                }
             }
         };
 
-        futures_util::future::select(
-            Box::pin(reading),
-            futures_util::future::select(Box::pin(writing), Box::pin(pushing)),
-        )
-        .await;
+        // The writer is the one that decides when this connection is over.
+        // The reader stops first — the client went away, or it asked the
+        // daemon to stop and has been answered — and closing the queue then
+        // lets the writer drain what is already in it. Without that ordering
+        // the answer to `daemon stop` is written into a socket that has
+        // already been torn down, and the client sees a closed connection
+        // instead of its reply.
+        let feeding = async {
+            reading.await;
+            outbound.close();
+        };
+        futures_util::future::join(Box::pin(feeding), Box::pin(writing)).await;
+        // Nothing left to push into.
+        drop(pushing);
         Ok(())
     }
 
@@ -305,38 +387,49 @@ impl Connection {
     }
 
     /// Handle one client frame, returning everything it should answer with.
-    async fn dispatch(&self, text: &str) -> Vec<ServerMessage> {
+    async fn dispatch(&self, text: &str) -> Dispatched {
         let message: ClientMessage = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(error) => {
-                // The frame carried no id, so there is nothing to correlate a
-                // response to; id 0 is reserved for exactly this.
-                return vec![ServerMessage::Error {
-                    id: 0,
+                // The id is recovered from the raw frame so the client that
+                // sent it gets an answer. This is the case of a client newer
+                // than its daemon — a method this build has never heard of —
+                // and answering id 0 would leave that client waiting forever
+                // for a reply that had already been sent.
+                return Dispatched::just(ServerMessage::Error {
+                    id: recover_request_id(text),
                     error: RpcError::malformed(error.to_string()),
-                }];
+                });
             }
         };
 
         match message {
             ClientMessage::Request { id, payload } => {
-                vec![match self.handle(payload).await {
+                let stop = matches!(payload, Request::Shutdown);
+                let answer = match self.handle(payload).await {
                     Ok(response) => ServerMessage::Response {
                         id,
                         payload: response,
                     },
                     Err(error) => ServerMessage::Error { id, error },
-                }]
+                };
+                Dispatched {
+                    messages: vec![answer],
+                    stop,
+                }
             }
-            ClientMessage::Resume { after } => match self.hub.replay_after(after) {
-                Ok(entries) => entries
-                    .into_iter()
-                    .map(|entry| ServerMessage::Event {
-                        seq: entry.seq,
-                        payload: entry.event,
-                    })
-                    .collect(),
-                Err(gap) => vec![ServerMessage::Gap { oldest: gap.oldest }],
+            ClientMessage::Resume { after } => Dispatched {
+                messages: match self.hub.replay_after(after) {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .map(|entry| ServerMessage::Event {
+                            seq: entry.seq,
+                            payload: entry.event,
+                        })
+                        .collect(),
+                    Err(gap) => vec![ServerMessage::Gap { oldest: gap.oldest }],
+                },
+                stop: false,
             },
         }
     }
@@ -354,5 +447,31 @@ impl Connection {
             service.handle(request)
         })
         .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_that_will_not_parse_is_still_answered_to_its_sender() {
+        // A client newer than its daemon sends a method this build has never
+        // heard of. Answering id 0 leaves that client waiting for a reply it
+        // has already been sent -- which is what a `ginka` that outran its
+        // running daemon looks like: a command that hangs.
+        assert_eq!(
+            recover_request_id(
+                r#"{"type":"request","id":7,"payload":{"method":"from_the_future"}}"#
+            ),
+            7
+        );
+    }
+
+    #[test]
+    fn a_frame_with_no_id_at_all_is_answered_to_nobody() {
+        assert_eq!(recover_request_id("not json"), 0);
+        assert_eq!(recover_request_id(r#"{"type":"resume"}"#), 0);
+        assert_eq!(recover_request_id(r#"{"id":"not a number"}"#), 0);
     }
 }

@@ -16,7 +16,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
-use ginka_protocol::model::{Checkpoint, Project, Session, WorkspaceSummary};
+use ginka_protocol::model::{AgentStatus, Checkpoint, Project, Session, WorkspaceSummary};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
@@ -49,6 +49,8 @@ enum Command {
     /// Manage workspaces, which are git worktrees.
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+    /// Report which agent CLIs this machine has, and whether they are usable.
+    Agents,
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
@@ -245,6 +247,7 @@ fn request_for(command: Command) -> Result<Request> {
             pinned: !off,
         },
 
+        Command::Agents => Request::ListAgents,
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
         },
@@ -328,10 +331,16 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
         DaemonCommand::Stop => smol::block_on(async {
             match discovery.connect_existing(None).await {
                 Ok(client) => {
-                    client
-                        .request(Request::Shutdown)
-                        .await
-                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    match client.request(Request::Shutdown).await {
+                        Ok(_) => {}
+                        // The daemon going is the thing that was asked for, and
+                        // it may go before its answer is read. What would be a
+                        // failure for any other request is the outcome here.
+                        Err(error) if error.code == "failed" => {
+                            tracing_stop_noted(&error.message);
+                        }
+                        Err(error) => return Err(anyhow::anyhow!("{error}")),
+                    }
                     println!("{}", rust_i18n::t!("cli.daemon.stopping"));
                     Ok(())
                 }
@@ -343,6 +352,14 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
             }
         }),
     }
+}
+
+/// Note a connection that ended while the daemon was stopping.
+///
+/// Not an error: the daemon is meant to be gone, and whether its last frame
+/// arrived first is not something the user asked about.
+fn tracing_stop_noted(why: &str) {
+    tracing::debug!(why, "the daemon went before answering");
 }
 
 fn describe_daemon(paths: &Paths) -> String {
@@ -366,6 +383,7 @@ fn print(response: Response) {
         Response::Project { project } => print_projects(std::slice::from_ref(&project)),
         Response::Workspaces { workspaces } => print_workspaces(&workspaces),
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
+        Response::Agents { agents } => print_agents(&agents),
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
@@ -407,6 +425,30 @@ fn print_workspaces(workspaces: &[WorkspaceSummary]) {
             summary.worktree.branch,
             ginka_cli_format::status_label(&summary.status),
             summary.worktree.path.display()
+        );
+    }
+}
+
+/// What each agent CLI says about itself.
+///
+/// The readiness column is the point: an agent that is missing or signed out
+/// should be visible here rather than in a session that failed.
+fn print_agents(agents: &[AgentStatus]) {
+    for agent in agents {
+        let state = if !agent.installed {
+            rust_i18n::t!("cli.agent.missing").to_string()
+        } else if agent.authenticated == Some(false) {
+            rust_i18n::t!("cli.agent.signed_out").to_string()
+        } else {
+            rust_i18n::t!("cli.agent.ready").to_string()
+        };
+        println!(
+            "{:<10} {:<14} {:<12} {:<14} {}",
+            agent.id,
+            agent.display_name,
+            agent.version.clone().unwrap_or_default(),
+            state,
+            agent.detail.clone().unwrap_or_default()
         );
     }
 }

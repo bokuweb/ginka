@@ -6,7 +6,7 @@
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
-use crate::model::{Checkpoint, Project, Session, TranscriptEntry, WorkspaceSummary};
+use crate::model::{AgentStatus, Checkpoint, Project, Session, TranscriptEntry, WorkspaceSummary};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -50,6 +50,11 @@ pub enum Request {
         pinned: bool,
     },
 
+    /// Which agents this machine has, and whether they are usable.
+    ///
+    /// Probing runs each vendor's CLI, so this is a request rather than
+    /// something a client can work out for itself.
+    ListAgents,
     /// Sessions, newest first. `workspace` limits it.
     ListSessions { workspace: Option<WorkspaceId> },
     /// Start an agent in a workspace and send it `prompt`.
@@ -111,6 +116,9 @@ pub enum Response {
     },
     Workspace {
         workspace: WorkspaceSummary,
+    },
+    Agents {
+        agents: Vec<AgentStatus>,
     },
     Sessions {
         sessions: Vec<Session>,

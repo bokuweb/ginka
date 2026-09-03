@@ -441,6 +441,97 @@ fn a_scratch_workspace_with_no_name_is_still_named() {
     assert!(workspace.worktree.path.is_dir());
 }
 
+/// A driver that records how often it was asked about itself.
+struct CountingDriver {
+    probes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ginka_core::driver::AgentDriver for CountingDriver {
+    fn id(&self) -> &'static str {
+        "claude"
+    }
+    fn display_name(&self) -> &'static str {
+        "Counting"
+    }
+    fn models(&self) -> Vec<ginka_core::driver::ProviderModel> {
+        Vec::new()
+    }
+    fn program(&self) -> &str {
+        "/nonexistent/ginka-counting-agent"
+    }
+    fn probe_command(&self) -> ginka_core::driver::CommandSpec {
+        self.probes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ginka_core::driver::CommandSpec::new(self.program())
+    }
+    fn parse_version(&self, _output: &str) -> Option<String> {
+        None
+    }
+    fn start_command(
+        &self,
+        _spec: &ginka_core::driver::SessionSpec,
+    ) -> ginka_core::driver::CommandSpec {
+        ginka_core::driver::CommandSpec::new(self.program())
+    }
+    fn resume_command(
+        &self,
+        _spec: &ginka_core::driver::SessionSpec,
+        _vendor: &str,
+    ) -> ginka_core::driver::CommandSpec {
+        ginka_core::driver::CommandSpec::new(self.program())
+    }
+    fn parse_line(
+        &self,
+        _line: &str,
+        _state: &mut ginka_core::driver::ParseState,
+    ) -> Vec<ginka_protocol::AgentEvent> {
+        Vec::new()
+    }
+}
+
+#[test]
+fn an_agent_that_is_missing_is_reported_before_a_prompt_is_sent() {
+    // Learning that an agent is not installed from a session that failed is
+    // learning it too late.
+    let mut fixture = Fixture::new();
+    match fixture.ask(Request::ListAgents) {
+        Response::Agents { agents } => {
+            let claude = agents
+                .iter()
+                .find(|agent| agent.id == "claude")
+                .expect("the build ships a claude driver");
+            assert_eq!(claude.display_name, "Claude Code");
+            assert!(!claude.models.is_empty());
+        }
+        other => panic!("expected agents, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_agent_probe_is_not_re_run_on_every_ask() {
+    // Probing shells out twice per agent and the sidebar asks on every tick;
+    // an installed CLI does not come and go between them.
+    let probes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::with_root(home.path().join("state"));
+    paths.ensure().unwrap();
+    let mut drivers = ginka_core::driver::Registry::empty();
+    drivers.insert(Arc::new(CountingDriver {
+        probes: probes.clone(),
+    }));
+    let mut service = Service::new(
+        paths,
+        db::open_in_memory().unwrap(),
+        Arc::new(Recorder::default()),
+    )
+    .with_drivers(drivers);
+
+    for _ in 0..5 {
+        service.handle(Request::ListAgents).unwrap();
+    }
+    assert_eq!(probes.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
 #[test]
 fn the_service_reports_where_its_state_lives() {
     let fixture = Fixture::new();

@@ -6,11 +6,56 @@
 //! summary arrives, that work is done.
 
 use crate::assets::icon;
-use ginka_protocol::model::{BranchStatus, SessionState, WorkspaceSummary};
+use ginka_protocol::ids::slugify;
+use ginka_protocol::model::{AgentStatus, BranchStatus, SessionState, WorkspaceSummary};
 use ginka_protocol::{SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
 use std::path::PathBuf;
+
+/// The sidebar's rows, under the project they belong to.
+///
+/// The project is a heading rather than a line on every row: repeated once per
+/// workspace it is noise, and a reader scanning for "which of my projects is
+/// this" wants one place to look.
+#[derive(Debug, Clone)]
+pub struct ProjectGroup {
+    pub project: SharedString,
+    /// The rows, each with the index it had in the flat list — which is what
+    /// selection is addressed by.
+    pub rows: Vec<(usize, SessionRow)>,
+}
+
+impl ProjectGroup {
+    /// The most urgent thing happening in this project, for ordering.
+    fn rank(&self) -> u8 {
+        self.rows
+            .iter()
+            .map(|(_, row)| row.attention_rank())
+            .min()
+            .unwrap_or(u8::MAX)
+    }
+}
+
+/// Group rows under their projects, keeping each project's own order.
+///
+/// Projects are ordered by the most urgent row in them, so a project with an
+/// agent working in it rises the way a row does. Within a project the order
+/// the caller gave is kept: it is already the attention order.
+pub fn group_by_project(rows: &[SessionRow]) -> Vec<ProjectGroup> {
+    let mut groups: Vec<ProjectGroup> = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        match groups.iter_mut().find(|group| group.project == row.origin) {
+            Some(group) => group.rows.push((index, row.clone())),
+            None => groups.push(ProjectGroup {
+                project: row.origin.clone(),
+                rows: vec![(index, row.clone())],
+            }),
+        }
+    }
+    groups.sort_by_key(ProjectGroup::rank);
+    groups
+}
 
 /// Turn a worktree's slug into something readable.
 ///
@@ -200,6 +245,39 @@ impl SessionRow {
                 .into(),
             archived: false,
         }
+    }
+
+    /// Whether the branch is worth a line of its own.
+    ///
+    /// A workspace's name comes from the branch it was cut on, so most rows
+    /// would spend a line repeating their own title. The exception is the one
+    /// that matters: an agent that checked out something else inside the
+    /// worktree, which is exactly when the reader needs to see it.
+    pub fn branch_worth_showing(&self) -> bool {
+        !self.branch.is_empty() && slugify(&self.branch) != slugify(&self.title)
+    }
+
+    /// Which agent the composer would start here.
+    ///
+    /// What the user picked wins — that is what picking is for, including
+    /// picking one this build cannot probe or that says it is signed out.
+    /// Failing that, a workspace already holding a session continues with the
+    /// agent running it, since switching mid-conversation would abandon the
+    /// transcript the vendor is holding. A fresh workspace gets the first agent
+    /// that is actually usable: starting one that is signed out only produces a
+    /// failed session and a puzzled user.
+    pub fn agent_to_start(&self, agents: &[AgentStatus], chosen: Option<&str>) -> String {
+        if let Some(chosen) = chosen {
+            return chosen.to_string();
+        }
+        if self.session.is_some() {
+            return self.agent.driver_id().to_string();
+        }
+        agents
+            .iter()
+            .find(|agent| agent.is_ready())
+            .map(|agent| agent.id.clone())
+            .unwrap_or_else(|| self.agent.driver_id().to_string())
     }
 
     /// A short summary of the worktree's divergence, or `None` when there is
@@ -507,6 +585,105 @@ mod tests {
     fn an_agent_this_build_has_no_glyph_for_still_marks_its_row() {
         assert_eq!(Agent::from_id("amp"), Agent::Claude);
         assert_eq!(Agent::from_id("codex"), Agent::Codex);
+    }
+
+    fn status(id: &str, installed: bool, authenticated: Option<bool>) -> AgentStatus {
+        AgentStatus {
+            id: id.into(),
+            display_name: id.into(),
+            program: id.into(),
+            installed,
+            version: None,
+            authenticated,
+            detail: None,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_fresh_workspace_starts_the_agent_that_is_actually_usable() {
+        // Starting one that is signed out produces a failed session and a
+        // puzzled user; the one next to it would have worked.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        let agents = vec![
+            status("claude", true, Some(false)),
+            status("codex", true, Some(true)),
+        ];
+        assert_eq!(row.agent_to_start(&agents, None), "codex");
+    }
+
+    #[test]
+    fn what_the_user_picked_wins_over_what_would_have_been_chosen() {
+        // Including an agent that says it is signed out: the user may be
+        // fixing that in another window, and a picker that refuses the pick is
+        // not a picker.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        let agents = vec![
+            status("claude", true, Some(false)),
+            status("codex", true, Some(true)),
+        ];
+        assert_eq!(row.agent_to_start(&agents, Some("claude")), "claude");
+    }
+
+    #[test]
+    fn a_workspace_with_a_session_stays_with_the_agent_running_it() {
+        // Switching mid-conversation would abandon the transcript the vendor
+        // is holding.
+        let row = SessionRow::from_summary(&summary(Some(session("codex", SessionState::Idle))), 0);
+        let agents = vec![status("claude", true, Some(true))];
+        assert_eq!(row.agent_to_start(&agents, None), "codex");
+    }
+
+    #[test]
+    fn with_nothing_usable_the_default_is_still_offered() {
+        // The failure then comes from the agent, with its own words, rather
+        // than from a composer that refused to do anything.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        assert_eq!(row.agent_to_start(&[], None), "claude");
+        assert_eq!(
+            row.agent_to_start(&[status("claude", false, None)], None),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn rows_are_grouped_under_their_project_in_the_order_they_came() {
+        let rows = SessionRow::samples();
+        let groups = group_by_project(&rows);
+        assert_eq!(groups.len(), 1, "the samples are all one project");
+        let indices: Vec<usize> = groups[0].rows.iter().map(|(index, _)| *index).collect();
+        assert_eq!(indices, (0..rows.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_project_with_an_agent_working_in_it_rises() {
+        let mut quiet = SessionRow::from_summary(&summary(None), 0);
+        quiet.origin = "quiet".into();
+        let mut busy =
+            SessionRow::from_summary(&summary(Some(session("claude", SessionState::Running))), 0);
+        busy.origin = "busy".into();
+
+        let groups = group_by_project(&[quiet, busy]);
+        assert_eq!(groups[0].project, "busy");
+        assert_eq!(
+            groups[0].rows[0].0, 1,
+            "the row keeps the index selection is addressed by"
+        );
+    }
+
+    #[test]
+    fn a_branch_that_only_repeats_the_title_is_not_shown() {
+        // Most workspaces are named after the branch they were cut on, and a
+        // line of every row spent repeating its own title is a line wasted.
+        let mut row = SessionRow::from_summary(&summary(None), 0);
+        assert_eq!(row.title, "Remove R2 File Uploads");
+        row.branch = "remove-r2-file-uploads".into();
+        assert!(!row.branch_worth_showing());
+
+        // Until an agent checks out something else inside the worktree, which
+        // is exactly when the reader needs to see it.
+        row.branch = "fix/something-else".into();
+        assert!(row.branch_worth_showing());
     }
 
     #[test]

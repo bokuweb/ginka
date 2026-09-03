@@ -65,8 +65,39 @@ impl AgentDriver for CodexDriver {
         Vec::new()
     }
 
+    fn program(&self) -> &str {
+        &self.program
+    }
+
     fn probe_command(&self) -> CommandSpec {
         CommandSpec::new(&self.program).arg("--version")
+    }
+
+    /// `codex-cli 0.144.1` — the number is the last word.
+    fn parse_version(&self, output: &str) -> Option<String> {
+        let version = output.split_whitespace().next_back()?;
+        version
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_digit())
+            .then(|| version.to_string())
+    }
+
+    fn auth_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec::new(&self.program).arg("login").arg("status"))
+    }
+
+    /// A sentence rather than a document: `Logged in using ChatGPT`.
+    fn parse_auth(&self, output: &str) -> Option<(bool, Option<String>)> {
+        let said = output.trim();
+        let lowered = said.to_ascii_lowercase();
+        if lowered.contains("not logged in") || lowered.contains("not authenticated") {
+            return Some((false, None));
+        }
+        if lowered.contains("logged in") {
+            return Some((true, Some(said.lines().next()?.to_string())));
+        }
+        None
     }
 
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
@@ -370,6 +401,28 @@ mod tests {
         let command = driver.resume_command(&SessionSpec::new("/tmp/wt", "carry on"), "01H");
         assert_eq!(&command.args[..3], &["exec", "resume", "01H"]);
         assert_eq!(command.args.last().map(String::as_str), Some("carry on"));
+    }
+
+    #[test]
+    fn the_version_is_read_out_of_what_the_cli_prints() {
+        let driver = CodexDriver::default();
+        assert_eq!(
+            driver.parse_version("codex-cli 0.144.1\n").as_deref(),
+            Some("0.144.1")
+        );
+        // A CLI that answered with something else has not given us a version.
+        assert_eq!(driver.parse_version("command not found").as_deref(), None);
+    }
+
+    #[test]
+    fn signing_in_is_read_from_the_sentence_the_cli_prints() {
+        let driver = CodexDriver::default();
+        assert_eq!(
+            driver.parse_auth("Logged in using ChatGPT\n"),
+            Some((true, Some("Logged in using ChatGPT".into())))
+        );
+        assert_eq!(driver.parse_auth("Not logged in\n"), Some((false, None)));
+        assert_eq!(driver.parse_auth("something else entirely"), None);
     }
 
     #[test]

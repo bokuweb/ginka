@@ -2341,6 +2341,7 @@ dependencies = [
  "serde_json",
  "smol",
  "tempfile",
+ "tracing",
 ]
 
 [[package]]

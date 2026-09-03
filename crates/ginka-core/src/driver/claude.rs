@@ -86,8 +86,34 @@ impl AgentDriver for ClaudeDriver {
             .collect()
     }
 
+    fn program(&self) -> &str {
+        &self.program
+    }
+
     fn probe_command(&self) -> CommandSpec {
         CommandSpec::new(&self.program).arg("--version")
+    }
+
+    /// `2.1.241 (Claude Code)` — the number is the first word.
+    fn parse_version(&self, output: &str) -> Option<String> {
+        let version = output.split_whitespace().next()?;
+        (!version.is_empty()).then(|| version.to_string())
+    }
+
+    fn auth_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec::new(&self.program).arg("auth").arg("status"))
+    }
+
+    /// The CLI answers with JSON: `{"loggedIn": false, "authMethod": …}`.
+    fn parse_auth(&self, output: &str) -> Option<(bool, Option<String>)> {
+        let value: Value = serde_json::from_str(output.trim()).ok()?;
+        let signed_in = value.get("loggedIn")?.as_bool()?;
+        let detail = value
+            .get("authMethod")
+            .and_then(Value::as_str)
+            .filter(|method| *method != "none")
+            .map(|method| format!("signed in with {method}"));
+        Some((signed_in, detail))
     }
 
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
@@ -390,6 +416,40 @@ mod tests {
             command.args.windows(2).find(|pair| pair[0] == "--resume"),
             Some(["--resume".to_string(), "abc-123".to_string()].as_slice()),
         );
+    }
+
+    #[test]
+    fn the_version_is_read_out_of_what_the_cli_prints() {
+        let driver = ClaudeDriver::default();
+        assert_eq!(
+            driver.parse_version("2.1.241 (Claude Code)\n").as_deref(),
+            Some("2.1.241")
+        );
+        assert_eq!(driver.parse_version("  ").as_deref(), None);
+    }
+
+    #[test]
+    fn being_signed_out_is_read_from_the_cli_rather_than_guessed() {
+        // The user has to learn this before they send a prompt, not from a
+        // session that failed.
+        let driver = ClaudeDriver::default();
+        assert_eq!(
+            driver.parse_auth(r#"{"loggedIn": false, "authMethod": "none"}"#),
+            Some((false, None))
+        );
+        assert_eq!(
+            driver.parse_auth(r#"{"loggedIn": true, "authMethod": "oauth"}"#),
+            Some((true, Some("signed in with oauth".into())))
+        );
+    }
+
+    #[test]
+    fn an_answer_this_driver_cannot_read_is_not_reported_as_signed_out() {
+        // Refusing to start an agent that would have worked is the worse
+        // failure of the two.
+        let driver = ClaudeDriver::default();
+        assert_eq!(driver.parse_auth("some new output"), None);
+        assert_eq!(driver.parse_auth(""), None);
     }
 
     #[test]

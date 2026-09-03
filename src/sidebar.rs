@@ -1,11 +1,16 @@
 //! The session sidebar: `docs/ui.md` §3.2.
 //!
-//! Three lines per row — origin + status, title, worktree branch — with an
-//! archived section below. M0 draws the structure against sample rows; M1
-//! swaps in real data and makes the list virtualized.
+//! Workspaces under the project they belong to, the way a file tree puts files
+//! under a folder. The project was a line on every row before, which is a line
+//! per row spent repeating what the heading above it already says, and it left
+//! a reader scanning for "which project is this" with nowhere single to look.
+//!
+//! A row is its title and what is happening to it. Its branch only earns a
+//! second line when it says something the title does not — which is when an
+//! agent has checked out something else inside the worktree.
 
 use ginka_ui::Tokens;
-use ginka_ui::workspace::{AgentState, SessionRow};
+use ginka_ui::workspace::{AgentState, SessionRow, group_by_project};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
@@ -42,10 +47,17 @@ impl SessionSidebar {
     /// The selection follows the *workspace*, not the index: rows are sorted by
     /// attention, so an index means nothing across a reload and keeping one
     /// would move the user's selection whenever an agent started somewhere else.
+    ///
+    /// By workspace id rather than by branch, because the branch is the live
+    /// one: an agent that checks out something else inside the worktree would
+    /// otherwise move the selection out from under the user mid-answer.
     pub fn set_rows(&mut self, rows: Vec<SessionRow>, cx: &mut Context<Self>) {
-        let selected_branch = self.rows.get(self.selected).map(|row| row.branch.clone());
-        self.selected = selected_branch
-            .and_then(|branch| rows.iter().position(|row| row.branch == branch))
+        let selected = self
+            .rows
+            .get(self.selected)
+            .map(|row| row.workspace.clone());
+        self.selected = selected
+            .and_then(|workspace| rows.iter().position(|row| row.workspace == workspace))
             .unwrap_or(0);
         self.rows = rows;
         cx.notify();
@@ -64,6 +76,8 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// The app's own header: what this is, and the two things a header is
+    /// for — finding a workspace, and making one.
     fn header(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
@@ -73,39 +87,64 @@ impl SessionSidebar {
             .gap_2()
             .items_center()
             .child(
-                Icon::new(IconName::Folder)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
-            )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .gap_1()
-                    .items_baseline()
-                    .overflow_hidden()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_semibold()
-                            .text_color(tokens.colors().text_primary)
-                            .child("ginka"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(tokens.colors().text_muted)
-                            .child("@ personal-metal"),
-                    ),
+                div()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(tokens.colors().text_primary)
+                    .child("ginka"),
             )
             .child(
                 Icon::new(IconName::ChevronDown)
                     .size_3()
                     .text_color(tokens.colors().text_muted),
             )
+            .child(div().flex_1())
+            .child(
+                Icon::new(IconName::Search)
+                    .size_4()
+                    .text_color(tokens.colors().text_muted),
+            )
             .child(
                 Icon::new(IconName::Plus)
                     .size_4()
                     .text_color(tokens.colors().text_secondary),
+            )
+    }
+
+    /// A small muted label over a run of rows.
+    fn section(&self, label: String, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        div()
+            .w_full()
+            .px_3()
+            .pt_3()
+            .pb_1()
+            .text_xs()
+            .text_color(tokens.colors().text_muted)
+            .child(label)
+    }
+
+    /// The heading a project's workspaces hang under.
+    fn project_header(&self, project: SharedString, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .w_full()
+            .px_2p5()
+            .py_1p5()
+            .gap_2()
+            .items_center()
+            .child(
+                Icon::new(IconName::Folder)
+                    .size_3p5()
+                    .text_color(tokens.colors().text_muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(tokens.colors().text_secondary)
+                    .truncate()
+                    .child(project),
             )
     }
 
@@ -143,94 +182,99 @@ impl SessionSidebar {
     ) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let selected = index == self.selected;
+        let branch = row.branch_worth_showing();
 
         v_flex()
             .id(("session", index))
             .w_full()
+            // Indented under the project heading: the indent is what says
+            // these belong to it.
+            .ml_3()
             .px_2p5()
-            .py_2()
+            .py_1p5()
             .gap_0p5()
             .rounded(px(tokens.radius.row))
-            .when(selected, |this| this.bg(tokens.colors().bg_raised))
-            .hover(|this| this.bg(tokens.colors().bg_raised.opacity(0.6)))
+            .when(selected, |this| this.bg(tokens.colors().row_active()))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
             .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
             .child(
                 h_flex()
                     .w_full()
-                    .justify_between()
+                    .gap_2()
                     .items_center()
+                    .child(row.agent.glyph().size_3p5().text_color(if selected {
+                        tokens.colors().text_secondary
+                    } else {
+                        tokens.colors().text_muted
+                    }))
                     .child(
                         div()
                             .flex_1()
-                            .text_xs()
-                            .text_color(tokens.colors().text_muted)
+                            .text_sm()
+                            .when(selected, |this| this.font_medium())
+                            .text_color(if selected {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_secondary
+                            })
                             .truncate()
-                            .child(row.origin.clone()),
+                            .child(row.title.clone()),
                     )
                     .child(self.status(row, cx)),
             )
-            .child(
-                div()
-                    .w_full()
-                    .text_sm()
-                    .font_medium()
-                    .text_color(tokens.colors().text_primary)
-                    .truncate()
-                    .child(row.title.clone()),
-            )
-            .child(
-                h_flex()
-                    .w_full()
-                    .gap_1()
-                    .items_center()
-                    .child(
-                        row.agent
-                            .glyph()
-                            .size_3p5()
-                            .text_color(tokens.colors().text_secondary),
-                    )
-                    .child(
-                        Icon::empty()
-                            .path(ginka_ui::assets::icon::GIT_BRANCH)
-                            .size_3()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(tokens.colors().text_secondary)
-                            // Paths and branches carry their meaning in the
-                            // tail, so the head is what gets dropped.
-                            .truncate()
-                            .child(row.branch.clone()),
-                    )
-                    .when(row.status.conflict, |this| {
-                        this.child(
+            .when(branch || row.status.dirty || row.status.conflict, |this| {
+                this.child(
+                    h_flex()
+                        .w_full()
+                        .gap_1p5()
+                        .items_center()
+                        .when(branch, |this| {
+                            this.child(
+                                Icon::empty()
+                                    .path(ginka_ui::assets::icon::GIT_BRANCH)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    // Paths and branches carry their meaning in
+                                    // the tail, so the head is what gets
+                                    // dropped.
+                                    .truncate()
+                                    .child(row.branch.clone()),
+                            )
+                        })
+                        .when(!branch, |this| this.child(div().flex_1()))
+                        .when(row.status.conflict, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().status_error)
+                                    .child("!"),
+                            )
+                        })
+                        .when(row.status.dirty && !row.status.conflict, |this| {
+                            // An unlabelled dot: the sidebar has no room for
+                            // the word, and "there are changes here" is the
+                            // whole message.
+                            this.child(
+                                div()
+                                    .size_1p5()
+                                    .rounded_full()
+                                    .bg(tokens.colors().status_attention),
+                            )
+                        })
+                        .children(row.divergence().map(|summary| {
                             div()
                                 .text_xs()
-                                .text_color(tokens.colors().status_error)
-                                .child("!"),
-                        )
-                    })
-                    .when(row.status.dirty && !row.status.conflict, |this| {
-                        // An unlabelled dot: the sidebar has no room for the
-                        // word, and "there are changes here" is the whole
-                        // message.
-                        this.child(
-                            div()
-                                .size_1p5()
-                                .rounded_full()
-                                .bg(tokens.colors().status_attention),
-                        )
-                    })
-                    .children(row.divergence().map(|summary| {
-                        div()
-                            .text_xs()
-                            .text_color(tokens.colors().text_muted)
-                            .child(summary)
-                    })),
-            )
+                                .text_color(tokens.colors().text_muted)
+                                .child(summary)
+                        })),
+                )
+            })
     }
 
     fn archived_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -278,7 +322,7 @@ impl SessionSidebar {
             .gap_2()
             .items_center()
             .rounded(px(tokens.radius.row))
-            .hover(|this| this.bg(tokens.colors().bg_raised.opacity(0.6)))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
             .child(
                 Icon::new(IconName::Inbox)
                     .size_3p5()
@@ -387,6 +431,22 @@ impl Render for SessionSidebar {
             .collect();
         // Stable: equal ranks keep their insertion order.
         active.sort_by_key(|(_, row)| row.attention_rank());
+        // Grouped under their projects, which is also what orders the projects:
+        // the one with an agent working in it rises the way a row does.
+        let active_rows: Vec<SessionRow> = active.iter().map(|(_, row)| row.clone()).collect();
+        let groups = group_by_project(&active_rows)
+            .into_iter()
+            .map(|mut group| {
+                // `group_by_project` numbers rows within what it was given;
+                // selection is addressed by the index in `self.rows`.
+                group.rows = group
+                    .rows
+                    .into_iter()
+                    .map(|(within, row)| (active[within].0, row))
+                    .collect();
+                group
+            })
+            .collect::<Vec<_>>();
 
         let archived: Vec<(usize, SessionRow)> = self
             .rows
@@ -414,8 +474,14 @@ impl Render for SessionSidebar {
                         .px_1p5()
                         .gap_0p5()
                         .overflow_y_scroll()
-                        .children(active.iter().map(|(index, row)| {
-                            self.session_row(*index, row, cx).into_any_element()
+                        .child(self.section(rust_i18n::t!("sidebar.projects").to_string(), cx))
+                        .children(groups.into_iter().flat_map(|group| {
+                            let mut elements =
+                                vec![self.project_header(group.project, cx).into_any_element()];
+                            elements.extend(group.rows.iter().map(|(index, row)| {
+                                self.session_row(*index, row, cx).into_any_element()
+                            }));
+                            elements
                         }))
                         .child(div().h_2())
                         .child(self.archived_header(cx))

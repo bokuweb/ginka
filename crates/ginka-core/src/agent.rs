@@ -16,7 +16,7 @@ use crate::{checkpoint, session};
 use anyhow::{Context, Result};
 use futures_lite::io::BufReader;
 use futures_lite::{AsyncBufReadExt, StreamExt};
-use ginka_protocol::model::{SessionState, TranscriptPayload};
+use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
@@ -41,18 +41,18 @@ struct Shared {
 impl Shared {
     /// Append to the transcript and push the event to every client.
     fn record(&self, session: &SessionId, payload: TranscriptPayload) -> Result<u64> {
-        let now = now();
+        let at = now();
         let seq = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-            session::append(&conn, session, &payload, now)?
+            session::append(&conn, session, &payload, at)?
         };
-        if let TranscriptPayload::Agent { event } = payload {
-            self.events.emit(DaemonEvent::SessionEvent {
-                session: session.clone(),
-                seq,
-                agent_event: event,
-            });
-        }
+        // Prompts are pushed as well as events: a window that had to wait for
+        // a poll to see what the user just typed reads as a window that lost
+        // it.
+        self.events.emit(DaemonEvent::SessionEvent {
+            session: session.clone(),
+            entry: TranscriptEntry { seq, at, payload },
+        });
         Ok(seq)
     }
 
@@ -86,11 +86,21 @@ impl Shared {
         }
     }
 
+    /// Move a session, and tell every client it moved.
+    ///
+    /// The push is what lets a window show that an agent is thinking the
+    /// moment it starts, rather than on whatever tick notices next.
     fn set_state(&self, session: &SessionId, state: SessionState, summary: Option<&str>) {
-        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        if let Err(error) = session::update_state(&conn, session, state, summary, now()) {
-            tracing::error!(%error, session = %session, "could not record a session state");
+        {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            if let Err(error) = session::update_state(&conn, session, state, summary, now()) {
+                tracing::error!(%error, session = %session, "could not record a session state");
+            }
         }
+        self.events.emit(DaemonEvent::SessionStateChanged {
+            session: session.clone(),
+            state,
+        });
     }
 }
 
@@ -244,15 +254,13 @@ impl Supervisor {
             Ok(child) => child,
             Err(error) => {
                 tracing::error!(%error, agent = driver.id(), "could not start the agent");
+                // `set_state` publishes the move, so there is nothing else to
+                // announce: the failure is the state.
                 context.set_state(
                     &session,
                     SessionState::Failed,
                     Some(&format!("could not start {}: {error}", command.program)),
                 );
-                context.events.emit(DaemonEvent::SessionEnded {
-                    session,
-                    state: SessionState::Failed,
-                });
                 return;
             }
         };
@@ -280,10 +288,6 @@ impl Supervisor {
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&session);
-                context.events.emit(DaemonEvent::SessionEnded {
-                    session: session.clone(),
-                    state,
-                });
 
                 // A turn that ended cleanly hands over to whatever the user
                 // sent while it was working.
@@ -446,15 +450,69 @@ fn outcome(
     }
 }
 
+/// Whether a variable belongs to the session that started the daemon rather
+/// than to the agent it is about to run.
+///
+/// A daemon is often started from inside another agent's shell — that is how
+/// an agent drives Ginka at all — and that shell exports its own session,
+/// endpoint and credentials. Passing them on makes every agent behave like
+/// whatever happened to launch the daemon: pointed at someone else's gateway,
+/// carrying someone else's token, and reporting itself as not logged in.
+///
+/// A user who does want a gateway or an API key sets it per agent in
+/// `settings.json`, which is applied after this and therefore wins. That is
+/// the difference between a deliberate choice and an accident of how the
+/// daemon was started (`docs/roadmap.md` §6.3).
+pub(crate) fn is_inherited_session_state(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "CLAUDE_CODE_",
+        "CLAUDE_AGENT_SDK_",
+        "CLAUDE_PREVIEW_",
+        "CODEX_",
+        "GEMINI_",
+    ];
+    const NAMES: &[&str] = &[
+        "CLAUDECODE",
+        "CLAUDE_EFFORT",
+        "CLAUDE_PID",
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "OPENAI_API_KEY",
+        "OPENAI_BASE_URL",
+        "GOOGLE_API_KEY",
+    ];
+    PREFIXES.iter().any(|prefix| name.starts_with(prefix)) || NAMES.contains(&name)
+}
+
+/// Strip the daemon's own inherited session state from a command.
+///
+/// Shared with the probe, so what an agent is asked about itself is asked in
+/// the environment it would actually run in.
+pub(crate) fn sanitize(process: &mut std::process::Command) {
+    for (name, _) in std::env::vars() {
+        if is_inherited_session_state(&name) {
+            process.env_remove(&name);
+        }
+    }
+}
+
 /// Start the agent in its workspace.
 ///
 /// The child is put in its own process group so cancelling stops the tools it
 /// spawned too, not just the CLI that spawned them. Its stdin is closed: the
 /// non-interactive modes this drives read their prompt from the command line,
 /// and leaving stdin open makes an agent that expects a terminal hang.
+///
+/// The environment is sanitized first: see [`is_inherited_session_state`].
 fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Child> {
     let mut base = std::process::Command::new(&command.program);
     base.args(&command.args).current_dir(&spec.workspace_path);
+    sanitize(&mut base);
+    // After the sanitizing, so what the user configured wins over what the
+    // daemon happened to inherit.
     for (key, value) in command.env.iter().chain(spec.env.iter()) {
         base.env(key, value);
     }
@@ -479,26 +537,66 @@ fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Chi
         .with_context(|| format!("starting {}", command.program))
 }
 
-/// Stop a process group.
+/// Stop an agent, and the tools it started.
 ///
 /// Signalling the group is what makes a cancel reach the compiler an agent
-/// started, not only the agent. It goes through the `kill` binary for the same
-/// reason git does: it is the implementation the platform already agrees with,
-/// and it keeps this crate free of unsafe.
+/// started, not only the agent — but only when the agent is that group's
+/// leader. A child that did not get its own group is in *ours*, and signalling
+/// the group by its pid would either hit nothing or, if that number happened to
+/// name a real group, hit something that has nothing to do with this session.
+/// So the group is confirmed first and, failing that, the agent alone is
+/// stopped: a tool that outlives its agent is a bug worth seeing, and taking
+/// the whole session's host down with it is not the way to avoid it.
+///
+/// Both go through the `kill` binary for the same reason git does: it is the
+/// implementation the platform already agrees with, and it keeps this crate
+/// free of unsafe.
 fn stop_process_tree(pid: u32) {
+    // Never signal our own group. On a machine where this process is not a
+    // group leader that is the whole session it was started from.
+    if pid == 0 || pid == std::process::id() {
+        tracing::error!(pid, "refusing to signal this process's own group");
+        return;
+    }
+
+    let leads_a_group = process_group_of(pid) == Some(pid);
     #[cfg(unix)]
+    let target = if leads_a_group {
+        format!("-{pid}")
+    } else {
+        tracing::warn!(pid, "the agent has no group of its own; stopping it alone");
+        pid.to_string()
+    };
+    #[cfg(unix)]
+    // `--` because the group form starts with a `-`, which is otherwise an
+    // option wherever this runs.
     let killed = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{pid}"))
+        .args(["-TERM", "--", &target])
         .output();
+
     #[cfg(windows)]
     let killed = std::process::Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .output();
 
     if let Err(error) = killed {
-        tracing::warn!(%error, pid, "could not stop the agent's process group");
+        tracing::warn!(%error, pid, "could not stop the agent");
     }
+}
+
+/// The process group a pid belongs to.
+///
+/// Through `ps` rather than `/proc`, which macOS does not have, or `libc`,
+/// which this crate does not link.
+fn process_group_of(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Read a stream to its end, keeping only the tail.
@@ -532,6 +630,64 @@ mod tests {
             .arg(format!("exit {code}"))
             .status()?;
         Ok(status)
+    }
+
+    #[test]
+    fn the_session_that_started_the_daemon_does_not_reach_the_agent() {
+        // The failure this prevents: a daemon started from inside another
+        // agent's shell hands every agent that shell's endpoint and token, and
+        // they all report themselves as not logged in.
+        for name in [
+            "CLAUDECODE",
+            "CLAUDE_CODE_SESSION_ID",
+            "CLAUDE_CODE_ENTRYPOINT",
+            "CLAUDE_AGENT_SDK_VERSION",
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",
+            "OPENAI_API_KEY",
+            "CODEX_HOME",
+        ] {
+            assert!(
+                is_inherited_session_state(name),
+                "{name} must not be passed on"
+            );
+        }
+    }
+
+    #[test]
+    fn the_rest_of_the_environment_is_left_alone() {
+        // An agent needs a shell, a home and a terminal like any other program.
+        for name in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "SHELL",
+            "SSH_AUTH_SOCK",
+            "GIT_AUTHOR_NAME",
+            "NODE_OPTIONS",
+        ] {
+            assert!(
+                !is_inherited_session_state(name),
+                "{name} is the user's own"
+            );
+        }
+    }
+
+    #[test]
+    fn a_process_reports_the_group_it_is_in() {
+        // The check that decides whether a cancel may signal a group at all.
+        let mine = std::process::id();
+        assert!(
+            process_group_of(mine).is_some(),
+            "this process is in some group"
+        );
+        assert_eq!(
+            process_group_of(u32::MAX - 1),
+            None,
+            "a pid that cannot exist leads nothing"
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ use anyhow::Result;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
+    AgentStatus, Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
@@ -51,7 +51,19 @@ pub struct Service {
     events: Arc<dyn EventSink>,
     drivers: Arc<Registry>,
     sessions: Supervisor,
+    /// The last probe of the agent CLIs, and when it was taken.
+    ///
+    /// Probing runs two subprocesses per agent, and the sidebar asks on every
+    /// tick; an installed CLI does not come and go between them.
+    agents: Option<(std::time::Instant, Vec<AgentStatus>)>,
 }
+
+/// How long a probe of the agent CLIs is trusted for.
+///
+/// Long enough that a window ticking every fifteen seconds does not shell out
+/// each time, short enough that signing in is noticed while the user is still
+/// wondering why it said they had not.
+const AGENT_PROBE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 impl Service {
     /// Build a service around an already-open database.
@@ -63,6 +75,7 @@ impl Service {
             conn,
             events,
             drivers: Arc::new(Registry::with_defaults()),
+            agents: None,
         }
     }
 
@@ -244,6 +257,9 @@ impl Service {
                 Ok(Response::Ack)
             }
 
+            Request::ListAgents => Ok(Response::Agents {
+                agents: self.agents(),
+            }),
             Request::ListSessions { workspace } => Ok(Response::Sessions {
                 sessions: session::list(&self.conn(), workspace.as_ref()).map_err(failed)?,
             }),
@@ -295,6 +311,22 @@ impl Service {
                 Ok(Response::Ack)
             }
         }
+    }
+
+    /// What each agent CLI says about itself, from the last probe or a new one.
+    fn agents(&mut self) -> Vec<AgentStatus> {
+        let fresh = self
+            .agents
+            .as_ref()
+            .is_some_and(|(taken, _)| taken.elapsed() < AGENT_PROBE_TTL);
+        if !fresh {
+            let probed = crate::driver::probe::probe_all(&self.drivers);
+            self.agents = Some((std::time::Instant::now(), probed));
+        }
+        self.agents
+            .as_ref()
+            .map(|(_, agents)| agents.clone())
+            .unwrap_or_default()
     }
 
     /// Start an agent in a workspace.

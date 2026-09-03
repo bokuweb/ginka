@@ -12,9 +12,9 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
-use ginka_protocol::model::{Session, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, Checkpoint, Session, TranscriptEntry};
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{SessionId, WorkspaceId};
+use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -45,6 +45,17 @@ impl DaemonLink {
                 .iter()
                 .map(|summary| SessionRow::from_summary(summary, now))
                 .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// What each agent CLI on this machine says about itself.
+    ///
+    /// The daemon caches the probe, so asking on every tick costs a request
+    /// rather than two subprocesses per agent.
+    pub async fn agents(&self) -> Vec<AgentStatus> {
+        match self.ask(Request::ListAgents).await {
+            Some(Response::Agents { agents }) => agents,
             _ => Vec::new(),
         }
     }
@@ -89,19 +100,49 @@ impl DaemonLink {
         workspace: &WorkspaceId,
         agent: &str,
         prompt: String,
+        model: Option<String>,
     ) -> Option<Session> {
         match self
             .ask(Request::StartSession {
                 workspace: workspace.clone(),
                 agent: agent.to_string(),
                 prompt,
-                model: None,
+                model,
             })
             .await
         {
             Some(Response::Session { session }) => Some(session),
             _ => None,
         }
+    }
+
+    /// The checkpoints taken in a workspace, newest first.
+    pub async fn checkpoints(&self, workspace: &WorkspaceId) -> Vec<Checkpoint> {
+        match self
+            .ask(Request::ListCheckpoints {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Checkpoints { checkpoints }) => checkpoints,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Put a workspace back to the state a checkpoint captured.
+    pub async fn restore(&self, checkpoint: &CheckpointId) {
+        self.ask(Request::RestoreCheckpoint {
+            checkpoint: checkpoint.clone(),
+        })
+        .await;
+    }
+
+    /// Stop the agent working in a session.
+    pub async fn cancel_session(&self, session: &SessionId) {
+        self.ask(Request::CancelSession {
+            session: session.clone(),
+        })
+        .await;
     }
 
     /// Send a follow-up to a running session.

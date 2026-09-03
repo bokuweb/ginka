@@ -116,6 +116,19 @@ impl Hub {
         self.lock().subscribers.len()
     }
 
+    /// Close every subscription, letting what is already queued be delivered.
+    ///
+    /// This is how a shutdown reaches the clients in the right order: a closed
+    /// `async_channel` still drains, so a client's last event — and the answer
+    /// to the request that asked for the shutdown — goes out before its
+    /// connection ends.
+    pub fn close(&self) {
+        let mut inner = self.lock();
+        for sender in inner.subscribers.drain(..) {
+            sender.close();
+        }
+    }
+
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         // A poisoned hub means a panic while publishing. The event bus has no
         // invariants a panic can break, so recovering beats taking the daemon
@@ -216,6 +229,23 @@ mod tests {
             hub.emit(event(name));
         }
         assert!(hub.replay_after(hub.current_seq()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn closing_lets_what_is_queued_be_read_before_the_stream_ends() {
+        // A shutdown has to reach a client *after* the answer to the request
+        // that asked for it, so closing must drain rather than drop.
+        let hub = Hub::new(8);
+        let subscription = hub.subscribe();
+        hub.emit(event("last"));
+        hub.close();
+
+        assert_eq!(
+            subscription.try_next().map(|entry| entry.event),
+            Some(event("last"))
+        );
+        assert!(subscription.try_next().is_none(), "and then it is over");
+        assert_eq!(hub.subscriber_count(), 0);
     }
 
     #[test]
