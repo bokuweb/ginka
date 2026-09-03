@@ -14,7 +14,7 @@ use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::SessionId;
 use ginka_protocol::event::DaemonEvent;
-use ginka_protocol::model::{AgentStatus, SessionState, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
 use ginka_ui::Tokens;
 use ginka_ui::layout::{Layout, Panel};
 use ginka_ui::transcript::{
@@ -135,6 +135,14 @@ pub struct Shell {
     /// Set when the next prompt should open a new conversation rather than
     /// continue the one on screen.
     start_fresh: bool,
+    /// The states this workspace can be put back to, one per turn.
+    checkpoints: Vec<Checkpoint>,
+    /// The turn whose rewind has been offered and is waiting to be confirmed.
+    ///
+    /// Two steps because it is destructive: work written since is removed, and
+    /// a single click that quietly rewrites the worktree is not something to
+    /// discover by accident.
+    rewinding: Option<u32>,
     /// The transcript's scroll position, so the answer can be followed.
     transcript_scroll: ScrollHandle,
     /// Whether the transcript is still following the answer. Dropped by the
@@ -189,6 +197,8 @@ impl Shell {
                 this.chosen_agent = None;
                 this.chosen_model = None;
                 this.start_fresh = false;
+                this.checkpoints = Vec::new();
+                this.rewinding = None;
                 cx.notify();
             }
         });
@@ -346,6 +356,8 @@ impl Shell {
             chosen_agent: None,
             chosen_model: None,
             start_fresh: false,
+            checkpoints: Vec::new(),
+            rewinding: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
@@ -478,6 +490,22 @@ impl Shell {
     /// The reader has taken the transcript somewhere themselves.
     fn transcript_scrolled(&mut self) {
         self.transcript_follows = false;
+    }
+
+    /// Put the workspace back to a checkpoint, and read the transcript again.
+    ///
+    /// The transcript is not rewound with it: what the agent said still
+    /// happened, and a conversation that edits itself to match the files is a
+    /// worse record than one that shows the work being undone.
+    fn rewind(&mut self, checkpoint: ginka_protocol::CheckpointId, cx: &mut Context<Self>) {
+        self.rewinding = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |_, cx| {
+            cx.background_spawn(async move { link.restore(&checkpoint).await })
+                .await;
+        })
+        .detach();
     }
 
     /// Stop the agent working in the workspace on screen.
@@ -889,8 +917,8 @@ impl Shell {
     /// Each kind is drawn differently on purpose: the reader has to be able to
     /// tell what the agent said from what it was thinking, and both from what
     /// it did.
-    fn block(&self, index: usize, block: &TranscriptBlock, cx: &App) -> AnyElement {
-        let tokens = Tokens::global(cx);
+    fn block(&self, index: usize, block: &TranscriptBlock, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
         let prose = |text: &str, color: Hsla| {
             div()
                 .w_full()
@@ -971,31 +999,9 @@ impl Shell {
             TranscriptBlock::Plan { plan } => {
                 prose(plan, tokens.colors().text_secondary).into_any_element()
             }
-            TranscriptBlock::TurnEnd { turn } => h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .h(px(1.))
-                        .flex_1()
-                        .bg(tokens.colors().border_subtle.opacity(0.6)),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(tokens.colors().text_muted.opacity(0.7))
-                        // A turn boundary is also where a checkpoint was taken,
-                        // which is what makes it worth drawing at all.
-                        .child(rust_i18n::t!("transcript.turn", turn = turn).to_string()),
-                )
-                .child(
-                    div()
-                        .h(px(1.))
-                        .flex_1()
-                        .bg(tokens.colors().border_subtle.opacity(0.6)),
-                )
-                .into_any_element(),
+            // A turn boundary is where a checkpoint was taken, which is what
+            // makes it worth drawing — and what makes it the way back.
+            TranscriptBlock::TurnEnd { turn } => self.turn_rule(*turn, cx),
             // A turn that worked says so by being answered. Only an outcome
             // the user has to do something about is worth a line of its own.
             TranscriptBlock::Outcome { state, summary } => match state {
@@ -1026,6 +1032,114 @@ impl Shell {
         }
     }
 
+    /// The rule between turns, and the way back to one.
+    ///
+    /// waku's idea, and the reason checkpoints exist: a position in a
+    /// transcript maps to a working tree, so "put it back to how it was three
+    /// turns ago" is an operation rather than an apology. Offered in two steps
+    /// because it is destructive — work written since is removed — and a single
+    /// click that quietly rewrites the worktree is not something to discover by
+    /// accident. What it replaces is snapshotted first, so even a rewind the
+    /// user regrets is reachable.
+    fn turn_rule(&self, turn: u32, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let checkpoint = self
+            .checkpoints
+            .iter()
+            .find(|checkpoint| checkpoint.turn == turn)
+            .map(|checkpoint| checkpoint.id.clone());
+        let asking = self.rewinding == Some(turn);
+        let rule = || {
+            div()
+                .h(px(1.))
+                .flex_1()
+                .bg(tokens.colors().border_subtle.opacity(0.6))
+        };
+
+        h_flex()
+            .w_full()
+            .items_center()
+            .gap_2()
+            .child(rule())
+            .children(checkpoint.is_none().then(|| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted.opacity(0.7))
+                    .child(rust_i18n::t!("transcript.turn", turn = turn).to_string())
+            }))
+            .children(checkpoint.clone().map(|id| {
+                h_flex()
+                    .gap_1p5()
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("turn-{turn}")))
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(tokens.radius.row))
+                            .text_xs()
+                            .text_color(if asking {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_muted.opacity(0.7)
+                            })
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(rust_i18n::t!("transcript.rewind.hint").to_string())
+                                    .build(window, cx)
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.rewinding = (this.rewinding != Some(turn)).then_some(turn);
+                                cx.notify();
+                            }))
+                            .child(if asking {
+                                rust_i18n::t!("transcript.rewind.confirm").to_string()
+                            } else {
+                                rust_i18n::t!("transcript.turn", turn = turn).to_string()
+                            }),
+                    )
+                    .children(asking.then(|| {
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("rewind-{turn}")))
+                                    .px(px(7.))
+                                    .py(px(2.))
+                                    .rounded(px(tokens.radius.row))
+                                    .bg(tokens.colors().row_active())
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_primary)
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rewind(id.clone(), cx)
+                                    }))
+                                    .child(rust_i18n::t!("transcript.rewind.yes").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("keep-{turn}")))
+                                    .px(px(7.))
+                                    .py(px(2.))
+                                    .rounded(px(tokens.radius.row))
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.rewinding = None;
+                                        cx.notify();
+                                    }))
+                                    .child(rust_i18n::t!("transcript.rewind.no").to_string()),
+                            )
+                    }))
+            }))
+            .child(rule())
+            .into_any_element()
+    }
+
     /// A tool call and, once it has one, its result.
     fn tool_card(
         &self,
@@ -1035,7 +1149,7 @@ impl Shell {
         is_error: bool,
         cx: &App,
     ) -> AnyElement {
-        let tokens = Tokens::global(cx);
+        let tokens = Tokens::global(cx).clone();
         let font = cx.theme_mono_font();
         v_flex()
             .w_full()
@@ -1714,13 +1828,22 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (rows, agents) = cx
+    let showing = this
+        .update(cx, |this, _| {
+            this.session.as_ref().map(|row| row.workspace.clone())
+        })
+        .map_err(|_| ())?;
+    let (rows, agents, checkpoints) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Cached by the daemon, so this is a request rather than two
             // subprocesses per agent every tick.
             let agents = listing.agents().await;
-            (rows, agents)
+            let checkpoints = match &showing {
+                Some(workspace) => listing.checkpoints(workspace).await,
+                None => Vec::new(),
+            };
+            (rows, agents, checkpoints)
         })
         .await;
     tracing::debug!(
@@ -1730,6 +1853,7 @@ async fn pull_rows(
     );
     this.update(cx, |this, cx| {
         this.agents = agents;
+        this.checkpoints = checkpoints;
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         this.session = this.sidebar.read(cx).selected_row().cloned();

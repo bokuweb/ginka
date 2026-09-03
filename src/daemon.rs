@@ -12,9 +12,9 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
-use ginka_protocol::model::{AgentStatus, Session, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, Checkpoint, Session, TranscriptEntry};
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{SessionId, WorkspaceId};
+use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -114,6 +114,27 @@ impl DaemonLink {
             Some(Response::Session { session }) => Some(session),
             _ => None,
         }
+    }
+
+    /// The checkpoints taken in a workspace, newest first.
+    pub async fn checkpoints(&self, workspace: &WorkspaceId) -> Vec<Checkpoint> {
+        match self
+            .ask(Request::ListCheckpoints {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Checkpoints { checkpoints }) => checkpoints,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Put a workspace back to the state a checkpoint captured.
+    pub async fn restore(&self, checkpoint: &CheckpointId) {
+        self.ask(Request::RestoreCheckpoint {
+            checkpoint: checkpoint.clone(),
+        })
+        .await;
     }
 
     /// Stop the agent working in a session.
