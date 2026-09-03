@@ -259,12 +259,17 @@ impl SessionRow {
 
     /// Which agent the composer would start here.
     ///
-    /// A workspace that already has a session continues with the agent running
-    /// it — switching agents mid-conversation would abandon the transcript the
-    /// vendor is holding. A workspace with no session gets the first agent that
-    /// is actually usable, because starting one that is signed out only
-    /// produces a failed session and a puzzled user.
-    pub fn agent_to_start(&self, agents: &[AgentStatus]) -> String {
+    /// What the user picked wins — that is what picking is for, including
+    /// picking one this build cannot probe or that says it is signed out.
+    /// Failing that, a workspace already holding a session continues with the
+    /// agent running it, since switching mid-conversation would abandon the
+    /// transcript the vendor is holding. A fresh workspace gets the first agent
+    /// that is actually usable: starting one that is signed out only produces a
+    /// failed session and a puzzled user.
+    pub fn agent_to_start(&self, agents: &[AgentStatus], chosen: Option<&str>) -> String {
+        if let Some(chosen) = chosen {
+            return chosen.to_string();
+        }
         if self.session.is_some() {
             return self.agent.driver_id().to_string();
         }
@@ -604,7 +609,20 @@ mod tests {
             status("claude", true, Some(false)),
             status("codex", true, Some(true)),
         ];
-        assert_eq!(row.agent_to_start(&agents), "codex");
+        assert_eq!(row.agent_to_start(&agents, None), "codex");
+    }
+
+    #[test]
+    fn what_the_user_picked_wins_over_what_would_have_been_chosen() {
+        // Including an agent that says it is signed out: the user may be
+        // fixing that in another window, and a picker that refuses the pick is
+        // not a picker.
+        let row = SessionRow::from_summary(&summary(None), 0);
+        let agents = vec![
+            status("claude", true, Some(false)),
+            status("codex", true, Some(true)),
+        ];
+        assert_eq!(row.agent_to_start(&agents, Some("claude")), "claude");
     }
 
     #[test]
@@ -613,7 +631,7 @@ mod tests {
         // is holding.
         let row = SessionRow::from_summary(&summary(Some(session("codex", SessionState::Idle))), 0);
         let agents = vec![status("claude", true, Some(true))];
-        assert_eq!(row.agent_to_start(&agents), "codex");
+        assert_eq!(row.agent_to_start(&agents, None), "codex");
     }
 
     #[test]
@@ -621,9 +639,9 @@ mod tests {
         // The failure then comes from the agent, with its own words, rather
         // than from a composer that refused to do anything.
         let row = SessionRow::from_summary(&summary(None), 0);
-        assert_eq!(row.agent_to_start(&[]), "claude");
+        assert_eq!(row.agent_to_start(&[], None), "claude");
         assert_eq!(
-            row.agent_to_start(&[status("claude", false, None)]),
+            row.agent_to_start(&[status("claude", false, None)], None),
             "claude"
         );
     }

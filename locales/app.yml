@@ -40,6 +40,15 @@ composer.no_agent:
 composer.agent:
   en: Agent
   ja: エージェント
+composer.agent.pick:
+  en: Choose which agent runs this
+  ja: 実行するエージェントを選ぶ
+composer.model.default:
+  en: Model
+  ja: モデル
+composer.new_session:
+  en: New session
+  ja: 新しいセッション
 composer.agent.signed_out:
   en: not signed in
   ja: 未ログイン

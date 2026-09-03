@@ -36,6 +36,18 @@ use std::time::Duration;
 
 actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
 
+/// What the composer is offering a choice of.
+///
+/// One at a time: two open lists over a conversation is a menu, not a
+/// composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Picker {
+    /// Which agent runs the next prompt.
+    Agent,
+    /// Which of that agent's models it runs on.
+    Model,
+}
+
 const CONTEXT: &str = "Shell";
 
 /// Bind the panel toggles.
@@ -113,6 +125,16 @@ pub struct Shell {
     submitted: bool,
     /// Whether the composer has the keyboard, so the card can show it.
     composer_focused: bool,
+    /// Which picker is open above the composer, if any.
+    picker: Option<Picker>,
+    /// The agent the user chose, which beats whatever would have been picked
+    /// for them. `None` until they choose one.
+    chosen_agent: Option<String>,
+    /// The model the user chose for that agent.
+    chosen_model: Option<String>,
+    /// Set when the next prompt should open a new conversation rather than
+    /// continue the one on screen.
+    start_fresh: bool,
     /// The transcript's scroll position, so the answer can be followed.
     transcript_scroll: ScrollHandle,
     /// Whether the transcript is still following the answer. Dropped by the
@@ -163,6 +185,10 @@ impl Shell {
                 this.session_state = None;
                 this.submitted = false;
                 this.transcript_follows = true;
+                this.picker = None;
+                this.chosen_agent = None;
+                this.chosen_model = None;
+                this.start_fresh = false;
                 cx.notify();
             }
         });
@@ -316,6 +342,10 @@ impl Shell {
             session_state: None,
             submitted: false,
             composer_focused: false,
+            picker: None,
+            chosen_agent: None,
+            chosen_model: None,
+            start_fresh: false,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
@@ -506,9 +536,12 @@ impl Shell {
         cx.notify();
 
         let link = self.link.clone();
-        let agent = row.agent_to_start(&self.agents);
+        let agent = row.agent_to_start(&self.agents, self.chosen_agent.as_deref());
+        let model = self.chosen_model.clone();
+        let fresh = self.start_fresh;
+        self.start_fresh = false;
         cx.spawn(async move |this, cx| {
-            match row.session.clone() {
+            match row.session.clone().filter(|_| !fresh) {
                 Some(session) => {
                     let sending = link.clone();
                     let text = text.clone();
@@ -519,7 +552,7 @@ impl Shell {
                     let workspace = row.workspace.clone();
                     let started = cx
                         .background_spawn(async move {
-                            link.start_session(&workspace, &agent, text).await
+                            link.start_session(&workspace, &agent, text, model).await
                         })
                         .await;
                     // Adopt the new session immediately rather than waiting for
@@ -1071,8 +1104,15 @@ impl Shell {
     /// what happens to it sits underneath, where it is legible without
     /// competing with the text.
     fn composer(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
+        // Copied out: the pickers and chips below need `cx` mutably to bind
+        // their listeners, and a borrow of the theme held across that is a
+        // borrow held across the whole composer.
+        let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
+        let picker = self.picker_panel(cx);
+        let model_chip = self.model_chip_button(cx);
+        let agent_chip = self.agent_chip_button(cx);
+        let new_session = self.new_session_button(cx);
 
         v_flex()
             .w_full()
@@ -1081,6 +1121,7 @@ impl Shell {
             .px_4()
             .pb_3()
             .gap_2()
+            .children(picker)
             .child(
                 v_flex()
                     .w_full()
@@ -1110,8 +1151,8 @@ impl Shell {
                                     .text_color(tokens.colors().text_muted),
                             )
                             .child(div().flex_1())
-                            .child(self.model_chip(cx))
-                            .child(self.chip(&rust_i18n::t!("composer.agent"), cx))
+                            .children(model_chip)
+                            .child(agent_chip)
                             .child(if working {
                                 // An agent that cannot be stopped is one the
                                 // user has to wait out. The composer keeps
@@ -1164,22 +1205,231 @@ impl Shell {
                             }),
                     ),
             )
-            .child(self.context_bar(cx))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().flex_1().child(self.context_bar(cx)))
+                    .children(new_session),
+            )
     }
 
-    /// The agent chip: which agent the composer would start, and whether it
-    /// can be.
+    /// The list the composer is offering, above the card.
+    ///
+    /// A panel rather than a menu: an agent's row has to say *why* it cannot be
+    /// used, and "Claude Code — not signed in" is not a menu label. Choosing is
+    /// still allowed — the user may be signing in in another window, and a
+    /// picker that refuses the pick is not a picker.
+    fn picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx);
+        let picker = self.picker?;
+
+        let rows: Vec<AnyElement> = match picker {
+            Picker::Agent => self
+                .agents
+                .iter()
+                .map(|agent| {
+                    let id = agent.id.clone();
+                    let chosen = self.chosen_agent.as_deref() == Some(agent.id.as_str());
+                    let note = if !agent.installed {
+                        Some(rust_i18n::t!("composer.agent.missing").to_string())
+                    } else if agent.authenticated == Some(false) {
+                        Some(rust_i18n::t!("composer.agent.signed_out").to_string())
+                    } else {
+                        agent.version.clone()
+                    };
+                    self.picker_row(
+                        SharedString::from(format!("agent-option:{}", agent.id)),
+                        agent.display_name.clone(),
+                        note,
+                        chosen,
+                        cx.listener(move |this, _, _, cx| {
+                            this.chosen_agent = Some(id.clone());
+                            // The model belonged to the agent that was chosen
+                            // before; it means nothing to the new one.
+                            this.chosen_model = None;
+                            this.picker = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
+            Picker::Model => self
+                .models()
+                .into_iter()
+                .map(|model| {
+                    let picked = model.clone();
+                    let chosen = self.chosen_model.as_deref() == Some(model.as_str());
+                    self.picker_row(
+                        SharedString::from(format!("model-option:{model}")),
+                        model.clone(),
+                        None,
+                        chosen,
+                        cx.listener(move |this, _, _, cx| {
+                            this.chosen_model = Some(picked.clone());
+                            this.picker = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
+        };
+
+        if rows.is_empty() {
+            return None;
+        }
+
+        Some(
+            v_flex()
+                .w_full()
+                .p_1()
+                .gap_0p5()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .children(rows)
+                .into_any_element(),
+        )
+    }
+
+    /// One option in an open picker.
+    fn picker_row(
+        &self,
+        id: impl Into<ElementId>,
+        label: String,
+        note: Option<String>,
+        chosen: bool,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &App,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .id(id)
+            .w_full()
+            .h(px(30.))
+            .px(px(9.))
+            .gap(px(8.))
+            .items_center()
+            .rounded(px(tokens.radius.row))
+            .cursor_pointer()
+            .when(chosen, |this| this.bg(tokens.colors().row_active()))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .on_click(on_click)
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .text_color(tokens.colors().text_primary)
+                    .truncate()
+                    .child(label),
+            )
+            .children(note.map(|note| {
+                div()
+                    .text_size(px(11.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(note)
+            }))
+            .into_any_element()
+    }
+
+    /// The models the chosen agent offers, if it offers a choice.
+    fn models(&self) -> Vec<String> {
+        let chosen = self
+            .session
+            .as_ref()
+            .map(|row| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
+        chosen
+            .and_then(|id| {
+                self.agents
+                    .iter()
+                    .find(|agent| agent.id == id)
+                    .map(|agent| agent.models.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    /// Open a picker, or close it if it is the one already open.
+    fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
+        self.picker = (self.picker != Some(picker)).then_some(picker);
+        cx.notify();
+    }
+
+    /// The agent chip, which is also how the agent is changed.
+    fn agent_chip_button(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        div()
+            .id("agent-chip")
+            .cursor_pointer()
+            .tooltip(|window, cx| {
+                Tooltip::new(rust_i18n::t!("composer.agent.pick").to_string()).build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Agent, cx)))
+            .child(self.agent_chip(cx))
+    }
+
+    /// The model chip, when the chosen agent offers a choice of models.
+    ///
+    /// Absent rather than empty for an agent that decides its own model:
+    /// Codex resolves it from the user's own configuration, and a picker
+    /// showing nothing would suggest something was broken.
+    fn model_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let models = self.models();
+        if models.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let label = self
+            .chosen_model
+            .clone()
+            .or_else(|| {
+                self.session
+                    .as_ref()
+                    .and_then(|row| row.session.as_ref())
+                    .and(None)
+            })
+            .unwrap_or_else(|| rust_i18n::t!("composer.model.default").to_string());
+
+        Some(
+            h_flex()
+                .id("model-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Model, cx)))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(label),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(tokens.colors().text_muted),
+                ),
+        )
+    }
+
+    /// Which agent the composer would start, and whether it can be.
     ///
     /// The readiness is the point. An agent that is missing or signed out used
     /// to be discoverable only by sending a prompt and reading the failure it
     /// produced; saying so here is the difference between a tool that works
     /// and one that appears not to.
-    fn model_chip(&self, cx: &App) -> impl IntoElement {
+    fn agent_chip(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         let chosen = self
             .session
             .as_ref()
-            .map(|row| row.agent_to_start(&self.agents));
+            .map(|row| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
         let status = chosen
             .as_ref()
             .and_then(|id| self.agents.iter().find(|agent| &agent.id == id));
@@ -1234,20 +1484,50 @@ impl Shell {
             }))
     }
 
-    fn chip(&self, label: &str, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
-        h_flex()
-            .h(px(28.))
-            .px(px(9.))
-            .items_center()
-            .rounded(px(tokens.radius.row))
-            .bg(tokens.colors().row_hover())
-            .text_size(px(12.))
-            .text_color(tokens.colors().text_secondary)
-            .child(label.to_string())
+    /// The hairline strip under the composer: worktree left, branch right.
+    /// Start the next prompt as a new conversation rather than a follow-up.
+    ///
+    /// Resuming is the right default — that is what a workspace's session is
+    /// for — but a task that has nothing to do with the last one should not
+    /// inherit its context, and the vendor charges for carrying it.
+    fn new_session_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        self.session.as_ref()?.session.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        Some(
+            h_flex()
+                .id("new-session")
+                .h(px(22.))
+                .px(px(7.))
+                .gap(px(5.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .cursor_pointer()
+                .when(self.start_fresh, |this| {
+                    this.bg(tokens.colors().row_active())
+                })
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.start_fresh = !this.start_fresh;
+                    cx.notify();
+                }))
+                .child(
+                    Icon::new(IconName::Plus)
+                        .size(px(11.))
+                        .text_color(tokens.colors().text_muted),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(if self.start_fresh {
+                            tokens.colors().text_secondary
+                        } else {
+                            tokens.colors().text_muted
+                        })
+                        .child(rust_i18n::t!("composer.new_session").to_string()),
+                ),
+        )
     }
 
-    /// The hairline strip under the composer: worktree left, branch right.
     fn context_bar(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()

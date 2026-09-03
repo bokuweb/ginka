@@ -100,13 +100,14 @@ impl DaemonLink {
         workspace: &WorkspaceId,
         agent: &str,
         prompt: String,
+        model: Option<String>,
     ) -> Option<Session> {
         match self
             .ask(Request::StartSession {
                 workspace: workspace.clone(),
                 agent: agent.to_string(),
                 prompt,
-                model: None,
+                model,
             })
             .await
         {
