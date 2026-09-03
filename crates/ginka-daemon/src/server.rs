@@ -27,6 +27,13 @@ use ginka_protocol::{
 };
 use std::sync::{Arc, Mutex};
 
+/// How long a stopping daemon waits for its connections to flush.
+///
+/// Bounded: a client that has stopped reading its socket must not be able to
+/// keep the daemon alive. The ordering is what makes the wait correct; this is
+/// only the limit on how long correctness is worth waiting for.
+const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// How many events the daemon keeps for reconnecting clients.
 ///
 /// A client that has been away longer than this re-reads instead of patching.
@@ -41,6 +48,8 @@ pub struct Daemon {
     service: Arc<Mutex<Service>>,
     handshake: Handshake,
     paths: Paths,
+    /// Connections that have not finished writing yet.
+    live: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Daemon {
@@ -87,6 +96,7 @@ impl Daemon {
             service: Arc::new(Mutex::new(service)),
             handshake,
             paths,
+            live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 
@@ -117,10 +127,13 @@ impl Daemon {
                             token: self.handshake.token.clone(),
                             version: self.handshake.version.clone(),
                         };
+                        let live = self.live.clone();
+                        live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                         smol::spawn(async move {
                             if let Err(error) = connection.serve(stream).await {
                                 tracing::debug!(%peer, %error, "connection closed");
                             }
+                            live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                         })
                         .detach();
                     }
@@ -168,6 +181,20 @@ impl Daemon {
             futures_util::future::select(Box::pin(stopping), Box::pin(signalled)),
         )
         .await;
+
+        // Closing the event streams ends every connection's pump, which closes
+        // its write queue, which lets the writer flush what is already in it.
+        // Then wait for those writers: the client that asked the daemon to stop
+        // is owed the answer, and a daemon that exits first hands it a closed
+        // connection instead.
+        self.hub.close();
+        let deadline = std::time::Instant::now() + SHUTDOWN_GRACE;
+        while self.live.load(std::sync::atomic::Ordering::SeqCst) > 0
+            && std::time::Instant::now() < deadline
+        {
+            smol::Timer::after(std::time::Duration::from_millis(5)).await;
+        }
+
         handshake::remove(&handshake_path)?;
         tracing::info!("daemon stopped");
         Ok(())
@@ -257,7 +284,7 @@ impl Connection {
             }
         };
 
-        let reading = async move {
+        let reading = async {
             while let Some(frame) = incoming.next().await {
                 let text = match frame {
                     Ok(Message::Text(text)) => text.to_string(),
@@ -277,11 +304,18 @@ impl Connection {
             }
         };
 
-        futures_util::future::select(
-            Box::pin(reading),
-            futures_util::future::select(Box::pin(writing), Box::pin(pushing)),
-        )
-        .await;
+        // The writer is the one that decides when this connection is over.
+        // Feeding it stops first — the client went away, or the daemon is
+        // stopping — and closing the queue then lets the writer drain what is
+        // already in it before it ends. Without that ordering the answer to
+        // the request that asked for a shutdown is written into a socket that
+        // has already been torn down, and the client sees a closed connection
+        // instead of its reply.
+        let feeding = async {
+            futures_util::future::select(Box::pin(reading), Box::pin(pushing)).await;
+            outbound.close();
+        };
+        futures_util::future::join(Box::pin(feeding), Box::pin(writing)).await;
         Ok(())
     }
 

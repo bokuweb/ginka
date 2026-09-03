@@ -236,6 +236,21 @@ fn a_fresh_client_is_told_where_the_stream_is_rather_than_replaying_history() {
 }
 
 #[test]
+fn a_watching_client_is_told_the_daemon_is_going_before_its_stream_ends() {
+    // Otherwise a window has no way to tell "the daemon stopped" from "the
+    // connection dropped", and reconnects into a daemon that is on its way out.
+    let fixture = Fixture::start();
+    smol::block_on(async {
+        let watcher = fixture.client().await;
+        let actor = fixture.client().await;
+        actor.request(Request::Shutdown).await.unwrap();
+
+        let announced = watcher.next_event().await.expect("an event arrives");
+        assert_eq!(announced.payload, DaemonEvent::Shutdown);
+    });
+}
+
+#[test]
 fn a_failed_request_answers_with_an_error_and_leaves_the_connection_open() {
     let fixture = Fixture::start();
     smol::block_on(async {
@@ -283,7 +298,13 @@ fn asking_the_daemon_to_shut_down_stops_it_and_clears_the_handshake() {
     let handshake_path = fixture.paths.daemon_handshake();
     smol::block_on(async {
         let client = fixture.client().await;
-        client.request(Request::Shutdown).await.unwrap();
+        // The answer, not a closed connection: a daemon that tears the socket
+        // down before flushing hands `ginka daemon stop` a failure for having
+        // succeeded.
+        assert_eq!(
+            client.request(Request::Shutdown).await.unwrap(),
+            Response::Ack
+        );
 
         // The daemon exits asynchronously; give it a moment to unwind.
         for _ in 0..100 {
