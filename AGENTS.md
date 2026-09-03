@@ -27,7 +27,7 @@ Two other projects inform the design:
 - **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
 - The three-column shell renders with a resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser. **Not yet visually signed off** (see roadmap M0).
 
-- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; the composer starts an agent or sends a follow-up.
+- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; the composer starts an agent or sends a follow-up, picks which agent and model answer, and stops one that is working. A turn boundary is where a checkpoint was taken, so it is also the way back to it.
 - **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
 
 - **English and Japanese.** Every user-visible string is in `locales/app.yml` in both; the language follows `app.json`, then the environment, then English.

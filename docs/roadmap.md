@@ -278,6 +278,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] Virtualize the transcript list (§6.2's budget is lost here first)
 - [x] Message queueing while the agent is busy
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
+- [x] Agent and model pickers in the composer, and a new-session toggle
 - [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace
 - [ ] Plan approval and ask-user-question interaction modes. The events and the `respond_to_agent` request exist; no shipped driver can interrupt a turn to raise them, so this waits on ACP
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
@@ -300,7 +301,8 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [ ] Commit dialog: stage/unstage, message composer, agent-generated message
 - [ ] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
-- [ ] Rewinding from the transcript in the UI, and pruning old checkpoint refs
+- [x] Rewinding from the transcript in the UI, confirmed in two steps
+- [ ] Pruning old checkpoint refs
 
 **Exit criteria:** a full task cycle — prompt → agent edits → review with 3 line comments → agent revises → commit — without touching another app.
 
@@ -421,4 +423,7 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-02 | An agent that exits zero having said nothing the driver could read is reported as failed | That is exactly what a vendor changing its output format looks like, and reporting it as a finished session with an empty transcript hides it. |
 | 2026-09-02 | Agent processes start in their own process group and are stopped through the `kill` binary | Signalling the group is what makes a cancel reach the tools the agent started. The binary rather than `libc` keeps the workspace's `unsafe_code = "deny"` intact, on the same reasoning that sends git through its own binary. |
 | 2026-09-02 | Checkpoints are commits on no branch, held by refs under `refs/ginka/checkpoints/` | A ref keeps them from being garbage-collected while keeping them out of `git log` and `git branch`. Restoring snapshots the state it is about to replace, because a rewind must never be the thing that loses work. |
+| 2026-09-03 | Checkpoints are committed as Ginka, not as the configured user | `git commit-tree` needs an identity, and taking the user's put the app's bookkeeping in their history — and made a checkpoint impossible on a machine that has never run `git config user.email`, which is every container and CI runner. |
+| 2026-09-03 | A cancel signals the agent's process group only after confirming the agent leads it | A child that did not get its own group is in ours, and signalling a group by its pid then hits something unrelated — on CI, the job. An agent that leads no group is stopped alone. |
+| 2026-09-03 | Only the reader closes a connection's write queue | Two writers into one queue meant whichever stopped first closed it, and on a shutdown the event pump stops first — which dropped the answer to the request that asked for the shutdown. |
 | 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
