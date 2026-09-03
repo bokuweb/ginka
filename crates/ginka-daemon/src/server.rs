@@ -228,6 +228,25 @@ fn is_listening(port: u16) -> bool {
     .is_ok()
 }
 
+/// What one client frame produced.
+struct Dispatched {
+    /// What to answer with, in order.
+    messages: Vec<ServerMessage>,
+    /// Whether this frame asked the daemon to stop, in which case the
+    /// connection ends once these have been queued.
+    stop: bool,
+}
+
+impl Dispatched {
+    /// One message, and nothing else to do.
+    fn just(message: ServerMessage) -> Self {
+        Self {
+            messages: vec![message],
+            stop: false,
+        }
+    }
+}
+
 /// One client connection.
 struct Connection {
     hub: Arc<Hub>,
@@ -269,7 +288,12 @@ impl Connection {
             }
         };
 
-        let pushing = {
+        // Spawned rather than raced with the reader: the queue is closed by
+        // whoever is still putting things in it, and that is the reader. A
+        // pusher that closed it could do so between the reader handling a
+        // request and queueing the answer to it, which is exactly how the
+        // reply to `daemon stop` went missing.
+        let pushing = smol::spawn({
             let outbound = outbound.clone();
             async move {
                 while let Some(entry) = events.next().await {
@@ -282,7 +306,7 @@ impl Connection {
                     }
                 }
             }
-        };
+        });
 
         let reading = async {
             while let Some(frame) = incoming.next().await {
@@ -296,26 +320,35 @@ impl Connection {
                     // Ping/Pong are answered by the library.
                     Ok(_) => continue,
                 };
-                for message in self.dispatch(&text).await {
+                let dispatched = self.dispatch(&text).await;
+                for message in dispatched.messages {
                     if outbound.send(message).await.is_err() {
                         return;
                     }
+                }
+                // The client asked the daemon to stop, and has been answered.
+                // Ending here is what lets the writer flush that answer before
+                // the process goes.
+                if dispatched.stop {
+                    return;
                 }
             }
         };
 
         // The writer is the one that decides when this connection is over.
-        // Feeding it stops first — the client went away, or the daemon is
-        // stopping — and closing the queue then lets the writer drain what is
-        // already in it before it ends. Without that ordering the answer to
-        // the request that asked for a shutdown is written into a socket that
-        // has already been torn down, and the client sees a closed connection
+        // The reader stops first — the client went away, or it asked the
+        // daemon to stop and has been answered — and closing the queue then
+        // lets the writer drain what is already in it. Without that ordering
+        // the answer to `daemon stop` is written into a socket that has
+        // already been torn down, and the client sees a closed connection
         // instead of its reply.
         let feeding = async {
-            futures_util::future::select(Box::pin(reading), Box::pin(pushing)).await;
+            reading.await;
             outbound.close();
         };
         futures_util::future::join(Box::pin(feeding), Box::pin(writing)).await;
+        // Nothing left to push into.
+        drop(pushing);
         Ok(())
     }
 
@@ -354,7 +387,7 @@ impl Connection {
     }
 
     /// Handle one client frame, returning everything it should answer with.
-    async fn dispatch(&self, text: &str) -> Vec<ServerMessage> {
+    async fn dispatch(&self, text: &str) -> Dispatched {
         let message: ClientMessage = match serde_json::from_str(text) {
             Ok(message) => message,
             Err(error) => {
@@ -363,32 +396,40 @@ impl Connection {
                 // than its daemon — a method this build has never heard of —
                 // and answering id 0 would leave that client waiting forever
                 // for a reply that had already been sent.
-                return vec![ServerMessage::Error {
+                return Dispatched::just(ServerMessage::Error {
                     id: recover_request_id(text),
                     error: RpcError::malformed(error.to_string()),
-                }];
+                });
             }
         };
 
         match message {
             ClientMessage::Request { id, payload } => {
-                vec![match self.handle(payload).await {
+                let stop = matches!(payload, Request::Shutdown);
+                let answer = match self.handle(payload).await {
                     Ok(response) => ServerMessage::Response {
                         id,
                         payload: response,
                     },
                     Err(error) => ServerMessage::Error { id, error },
-                }]
+                };
+                Dispatched {
+                    messages: vec![answer],
+                    stop,
+                }
             }
-            ClientMessage::Resume { after } => match self.hub.replay_after(after) {
-                Ok(entries) => entries
-                    .into_iter()
-                    .map(|entry| ServerMessage::Event {
-                        seq: entry.seq,
-                        payload: entry.event,
-                    })
-                    .collect(),
-                Err(gap) => vec![ServerMessage::Gap { oldest: gap.oldest }],
+            ClientMessage::Resume { after } => Dispatched {
+                messages: match self.hub.replay_after(after) {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .map(|entry| ServerMessage::Event {
+                            seq: entry.seq,
+                            payload: entry.event,
+                        })
+                        .collect(),
+                    Err(gap) => vec![ServerMessage::Gap { oldest: gap.oldest }],
+                },
+                stop: false,
             },
         }
     }

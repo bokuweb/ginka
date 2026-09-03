@@ -331,10 +331,16 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
         DaemonCommand::Stop => smol::block_on(async {
             match discovery.connect_existing(None).await {
                 Ok(client) => {
-                    client
-                        .request(Request::Shutdown)
-                        .await
-                        .map_err(|error| anyhow::anyhow!("{error}"))?;
+                    match client.request(Request::Shutdown).await {
+                        Ok(_) => {}
+                        // The daemon going is the thing that was asked for, and
+                        // it may go before its answer is read. What would be a
+                        // failure for any other request is the outcome here.
+                        Err(error) if error.code == "failed" => {
+                            tracing_stop_noted(&error.message);
+                        }
+                        Err(error) => return Err(anyhow::anyhow!("{error}")),
+                    }
                     println!("{}", rust_i18n::t!("cli.daemon.stopping"));
                     Ok(())
                 }
@@ -346,6 +352,14 @@ fn daemon(paths: &Paths, command: DaemonCommand, json: bool) -> Result<()> {
             }
         }),
     }
+}
+
+/// Note a connection that ended while the daemon was stopping.
+///
+/// Not an error: the daemon is meant to be gone, and whether its last frame
+/// arrived first is not something the user asked about.
+fn tracing_stop_noted(why: &str) {
+    tracing::debug!(why, "the daemon went before answering");
 }
 
 fn describe_daemon(paths: &Paths) -> String {
