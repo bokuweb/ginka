@@ -272,6 +272,13 @@ pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Who a checkpoint is committed as.
+///
+/// Not the user: these are the app's snapshots, and they should read as such
+/// in `git show` rather than as commits the user does not remember making.
+const CHECKPOINT_AUTHOR: &str = "Ginka";
+const CHECKPOINT_EMAIL: &str = "ginka@localhost";
+
 /// Snapshot everything in a worktree, and return the commit holding it.
 ///
 /// The snapshot is taken through a scratch index so the user's own index is
@@ -297,13 +304,27 @@ pub fn snapshot(worktree: &Path, reference: &str, message: &str) -> Result<Strin
     let tree = git_with_env(worktree, &["write-tree"], &env)?;
     std::fs::remove_file(&index).ok();
 
+    // A checkpoint is Ginka's commit, not the user's: it is on no branch, it
+    // was not asked for by name, and attributing it to whoever happens to be
+    // configured would put the app's bookkeeping in their name. Carrying its
+    // own identity also means a machine that has never run `git config
+    // user.email` — a fresh install, a container, a CI runner — can still
+    // rewind, instead of failing with an identity error the user has no reason
+    // to connect to a checkpoint.
+    let identity = [
+        ("GIT_AUTHOR_NAME", CHECKPOINT_AUTHOR),
+        ("GIT_AUTHOR_EMAIL", CHECKPOINT_EMAIL),
+        ("GIT_COMMITTER_NAME", CHECKPOINT_AUTHOR),
+        ("GIT_COMMITTER_EMAIL", CHECKPOINT_EMAIL),
+    ];
     let commit = match head_commit(worktree) {
-        Some(parent) => git(
+        Some(parent) => git_with_env(
             worktree,
             &["commit-tree", &tree, "-p", &parent, "-m", message],
+            &identity,
         )?,
         // An empty repository has nothing to hang the snapshot off.
-        None => git(worktree, &["commit-tree", &tree, "-m", message])?,
+        None => git_with_env(worktree, &["commit-tree", &tree, "-m", message], &identity)?,
     };
     git(worktree, &["update-ref", reference, &commit])?;
     Ok(commit)
@@ -618,9 +639,13 @@ prunable
     }
 
     #[test]
-    fn a_repository_with_no_commits_can_still_be_snapshotted() {
-        // The first thing an agent does in a fresh worktree may be its own
-        // first commit; there has to be something to rewind to before that.
+    fn a_repository_with_no_commits_or_identity_can_still_be_snapshotted() {
+        // Two things at once, both real: the first thing an agent does in a
+        // fresh worktree may be its own first commit, so there has to be
+        // something to rewind to before that — and this repository has no
+        // `user.email`, as a fresh machine, a container or a CI runner does
+        // not. A checkpoint that needed the user's identity would fail there
+        // with an error they have no reason to connect to a rewind.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("empty");
         std::fs::create_dir_all(&root).unwrap();
@@ -633,6 +658,18 @@ prunable
                 .unwrap()
                 .contains("draft.txt")
         );
+    }
+
+    #[test]
+    fn a_checkpoint_is_committed_as_the_app_rather_than_as_the_user() {
+        // `git show` on a checkpoint should not read as a commit the user does
+        // not remember making.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let commit = snapshot(&root, REF, "checkpoint").unwrap();
+        let author = git(&root, &["show", "-s", "--format=%an <%ae>", &commit]).unwrap();
+        assert_eq!(author, "Ginka <ginka@localhost>");
     }
 
     #[test]
