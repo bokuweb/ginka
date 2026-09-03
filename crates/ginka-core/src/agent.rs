@@ -537,26 +537,66 @@ fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Chi
         .with_context(|| format!("starting {}", command.program))
 }
 
-/// Stop a process group.
+/// Stop an agent, and the tools it started.
 ///
 /// Signalling the group is what makes a cancel reach the compiler an agent
-/// started, not only the agent. It goes through the `kill` binary for the same
-/// reason git does: it is the implementation the platform already agrees with,
-/// and it keeps this crate free of unsafe.
+/// started, not only the agent — but only when the agent is that group's
+/// leader. A child that did not get its own group is in *ours*, and signalling
+/// the group by its pid would either hit nothing or, if that number happened to
+/// name a real group, hit something that has nothing to do with this session.
+/// So the group is confirmed first and, failing that, the agent alone is
+/// stopped: a tool that outlives its agent is a bug worth seeing, and taking
+/// the whole session's host down with it is not the way to avoid it.
+///
+/// Both go through the `kill` binary for the same reason git does: it is the
+/// implementation the platform already agrees with, and it keeps this crate
+/// free of unsafe.
 fn stop_process_tree(pid: u32) {
+    // Never signal our own group. On a machine where this process is not a
+    // group leader that is the whole session it was started from.
+    if pid == 0 || pid == std::process::id() {
+        tracing::error!(pid, "refusing to signal this process's own group");
+        return;
+    }
+
+    let leads_a_group = process_group_of(pid) == Some(pid);
     #[cfg(unix)]
+    let target = if leads_a_group {
+        format!("-{pid}")
+    } else {
+        tracing::warn!(pid, "the agent has no group of its own; stopping it alone");
+        pid.to_string()
+    };
+    #[cfg(unix)]
+    // `--` because the group form starts with a `-`, which is otherwise an
+    // option wherever this runs.
     let killed = std::process::Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{pid}"))
+        .args(["-TERM", "--", &target])
         .output();
+
     #[cfg(windows)]
     let killed = std::process::Command::new("taskkill")
         .args(["/T", "/F", "/PID", &pid.to_string()])
         .output();
 
     if let Err(error) = killed {
-        tracing::warn!(%error, pid, "could not stop the agent's process group");
+        tracing::warn!(%error, pid, "could not stop the agent");
     }
+}
+
+/// The process group a pid belongs to.
+///
+/// Through `ps` rather than `/proc`, which macOS does not have, or `libc`,
+/// which this crate does not link.
+fn process_group_of(pid: u32) -> Option<u32> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
 }
 
 /// Read a stream to its end, keeping only the tail.
@@ -633,6 +673,21 @@ mod tests {
                 "{name} is the user's own"
             );
         }
+    }
+
+    #[test]
+    fn a_process_reports_the_group_it_is_in() {
+        // The check that decides whether a cancel may signal a group at all.
+        let mine = std::process::id();
+        assert!(
+            process_group_of(mine).is_some(),
+            "this process is in some group"
+        );
+        assert_eq!(
+            process_group_of(u32::MAX - 1),
+            None,
+            "a pid that cannot exist leads nothing"
+        );
     }
 
     #[test]
