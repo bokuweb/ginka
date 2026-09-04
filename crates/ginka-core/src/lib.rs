@@ -4,6 +4,8 @@
 //! a viewport onto this crate, and the daemon is its long-running host. If a
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
+pub mod checkpoint;
+pub mod commit;
 pub mod db;
 pub mod driver;
 pub mod git;
@@ -11,6 +13,7 @@ pub mod logging;
 pub mod paths;
 pub mod project;
 pub mod registry;
+pub mod review;
 pub mod settings;
 
 pub use paths::Paths;
