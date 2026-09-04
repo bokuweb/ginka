@@ -16,7 +16,14 @@
 //! thread, and hands events to the daemon over a channel; making the calls
 //! async would buy nothing and cost a second reactor (roadmap §4.3).
 
+pub mod activity;
+pub mod claude;
+pub mod event;
 pub mod testing;
+
+pub use activity::{ActivityItem, ActivityKind};
+pub use claude::ClaudeStream;
+pub use event::{AgentEvent, DriverError, TurnOutcome};
 
 use anyhow::Result;
 use ginka_protocol::provider::{OptionOutcome, SessionOptions};
