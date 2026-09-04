@@ -454,6 +454,21 @@ pub struct DiffLine {
     pub old_line: Option<u32>,
     /// Its number after, absent for a removed line.
     pub new_line: Option<u32>,
+    /// The parts of `text` that actually differ from the line it replaced.
+    ///
+    /// Empty when there is nothing worth pointing at — a line with no partner,
+    /// or one rewritten so completely that marking it up would be marking all
+    /// of it. Byte ranges into `text`, in order and not overlapping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Span>,
+}
+
+/// A range of bytes in a line.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
 }
 
 /// A run of changed lines with the context around it.

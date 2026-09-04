@@ -860,24 +860,7 @@ impl SurfacePanel {
                                                 .unwrap_or_default(),
                                         }),
                                 )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .text_color(match line.kind {
-                                            LineKind::Added => tokens.colors().text_primary,
-                                            LineKind::Removed => tokens.colors().text_secondary,
-                                            LineKind::Context => tokens.colors().text_muted,
-                                        })
-                                        .child(format!(
-                                            "{}{}",
-                                            match line.kind {
-                                                LineKind::Added => '+',
-                                                LineKind::Removed => '-',
-                                                LineKind::Context => ' ',
-                                            },
-                                            line.text
-                                        )),
-                                )
+                                .child(diff_text(line, &tokens))
                                 .into_any_element()
                         }))
                         .children(hunk.lines.iter().flat_map(|line| {
@@ -1063,6 +1046,55 @@ impl SurfacePanel {
                     })),
             )
     }
+}
+
+/// One line of a diff, with the parts that actually changed marked.
+///
+/// The marks are why the line is split at all: a one-word edit reads as a
+/// whole line replaced, and the word is what the reader is looking for.
+fn diff_text(line: &ginka_protocol::model::DiffLine, tokens: &Tokens) -> impl IntoElement + use<> {
+    let colour = match line.kind {
+        LineKind::Added => tokens.colors().text_primary,
+        LineKind::Removed => tokens.colors().text_secondary,
+        LineKind::Context => tokens.colors().text_muted,
+    };
+    let mark = match line.kind {
+        LineKind::Added => tokens.colors().status_done.opacity(0.22),
+        LineKind::Removed => tokens.colors().status_error.opacity(0.22),
+        LineKind::Context => gpui::transparent_black(),
+    };
+    let sign = match line.kind {
+        LineKind::Added => '+',
+        LineKind::Removed => '-',
+        LineKind::Context => ' ',
+    };
+
+    let mut parts: Vec<(String, bool)> = Vec::new();
+    let mut at = 0usize;
+    for span in &line.words {
+        let (start, end) = (span.start as usize, span.end as usize);
+        if start > at && start <= line.text.len() {
+            parts.push((line.text[at..start].to_string(), false));
+        }
+        if end <= line.text.len() {
+            parts.push((line.text[start..end].to_string(), true));
+            at = end;
+        }
+    }
+    parts.push((line.text[at.min(line.text.len())..].to_string(), false));
+
+    h_flex()
+        .flex_1()
+        .flex_wrap()
+        .text_color(colour)
+        .child(div().child(sign.to_string()))
+        .children(parts.into_iter().filter(|(text, _)| !text.is_empty()).map(
+            move |(text, changed)| {
+                div()
+                    .when(changed, |this| this.bg(mark).rounded(px(2.)))
+                    .child(text)
+            },
+        ))
 }
 
 impl Render for SurfacePanel {

@@ -11,7 +11,7 @@
 //! a file whose header it cannot read is better shown with no hunks than
 //! dropped from a review.
 
-use ginka_protocol::model::{ChangeKind, DiffLine, FileChange, Hunk, LineKind};
+use ginka_protocol::model::{ChangeKind, DiffLine, FileChange, Hunk, LineKind, Span};
 
 /// Parse `git diff` output into one entry per file.
 pub fn parse(patch: &str) -> Vec<FileChange> {
@@ -125,11 +125,168 @@ pub fn parse(patch: &str) -> Vec<FileChange> {
             text: text.to_string(),
             old_line: old,
             new_line: new,
+            words: Vec::new(),
         });
     }
 
     close(&mut files, &mut current, &mut hunk);
+    for file in &mut files {
+        for hunk in &mut file.hunks {
+            refine(&mut hunk.lines);
+        }
+    }
     files
+}
+
+/// Mark what actually changed inside each replaced line.
+///
+/// A one-character edit shows as a whole line removed and a whole line added,
+/// and finding the character is the reader's job unless someone does it for
+/// them. Lines are paired by position within a run, which is what git's own
+/// word diff does: the first removed line answers to the first added one.
+fn refine(lines: &mut [DiffLine]) {
+    let mut index = 0;
+    while index < lines.len() {
+        let removed_at = index;
+        let removed = lines[index..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Removed)
+            .count();
+        let added_at = removed_at + removed;
+        let added = lines[added_at..]
+            .iter()
+            .take_while(|line| line.kind == LineKind::Added)
+            .count();
+        if removed == 0 || added == 0 {
+            index = if removed + added == 0 {
+                index + 1
+            } else {
+                added_at + added
+            };
+            continue;
+        }
+        for offset in 0..removed.min(added) {
+            let before = lines[removed_at + offset].text.clone();
+            let after = lines[added_at + offset].text.clone();
+            let (old_words, new_words) = words(&before, &after);
+            lines[removed_at + offset].words = old_words;
+            lines[added_at + offset].words = new_words;
+        }
+        index = added_at + added;
+    }
+}
+
+/// How much of a rewritten line has to survive for the marks to be worth it.
+///
+/// Below this the two lines have nothing much in common, and marking the
+/// difference would be marking the whole line — which says less than leaving
+/// it alone.
+const KEPT_ENOUGH: f32 = 0.25;
+
+/// The parts of two lines that differ, as byte ranges into each.
+fn words(before: &str, after: &str) -> (Vec<Span>, Vec<Span>) {
+    let old = tokens(before);
+    let new = tokens(after);
+    let common = longest_common(&old, &new);
+    let kept: usize = common
+        .iter()
+        .map(|&(index, _)| old[index].1.trim().len())
+        .sum();
+    let total: usize = old
+        .iter()
+        .chain(new.iter())
+        .map(|token| token.1.trim().len())
+        .sum::<usize>()
+        .max(1);
+    // Both sides are counted, so an unchanged pair scores half; the threshold
+    // is against that.
+    if (kept * 2) as f32 / total as f32 <= KEPT_ENOUGH {
+        return (Vec::new(), Vec::new());
+    }
+
+    let old_same: Vec<usize> = common.iter().map(|&(index, _)| index).collect();
+    let new_same: Vec<usize> = common.iter().map(|&(_, index)| index).collect();
+    (differing(&old, &old_same), differing(&new, &new_same))
+}
+
+/// Split a line into words and the runs of anything else between them.
+///
+/// Punctuation is its own token rather than part of a word, so changing
+/// `foo(bar)` to `foo(baz)` marks `bar`, not the whole call.
+fn tokens(line: &str) -> Vec<(usize, &str)> {
+    let mut found = Vec::new();
+    let mut start = 0;
+    let mut chars = line.char_indices().peekable();
+    while let Some((at, character)) = chars.next() {
+        let alphanumeric = character.is_alphanumeric() || character == '_';
+        let ends = match chars.peek() {
+            Some(&(_, next)) => (next.is_alphanumeric() || next == '_') != alphanumeric,
+            None => true,
+        };
+        if ends {
+            let end = at + character.len_utf8();
+            found.push((start, &line[start..end]));
+            start = end;
+        }
+    }
+    found
+}
+
+/// The indices of the tokens the two lines have in common, in order.
+///
+/// A plain LCS. Lines are short — this is one line against one line — so the
+/// quadratic table costs nothing and the result is the one a reader expects
+/// rather than an approximation of it.
+fn longest_common(old: &[(usize, &str)], new: &[(usize, &str)]) -> Vec<(usize, usize)> {
+    let mut table = vec![vec![0u16; new.len() + 1]; old.len() + 1];
+    for i in (0..old.len()).rev() {
+        for j in (0..new.len()).rev() {
+            table[i][j] = if old[i].1 == new[j].1 {
+                table[i + 1][j + 1] + 1
+            } else {
+                table[i + 1][j].max(table[i][j + 1])
+            };
+        }
+    }
+    let (mut i, mut j) = (0, 0);
+    let mut common = Vec::new();
+    while i < old.len() && j < new.len() {
+        if old[i].1 == new[j].1 {
+            common.push((i, j));
+            i += 1;
+            j += 1;
+        } else if table[i + 1][j] >= table[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    common
+}
+
+/// The byte ranges of the tokens that are not in `same`, merged where they
+/// touch: three adjacent changed tokens are one mark, not three.
+fn differing(all: &[(usize, &str)], same: &[usize]) -> Vec<Span> {
+    let mut spans: Vec<Span> = Vec::new();
+    for (index, (start, text)) in all.iter().enumerate() {
+        if same.contains(&index) {
+            continue;
+        }
+        // Whitespace on its own is not worth marking: a mark around a space
+        // between two changed words is what makes the run look ragged.
+        if text.trim().is_empty() && !spans.is_empty() {
+            continue;
+        }
+        let span = Span {
+            start: *start as u32,
+            end: (start + text.len()) as u32,
+        };
+        match spans.last_mut() {
+            Some(last) if last.end >= span.start => last.end = span.end,
+            _ => spans.push(span),
+        }
+    }
+    spans
 }
 
 /// Finish whatever file and hunk are open.
@@ -383,5 +540,110 @@ diff --git a/a.rs b/a.rs
         assert_eq!(files[0].hunks.len(), 2);
         assert_eq!(files[0].hunks[1].lines[0].old_line, Some(20));
         assert_eq!((files[0].added, files[0].removed), (2, 2));
+    }
+
+    #[test]
+    fn a_one_word_edit_is_marked_rather_than_the_whole_line() {
+        // The reason word diff exists: a one-character change shows as a whole
+        // line removed and a whole line added, and finding it is the reader's
+        // job unless someone does it for them.
+        let patch = "\
+diff --git a/src/main.rs b/src/main.rs
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,1 +1,1 @@
+-let total = price * quantity;
++let total = price * amount;
+";
+        let files = parse(patch);
+        let lines = &files[0].hunks[0].lines;
+        let removed = &lines[0];
+        let added = &lines[1];
+        assert_eq!(
+            marked(removed),
+            vec!["quantity"],
+            "only the word that changed"
+        );
+        assert_eq!(marked(added), vec!["amount"]);
+    }
+
+    #[test]
+    fn a_line_rewritten_completely_is_left_alone() {
+        // Marking all of it says less than marking none of it.
+        let patch = "\
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,1 +1,1 @@
+-the quick brown fox
++something else entirely different
+";
+        let files = parse(patch);
+        let lines = &files[0].hunks[0].lines;
+        assert!(lines[0].words.is_empty(), "{:?}", lines[0].words);
+        assert!(lines[1].words.is_empty());
+    }
+
+    #[test]
+    fn punctuation_is_its_own_word_so_a_call_marks_its_argument() {
+        let patch = "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,1 +1,1 @@
+-    println!(\"{bar}\");
++    println!(\"{baz}\");
+";
+        let files = parse(patch);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(marked(&lines[0]), vec!["bar"]);
+        assert_eq!(marked(&lines[1]), vec!["baz"]);
+    }
+
+    #[test]
+    fn a_line_with_no_partner_is_not_marked() {
+        // Nothing replaced it, so there is nothing to point at inside it.
+        let patch = "\
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,3 @@
+ context
++a whole new line
+";
+        let files = parse(patch);
+        let added = &files[0].hunks[0].lines[1];
+        assert_eq!(added.kind, LineKind::Added);
+        assert!(added.words.is_empty());
+    }
+
+    #[test]
+    fn several_replaced_lines_are_paired_in_order() {
+        let patch = "\
+diff --git a/a.txt b/a.txt
+--- a/a.txt
++++ b/a.txt
+@@ -1,2 +1,2 @@
+-alpha one here
+-beta two here
++alpha ONE here
++beta TWO here
+";
+        let files = parse(patch);
+        let lines = &files[0].hunks[0].lines;
+        assert_eq!(
+            marked(&lines[2]),
+            vec!["ONE"],
+            "the first added line answers the first removed one"
+        );
+        assert_eq!(marked(&lines[3]), vec!["TWO"]);
+    }
+
+    /// The text under each mark, which is what a reader would see highlighted.
+    fn marked(line: &DiffLine) -> Vec<&str> {
+        line.words
+            .iter()
+            .map(|span| &line.text[span.start as usize..span.end as usize])
+            .collect()
     }
 }
