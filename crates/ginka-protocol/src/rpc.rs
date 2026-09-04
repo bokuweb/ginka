@@ -7,7 +7,7 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch,
+    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Project, Session, SessionMatch,
     TranscriptEntry, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
@@ -130,6 +130,22 @@ pub enum Request {
     /// Push a workspace's branch, setting an upstream if it has none.
     Push { workspace: WorkspaceId },
 
+    /// The files in a workspace, best matches for `query` first.
+    ///
+    /// What `@` in the composer reaches for, and what a quick-open will.
+    WorkspaceFiles {
+        workspace: WorkspaceId,
+        query: Option<String>,
+        limit: Option<u32>,
+    },
+    /// What the user was in the middle of typing in a workspace.
+    ComposerDraft { workspace: WorkspaceId },
+    /// Keep what they are typing. An empty draft forgets it.
+    SaveComposerDraft {
+        workspace: WorkspaceId,
+        text: String,
+    },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
@@ -182,6 +198,12 @@ pub enum Response {
     },
     Changes {
         changes: Changes,
+    },
+    Files {
+        files: Vec<FileEntry>,
+    },
+    Draft {
+        text: String,
     },
     /// A commit was made, and this is what it is called.
     Committed {

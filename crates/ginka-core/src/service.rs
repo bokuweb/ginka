@@ -410,6 +410,30 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
+            Request::WorkspaceFiles {
+                workspace,
+                query,
+                limit,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let paths = crate::files::list(&worktree.path).map_err(failed)?;
+                Ok(Response::Files {
+                    files: crate::files::search(
+                        &paths,
+                        query.as_deref().unwrap_or_default(),
+                        limit
+                            .map(|limit| limit as usize)
+                            .unwrap_or(crate::files::DEFAULT_LIMIT),
+                    ),
+                })
+            }
+            Request::ComposerDraft { workspace } => Ok(Response::Draft {
+                text: session::draft(&self.conn(), &workspace).map_err(failed)?,
+            }),
+            Request::SaveComposerDraft { workspace, text } => {
+                session::set_draft(&self.conn(), &workspace, &text, now()).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;
                 Ok(Response::Checkpoints {

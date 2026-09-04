@@ -10,7 +10,7 @@ use ginka_protocol::model::{
     Session, SessionMatch, SessionState, TranscriptEntry, TranscriptPayload,
 };
 use ginka_protocol::{SessionId, WorkspaceId};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension as _};
 
 /// Store a new session.
 pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
@@ -286,6 +286,41 @@ fn excerpt(payload: &str, query: &str) -> String {
     format!("{head}{}{tail}", kept.replace('\n', " "))
 }
 
+/// What the user was in the middle of typing in a workspace.
+pub fn draft(conn: &Connection, workspace: &WorkspaceId) -> Result<String> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT text FROM composer_drafts WHERE workspace_id = ?1",
+            [&workspace.0],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(text.unwrap_or_default())
+}
+
+/// Keep a draft, or forget it once it has been sent.
+///
+/// An empty draft is a deletion rather than an empty row: "nothing is being
+/// written here" and "a draft of nothing" are the same state, and storing both
+/// invites them to disagree.
+pub fn set_draft(conn: &Connection, workspace: &WorkspaceId, text: &str, now: i64) -> Result<()> {
+    if text.trim().is_empty() {
+        conn.execute(
+            "DELETE FROM composer_drafts WHERE workspace_id = ?1",
+            [&workspace.0],
+        )?;
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO composer_drafts (workspace_id, text, updated_at)
+         VALUES (?1, ?2, ?3)
+         ON CONFLICT(workspace_id) DO UPDATE SET text = excluded.text,
+                                                 updated_at = excluded.updated_at",
+        rusqlite::params![workspace.0, text, now],
+    )?;
+    Ok(())
+}
+
 /// How many turns a session has already completed.
 ///
 /// Each turn is its own process, so a driver's own counter restarts every
@@ -524,6 +559,51 @@ mod tests {
             .query_row("SELECT count(*) FROM session_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(remaining, 0);
+    }
+
+    #[test]
+    fn a_half_written_prompt_survives_being_left() {
+        // Losing it to a restart is the kind of small betrayal that stops
+        // people trusting a tool with anything long.
+        let conn = db::open_in_memory().unwrap();
+        let workspace = WorkspaceId("comet/harbor".into());
+        assert_eq!(draft(&conn, &workspace).unwrap(), "");
+
+        set_draft(&conn, &workspace, "the beginning of a thought", 100).unwrap();
+        assert_eq!(
+            draft(&conn, &workspace).unwrap(),
+            "the beginning of a thought"
+        );
+
+        set_draft(&conn, &workspace, "changed my mind", 200).unwrap();
+        assert_eq!(draft(&conn, &workspace).unwrap(), "changed my mind");
+    }
+
+    #[test]
+    fn sending_what_was_drafted_leaves_nothing_behind() {
+        // "Nothing is being written here" and "a draft of nothing" are the
+        // same state; storing both invites them to disagree.
+        let conn = db::open_in_memory().unwrap();
+        let workspace = WorkspaceId("comet/harbor".into());
+        set_draft(&conn, &workspace, "sent", 100).unwrap();
+        set_draft(&conn, &workspace, "   ", 200).unwrap();
+        assert_eq!(draft(&conn, &workspace).unwrap(), "");
+
+        let rows: i64 = conn
+            .query_row("SELECT count(*) FROM composer_drafts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn drafts_are_kept_apart_by_workspace() {
+        let conn = db::open_in_memory().unwrap();
+        let one = WorkspaceId("comet/one".into());
+        let two = WorkspaceId("comet/two".into());
+        set_draft(&conn, &one, "for one", 1).unwrap();
+        set_draft(&conn, &two, "for two", 1).unwrap();
+        assert_eq!(draft(&conn, &one).unwrap(), "for one");
+        assert_eq!(draft(&conn, &two).unwrap(), "for two");
     }
 
     #[test]

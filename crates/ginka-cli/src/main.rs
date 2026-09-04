@@ -57,6 +57,13 @@ enum Command {
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// List a workspace's files, best matches first.
+    Files {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// What to look for. Any subsequence of a path will do.
+        query: Option<String>,
+    },
     /// Show what has changed in a workspace.
     Changes {
         /// The workspace id, as shown by `workspace list`.
@@ -301,6 +308,11 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Files { workspace, query } => Request::WorkspaceFiles {
+            workspace: WorkspaceId(workspace),
+            query,
+            limit: None,
+        },
         Command::Commit {
             workspace,
             message,
@@ -485,6 +497,12 @@ fn print(response: Response, patch: bool) {
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::Files { files } => {
+            for file in files {
+                println!("{}", file.path);
+            }
+        }
+        Response::Draft { text } => println!("{text}"),
         Response::Committed { commit } => println!(
             "{}",
             rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])

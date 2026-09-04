@@ -9,6 +9,7 @@ pub mod checkpoint;
 pub mod db;
 pub mod diff;
 pub mod driver;
+pub mod files;
 pub mod git;
 pub mod i18n;
 pub mod logging;

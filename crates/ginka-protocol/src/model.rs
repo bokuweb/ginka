@@ -239,6 +239,18 @@ pub enum TranscriptPayload {
     Agent { event: crate::event::AgentEvent },
 }
 
+/// One file in a workspace, as a picker shows it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    /// Relative to the worktree root, which is what a mention inserts.
+    pub path: String,
+    /// The last segment, shown apart from the rest so a list reads as names.
+    pub name: String,
+    /// How well it matched, for ordering. Zero when nothing was typed.
+    pub score: u32,
+}
+
 /// Where a search found something.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -944,3 +944,85 @@ mod tests {
         assert_eq!(render_input(&json!("ls -la")), "ls -la");
     }
 }
+
+/// What the composer is completing, read from the text before the caret.
+///
+/// A mention is `@` followed by anything that is not a space, and it only
+/// counts at the end of what has been typed: `@src/main.rs and now what?` is a
+/// finished mention in a sentence, not a picker that should still be open.
+pub fn mention_being_typed(text: &str) -> Option<&str> {
+    let last_line = text.rsplit('\n').next()?;
+    let at = last_line.rfind('@')?;
+    // `foo@bar` is an address, not a mention: one has to start a word.
+    let starts_a_word = at == 0
+        || last_line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+    if !starts_a_word {
+        return None;
+    }
+    let query = &last_line[at + 1..];
+    (!query.contains(char::is_whitespace)).then_some(query)
+}
+
+/// Replace the mention being typed with `path`, and say what the text becomes.
+///
+/// The trailing space is deliberate: a mention is finished once it is chosen,
+/// and the next thing typed is a sentence rather than more of the path.
+pub fn complete_mention(text: &str, path: &str) -> String {
+    let Some(query) = mention_being_typed(text) else {
+        return text.to_string();
+    };
+    let cut = text.len() - query.len();
+    format!("{}{path} ", &text[..cut])
+}
+
+#[cfg(test)]
+mod mentions {
+    use super::*;
+
+    #[test]
+    fn an_at_sign_starts_a_mention() {
+        assert_eq!(mention_being_typed("look at @src/ma"), Some("src/ma"));
+        assert_eq!(mention_being_typed("@"), Some(""));
+    }
+
+    #[test]
+    fn a_finished_mention_is_not_still_being_typed() {
+        // Otherwise the picker stays open over the rest of the sentence.
+        assert_eq!(mention_being_typed("@src/main.rs and then"), None);
+    }
+
+    #[test]
+    fn an_address_is_not_a_mention() {
+        assert_eq!(mention_being_typed("mail me at bob@example"), None);
+    }
+
+    #[test]
+    fn nothing_typed_is_not_a_mention() {
+        assert_eq!(mention_being_typed(""), None);
+        assert_eq!(mention_being_typed("no at sign here"), None);
+    }
+
+    #[test]
+    fn only_the_line_being_typed_counts() {
+        assert_eq!(mention_being_typed("@old/path\nand now"), None);
+        assert_eq!(mention_being_typed("first line\n@sec"), Some("sec"));
+    }
+
+    #[test]
+    fn choosing_a_file_finishes_the_mention() {
+        assert_eq!(
+            complete_mention("look at @src/ma", "src/main.rs"),
+            "look at @src/main.rs ",
+            "a chosen mention is finished, and what follows is a sentence"
+        );
+        assert_eq!(complete_mention("@", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn completing_when_nothing_is_being_typed_changes_nothing() {
+        assert_eq!(complete_mention("plain text", "x.rs"), "plain text");
+    }
+}

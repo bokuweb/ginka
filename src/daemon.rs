@@ -13,7 +13,7 @@
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Session, TranscriptEntry,
+    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Session, TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
@@ -176,6 +176,43 @@ impl DaemonLink {
     pub async fn restore(&self, checkpoint: &CheckpointId) {
         self.ask(Request::RestoreCheckpoint {
             checkpoint: checkpoint.clone(),
+        })
+        .await;
+    }
+
+    /// The files in a workspace that match `query`, best first.
+    pub async fn files(&self, workspace: &WorkspaceId, query: &str) -> Vec<FileEntry> {
+        match self
+            .ask(Request::WorkspaceFiles {
+                workspace: workspace.clone(),
+                query: Some(query.to_string()),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        }
+    }
+
+    /// What was being typed in a workspace when it was last left.
+    pub async fn draft(&self, workspace: &WorkspaceId) -> String {
+        match self
+            .ask(Request::ComposerDraft {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Draft { text }) => text,
+            _ => String::new(),
+        }
+    }
+
+    /// Keep what is being typed, so leaving does not lose it.
+    pub async fn save_draft(&self, workspace: &WorkspaceId, text: String) {
+        self.ask(Request::SaveComposerDraft {
+            workspace: workspace.clone(),
+            text,
         })
         .await;
     }

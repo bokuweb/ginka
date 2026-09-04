@@ -302,6 +302,31 @@ fn committing_nothing_says_what_git_said() {
 }
 
 #[test]
+fn a_workspaces_files_are_searchable_by_any_part_of_their_path() {
+    // What `@` in the composer reaches for.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "files"]);
+    let worktree = home.root().join("worktrees").join("comet").join("files");
+    std::fs::create_dir_all(worktree.join("src")).unwrap();
+    std::fs::write(worktree.join("src/parser.rs"), "fn parse() {}\n").unwrap();
+    std::fs::write(worktree.join(".gitignore"), "secret.txt\n").unwrap();
+    std::fs::write(worktree.join("secret.txt"), "shh\n").unwrap();
+
+    let all = home.ok(&["files", "comet/files"]);
+    assert!(all.contains("src/parser.rs"), "a file written now is offered: {all}");
+    assert!(
+        !all.contains("secret.txt"),
+        "what the project ignores is not offered: {all}"
+    );
+
+    // Any subsequence of the path will do.
+    let found = home.ok(&["files", "comet/files", "prsr"]);
+    assert!(found.contains("src/parser.rs"), "{found}");
+}
+
+#[test]
 fn searching_conversations_that_do_not_exist_yet_is_an_empty_answer() {
     // Not an error: a user searching a fresh install has asked a reasonable
     // question and the answer is "nothing".

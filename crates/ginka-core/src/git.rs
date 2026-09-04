@@ -478,6 +478,24 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
     Ok(crate::diff::parse(&patch))
 }
 
+/// Every file git would show in the worktree, tracked or not.
+///
+/// `--exclude-standard` keeps the ignore rules, which is the difference
+/// between offering the user their own source files and offering them
+/// `node_modules`.
+pub fn ls_files(worktree: &Path) -> Result<Vec<String>> {
+    let listed = git(
+        worktree,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    )?;
+    Ok(listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
 /// Commit what is in the worktree.
 ///
 /// `all` stages everything first, including files git has never seen, which is
@@ -780,6 +798,30 @@ prunable
                 .unwrap()
                 .contains("draft.txt")
         );
+    }
+
+    #[test]
+    fn listing_files_shows_the_users_own_and_not_what_they_ignore() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::create_dir_all(root.join("node_modules")).unwrap();
+        std::fs::write(root.join("node_modules/lib.js"), "noise\n").unwrap();
+        std::fs::write(root.join(".gitignore"), ".env\nnode_modules\n").unwrap();
+        std::fs::write(root.join(".env"), "SECRET=1\n").unwrap();
+        std::fs::write(root.join("fresh.rs"), "fn new() {}\n").unwrap();
+
+        let files = ls_files(&root).unwrap();
+        assert!(files.contains(&"tracked.txt".to_string()), "{files:?}");
+        assert!(
+            files.contains(&"fresh.rs".to_string()),
+            "a file written a minute ago is the one being reached for: {files:?}"
+        );
+        assert!(
+            !files.iter().any(|path| path.contains("node_modules")),
+            "{files:?}"
+        );
+        assert!(!files.contains(&".env".to_string()), "{files:?}");
     }
 
     #[test]

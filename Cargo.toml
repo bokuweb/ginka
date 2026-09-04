@@ -49,6 +49,9 @@ clap = { version = "4", features = ["derive"] }
 dirs = "6"
 futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink", "async-await"] }
+# The matcher the roadmap picked for quick-open, the command palette and file
+# mentions (§4.3). Small, pure Rust, and the same one Helix and Zed use.
+nucleo-matcher = "0.3"
 parking_lot = "0.12"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rust-i18n = "4"

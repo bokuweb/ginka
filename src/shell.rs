@@ -46,6 +46,8 @@ enum Picker {
     Agent,
     /// Which of that agent's models it runs on.
     Model,
+    /// Which file the `@` being typed means.
+    Mention,
 }
 
 const CONTEXT: &str = "Shell";
@@ -127,6 +129,8 @@ pub struct Shell {
     composer_focused: bool,
     /// Which picker is open above the composer, if any.
     picker: Option<Picker>,
+    /// The files offered for the mention being typed, if one is.
+    mentions: Vec<ginka_protocol::model::FileEntry>,
     /// The agent the user chose, which beats whatever would have been picked
     /// for them. `None` until they choose one.
     chosen_agent: Option<String>,
@@ -188,24 +192,34 @@ impl Shell {
             crate::surfaces::SurfaceEvent::Commit(message) => this.commit(message.clone(), cx),
         });
 
-        let selection = cx.subscribe(&sidebar, |this, sidebar, event, cx| match event {
-            SidebarEvent::Selected => {
-                this.session = sidebar.read(cx).selected_row().cloned();
-                // A different workspace is a different conversation.
-                this.transcript = Transcript::new();
-                this.transcript_of = None;
-                this.session_state = None;
-                this.submitted = false;
-                this.transcript_follows = true;
-                this.picker = None;
-                this.chosen_agent = None;
-                this.chosen_model = None;
-                this.start_fresh = false;
-                this.checkpoints = Vec::new();
-                this.rewinding = None;
-                cx.notify();
-            }
-        });
+        let selection =
+            cx.subscribe_in(
+                &sidebar,
+                window,
+                |this, sidebar, event, window, cx| match event {
+                    SidebarEvent::Selected => {
+                        this.session = sidebar.read(cx).selected_row().cloned();
+                        // A different workspace is a different conversation.
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.session_state = None;
+                        this.submitted = false;
+                        this.transcript_follows = true;
+                        this.picker = None;
+                        this.chosen_agent = None;
+                        this.chosen_model = None;
+                        this.start_fresh = false;
+                        this.checkpoints = Vec::new();
+                        this.rewinding = None;
+                        this.mentions.clear();
+                        // Whatever was half-written here when it was last left.
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.load_draft(window, cx);
+                        cx.notify();
+                    }
+                },
+            );
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -221,7 +235,15 @@ impl Shell {
             &composer,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => {
+                    // A mention being chosen is not a message being sent.
+                    if this.picker == Some(Picker::Mention) {
+                        this.take_first_mention(window, cx);
+                    } else {
+                        this.submit(window, cx);
+                    }
+                }
+                InputEvent::Change => this.composer_changed(window, cx),
                 InputEvent::Focus => {
                     this.composer_focused = true;
                     cx.notify();
@@ -357,6 +379,7 @@ impl Shell {
             submitted: false,
             composer_focused: false,
             picker: None,
+            mentions: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
             start_fresh: false,
@@ -578,6 +601,13 @@ impl Shell {
         };
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
+        // The draft belonged to the prompt that has just been sent.
+        {
+            let link = self.link.clone();
+            let workspace = row.workspace.clone();
+            cx.background_spawn(async move { link.save_draft(&workspace, String::new()).await })
+                .detach();
+        }
         // Before the daemon has answered: the user pressed enter, and the
         // window saying nothing for a round trip reads as a window that
         // dropped it.
@@ -1392,6 +1422,27 @@ impl Shell {
                     )
                 })
                 .collect(),
+            Picker::Mention => self
+                .mentions
+                .iter()
+                .map(|file| {
+                    let path = file.path.clone();
+                    self.picker_row(
+                        SharedString::from(format!("mention:{}", file.path)),
+                        file.name.clone(),
+                        // The directory, quietly, because two files with the
+                        // same name are told apart by where they are.
+                        file.path
+                            .rsplit_once('/')
+                            .map(|(directory, _)| directory.to_string()),
+                        false,
+                        cx.listener(move |this, _, window, cx| {
+                            this.choose_mention(&path.clone(), window, cx)
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
             Picker::Model => self
                 .models()
                 .into_iter()
@@ -1486,6 +1537,108 @@ impl Shell {
                     .map(|agent| agent.models.clone())
             })
             .unwrap_or_default()
+    }
+
+    /// Put back what was being typed here when it was last left.
+    fn load_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let text = cx
+                .background_spawn(async move { link.draft(&workspace).await })
+                .await;
+            if text.is_empty() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                // Only into an empty composer: a draft arriving late must not
+                // overwrite something the user has already started typing.
+                if this.composer.read(cx).value().is_empty() {
+                    this.composer
+                        .update(cx, |state, cx| state.set_value(text, window, cx));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What the composer does on every keystroke.
+    ///
+    /// Two things, both of which have to be cheap: keep the draft, so leaving
+    /// does not lose it, and offer files while a mention is being typed.
+    fn composer_changed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+
+        // Written through the daemon rather than held here: a second window on
+        // the same workspace is looking at the same draft.
+        let link = self.link.clone();
+        let saving = text.clone();
+        let for_draft = workspace.clone();
+        cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
+            .detach();
+
+        match ginka_ui::transcript::mention_being_typed(&text) {
+            Some(query) => {
+                let query = query.to_string();
+                let link = self.link.clone();
+                cx.spawn(async move |this, cx| {
+                    let found = cx
+                        .background_spawn(async move { link.files(&workspace, &query).await })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        // Only if a mention is still being typed: the answer
+                        // may arrive after the user finished the word.
+                        let still = ginka_ui::transcript::mention_being_typed(
+                            &this.composer.read(cx).value(),
+                        )
+                        .is_some();
+                        this.mentions = found;
+                        this.picker = (still && !this.mentions.is_empty())
+                            .then_some(Picker::Mention)
+                            .or(match this.picker {
+                                Some(Picker::Mention) => None,
+                                other => other,
+                            });
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            None => {
+                if self.picker == Some(Picker::Mention) {
+                    self.picker = None;
+                    self.mentions.clear();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Put a chosen file into the prompt in place of what was typed.
+    fn choose_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let completed = ginka_ui::transcript::complete_mention(&text, path);
+        self.composer
+            .update(cx, |state, cx| state.set_value(completed, window, cx));
+        self.picker = None;
+        self.mentions.clear();
+        cx.notify();
+    }
+
+    /// Enter with the mention picker open takes the best match.
+    fn take_first_mention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(best) = self.mentions.first().map(|entry| entry.path.clone()) else {
+            return;
+        };
+        self.choose_mention(&best, window, cx);
     }
 
     /// Open a picker, or close it if it is the one already open.
