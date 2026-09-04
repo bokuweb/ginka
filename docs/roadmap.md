@@ -282,7 +282,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [x] Agent and model pickers in the composer, and a new-session toggle
 - [x] Composer: `@file` mentions, slash commands from `.claude/commands`, drafts persisted per workspace
-- [ ] Plan approval and ask-user-question interaction modes. The events and the `respond_to_agent` request exist; no shipped driver can interrupt a turn to raise them, so this waits on ACP
+- [x] Plan approval and ask-user-question cards: the events, the `respond_to_agent` request, and the transcript cards that answer them. No shipped driver can interrupt a turn to raise one yet, so the loop is only closed once ACP lands (M5)
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
 - [x] `codex` driver (both generations of its JSONL)
@@ -446,3 +446,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |
 | 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
 | 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |
+| 2026-09-04 | Whether a question has been answered is a property of the transcript, not of the window | A transcript re-read after a restart has to know as much as one that was watched, and what it knows is that the reader said something afterwards. The card stops offering buttons on that alone. |

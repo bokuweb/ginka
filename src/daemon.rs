@@ -205,6 +205,16 @@ impl DaemonLink {
         .await;
     }
 
+    /// Answer a question or a plan the agent is waiting on.
+    pub async fn respond(&self, session: &SessionId, request_id: &str, response: &str) {
+        self.ask(Request::RespondToAgent {
+            session: session.clone(),
+            request_id: request_id.to_string(),
+            response: response.to_string(),
+        })
+        .await;
+    }
+
     /// The lines in a workspace's files that contain `query`.
     pub async fn search_content(&self, workspace: &WorkspaceId, query: &str) -> Vec<ContentMatch> {
         match self

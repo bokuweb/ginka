@@ -80,6 +80,12 @@ transcript.rewind.yes:
 transcript.rewind.no:
   en: Keep
   ja: やめる
+transcript.plan.approve:
+  en: Approve
+  ja: 承認する
+transcript.plan.reject:
+  en: Not this
+  ja: 却下する
 transcript.copy:
   en: Copy the answer
   ja: 返答をコピー

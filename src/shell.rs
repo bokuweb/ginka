@@ -1398,6 +1398,170 @@ impl Shell {
             )
     }
 
+    /// A question the agent is waiting on, with its answers as buttons.
+    ///
+    /// The options are the agent's own words, so they are sent back verbatim:
+    /// a card that paraphrased what the reader chose would be answering a
+    /// different question. Once answered it is history, and history is read
+    /// rather than clicked.
+    fn asked(
+        &self,
+        index: usize,
+        id: &str,
+        question: &str,
+        options: &[String],
+        answered: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_2()
+            .rounded(px(tokens.radius.card))
+            .bg(tokens.colors().bg_surface)
+            .border_1()
+            .border_color(if answered {
+                tokens.colors().border_subtle
+            } else {
+                tokens.colors().status_attention.opacity(0.55)
+            })
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(tokens.colors().text_primary)
+                    .child(question.to_string()),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(options.iter().enumerate().map(|(at, option)| {
+                        let answer = option.clone();
+                        let asked = id.to_string();
+                        div()
+                            .id(SharedString::from(format!("ask-{index}-{at}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .text_sm()
+                            .when(answered, |this| {
+                                this.text_color(tokens.colors().text_muted)
+                                    .border_1()
+                                    .border_color(tokens.colors().border_subtle)
+                            })
+                            .when(!answered, |this| {
+                                this.bg(tokens.colors().row_active())
+                                    .text_color(tokens.colors().text_primary)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().accent.opacity(0.35)))
+                            })
+                            .when(!answered, |this| {
+                                this.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(asked.clone(), answer.clone(), cx)
+                                }))
+                            })
+                            .child(option.clone())
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// A plan the agent wants approved, with the two answers it can take.
+    fn proposed(
+        &self,
+        index: usize,
+        id: &str,
+        plan: &str,
+        answered: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let approve = id.to_string();
+        let reject = id.to_string();
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_2()
+            .rounded(px(tokens.radius.card))
+            .bg(tokens.colors().bg_surface)
+            .border_1()
+            .border_color(if answered {
+                tokens.colors().border_subtle
+            } else {
+                tokens.colors().accent.opacity(0.55)
+            })
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .line_height(px(25.))
+                    .text_color(tokens.colors().text_primary)
+                    .child(plan.to_string()),
+            )
+            .children((!answered).then(|| {
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("plan-yes-{index}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .bg(tokens.colors().accent.opacity(0.9))
+                            .text_sm()
+                            .text_color(tokens.colors().bg_window)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // English, because this one is read by the
+                                // agent rather than by the user: the label
+                                // beside it is what the user reads.
+                                this.respond(
+                                    approve.clone(),
+                                    "Approved. Go ahead with this plan.".into(),
+                                    cx,
+                                )
+                            }))
+                            .child(rust_i18n::t!("transcript.plan.approve").to_string()),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("plan-no-{index}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(
+                                    reject.clone(),
+                                    "Not approved. Stop and wait for further instructions.".into(),
+                                    cx,
+                                )
+                            }))
+                            .child(rust_i18n::t!("transcript.plan.reject").to_string()),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    /// Answer whatever the agent is waiting on.
+    fn respond(&mut self, request_id: String, response: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        // Folded in as the reader's own words straight away: the daemon will
+        // say the same thing back, and waiting for it is a card that stays
+        // clickable after it has been clicked.
+        self.transcript.answer(&request_id);
+        let link = self.link.clone();
+        cx.notify();
+        cx.background_spawn(async move { link.respond(&session, &request_id, &response).await })
+            .detach();
+    }
+
     /// The line that says the agent is still there.
     ///
     /// An agent between tokens looks exactly like one that has died, and the
@@ -1540,24 +1704,14 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
-            TranscriptBlock::Question { question, options } => v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .text_color(tokens.colors().accent)
-                        .child(question.clone()),
-                )
-                .children(options.iter().map(|option| {
-                    div()
-                        .text_sm()
-                        .text_color(tokens.colors().text_secondary)
-                        .child(format!("· {option}"))
-                }))
-                .into_any_element(),
-            TranscriptBlock::Plan { plan } => {
-                prose(plan, tokens.colors().text_secondary).into_any_element()
+            TranscriptBlock::Question {
+                id,
+                question,
+                options,
+                answered,
+            } => self.asked(index, id, question, options, *answered, cx),
+            TranscriptBlock::Plan { id, plan, answered } => {
+                self.proposed(index, id, plan, *answered, cx)
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.

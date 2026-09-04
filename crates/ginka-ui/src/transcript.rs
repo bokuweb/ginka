@@ -36,11 +36,23 @@ pub enum Block {
     },
     /// The agent is blocked on the user.
     Question {
+        /// What an answer is sent against.
+        id: String,
         question: String,
         options: Vec<String>,
+        /// Whether the reader has already replied to it.
+        ///
+        /// Kept on the block rather than in the view: a transcript re-read
+        /// after a restart has to know as much as one that was watched, and
+        /// what it knows is that the reader said something afterwards.
+        answered: bool,
     },
     /// A plan the agent wants approved before acting.
-    Plan { plan: String },
+    Plan {
+        id: String,
+        plan: String,
+        answered: bool,
+    },
     /// A turn boundary. A checkpoint was taken here.
     TurnEnd { turn: u32 },
     /// How the session ended.
@@ -138,6 +150,10 @@ impl Transcript {
 
         match &entry.payload {
             TranscriptPayload::User { text } => {
+                // Anything the reader says answers whatever they were being
+                // asked: the agent is not going to ask twice and wait for the
+                // second answer first.
+                self.answer_everything_open();
                 self.blocks.push(Block::User { text: text.clone() })
             }
             TranscriptPayload::Agent { event } => self.fold(event),
@@ -180,14 +196,20 @@ impl Transcript {
                 is_error,
             } => self.attach_result(id, output, *is_error),
             AgentEvent::AskUser {
-                question, options, ..
+                id,
+                question,
+                options,
             } => self.blocks.push(Block::Question {
+                id: id.clone(),
                 question: question.clone(),
                 options: options.clone(),
+                answered: false,
             }),
-            AgentEvent::PlanProposal { plan, .. } => {
-                self.blocks.push(Block::Plan { plan: plan.clone() })
-            }
+            AgentEvent::PlanProposal { id, plan } => self.blocks.push(Block::Plan {
+                id: id.clone(),
+                plan: plan.clone(),
+                answered: false,
+            }),
             // Accounting belongs in the context bar, not in the conversation.
             AgentEvent::Usage { usage } => self.usage = *usage,
             AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn }),
@@ -195,6 +217,38 @@ impl Transcript {
                 state: *state,
                 summary: summary.clone(),
             }),
+        }
+    }
+
+    /// Mark one question or plan answered, before the daemon says so.
+    ///
+    /// A card that stays clickable after it has been clicked invites a second
+    /// answer to a question that has one.
+    pub fn answer(&mut self, id: &str) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question {
+                    id: asked,
+                    answered,
+                    ..
+                }
+                | Block::Plan {
+                    id: asked,
+                    answered,
+                    ..
+                } if asked == id => *answered = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Mark every question and plan still waiting as answered.
+    fn answer_everything_open(&mut self) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question { answered, .. } | Block::Plan { answered, .. } => *answered = true,
+                _ => {}
+            }
         }
     }
 
@@ -942,6 +996,56 @@ mod tests {
         assert_eq!(render_input(&json!({})), "");
         assert_eq!(render_input(&serde_json::Value::Null), "");
         assert_eq!(render_input(&json!("ls -la")), "ls -la");
+    }
+
+    #[test]
+    fn a_question_carries_what_an_answer_is_sent_against() {
+        // Without the id there is nothing to answer to, and the card is a
+        // paragraph with buttons that do nothing.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[agent(
+            1,
+            AgentEvent::AskUser {
+                id: "ask-1".into(),
+                question: "Which one?".into(),
+                options: vec!["this".into(), "that".into()],
+            },
+        )]);
+        match transcript.blocks().last().unwrap() {
+            Block::Question {
+                id,
+                options,
+                answered,
+                ..
+            } => {
+                assert_eq!(id, "ask-1");
+                assert_eq!(options.len(), 2);
+                assert!(!answered, "nobody has said anything yet");
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saying_anything_answers_what_was_being_asked() {
+        // A transcript re-read after a restart has to know as much as one that
+        // was watched, and what it knows is that the reader replied.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::PlanProposal {
+                    id: "plan-1".into(),
+                    plan: "do the thing".into(),
+                },
+            ),
+            user(2, "go ahead"),
+        ]);
+        let answered = transcript
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, Block::Plan { answered: true, .. }));
+        assert!(answered, "{:?}", transcript.blocks());
     }
 }
 
