@@ -5,6 +5,7 @@
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
 pub mod db;
+pub mod driver;
 pub mod git;
 pub mod logging;
 pub mod paths;
