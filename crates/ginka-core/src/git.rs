@@ -514,6 +514,60 @@ pub fn commit(worktree: &Path, message: &str, all: bool) -> Result<String> {
     head_commit(worktree).context("committed, but git reports no HEAD")
 }
 
+/// Stage one path for the next commit.
+///
+/// Per file rather than all-or-nothing, because a review that ends in "these
+/// three files are right and that one is not" has nowhere to put that answer
+/// otherwise.
+pub fn stage(worktree: &Path, path: &str) -> Result<()> {
+    git(worktree, &["add", "--", path])?;
+    Ok(())
+}
+
+/// Take one path back out of the next commit, leaving the file alone.
+///
+/// `restore --staged` needs a commit to restore the index entry from, so a
+/// repository whose first commit has not happened yet drops the entry instead.
+/// That is the same outcome — the file goes back to being untracked — reached
+/// the only way git offers before there is a HEAD.
+pub fn unstage(worktree: &Path, path: &str) -> Result<()> {
+    match head_commit(worktree) {
+        Some(_) => git(worktree, &["restore", "--staged", "--", path])?,
+        None => git(
+            worktree,
+            &["rm", "--cached", "--force", "--quiet", "--", path],
+        )?,
+    };
+    Ok(())
+}
+
+/// Throw away a file's uncommitted work, staged or not.
+///
+/// A file that HEAD has never heard of cannot be restored from it — there is
+/// nothing to restore — so it is removed from the index and deleted, which is
+/// what "undo this file" means for a file the agent created. Destructive by
+/// definition: the caller is the one that has to have asked.
+pub fn revert_file(worktree: &Path, path: &str) -> Result<()> {
+    let known = head_commit(worktree).is_some()
+        && git(worktree, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok();
+    if known {
+        git(worktree, &["restore", "--staged", "--worktree", "--", path])?;
+        return Ok(());
+    }
+    // Best-effort: the file may never have reached the index, and a path git
+    // does not know is one there is nothing to remove.
+    git(
+        worktree,
+        &["rm", "--cached", "--force", "--quiet", "--", path],
+    )
+    .ok();
+    let full = worktree.join(path);
+    if full.exists() {
+        std::fs::remove_file(&full).with_context(|| format!("deleting {path}"))?;
+    }
+    Ok(())
+}
+
 /// Push the worktree's branch, setting an upstream if it has none.
 ///
 /// A branch cut for a workspace has never been pushed, so the first push is
@@ -990,5 +1044,100 @@ prunable
         snapshot(&root, REF, "checkpoint").unwrap();
         drop_snapshot(&root, REF).unwrap();
         assert!(git(&root, &["rev-parse", "--verify", "--quiet", REF]).is_err());
+    }
+
+    #[test]
+    fn a_file_can_be_staged_and_taken_back_out_on_its_own() {
+        // The point of staging per file: "these two are right, that one is
+        // not" has nowhere to go otherwise.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(root.join("other.txt"), "new\n").unwrap();
+
+        stage(&root, "tracked.txt").unwrap();
+        let staged = changes(&root, &ChangeSource::Staged).unwrap();
+        let paths: Vec<&str> = staged.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, ["tracked.txt"], "only what was staged is staged");
+
+        unstage(&root, "tracked.txt").unwrap();
+        assert!(
+            changes(&root, &ChangeSource::Staged).unwrap().is_empty(),
+            "unstaging leaves nothing for the next commit"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "edited\n",
+            "unstaging is about the index, not the file"
+        );
+    }
+
+    #[test]
+    fn staging_works_before_there_is_anything_to_restore_from() {
+        // A repository whose first commit has not happened has no HEAD, and
+        // `restore --staged` has nothing to read the entry back from.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "--initial-branch=main"]).unwrap();
+        std::fs::write(root.join("first.txt"), "hello\n").unwrap();
+
+        stage(&root, "first.txt").unwrap();
+        assert_eq!(changes(&root, &ChangeSource::Staged).unwrap().len(), 1);
+        unstage(&root, "first.txt").unwrap();
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+        assert!(
+            root.join("first.txt").exists(),
+            "the file is not the target"
+        );
+    }
+
+    #[test]
+    fn reverting_a_file_puts_it_back_and_deletes_one_that_was_never_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(root.join("invented.rs"), "fn wrong() {}\n").unwrap();
+        // What the changes panel does before it draws, which leaves the new
+        // file in the index — a revert has to cope with that.
+        changes(&root, &ChangeSource::Uncommitted).unwrap();
+
+        revert_file(&root, "tracked.txt").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
+
+        revert_file(&root, "invented.rs").unwrap();
+        assert!(
+            !root.join("invented.rs").exists(),
+            "undoing a file the agent invented means the file is gone"
+        );
+        assert!(
+            changes(&root, &ChangeSource::Uncommitted)
+                .unwrap()
+                .is_empty(),
+            "nothing is left over"
+        );
+    }
+
+    #[test]
+    fn reverting_a_staged_file_undoes_the_staging_too() {
+        // Half an undo -- the working tree restored, the old edit still queued
+        // for the next commit -- is worse than none.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        stage(&root, "tracked.txt").unwrap();
+
+        revert_file(&root, "tracked.txt").unwrap();
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "original\n"
+        );
     }
 }

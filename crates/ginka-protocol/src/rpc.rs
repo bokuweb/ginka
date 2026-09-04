@@ -127,6 +127,25 @@ pub enum Request {
         message: String,
         all: bool,
     },
+    /// Put one file into the next commit, or take it back out.
+    ///
+    /// Per file, because "these three are right and that one is not" is the
+    /// ordinary outcome of reading an agent's work, and committing all of it
+    /// is not the only thing a reader may want to do about it.
+    StageFile {
+        workspace: WorkspaceId,
+        path: String,
+        /// `true` stages it, `false` takes it back out.
+        staged: bool,
+    },
+    /// Throw away one file's uncommitted work.
+    ///
+    /// Destructive and not undoable through git: a file the agent invented is
+    /// deleted. The caller confirms; the daemon does as it is told.
+    RevertFile {
+        workspace: WorkspaceId,
+        path: String,
+    },
     /// Push a workspace's branch, setting an upstream if it has none.
     Push { workspace: WorkspaceId },
 

@@ -213,11 +213,18 @@ impl Shell {
         let surfaces = cx.new(|_| SurfacePanel::new());
 
         let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
-            crate::surfaces::SurfaceEvent::Commit(message) => this.commit(message.clone(), cx),
+            crate::surfaces::SurfaceEvent::Commit {
+                message,
+                only_staged,
+            } => this.commit(message.clone(), *only_staged, cx),
             crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
                 this.leave_comment(path.clone(), *line, text.clone(), cx)
             }
             crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+            crate::surfaces::SurfaceEvent::Stage { path, staged } => {
+                this.stage(path.clone(), *staged, cx)
+            }
+            crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
         });
 
         let selection =
@@ -594,7 +601,7 @@ impl Shell {
     }
 
     /// Commit the workspace's work, and say so if git would not.
-    fn commit(&mut self, message: String, cx: &mut Context<Self>) {
+    fn commit(&mut self, message: String, only_staged: bool, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
@@ -602,10 +609,69 @@ impl Shell {
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
             let outcome = cx
-                .background_spawn(async move { link.commit(&workspace, message).await })
+                .background_spawn(
+                    async move { link.commit(&workspace, message, !only_staged).await },
+                )
                 .await;
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_commit_result(outcome.err(), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Put a file into the next commit, or take it back out.
+    fn stage(&mut self, path: String, staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move { link.stage(&workspace, &path, staged).await })
+                .await;
+            // The staged set and the diff both moved; the refresh reads both.
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Throw away a file's uncommitted work.
+    fn revert(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move { link.revert(&workspace, &path).await })
+                .await;
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Re-read the diff, the staged set and the comments for the workspace on
+    /// screen, without waiting for the next tick.
+    fn refresh_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let (changes, staged, comments) = cx
+                .background_spawn(async move {
+                    let changes = link
+                        .changes(&workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .await;
+                    let staged = link.staged_paths(&workspace).await;
+                    let comments = link.comments(&workspace).await;
+                    (changes, staged, comments)
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_changes(changes, cx);
+                surfaces.set_staged(staged, cx);
+                surfaces.set_comments(comments, cx);
             });
         })
         .detach();
@@ -2400,7 +2466,7 @@ async fn pull_rows(
             )
         })
         .map_err(|_| ())?;
-    let (rows, agents, checkpoints, changes, comments) = cx
+    let (rows, agents, checkpoints, changes, staged, comments) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Cached by the daemon, so this is a request rather than two
@@ -2410,16 +2476,17 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            let (changes, comments) = match (&showing, wants_changes) {
+            let (changes, staged, comments) = match (&showing, wants_changes) {
                 (Some(workspace), true) => (
                     listing
                         .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
                         .await,
+                    listing.staged_paths(workspace).await,
                     listing.comments(workspace).await,
                 ),
-                _ => (None, Vec::new()),
+                _ => (None, Vec::new(), Vec::new()),
             };
-            (rows, agents, checkpoints, changes, comments)
+            (rows, agents, checkpoints, changes, staged, comments)
         })
         .await;
     tracing::debug!(
@@ -2433,6 +2500,7 @@ async fn pull_rows(
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_changes(changes, cx);
+                surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
             });
         }

@@ -151,13 +151,18 @@ impl DaemonLink {
     /// The error is the message git gave, because that is the one the user can
     /// act on: an identity that is not configured, a hook that refused, or
     /// nothing to commit at all.
-    pub async fn commit(&self, workspace: &WorkspaceId, message: String) -> Result<(), String> {
+    pub async fn commit(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+        all: bool,
+    ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         match client
             .request(Request::Commit {
                 workspace: workspace.clone(),
                 message,
-                all: true,
+                all,
             })
             .await
         {
@@ -171,6 +176,33 @@ impl DaemonLink {
                 }
             }
         }
+    }
+
+    /// The paths staged for the next commit.
+    pub async fn staged_paths(&self, workspace: &WorkspaceId) -> Vec<String> {
+        match self.changes(workspace, ChangeSource::Staged).await {
+            Some(changes) => changes.files.into_iter().map(|file| file.path).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Put a file into the next commit, or take it back out.
+    pub async fn stage(&self, workspace: &WorkspaceId, path: &str, staged: bool) {
+        self.ask(Request::StageFile {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            staged,
+        })
+        .await;
+    }
+
+    /// Throw away a file's uncommitted work.
+    pub async fn revert(&self, workspace: &WorkspaceId, path: &str) {
+        self.ask(Request::RevertFile {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+        })
+        .await;
     }
 
     /// Leave a comment on a line of the diff.

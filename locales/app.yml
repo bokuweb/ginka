@@ -126,6 +126,21 @@ surface.git.summary:
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。
+surface.git.stage:
+  en: Stage
+  ja: ステージ
+surface.git.staged:
+  en: Staged
+  ja: ステージ済み
+surface.git.revert:
+  en: Undo
+  ja: 取り消す
+surface.git.revert.yes:
+  en: Throw away
+  ja: 破棄する
+surface.git.revert.no:
+  en: Keep
+  ja: やめる
 surface.git.comment:
   en: What is wrong with this line?
   ja: この行の何が問題ですか？

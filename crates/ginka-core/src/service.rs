@@ -415,6 +415,29 @@ impl Service {
                 });
                 Ok(Response::Committed { commit })
             }
+            Request::StageFile {
+                workspace,
+                path,
+                staged,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if staged {
+                    git::stage(&worktree.path, &path).map_err(failed)?;
+                } else {
+                    git::unstage(&worktree.path, &path).map_err(failed)?;
+                }
+                Ok(Response::Ack)
+            }
+            Request::RevertFile { workspace, path } => {
+                let worktree = self.worktree(&workspace)?;
+                git::revert_file(&worktree.path, &path).map_err(failed)?;
+                // The file is back to what it was, so the sidebar's count of
+                // what is uncommitted is stale.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
             Request::Push { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 git::push(&worktree.path).map_err(failed)?;

@@ -27,6 +27,17 @@ pub struct SurfacePanel {
     /// One at a time: a review is read line by line, and two open boxes is a
     /// form, not a margin note.
     commenting: Option<(String, Option<u32>, Entity<TextareaState>)>,
+    /// The paths that are staged for the next commit.
+    ///
+    /// Read separately from the changes themselves: the uncommitted diff is
+    /// what the reader is reading, and whether a file is in the next commit is
+    /// a second question about the same file.
+    staged: Vec<String>,
+    /// The file whose revert has been offered and is waiting to be confirmed.
+    ///
+    /// Two steps, like a rewind: a revert deletes a file the agent wrote, and
+    /// git has nothing to undo it with.
+    reverting: Option<String>,
     /// The commit message being written, if the box is open.
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
@@ -35,8 +46,11 @@ pub struct SurfacePanel {
 
 /// Emitted when the panel wants the shell to do something only it can.
 pub enum SurfaceEvent {
-    /// Commit everything in the workspace with this message.
-    Commit(String),
+    /// Commit the workspace's work with this message.
+    ///
+    /// `only_staged` when the reader has staged something: having said which
+    /// files belong in the commit, they do not expect the rest to come along.
+    Commit { message: String, only_staged: bool },
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -45,6 +59,10 @@ pub enum SurfaceEvent {
     },
     /// Send every waiting comment back to the agent.
     SendReview,
+    /// Put a file into the next commit, or take it back out.
+    Stage { path: String, staged: bool },
+    /// Throw away a file's uncommitted work.
+    Revert { path: String },
 }
 
 impl EventEmitter<SurfaceEvent> for SurfacePanel {}
@@ -57,6 +75,8 @@ impl SurfacePanel {
             expanded: None,
             comments: Vec::new(),
             commenting: None,
+            staged: Vec::new(),
+            reverting: None,
             message: None,
             complaint: None,
         }
@@ -72,6 +92,19 @@ impl SurfacePanel {
             self.comments = comments;
             cx.notify();
         }
+    }
+
+    /// Hand the panel the paths that are staged for the next commit.
+    pub fn set_staged(&mut self, staged: Vec<String>, cx: &mut Context<Self>) {
+        if self.staged != staged {
+            self.staged = staged;
+            cx.notify();
+        }
+    }
+
+    /// Whether the commit box would commit only part of what is on screen.
+    fn only_staged(&self) -> bool {
+        !self.staged.is_empty()
     }
 
     /// Say why a commit did not happen, or clear it once one did.
@@ -535,7 +568,111 @@ impl SurfacePanel {
             cx.notify();
             return;
         }
-        cx.emit(SurfaceEvent::Commit(message));
+        cx.emit(SurfaceEvent::Commit {
+            message,
+            only_staged: self.only_staged(),
+        });
+    }
+
+    /// What can be done to one file: put it in the next commit, or undo it.
+    ///
+    /// On the row rather than behind a menu, because both answers are ones a
+    /// reader reaches for while reading, and a menu is a second decision about
+    /// where the first one lives.
+    fn file_actions(
+        &self,
+        file: &ginka_protocol::model::FileChange,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let staged = self.staged.iter().any(|path| path == &file.path);
+        let asking = self.reverting.as_deref() == Some(file.path.as_str());
+        let path = file.path.clone();
+        let to_stage = path.clone();
+        let to_revert = path.clone();
+        let to_arm = path.clone();
+
+        let mut actions: Vec<AnyElement> = vec![
+            div()
+                .id(SharedString::from(format!("stage:{path}")))
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .when(staged, |this| this.bg(tokens.colors().row_active()))
+                .text_color(if staged {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted.opacity(0.7)
+                })
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                // The click belongs to the control, not to the row it sits on:
+                // staging a file must not also collapse its diff.
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.emit(SurfaceEvent::Stage {
+                        path: to_stage.clone(),
+                        staged: !staged,
+                    });
+                }))
+                .child(if staged {
+                    rust_i18n::t!("surface.git.staged").to_string()
+                } else {
+                    rust_i18n::t!("surface.git.stage").to_string()
+                })
+                .into_any_element(),
+        ];
+
+        if asking {
+            actions.push(
+                div()
+                    .id(SharedString::from(format!("revert-yes:{path}")))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().status_error.opacity(0.22))
+                    .text_xs()
+                    .text_color(tokens.colors().text_primary)
+                    .cursor_pointer()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.reverting = None;
+                        cx.emit(SurfaceEvent::Revert {
+                            path: to_revert.clone(),
+                        });
+                    }))
+                    .child(rust_i18n::t!("surface.git.revert.yes").to_string())
+                    .into_any_element(),
+            );
+        }
+        actions.push(
+            div()
+                .id(SharedString::from(format!("revert:{path}")))
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .text_color(if asking {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted.opacity(0.7)
+                })
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.reverting = (!asking).then(|| to_arm.clone());
+                    cx.notify();
+                }))
+                .child(if asking {
+                    rust_i18n::t!("surface.git.revert.no").to_string()
+                } else {
+                    rust_i18n::t!("surface.git.revert").to_string()
+                })
+                .into_any_element(),
+        );
+        actions
     }
 
     /// One file, and its diff when it is the one being read.
@@ -602,7 +739,8 @@ impl SurfacePanel {
                             .text_xs()
                             .text_color(tokens.colors().status_error)
                             .child(format!("-{}", file.removed)),
-                    ),
+                    )
+                    .children(self.file_actions(file, cx)),
             )
             .when(expanded && file.binary, |this| {
                 this.child(

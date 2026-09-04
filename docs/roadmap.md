@@ -300,9 +300,9 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [ ] File-path detection in terminal and chat output → click opens the file
 - [ ] Selection → "add to chat" / "add to terminal"
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
-- [ ] Split diff, intra-line word diff, revert file
+- [ ] Split diff, intra-line word diff
 - [x] Commit: message box under the reviewed files, `ginka commit` / `push`
-- [ ] Stage/unstage per file, agent-generated commit message
+- [x] Stage/unstage per file, revert a file; agent-generated commit message still open
 - [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
@@ -434,3 +434,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-03 | Only the reader closes a connection's write queue | Two writers into one queue meant whichever stopped first closed it, and on a shutdown the event pump stops first — which dropped the answer to the request that asked for the shutdown. |
 | 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
 | 2026-09-04 | Review comments are held by the daemon and sent as one message | A comment is worth writing before the reader has finished reading, and worth keeping if the window closes; sending each one as it is written interrupts the agent mid-turn and costs a round trip per line. The batch clears only once the agent has it. |
+| 2026-09-04 | Staging is per file, and the commit box follows what is staged | Reading an agent's work usually ends in "these are right, that one is not", and a commit box that took everything anyway would make staging decorative. Nothing staged still means commit everything, which is the common case. |

@@ -92,6 +92,25 @@ enum Command {
     /// Leave comments on a diff and send them back to the agent.
     #[command(subcommand)]
     Review(ReviewCommand),
+    /// Put a file into the next commit, or take it back out.
+    Stage {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Take it back out instead of putting it in.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Throw away a file's uncommitted work.
+    ///
+    /// A file the agent created is deleted, which git cannot undo.
+    Revert {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+    },
     /// Commit a workspace's work.
     Commit {
         /// The workspace id, as shown by `workspace list`.
@@ -378,6 +397,19 @@ fn request_for(command: Command) -> Result<Request> {
                 session: SessionId(session),
             }
         }
+        Command::Stage {
+            workspace,
+            path,
+            undo,
+        } => Request::StageFile {
+            workspace: WorkspaceId(workspace),
+            path,
+            staged: !undo,
+        },
+        Command::Revert { workspace, path } => Request::RevertFile {
+            workspace: WorkspaceId(workspace),
+            path,
+        },
         Command::Commit {
             workspace,
             message,
