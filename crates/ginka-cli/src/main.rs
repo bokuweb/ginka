@@ -140,6 +140,11 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
+    ///
+    /// Spawned by the agent, not by the user: the state stays in the daemon
+    /// and this is a bridge to it.
+    Mcp,
     /// Rewind a workspace to a saved state.
     #[command(subcommand)]
     Checkpoint(CheckpointCommand),
@@ -302,6 +307,7 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => doctor(&paths),
+        Command::Mcp => mcp(&paths),
         Command::Daemon(command) => daemon(&paths, command, cli.json),
         command => {
             // Read before the command is consumed: how a diff is printed is
@@ -323,6 +329,106 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Speak MCP on stdin and stdout until the agent closes them.
+///
+/// Line-delimited JSON, one message per line, which is the stdio transport the
+/// spec describes. Every tool call becomes a daemon request, so an agent has
+/// exactly the capabilities a person does (`AGENTS.md` rule 3).
+///
+/// The daemon is connected to lazily, on the first call rather than at start:
+/// an agent that lists the tools and never uses one should not have started a
+/// daemon by asking.
+fn mcp(paths: &Paths) -> Result<()> {
+    use ginka_core::mcp;
+    use std::io::{BufRead as _, Write as _};
+
+    let input = std::io::stdin();
+    let mut output = std::io::stdout();
+    let mut client: Option<Client> = None;
+
+    for line in input.lock().lines() {
+        let line = line.context("reading the agent's message")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(message) => message,
+            Err(error) => {
+                // Nothing to answer to: a message that did not parse has no id
+                // to reply against, so the error carries a null one.
+                let reply =
+                    mcp::error(serde_json::Value::Null, mcp::PARSE_ERROR, error.to_string());
+                writeln!(output, "{reply}")?;
+                output.flush()?;
+                continue;
+            }
+        };
+        let method = message
+            .get("method")
+            .and_then(|method| method.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let id = message.get("id").cloned();
+        // A notification has no id and takes no answer -- writing one back is
+        // how a client ends up waiting for a reply to nothing.
+        let Some(id) = id else {
+            continue;
+        };
+
+        let reply = match method.as_str() {
+            "initialize" => mcp::reply(id, mcp::server_info()),
+            "tools/list" => mcp::reply(id, mcp::tool_list()),
+            "ping" => mcp::reply(id, serde_json::json!({})),
+            "tools/call" => {
+                let empty = serde_json::json!({});
+                let params = message.get("params").unwrap_or(&empty);
+                let name = params
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .unwrap_or_default();
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                match mcp::request_for(name, &arguments) {
+                    Err(error) => mcp::reply(id, mcp::tool_failure(error.to_string())),
+                    Ok(request) => {
+                        let answered = smol::block_on(async {
+                            if client.is_none() {
+                                client = Some(connect(paths).await?);
+                            }
+                            let daemon = client.as_ref().expect("just connected");
+                            daemon
+                                .request(request)
+                                .await
+                                .map_err(|error| anyhow::anyhow!("{error}"))
+                        });
+                        match answered {
+                            Ok(response) => {
+                                mcp::reply(id, mcp::tool_result(serde_json::to_string(&response)?))
+                            }
+                            Err(error) => {
+                                // The daemon may have gone; the next call
+                                // reconnects rather than failing forever.
+                                client = None;
+                                mcp::reply(id, mcp::tool_failure(error.to_string()))
+                            }
+                        }
+                    }
+                }
+            }
+            other => mcp::error(
+                id,
+                mcp::METHOD_NOT_FOUND,
+                format!("no method called {other}"),
+            ),
+        };
+        writeln!(output, "{reply}")?;
+        output.flush()?;
+    }
+    Ok(())
 }
 
 /// Find the daemon, starting one if there is none.
@@ -513,7 +619,8 @@ fn request_for(command: Command) -> Result<Request> {
         }
 
         // Handled before this point, without a daemon.
-        Command::Doctor | Command::Daemon(_) => unreachable!("handled in main"),
+        // Not one request each: handled in `main` before this is reached.
+        Command::Doctor | Command::Daemon(_) | Command::Mcp => unreachable!("handled in main"),
     })
 }
 

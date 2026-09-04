@@ -14,6 +14,7 @@ pub mod files;
 pub mod git;
 pub mod i18n;
 pub mod logging;
+pub mod mcp;
 pub mod paths;
 pub mod project;
 pub mod registry;

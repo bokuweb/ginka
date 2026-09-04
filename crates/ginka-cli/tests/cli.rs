@@ -10,8 +10,9 @@
 //! rebuild another package's binary — against a stale one these fail with an
 //! `unsupported` method rather than with anything about the code under test.
 
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 
 const CLI: &str = env!("CARGO_BIN_EXE_ginka-cli");
 
@@ -49,6 +50,30 @@ impl Home {
             String::from_utf8_lossy(&output.stderr)
         );
         String::from_utf8_lossy(&output.stdout).to_string()
+    }
+
+    /// Drive the MCP bridge with a line-delimited conversation, and read the
+    /// replies back.
+    fn mcp(&self, messages: &[&str]) -> Vec<serde_json::Value> {
+        let mut child = Command::new(CLI)
+            .arg("mcp")
+            .env("GINKA_HOME", self.root())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("the bridge starts");
+        {
+            let stdin = child.stdin.as_mut().expect("it takes messages");
+            for message in messages {
+                writeln!(stdin, "{message}").unwrap();
+            }
+        }
+        let output = child.wait_with_output().expect("it finishes");
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("each reply is JSON"))
+            .collect()
     }
 
     /// A repository with one commit, ready to register.
@@ -351,4 +376,58 @@ fn sessions_and_checkpoints_are_listable_before_any_agent_has_run() {
     assert!(sessions.contains("no sessions"), "{sessions}");
     let checkpoints = home.ok(&["checkpoint", "list", "comet/harbor"]);
     assert!(checkpoints.contains("no checkpoints"), "{checkpoints}");
+}
+
+#[test]
+fn an_agent_can_drive_ginka_over_mcp() {
+    // M4's exit criterion, and rule 3's third client: what a person can do
+    // from the command line, an agent can do through a tool call, because
+    // both are the same request.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let replies = home.mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"ginka_workspace_create","arguments":{"project":"comet","branch":"harbor"}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"ginka_workspaces","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"ginka_read_file","arguments":{"workspace":"comet/harbor","path":"README.md"}}}"#,
+        r#"{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"ginka_nonsense","arguments":{}}}"#,
+    ]);
+
+    // The notification is not answered: a client waiting for a reply to one
+    // would wait forever.
+    let ids: Vec<u64> = replies
+        .iter()
+        .filter_map(|reply| reply["id"].as_u64())
+        .collect();
+    assert_eq!(ids, vec![1, 2, 3, 4, 5, 6], "{replies:#?}");
+
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "ginka");
+    let tools = replies[1]["result"]["tools"].as_array().unwrap();
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool["name"] == "ginka_session_start"),
+        "starting a sibling agent is the point of the surface"
+    );
+
+    let created = replies[2]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(created.contains("comet/harbor"), "{created}");
+    let listed = replies[3]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(listed.contains("harbor"), "{listed}");
+    let read = replies[4]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(read.contains("README"), "{read}");
+
+    // A call the agent got wrong is a result that says so, not a dead
+    // connection.
+    assert_eq!(replies[5]["result"]["isError"], true);
+    assert!(
+        replies[5]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("ginka_nonsense")
+    );
 }

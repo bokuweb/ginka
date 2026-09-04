@@ -327,7 +327,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea`, per-workspace persistence, panel visibility rules, `docs/ui.md` §3.4 empty state
 - [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron
 - [ ] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`)
-- [ ] MCP server on the daemon exposing the same operations to agents
+- [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
 - [ ] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
 
 **Exit criteria:** an agent can create a workspace, start a sibling agent, and read its diff entirely through the CLI/MCP.
@@ -444,3 +444,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | Word-level marks are computed in `ginka-core`, not asked of git | `--word-diff` returns a different text format to parse, and the pairing rule and the "too different to mark" threshold are judgement calls worth testing. One line against one line is short enough for a plain LCS. |
 | 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |
 | 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |
+| 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
