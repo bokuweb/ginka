@@ -315,7 +315,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] The normalized `AgentEvent` stream and the activity shape every tool call collapses into
 - [x] Claude's stream-json read into it, against recorded lines rather than a live CLI (R6)
 - [x] Process supervision: one child, one reader thread, cancellation that takes the agent's own children with it, and a fake agent binary to pin it against
-- [ ] The `claude` driver on top: launch arguments, resume from a session id, and `AgentSession` for steering and option changes
+- [x] The `claude` driver on top: launch arguments, resume from a session id, and `AgentSession` — steering writes a user message into the running turn, and only the permission mode forces a restart
+- [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
 - [ ] Session persistence: tasks, chats, messages; resume from vendor session id
 - [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination
 - [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace, message queueing while the agent is busy
@@ -332,7 +333,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 
 > **Landed already (domain layer, ahead of the milestone):** N1 steering policy and the driver/session traits (`ginka-core::driver`), N2 the in-session-vs-restart rule, N3 the model/effort/tier vocabulary (`ginka-protocol::provider`), N4 completion triggers, command merge and the bounded file index (`ginka-core::composer`), N5 titles (`ginka-protocol::session`), N6 attachments and the blob store, N14 provider settings.
 >
-> **The driver layer is landed below the trait:** the normalized event stream and the one activity shape (`ginka-core::driver::event`, `::activity`), Claude's stream-json parsed into it (`::claude`), and process supervision with cancellation and a fake agent to test it against (`::process`, `ginka-fake-agent`).
+> **The driver layer is landed:** the normalized event stream and the one activity shape (`ginka-core::driver::event`, `::activity`), Claude's stream-json parsed into it and the session that speaks it (`::claude`), process supervision with cancellation and a fake agent to test it against (`::process`, `ginka-fake-agent`), and provider detection with the settings override (`::probe`).
 >
 > **The reconnect contract is landed too, without its socket:** the versioned handshake and its refusals (`ginka-protocol::envelope`), discovery and the 0600 token file (`ginka-core::daemon`), the bounded event window that answers a resume with events, a gap or a reset (`ginka-core::events`), and the client cursor that deduplicates a replay, refuses to render a hole, and resyncs when the daemon's epoch changes (`ginka-client::cursor`). What remains for M2 is the socket itself, the request/response types over it, and the first real driver.
 
