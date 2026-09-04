@@ -13,8 +13,8 @@
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, FileContent, FileEntry, ReviewComment, Session,
-    SlashCommand, TerminalInfo, TranscriptEntry,
+    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
+    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
@@ -203,6 +203,21 @@ impl DaemonLink {
             path: path.to_string(),
         })
         .await;
+    }
+
+    /// The lines in a workspace's files that contain `query`.
+    pub async fn search_content(&self, workspace: &WorkspaceId, query: &str) -> Vec<ContentMatch> {
+        match self
+            .ask(Request::SearchContent {
+                workspace: workspace.clone(),
+                query: query.to_string(),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::Matches { matches }) => matches,
+            _ => Vec::new(),
+        }
     }
 
     /// One of a workspace's files, as text.

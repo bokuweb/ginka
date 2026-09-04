@@ -527,6 +527,18 @@ impl Changes {
     }
 }
 
+/// One line of a file that matched a search.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentMatch {
+    /// Relative to the worktree root.
+    pub path: String,
+    /// 1-based, as an editor counts them.
+    pub line: u32,
+    /// The line itself, as it is in the file.
+    pub text: String,
+}
+
 /// A file, as the panel that shows it needs it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

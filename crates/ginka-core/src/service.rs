@@ -550,6 +550,20 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::SearchContent {
+                workspace,
+                query,
+                limit,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let limit = limit
+                    .map(|limit| limit as usize)
+                    .unwrap_or(crate::files::DEFAULT_LIMIT);
+                Ok(Response::Matches {
+                    matches: crate::files::search_content(&worktree.path, &query, limit)
+                        .map_err(failed)?,
+                })
+            }
             Request::ReadFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::FileContent {

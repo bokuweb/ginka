@@ -5,7 +5,7 @@
 //! changed. The rest are placeholders until M3 and M4. M4 turns this into a
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
-use ginka_protocol::model::{ChangeKind, Changes, FileContent, FileEntry, LineKind};
+use ginka_protocol::model::{ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind};
 use ginka_ui::Tokens;
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
@@ -46,6 +46,8 @@ pub struct SurfacePanel {
     finder: Entity<InputState>,
     /// The paths that match it, best first.
     files: Vec<FileEntry>,
+    /// The lines that contain what was typed, if any do.
+    matches: Vec<ContentMatch>,
     /// The file being read, if one was opened.
     showing: Option<FileContent>,
 }
@@ -96,6 +98,7 @@ impl SurfacePanel {
         Self {
             finder,
             files: Vec::new(),
+            matches: Vec::new(),
             showing: None,
             open: None,
             changes: None,
@@ -125,6 +128,14 @@ impl SurfacePanel {
     pub fn set_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
         if self.files != files {
             self.files = files;
+            cx.notify();
+        }
+    }
+
+    /// Hand the panel the lines that matched what was typed.
+    pub fn set_matches(&mut self, matches: Vec<ContentMatch>, cx: &mut Context<Self>) {
+        if self.matches != matches {
+            self.matches = matches;
             cx.notify();
         }
     }
@@ -932,6 +943,7 @@ impl SurfacePanel {
     /// What matched, as a list of paths.
     fn file_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
         v_flex()
             .id("file-list")
             .flex_1()
@@ -964,7 +976,51 @@ impl SurfacePanel {
                             .child(file.path.clone()),
                     )
             }))
-            .children(self.files.is_empty().then(|| {
+            .children((!self.matches.is_empty()).then(|| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.files.matches").to_string())
+            }))
+            .children(self.matches.iter().map(|hit| {
+                let path = hit.path.clone();
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "match:{}:{}",
+                        hit.path, hit.line
+                    )))
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .gap_0p5()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
+                        }),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(format!("{}:{}", hit.path, hit.line)),
+                    )
+                    .child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(hit.text.clone()),
+                    )
+            }))
+            .children((self.files.is_empty() && self.matches.is_empty()).then(|| {
                 div()
                     .w_full()
                     .px_3()

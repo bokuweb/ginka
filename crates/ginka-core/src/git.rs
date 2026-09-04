@@ -478,6 +478,74 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
     Ok(crate::diff::parse(&patch))
 }
 
+/// Lines in the worktree's files that contain `query`.
+///
+/// `git grep` rather than a walk: it searches the files git knows about,
+/// honours the ignore rules, and skips binaries, which is the same set the
+/// file finder offers. Untracked files are included — a file the agent wrote a
+/// minute ago is exactly the one being searched for.
+///
+/// A query that matches nothing is not a failure: `git grep` exits 1 to say
+/// so, which is the answer rather than an error.
+pub fn grep(worktree: &Path, query: &str, limit: usize) -> Result<Vec<(String, u32, String)>> {
+    let max = limit.to_string();
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args([
+            "grep",
+            "--line-number",
+            "--no-color",
+            "--fixed-strings",
+            "--ignore-case",
+            "--untracked",
+            "--max-count",
+            &max,
+            "-e",
+            query,
+        ])
+        .output()
+        .context("running git grep")?;
+    // 1 is "nothing matched"; anything else is a real failure.
+    if !output.status.success() && output.status.code() != Some(1) {
+        bail!(
+            "git grep failed in {}: {}",
+            worktree.display(),
+            complaint(&output)
+        );
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    Ok(text
+        .lines()
+        .filter_map(parse_grep_line)
+        .take(limit)
+        .collect())
+}
+
+/// Split `path:line:text`, which is what `git grep --line-number` prints.
+///
+/// A path can contain a colon and so can the text, so this splits twice from
+/// the left and no further: the line number is the first field that parses as
+/// one after a path that exists in the output's own shape.
+fn parse_grep_line(line: &str) -> Option<(String, u32, String)> {
+    let mut at = 0;
+    while let Some(colon) = line[at..].find(':') {
+        let split = at + colon;
+        let rest = &line[split + 1..];
+        let second = rest.find(':')?;
+        if let Ok(number) = rest[..second].parse::<u32>() {
+            return Some((
+                line[..split].to_string(),
+                number,
+                rest[second + 1..].to_string(),
+            ));
+        }
+        at = split + 1;
+    }
+    None
+}
+
 /// Every file git would show in the worktree, tracked or not.
 ///
 /// `--exclude-standard` keeps the ignore rules, which is the difference
@@ -1139,5 +1207,60 @@ prunable
             std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
             "original\n"
         );
+    }
+
+    #[test]
+    fn searching_finds_the_line_and_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(
+            root.join("tracked.txt"),
+            "first line\nthe needle is here\nthird line\n",
+        )
+        .unwrap();
+        // Untracked on purpose: the file the agent wrote a minute ago is
+        // exactly the one being searched for.
+        std::fs::write(root.join("fresh.rs"), "// needle in a new file\n").unwrap();
+        std::fs::write(root.join(".env"), "needle=secret\n").unwrap();
+
+        let found = grep(&root, "needle", 20).unwrap();
+        let paths: Vec<&str> = found.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert!(paths.contains(&"tracked.txt"), "{found:?}");
+        assert!(paths.contains(&"fresh.rs"), "{found:?}");
+        assert!(
+            !paths.contains(&".env"),
+            "an ignored file is not the user's to search: {found:?}"
+        );
+
+        let hit = found
+            .iter()
+            .find(|(path, _, _)| path == "tracked.txt")
+            .unwrap();
+        assert_eq!(hit.1, 2, "the line number is what makes a hit reachable");
+        assert_eq!(hit.2, "the needle is here");
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_is_an_answer_rather_than_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        assert!(
+            grep(&root, "no such thing anywhere", 20)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_path_with_a_colon_in_it_still_parses() {
+        // Both the path and the matched text can contain colons; the line
+        // number is the field between them.
+        assert_eq!(
+            parse_grep_line("src/a:b.rs:12:let x = a:b;"),
+            Some(("src/a:b.rs".to_string(), 12, "let x = a:b;".to_string()))
+        );
+        assert_eq!(parse_grep_line("nothing useful"), None);
     }
 }

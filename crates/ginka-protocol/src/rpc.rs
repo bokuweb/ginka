@@ -7,9 +7,9 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, DiffSide, FileContent, FileEntry, Project,
-    ReviewComment, Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow,
-    WorkspaceSummary,
+    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide, FileContent, FileEntry,
+    Project, ReviewComment, Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry,
+    UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -215,6 +215,16 @@ pub enum Request {
         rows: u16,
         cols: u16,
     },
+    /// The lines in a workspace's files that contain `query`.
+    ///
+    /// The other half of finding something: a reader who knows what the code
+    /// says and not what it is called cannot get there by path.
+    SearchContent {
+        workspace: WorkspaceId,
+        query: String,
+        limit: Option<u32>,
+    },
+
     /// Read one of a workspace's files, for the panel that shows it.
     ///
     /// Bounded and resolved inside the worktree by the daemon: a client asking
@@ -309,6 +319,9 @@ pub enum Response {
     },
     FileContent {
         file: FileContent,
+    },
+    Matches {
+        matches: Vec<ContentMatch>,
     },
     Terminals {
         terminals: Vec<TerminalInfo>,

@@ -12,7 +12,7 @@
 
 use crate::git;
 use anyhow::{Context as _, Result};
-use ginka_protocol::model::{FileContent, FileEntry};
+use ginka_protocol::model::{ContentMatch, FileContent, FileEntry};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 use std::path::Path;
@@ -33,6 +33,29 @@ pub fn list(worktree: &Path) -> Result<Vec<String>> {
     paths.sort_unstable();
     paths.dedup();
     Ok(paths)
+}
+
+/// The lines in a workspace's files that contain `query`.
+///
+/// A literal search rather than a regular expression: what a reader types into
+/// a find box is what they are looking for, and a stray `(` turning into a
+/// syntax error is a worse answer than no match. An empty query matches
+/// nothing rather than everything.
+pub fn search_content(worktree: &Path, query: &str, limit: usize) -> Result<Vec<ContentMatch>> {
+    let query = query.trim();
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(git::grep(worktree, query, limit)?
+        .into_iter()
+        .map(|(path, line, text)| ContentMatch {
+            path,
+            line,
+            // Long lines are a minified file's, and a list of them is a list
+            // of nothing readable.
+            text: text.trim_end().chars().take(200).collect(),
+        })
+        .collect())
 }
 
 /// How much of a file the viewer is given.

@@ -64,6 +64,13 @@ enum Command {
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
     },
+    /// Find lines in a workspace's files.
+    Search {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The text to look for. Taken literally, not as a pattern.
+        query: String,
+    },
     /// Print one of a workspace's files.
     Show {
         /// The workspace id, as shown by `workspace list`.
@@ -375,6 +382,11 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             query: None,
         },
+        Command::Search { workspace, query } => Request::SearchContent {
+            workspace: WorkspaceId(workspace),
+            query,
+            limit: None,
+        },
         Command::Show { workspace, path } => Request::ReadFile {
             workspace: WorkspaceId(workspace),
             path,
@@ -616,6 +628,13 @@ fn print(response: Response, patch: bool) {
         // The file as it is: a viewer prints what is in it, and anything
         // added here would be something a pipe has to strip back out.
         Response::FileContent { file } => print!("{}", file.text),
+        // `path:line: text`, which is what every other search prints and what
+        // an editor knows how to open.
+        Response::Matches { matches } => {
+            for hit in matches {
+                println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
         Response::Terminal { terminal } => println!("{terminal}"),
         Response::Terminals { terminals } => {
             for terminal in terminals {

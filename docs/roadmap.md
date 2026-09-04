@@ -319,7 +319,8 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 Goal: stop context-switching to an editor for reads, and make the app scriptable.
 
 - [x] File listing with `nucleo` matching, behind `@` in the composer and `ginka files`
-- [ ] File tree, quick open, content search (ripgrep-as-library), cross-worktree search
+- [x] Content search in a workspace, behind the same box as the file finder and `ginka search`
+- [ ] File tree, quick open, cross-worktree search
 - [x] A files surface: find a file in the worktree and read it (read-only)
 - [ ] Integrate `gpui-component`'s `CodeEditor`: file tabs, editor history (go back/forward), markdown + image preview
 - [ ] LSP wiring through `CodeEditor`: go-to-definition, hover, diagnostics
@@ -441,3 +442,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | The daemon keeps a bounded scrollback per terminal, and a window replays it on reattach | The pty outlives the window, so a window that comes back has missed whatever was printed meanwhile and would reattach to a blank screen. 256 KiB per shell is several screens of a build and small enough to hold; the newest is what is kept. |
 | 2026-09-04 | The daemon resolves a file read inside the worktree and bounds it | A client does not choose which of the user's files the daemon opens, so `../` is refused rather than followed, and half a megabyte is the most a side panel is given: a minified bundle laid out as text is how a window stops responding. |
 | 2026-09-04 | Word-level marks are computed in `ginka-core`, not asked of git | `--word-diff` returns a different text format to parse, and the pairing rule and the "too different to mark" threshold are judgement calls worth testing. One line against one line is short enough for a plain LCS. |
+| 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |

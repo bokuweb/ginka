@@ -690,10 +690,19 @@ impl Shell {
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
-            let found = cx
-                .background_spawn(async move { link.files(&workspace, &query).await })
+            let (found, matched) = cx
+                .background_spawn(async move {
+                    // Both at once: a reader who knows what the code says and
+                    // not what it is called is asking the same question.
+                    let found = link.files(&workspace, &query).await;
+                    let matched = link.search_content(&workspace, &query).await;
+                    (found, matched)
+                })
                 .await;
-            surfaces.update(cx, |surfaces, cx| surfaces.set_files(found, cx));
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_files(found, cx);
+                surfaces.set_matches(matched, cx);
+            });
         })
         .detach();
     }
