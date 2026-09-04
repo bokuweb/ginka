@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
+use ginka_protocol::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// Settings the UI owns: `~/.ginka/app.json`.
 ///
@@ -62,6 +64,15 @@ pub struct DaemonSettings {
     pub status_poll_secs: u64,
     /// Days of task and usage history to keep.
     pub retention_days: u32,
+    /// Providers the user has switched off. Absent means enabled, so the file
+    /// stays empty until someone actually turns something off.
+    pub disabled_providers: Vec<ProviderKind>,
+    /// Where a provider's CLI actually is, when autodetection cannot find it.
+    ///
+    /// Agent CLIs are installed through version managers, nix profiles and
+    /// plain checkouts; without this, a failed probe is a dead end with no way
+    /// out from inside the app. See `docs/roadmap.md` §3.3 N14.
+    pub provider_binaries: BTreeMap<ProviderKind, PathBuf>,
 }
 
 impl Default for DaemonSettings {
@@ -71,6 +82,40 @@ impl Default for DaemonSettings {
             sync_interval_secs: 15,
             status_poll_secs: 60,
             retention_days: 30,
+            disabled_providers: Vec::new(),
+            provider_binaries: BTreeMap::new(),
+        }
+    }
+}
+
+impl DaemonSettings {
+    pub fn is_enabled(&self, provider: ProviderKind) -> bool {
+        !self.disabled_providers.contains(&provider)
+    }
+
+    /// Enable or disable a provider. Re-enabling removes the entry rather than
+    /// leaving a tombstone, so the file only ever records real choices.
+    pub fn set_enabled(&mut self, provider: ProviderKind, enabled: bool) {
+        if enabled {
+            self.disabled_providers.retain(|kind| *kind != provider);
+        } else if !self.disabled_providers.contains(&provider) {
+            self.disabled_providers.push(provider);
+        }
+    }
+
+    pub fn binary_override(&self, provider: ProviderKind) -> Option<&Path> {
+        self.provider_binaries.get(&provider).map(PathBuf::as_path)
+    }
+
+    /// `None` clears the override and returns the provider to autodetection.
+    pub fn set_binary_override(&mut self, provider: ProviderKind, path: Option<PathBuf>) {
+        match path {
+            Some(path) => {
+                self.provider_binaries.insert(provider, path);
+            }
+            None => {
+                self.provider_binaries.remove(&provider);
+            }
         }
     }
 }
