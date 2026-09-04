@@ -215,6 +215,24 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// lines are counted in `state` rather than raised: vendors print
     /// diagnostics on stdout, and one unknown line is not a failed session.
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent>;
+
+    /// Whether a user message can be written into a turn that is already
+    /// running.
+    ///
+    /// A transport that says yes is handed the message on its standard input
+    /// as it works; one that says no gets it as the next turn instead
+    /// (`docs/roadmap.md` §3.3 N1). Saying yes also means the prompt itself
+    /// arrives that way, so `start_command` must not put it on the command
+    /// line.
+    fn supports_steer(&self) -> bool {
+        false
+    }
+
+    /// One user message, in whatever the transport reads from its input.
+    /// `None` where there is no such thing.
+    fn encode_user_message(&self, _text: &str) -> Option<String> {
+        None
+    }
 }
 
 /// The drivers this build knows about.

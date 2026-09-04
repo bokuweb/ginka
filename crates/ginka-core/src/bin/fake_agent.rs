@@ -89,7 +89,15 @@ fn flags() {
 /// File-driven: what the daemon's session tests script.
 fn scripted() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    let prompt = arguments.last().cloned().unwrap_or_default();
+    // A driver that streams its input passes no prompt on the command line;
+    // the first thing written to stdin is the prompt instead. The flag is how
+    // to tell, because the last argument is a flag's value either way.
+    let streamed_input = arguments.iter().any(|arg| arg == "--input-format");
+    let prompt = if streamed_input {
+        String::new()
+    } else {
+        arguments.last().cloned().unwrap_or_default()
+    };
     let joined = arguments.join(" ");
     let session =
         std::env::var("GINKA_FAKE_AGENT_SESSION").unwrap_or_else(|_| "fake-session".to_string());
@@ -104,11 +112,22 @@ fn scripted() {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     let mut stdin = std::io::stdin().lock();
+    // The last line read by `#read`, so a script can say what it was given.
+    let mut last_read = String::new();
+    // So a script can keep saying `{prompt}` whichever way it arrived.
+    let mut prompt = prompt;
+    if prompt.is_empty() {
+        let mut first = String::new();
+        if stdin.read_line(&mut first).unwrap_or(0) > 0 {
+            prompt = user_text(&first);
+        }
+    }
 
     for line in script.lines() {
         let line = line
             .replace("{prompt}", &prompt)
             .replace("{session}", &session)
+            .replace("{stdin}", &last_read)
             .replace("{args}", &joined);
         if let Some(rest) = line.strip_prefix("#sleep ") {
             let millis: u64 = rest.trim().parse().unwrap_or(0);
@@ -120,6 +139,7 @@ fn scripted() {
             if stdin.read_line(&mut buffer).unwrap_or(0) == 0 {
                 return;
             }
+            last_read = user_text(&buffer);
         } else if let Some(rest) = line.strip_prefix("#spawn ") {
             // A stand-in for the compiler or test runner a real agent starts.
             // Deliberately not waited on: the point is that it outlives this
@@ -153,4 +173,25 @@ fn default_script() -> String {
         r#"{"type":"result","subtype":"success","is_error":false,"result":"answering: {prompt}","session_id":"{session}","usage":{"input_tokens":1,"output_tokens":1}}"#,
     ]
     .join("\n")
+}
+
+/// What a user message says.
+///
+/// A streamed input is a JSON message; a script wants the sentence inside it,
+/// which is what a real agent acts on. Anything that is not one of those is
+/// taken as it came.
+fn user_text(line: &str) -> String {
+    let line = line.trim();
+    serde_json::from_str::<serde_json::Value>(line)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("message")?
+                .get("content")?
+                .get(0)?
+                .get("text")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| line.to_string())
 }

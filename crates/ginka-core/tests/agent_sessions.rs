@@ -65,6 +65,12 @@ impl Fixture {
             ClaudeDriver::with_program(FAKE_AGENT)
                 .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
         ));
+        // The same fake agent behind a driver that cannot steer, so the
+        // fallback — queue the follow-up, resume afterwards — stays covered.
+        drivers.insert(Arc::new(
+            ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        ));
         let mut service = Service::new(paths, db::open_in_memory().unwrap(), recorder.clone())
             .with_drivers(drivers);
 
@@ -95,12 +101,17 @@ impl Fixture {
 
     /// Point the agent at `script`, and start a session with `prompt`.
     fn start(&mut self, script: &str, prompt: &str) -> SessionId {
+        self.start_with("claude", script, prompt)
+    }
+
+    /// The same, against a named driver.
+    fn start_with(&mut self, agent: &str, script: &str, prompt: &str) -> SessionId {
         std::fs::write(&self.script, script).unwrap();
         match self
             .service
             .handle(Request::StartSession {
                 workspace: self.workspace.clone(),
-                agent: "claude".into(),
+                agent: agent.into(),
                 prompt: prompt.into(),
                 model: None,
             })
@@ -602,13 +613,17 @@ fn a_vendor_that_changed_its_format_fails_loudly_rather_than_reporting_silence()
 
 #[test]
 fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
+    // The fallback, for a transport with no way into a running turn: hold the
+    // message where the user can still see it, and open a fresh turn once the
+    // current one settles (§3.3 N1).
     let mut fixture = Fixture::new();
-    let session = fixture.start(
+    let session = fixture.start_with(
+        "codex",
         &[
-            r#"{"type":"system","subtype":"init","session_id":"vendor-9"}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[turn:{args}]"}]}}"#,
+            r#"{"type":"thread.started","thread_id":"vendor-9"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":"[turn:{args}]"}}"#,
             "#sleep 400",
-            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-9"}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
         ]
         .join("\n"),
         "first",
@@ -640,7 +655,7 @@ fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
         if turns >= 2 {
             let spoken = spoken(&transcript);
             assert!(
-                spoken.contains("--resume vendor-9"),
+                spoken.contains("resume vendor-9"),
                 "the follow-up must continue the vendor's session: {spoken}"
             );
             assert_eq!(
@@ -1175,4 +1190,92 @@ fn an_attachment_reaches_the_agent_as_a_path_it_can_open() {
         echoed.contains("attachments/"),
         "the agent was handed a path, not a reference: {echoed}"
     );
+}
+
+#[test]
+fn a_follow_up_reaches_the_turn_that_is_already_running() {
+    // Steering, and the reason the composer does not simply hold everything
+    // until the agent stops: on a transport that can take a message mid-turn,
+    // "stop, retype, resend" is friction with nothing behind it (§3.3 N1).
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[first:{prompt}]"}]}}"#,
+            "#read",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[steered:{stdin}]"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+
+    // While the turn is still going: the script is blocked on `#read`.
+    fixture
+        .service
+        .handle(Request::SendMessage {
+            session: session.clone(),
+            text: "actually, use serde_json".into(),
+        })
+        .unwrap();
+
+    let settled = fixture.settle(&session);
+    let transcript = fixture.transcript(&session);
+    let spoken = format!("{transcript:?}");
+    assert_eq!(settled, SessionState::Finished, "{spoken}");
+
+    assert!(
+        spoken.contains("actually, use serde_json"),
+        "the steered message never reached the agent: {spoken}"
+    );
+    assert!(
+        spoken.contains("[first:first]"),
+        "the turn it was steered into is the one that was running: {spoken}"
+    );
+
+    let turns = transcript
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry,
+                TranscriptPayload::Agent {
+                    event: AgentEvent::TurnEnd { .. }
+                }
+            )
+        })
+        .count();
+    assert_eq!(turns, 1, "steering does not open a second turn: {spoken}");
+}
+
+#[test]
+fn a_steered_message_is_in_the_transcript_like_any_other() {
+    // The reader has to see what they sent, whichever way it was delivered.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-2"}"#,
+            "#read",
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-2"}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+    fixture
+        .service
+        .handle(Request::SendMessage {
+            session: session.clone(),
+            text: "and the changelog".into(),
+        })
+        .unwrap();
+    fixture.settle(&session);
+
+    let users: Vec<String> = fixture
+        .transcript(&session)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::User { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(users, ["first", "and the changelog"]);
 }

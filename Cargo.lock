@@ -2409,6 +2409,7 @@ name = "ginka-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "base64",
  "chrono",
  "dirs",
