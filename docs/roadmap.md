@@ -56,9 +56,11 @@ waku is the existence proof that this app can be built in Rust + GPUI, and its s
 > **Where this stands (2026-09-02):** the crate split, the authenticated
 > client–daemon RPC, the driver abstraction with `claude` and `codex`, the
 > git-backed checkpoints, the TypeScript export, the config split and the
-> scratch workspaces, and `rust-i18n` with `en` and `ja`, are all in. What is
-> left from this list is scheduled rather than skipped: ACP (M5),
-> `alacritty_terminal` (M3), and `ropey` and `nucleo-matcher` (M4).
+> scratch workspaces, `rust-i18n` with `en` and `ja`, the review-and-commit
+> loop, session titles/forks/search, composer drafts and completions, usage
+> reporting and `alacritty_terminal` are all in. What is left from this list is
+> scheduled rather than skipped: ACP and the remaining drivers (M5), `ropey`
+> and the editor (M4).
 
 - **Crate split**: `waku-protocol` (wire types) / `waku-core` (domain + drivers) / `waku-daemon` (headless server) / `waku-client` (RPC client) / root binary (GPUI UI). Ginka mirrors this.
 - **Client–daemon split over authenticated WebSocket RPC**, with the daemon owning SQLite, the agent processes and git. The UI holds no authoritative state.
@@ -279,7 +281,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Message queueing while the agent is busy
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [x] Agent and model pickers in the composer, and a new-session toggle
-- [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace
+- [x] Composer: `@file` mentions, slash commands from `.claude/commands`, drafts persisted per workspace
 - [ ] Plan approval and ask-user-question interaction modes. The events and the `respond_to_agent` request exist; no shipped driver can interrupt a turn to raise them, so this waits on ACP
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
@@ -293,12 +295,14 @@ Goal: a real agent runs in a worktree and its transcript renders.
 
 Goal: the loop that makes the app useful daily — read the diff, comment, send back.
 
-- [ ] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`; bezel's `terminal` crate is the reference implementation)
-- [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay + width sync
+- [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
+- [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay
 - [ ] File-path detection in terminal and chat output → click opens the file
 - [ ] Selection → "add to chat" / "add to terminal"
-- [ ] Changes panel: status tree, per-file diff (unified + split), intra-line word diff, revert file
-- [ ] Commit dialog: stage/unstage, message composer, agent-generated message
+- [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
+- [ ] Split diff, intra-line word diff, revert file
+- [x] Commit: message box under the reviewed files, `ginka commit` / `push`
+- [ ] Stage/unstage per file, agent-generated commit message
 - [ ] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
@@ -312,7 +316,8 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 
 Goal: stop context-switching to an editor for reads, and make the app scriptable.
 
-- [ ] File tree, quick open (nucleo), content search (ripgrep-as-library), cross-worktree search
+- [x] File listing with `nucleo` matching, behind `@` in the composer and `ginka files`
+- [ ] File tree, quick open, content search (ripgrep-as-library), cross-worktree search
 - [ ] Integrate `gpui-component`'s `CodeEditor`: file tabs, editor history (go back/forward), markdown + image preview
 - [ ] LSP wiring through `CodeEditor`: go-to-definition, hover, diagnostics
 - [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea`, per-workspace persistence, panel visibility rules, `docs/ui.md` §3.4 empty state
@@ -328,7 +333,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 ### M5 — Depth (target: 4 weeks)
 
 - [ ] Cronjobs: scheduler, project/workspace scope, `via: chat | terminal`, overlap-skip, run history
-- [ ] Reports: usage events from drivers + on-disk session scanner with watermarks, cost aggregation by day/project/model, retention sweep
+- [x] Reports: usage events from drivers, cost aggregation by day and agent, retention sweep
+- [ ] On-disk session scanner with watermarks, and aggregation by project/model
 - [ ] Embedded browser surface via `gpui-component`'s `webview` crate: address bar with history autocomplete, find-in-page, per-workspace history with frecency
 - [ ] Design mode: click an element → send HTML/CSS/screenshot to the agent
 - [ ] Notifications + sounds on agent completion / attention needed
