@@ -208,7 +208,7 @@ impl Shell {
         // selection is wired up that is simply the first.
         let session = rows.first().cloned();
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
-        let surfaces = cx.new(|_| SurfacePanel::new());
+        let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
 
         let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
             crate::surfaces::SurfaceEvent::Commit {
@@ -223,6 +223,8 @@ impl Shell {
                 this.stage(path.clone(), *staged, cx)
             }
             crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
+            crate::surfaces::SurfaceEvent::FindFiles(query) => this.find_files(query.clone(), cx),
+            crate::surfaces::SurfaceEvent::OpenFile(path) => this.open_file(path.clone(), cx),
         });
 
         let selection =
@@ -680,6 +682,38 @@ impl Shell {
         .detach();
     }
 
+    /// Find the workspace's files that match what was typed into the finder.
+    fn find_files(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let found = cx
+                .background_spawn(async move { link.files(&workspace, &query).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_files(found, cx));
+        })
+        .detach();
+    }
+
+    /// Read a file and show it in the files surface.
+    fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&workspace, &path).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_file(file, cx));
+        })
+        .detach();
+    }
+
     /// Start a shell in the workspace on screen.
     ///
     /// Sized for the dock as it is now, and focused, because someone who
@@ -748,10 +782,9 @@ impl Shell {
                 .ok()
                 .unwrap_or_default();
             for terminal in fresh {
-                let link = this
-                    .update(cx, |this, _| this.link.clone())
-                    .ok()
-                    .expect("the window is still open");
+                let Ok(link) = this.update(cx, |this, _| this.link.clone()) else {
+                    return;
+                };
                 let asked = terminal.clone();
                 let history = cx
                     .background_spawn(async move { link.terminal_history(&asked).await })

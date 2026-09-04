@@ -13,7 +13,7 @@
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, ReviewComment, Session,
+    AgentStatus, ChangeSource, Changes, Checkpoint, FileContent, FileEntry, ReviewComment, Session,
     SlashCommand, TerminalInfo, TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
@@ -203,6 +203,20 @@ impl DaemonLink {
             path: path.to_string(),
         })
         .await;
+    }
+
+    /// One of a workspace's files, as text.
+    pub async fn read_file(&self, workspace: &WorkspaceId, path: &str) -> Option<FileContent> {
+        match self
+            .ask(Request::ReadFile {
+                workspace: workspace.clone(),
+                path: path.to_string(),
+            })
+            .await
+        {
+            Some(Response::FileContent { file }) => Some(file),
+            _ => None,
+        }
     }
 
     /// The shells the daemon is running in a workspace.

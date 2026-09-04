@@ -7,8 +7,9 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, DiffSide, FileEntry, Project, ReviewComment,
-    Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
+    AgentStatus, ChangeSource, Changes, Checkpoint, DiffSide, FileContent, FileEntry, Project,
+    ReviewComment, Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow,
+    WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -214,6 +215,16 @@ pub enum Request {
         rows: u16,
         cols: u16,
     },
+    /// Read one of a workspace's files, for the panel that shows it.
+    ///
+    /// Bounded and resolved inside the worktree by the daemon: a client asking
+    /// for `../../.ssh/id_rsa` is asking the daemon to do something it will
+    /// not do.
+    ReadFile {
+        workspace: WorkspaceId,
+        path: String,
+    },
+
     /// The shells already running in a workspace.
     ///
     /// A window that has just opened asks this: the daemon kept them running
@@ -295,6 +306,9 @@ pub enum Response {
     },
     Terminal {
         terminal: TerminalId,
+    },
+    FileContent {
+        file: FileContent,
     },
     Terminals {
         terminals: Vec<TerminalInfo>,

@@ -105,6 +105,24 @@ transcript.truncated:
 surface.terminal.pending:
   en: The terminal surface lands in M3.
   ja: ターミナルサーフェスは M3 で実装されます。
+surface.files.pending:
+  en: The files surface lands in M4.
+  ja: ファイルサーフェスは M4 で実装されます。
+surface.files.search:
+  en: Find a file
+  ja: ファイルを検索
+surface.files.binary:
+  en: This file is not text.
+  ja: このファイルはテキストではありません。
+surface.files.truncated:
+  en: Only the beginning is shown.
+  ja: 先頭部分のみ表示しています。
+surface.files.back:
+  en: Back
+  ja: 戻る
+surface.files.empty:
+  en: Nothing matches
+  ja: 一致するものはありません
 surface.git.pending:
   en: The git surface lands in M3.
   ja: git サーフェスは M3 で実装されます。

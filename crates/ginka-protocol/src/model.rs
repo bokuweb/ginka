@@ -512,6 +512,19 @@ impl Changes {
     }
 }
 
+/// A file, as the panel that shows it needs it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileContent {
+    /// Relative to the worktree root.
+    pub path: String,
+    pub text: String,
+    /// A binary file has no text worth showing; saying so beats showing none.
+    pub binary: bool,
+    /// Whether there is more of it than was sent.
+    pub truncated: bool,
+}
+
 /// One shell the daemon is running, as a tab strip sees it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

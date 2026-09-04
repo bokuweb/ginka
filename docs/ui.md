@@ -161,7 +161,7 @@ per row repeating what a heading says once, and left a reader scanning for
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit), **Files**, **Editor**, **Browser** (M5), **Reports**. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file and read it; editing is M4), **Editor**, **Browser** (M5), **Reports**. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
 
 ## 4. Component mapping
 

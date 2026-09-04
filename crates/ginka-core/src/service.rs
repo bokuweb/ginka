@@ -545,6 +545,12 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::ReadFile { workspace, path } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::FileContent {
+                    file: crate::files::read(&worktree.path, &path).map_err(failed)?,
+                })
+            }
             Request::WorkspaceTerminals { workspace } => Ok(Response::Terminals {
                 terminals: self.terminals.list(&workspace),
             }),

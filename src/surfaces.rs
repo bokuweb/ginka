@@ -5,12 +5,12 @@
 //! changed. The rest are placeholders until M3 and M4. M4 turns this into a
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
-use ginka_protocol::model::{ChangeKind, Changes, LineKind};
+use ginka_protocol::model::{ChangeKind, Changes, FileContent, FileEntry, LineKind};
 use ginka_ui::Tokens;
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{InputEvent, Textarea, TextareaState};
+use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::{Icon, IconName, h_flex, v_flex};
 
 pub struct SurfacePanel {
@@ -42,6 +42,12 @@ pub struct SurfacePanel {
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
     complaint: Option<SharedString>,
+    /// What is typed into the file finder.
+    finder: Entity<InputState>,
+    /// The paths that match it, best first.
+    files: Vec<FileEntry>,
+    /// The file being read, if one was opened.
+    showing: Option<FileContent>,
 }
 
 /// Emitted when the panel wants the shell to do something only it can.
@@ -59,6 +65,10 @@ pub enum SurfaceEvent {
     },
     /// Send every waiting comment back to the agent.
     SendReview,
+    /// Look for files whose path matches this.
+    FindFiles(String),
+    /// Read a file and show it.
+    OpenFile(String),
     /// Put a file into the next commit, or take it back out.
     Stage { path: String, staged: bool },
     /// Throw away a file's uncommitted work.
@@ -68,8 +78,25 @@ pub enum SurfaceEvent {
 impl EventEmitter<SurfaceEvent> for SurfacePanel {}
 
 impl SurfacePanel {
-    pub fn new() -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let finder = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.files.search").to_string())
+        });
+        // Searched as it is typed: a finder that waited for a return key would
+        // be a form, and the list is what tells the user whether the next
+        // character is worth typing.
+        cx.subscribe(&finder, |_, finder, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let query = finder.read(cx).value().to_string();
+                cx.emit(SurfaceEvent::FindFiles(query));
+            }
+        })
+        .detach();
         Self {
+            finder,
+            files: Vec::new(),
+            showing: None,
             open: None,
             changes: None,
             expanded: None,
@@ -92,6 +119,20 @@ impl SurfacePanel {
             self.comments = comments;
             cx.notify();
         }
+    }
+
+    /// Hand the panel the files that matched what was typed.
+    pub fn set_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
+        if self.files != files {
+            self.files = files;
+            cx.notify();
+        }
+    }
+
+    /// Show a file that has been read.
+    pub fn set_file(&mut self, file: Option<FileContent>, cx: &mut Context<Self>) {
+        self.showing = file;
+        cx.notify();
     }
 
     /// Hand the panel the paths that are staged for the next commit.
@@ -195,6 +236,12 @@ impl SurfacePanel {
             )
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open = Some(surface);
+                // A finder that opens empty is a finder the user has to type
+                // into before it says anything; the start of the list is what
+                // a picker shows before anything is typed.
+                if surface == Surface::Files && this.files.is_empty() {
+                    cx.emit(SurfaceEvent::FindFiles(String::new()));
+                }
                 cx.notify();
             }))
     }
@@ -872,6 +919,152 @@ impl SurfacePanel {
     }
 }
 
+impl SurfacePanel {
+    /// The files surface: a finder over the worktree, and what it opens.
+    ///
+    /// Read-only, and honestly so — the editor is M4. What it is for now is
+    /// the question a diff raises and cannot answer: what does the rest of
+    /// this file look like.
+    fn files(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
+
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                div()
+                    .w_full()
+                    .p_2()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(Input::new(&self.finder)),
+            )
+            .child(match &self.showing {
+                Some(file) => self.file_view(file, mono, cx).into_any_element(),
+                None => self.file_list(cx).into_any_element(),
+            })
+    }
+
+    /// What matched, as a list of paths.
+    fn file_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .id("file-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py_1()
+            .children(self.files.iter().map(|file| {
+                let path = file.path.clone();
+                h_flex()
+                    .id(SharedString::from(format!("file-entry:{}", file.path)))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(
+                        cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            // A path's meaning is in its tail.
+                            .truncate()
+                            .child(file.path.clone()),
+                    )
+            }))
+            .children(self.files.is_empty().then(|| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.files.empty").to_string())
+            }))
+    }
+
+    /// One file, as it is on disk.
+    fn file_view(
+        &self,
+        file: &FileContent,
+        mono: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .flex_1()
+            .min_h_0()
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .id("close-file")
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(tokens.radius.row))
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.showing = None;
+                                cx.notify();
+                            }))
+                            .child(rust_i18n::t!("surface.files.back").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(file.path.clone()),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("file-content")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_scroll()
+                    .p_3()
+                    .font_family(mono)
+                    .text_xs()
+                    .text_color(tokens.colors().text_primary)
+                    .children(file.binary.then(|| {
+                        div()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.files.binary").to_string())
+                    }))
+                    .children(
+                        (!file.binary).then(|| div().whitespace_normal().child(file.text.clone())),
+                    )
+                    .children(file.truncated.then(|| {
+                        div()
+                            .pt_2()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.files.truncated").to_string())
+                    })),
+            )
+    }
+}
+
 impl Render for SurfacePanel {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
@@ -886,6 +1079,7 @@ impl Render for SurfacePanel {
             .child(match open {
                 None => self.empty_state(cx).into_any_element(),
                 Some(Surface::Git) => self.git(cx).into_any_element(),
+                Some(Surface::Files) => self.files(cx).into_any_element(),
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
             })
     }

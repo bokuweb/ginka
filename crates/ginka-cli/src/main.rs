@@ -64,6 +64,13 @@ enum Command {
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
     },
+    /// Print one of a workspace's files.
+    Show {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+    },
     /// List the commands a workspace offers after `/`.
     Commands {
         /// The workspace id, as shown by `workspace list`.
@@ -368,6 +375,10 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             query: None,
         },
+        Command::Show { workspace, path } => Request::ReadFile {
+            workspace: WorkspaceId(workspace),
+            path,
+        },
         Command::Files { workspace, query } => Request::WorkspaceFiles {
             workspace: WorkspaceId(workspace),
             query,
@@ -602,6 +613,9 @@ fn print(response: Response, patch: bool) {
         Response::Draft { text } => println!("{text}"),
         // A terminal is opened by a window, which is where it is typed into;
         // printing the id is all a script can do with one.
+        // The file as it is: a viewer prints what is in it, and anything
+        // added here would be something a pipe has to strip back out.
+        Response::FileContent { file } => print!("{}", file.text),
         Response::Terminal { terminal } => println!("{terminal}"),
         Response::Terminals { terminals } => {
             for terminal in terminals {
