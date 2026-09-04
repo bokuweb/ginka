@@ -28,8 +28,9 @@ conflict the next time the toolkit moves — see `docs/roadmap.md` §4.6.
 
 - **Do not add a second GPUI component library.** `bezel` links
   `bezel-gpui`, a republished fork under a different package name, so its
-  `App`/`Window`/`Element` types are unrelated to ours at the type level. Code
-  ported from bezel must be adapted to our `gpui`, not linked.
+  `App`/`Window`/`Element` types are unrelated to ours at the type level — one
+  of several reasons we rebuild what it demonstrates rather than lifting it
+  (roadmap §4.6).
 - If a fix is needed upstream, prefer a PR to `gpui-component` over a fork. If a
   fork becomes unavoidable, record it in the roadmap's decision log with the
   condition under which we drop it.

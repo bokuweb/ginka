@@ -129,8 +129,8 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 
 Four things are not in any library and are load-bearing for the product's identity:
 
-1. **Agent status glyphs** — a small animated mark per provider that also encodes state (idle / working / attention). Bezel's `agent` crate (orbs + avatar, MIT) is the reference implementation to port.
-2. **Glass/vibrancy theme layer** — translucent window background with a platform blur behind it. Bezel's `theme/glass.rs` is the reference.
+1. **Agent status glyphs** — a small animated mark per provider that also encodes state (idle / working / attention). Bezel's orbs are worth looking at for the motion; the implementation is ours.
+2. **Glass/vibrancy theme layer** — translucent window background with a platform blur behind it, written against the platform API directly.
 3. **Transcript event views** — tool-call cards, reasoning blocks, plan approval, ask-user, diff sidecars. These are specific to our `AgentEvent` model.
 4. **Terminal view** — `alacritty_terminal` grid rendering, selection, file-path linkification, reattach/replay.
 
