@@ -35,7 +35,7 @@ Two other projects inform the design:
 - **The review loop.** The right panel draws the workspace's diff, marked word by word where a line was replaced, with per-file staging, a revert, and comments anchored to lines that go back to the agent as one message. `ginka review`, `stage`, `revert`, `commit`, `push`.
 - **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
 - **Finding things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, and reads what it opens. ⌘K reaches every action, panel, surface and workspace by name.
-- **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can.
+- **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
 
 What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
 

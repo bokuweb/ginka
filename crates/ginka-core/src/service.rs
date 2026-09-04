@@ -296,6 +296,13 @@ impl Service {
                 prompt,
                 model,
             } => self.start_session(workspace, &agent, prompt, model),
+            Request::FanOut {
+                project,
+                branch_prefix,
+                base,
+                prompt,
+                attempts,
+            } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
             Request::RespondToAgent {
                 session, response, ..
@@ -819,6 +826,56 @@ fn today() -> String {
 }
 
 impl Service {
+    /// Ask the same question in one worktree per attempt.
+    ///
+    /// Each arm goes through the same requests a person would send, so an arm
+    /// gets the project's setup and its own checkpoint exactly as a hand-made
+    /// workspace does. An arm that fails is reported and the rest carry on:
+    /// two answers are worth having even when the third never started.
+    fn fan_out(
+        &mut self,
+        project: ProjectName,
+        prefix: &str,
+        base: Option<String>,
+        prompt: &str,
+        attempts: &[ginka_protocol::rpc::Attempt],
+    ) -> Result<Response, RpcError> {
+        if attempts.is_empty() {
+            return Err(RpcError::failed("a fan-out needs at least one attempt"));
+        }
+        let mut started = Vec::new();
+        let mut failed = Vec::new();
+        for (index, attempt) in attempts.iter().enumerate() {
+            let branch = format!("{prefix}-{}", index + 1);
+            let workspace = match self.handle(Request::CreateWorkspace {
+                project: project.clone(),
+                branch: branch.clone(),
+                base: base.clone(),
+            }) {
+                Ok(Response::Workspace { workspace }) => workspace,
+                Ok(other) => {
+                    failed.push(format!("{branch}: unexpected answer {other:?}"));
+                    continue;
+                }
+                Err(error) => {
+                    failed.push(format!("{branch}: {}", error.message));
+                    continue;
+                }
+            };
+            match self.handle(Request::StartSession {
+                workspace: workspace.worktree.workspace_id(),
+                agent: attempt.agent.clone(),
+                prompt: prompt.to_string(),
+                model: attempt.model.clone(),
+            }) {
+                Ok(Response::Session { session }) => started.push(session),
+                Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
+                Err(error) => failed.push(format!("{branch}: {}", error.message)),
+            }
+        }
+        Ok(Response::FannedOut { started, failed })
+    }
+
     /// Reconcile every project's worktrees against git.
     ///
     /// The daemon's own tick rather than each client's: a worktree added with

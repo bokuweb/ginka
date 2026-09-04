@@ -96,6 +96,25 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_fan_out",
+            description: "Ask the same question in one new worktree per attempt, and start an agent in each.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "prefix": {"type": "string", "description": "What the branches are called: prefix-1, prefix-2"},
+                    "prompt": {"type": "string"},
+                    "agents": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "One driver id per attempt; repeats ask the same agent twice",
+                    },
+                    "base": {"type": "string"},
+                },
+                "required": ["project", "prefix", "prompt", "agents"],
+            }),
+        },
+        Tool {
             name: "ginka_session_send",
             description: "Send a follow-up to a session. Queued if it is mid-turn.",
             schema: json!({
@@ -242,6 +261,33 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             prompt: text("prompt")?,
             model: maybe("model"),
         },
+        "ginka_fan_out" => Request::FanOut {
+            project: ProjectName(text("project")?),
+            branch_prefix: text("prefix")?,
+            base: maybe("base"),
+            prompt: text("prompt")?,
+            attempts: arguments
+                .get("agents")
+                .and_then(Value::as_array)
+                .map(|agents| {
+                    agents
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(|agent| match agent.split_once(':') {
+                            Some((agent, model)) => ginka_protocol::rpc::Attempt {
+                                agent: agent.to_string(),
+                                model: Some(model.to_string()),
+                            },
+                            None => ginka_protocol::rpc::Attempt {
+                                agent: agent.to_string(),
+                                model: None,
+                            },
+                        })
+                        .collect()
+                })
+                .filter(|attempts: &Vec<_>| !attempts.is_empty())
+                .ok_or_else(|| anyhow!("{tool} needs at least one entry in `agents`"))?,
+        },
         "ginka_session_send" => Request::SendMessage {
             session: SessionId(text("session")?),
             text: text("text")?,
@@ -370,6 +416,8 @@ mod tests {
                 "query": "needle",
                 "path": "src/main.rs",
                 "checkpoint": "c-1",
+                "prefix": "attempt",
+                "agents": ["claude", "codex:gpt-5"],
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));

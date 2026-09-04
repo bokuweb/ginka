@@ -328,7 +328,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron
 - [ ] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`)
 - [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
-- [ ] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
+- [x] **Fan-out (Orca):** one prompt → N worktrees, from `ginka fan-out` and over MCP
+- [ ] Fan-out's side-by-side comparison view, and merging the winner
 
 **Exit criteria:** an agent can create a workspace, start a sibling agent, and read its diff entirely through the CLI/MCP.
 
@@ -448,3 +449,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |
 | 2026-09-04 | Whether a question has been answered is a property of the transcript, not of the window | A transcript re-read after a restart has to know as much as one that was watched, and what it knows is that the reader said something afterwards. The card stops offering buttons on that alone. |
 | 2026-09-04 | The daemon polls git on its own clock, and pushes only differences | A worktree added with the user's own git is news for every window, and having each window poll for it is the same work done once per window. A status that has not changed is not news: a push per workspace per minute is one clients learn to ignore. |
+| 2026-09-04 | A fan-out is the same requests a person would send, sent in a loop | Each arm gets the project's setup, its own checkpoint and its own worktree because it went through `create_workspace` and `start_session` rather than around them. An arm that fails is reported and the rest carry on: two answers are worth having when the third never started. |

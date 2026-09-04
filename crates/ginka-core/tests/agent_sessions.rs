@@ -1073,3 +1073,70 @@ fn restoring_a_checkpoint_that_does_not_exist_is_not_found() {
         .expect_err("there is no such checkpoint");
     assert_eq!(error.code, "not_found");
 }
+
+#[test]
+fn a_fan_out_asks_the_same_question_in_a_worktree_each() {
+    // Orca's idea: a task with more than one reasonable approach is worth
+    // trying more than once, and the attempts must not tread on each other.
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"on it"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"on it","session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let (started, failed) = match fixture
+        .service
+        .handle(Request::FanOut {
+            project: ProjectName("comet".into()),
+            branch_prefix: "attempt".into(),
+            base: None,
+            prompt: "make it faster".into(),
+            attempts: vec![
+                ginka_protocol::rpc::Attempt {
+                    agent: "claude".into(),
+                    model: None,
+                },
+                ginka_protocol::rpc::Attempt {
+                    agent: "claude".into(),
+                    model: None,
+                },
+                // A driver this build does not have: the arm fails and the
+                // others carry on.
+                ginka_protocol::rpc::Attempt {
+                    agent: "no-such-agent".into(),
+                    model: None,
+                },
+            ],
+        })
+        .unwrap()
+    {
+        Response::FannedOut { started, failed } => (started, failed),
+        other => panic!("expected a fan-out, got {other:?}"),
+    };
+
+    assert_eq!(started.len(), 2, "two arms started: {failed:?}");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let workspaces: Vec<String> = started
+        .iter()
+        .map(|session| session.workspace.0.clone())
+        .collect();
+    assert_eq!(
+        workspaces,
+        vec!["comet/attempt-1", "comet/attempt-2"],
+        "one worktree each, named in order"
+    );
+
+    for session in &started {
+        assert_eq!(
+            fixture.settle(&session.id),
+            SessionState::Finished,
+            "every arm runs its own agent"
+        );
+    }
+}

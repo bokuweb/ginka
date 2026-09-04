@@ -69,6 +69,21 @@ pub enum Request {
         prompt: String,
         model: Option<String>,
     },
+    /// Ask the same question in several worktrees at once.
+    ///
+    /// Orca's fan-out: a task with more than one reasonable approach is worth
+    /// trying more than once, and comparing three answers costs less than
+    /// re-prompting one agent three times. One worktree per attempt, so the
+    /// attempts cannot tread on each other.
+    FanOut {
+        project: ProjectName,
+        /// What the branches are called: `<prefix>-1`, `<prefix>-2`, …
+        branch_prefix: String,
+        base: Option<String>,
+        prompt: String,
+        /// One attempt per entry. The same agent can appear more than once.
+        attempts: Vec<Attempt>,
+    },
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
@@ -258,6 +273,15 @@ pub enum Request {
     Shutdown,
 }
 
+/// One arm of a fan-out.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attempt {
+    /// A driver id: `claude`, `codex`, …
+    pub agent: String,
+    pub model: Option<String>,
+}
+
 /// What the daemon answers with.
 ///
 /// One variant per shape rather than per request: several requests legitimately
@@ -325,6 +349,13 @@ pub enum Response {
     },
     Terminals {
         terminals: Vec<TerminalInfo>,
+    },
+    /// What a fan-out started, and what it could not.
+    FannedOut {
+        started: Vec<Session>,
+        /// One line per attempt that did not start, in the order they were
+        /// asked for: an arm that failed must not take the others with it.
+        failed: Vec<String>,
     },
     /// What a terminal printed before this window was looking.
     TerminalHistory {

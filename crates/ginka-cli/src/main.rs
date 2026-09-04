@@ -20,7 +20,7 @@ use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch, UsageRow,
     WorkspaceSummary,
 };
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::rpc::{Attempt, Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
 
@@ -63,6 +63,25 @@ enum Command {
         workspace: String,
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
+    },
+    /// Ask the same question in several worktrees at once.
+    ///
+    /// One worktree per attempt, so the attempts cannot tread on each other,
+    /// and the branches are `<prefix>-1`, `<prefix>-2`, …
+    FanOut {
+        /// The project to cut the worktrees in.
+        project: String,
+        /// What the branches are called.
+        prefix: String,
+        /// The prompt every attempt is given.
+        prompt: String,
+        /// One per attempt: a driver id, optionally `agent:model`. Repeats are
+        /// how the same agent is asked twice.
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+        /// What to branch from. The project's default branch otherwise.
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Find lines in a workspace's files.
     Search {
@@ -488,6 +507,28 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             query: None,
         },
+        Command::FanOut {
+            project,
+            prefix,
+            prompt,
+            agents,
+            base,
+        } => Request::FanOut {
+            project: ProjectName(project),
+            branch_prefix: prefix,
+            base,
+            prompt,
+            attempts: agents
+                .into_iter()
+                .map(|agent| match agent.split_once(':') {
+                    Some((agent, model)) => Attempt {
+                        agent: agent.to_string(),
+                        model: Some(model.to_string()),
+                    },
+                    None => Attempt { agent, model: None },
+                })
+                .collect(),
+        },
         Command::Search { workspace, query } => Request::SearchContent {
             workspace: WorkspaceId(workspace),
             query,
@@ -722,6 +763,15 @@ fn print(response: Response, patch: bool) {
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::SessionMatches { matches } => print_matches(&matches),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
+        Response::FannedOut { started, failed } => {
+            print_sessions(&started);
+            // On stderr: the sessions that did start are the answer, and a
+            // script reading stdout should not have to filter complaints out
+            // of it.
+            for problem in failed {
+                eprintln!("{problem}");
+            }
+        }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
         Response::Files { files } => {
