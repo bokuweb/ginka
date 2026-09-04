@@ -312,7 +312,11 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] Extract the daemon: WS RPC server, auto-spawn + health check + graceful takeover (discovery, the bearer token and the handshake gate are done)
 - [x] Sequence numbers, replay cursors and the epoch that invalidates them, so a reconnecting UI never misses an event and never renders a hole — the policy, tested without a socket
 - [ ] Request/response types and the WebSocket transport that carries them
-- [ ] `AgentDriver` trait + `claude` driver (stream-json over stdio), process supervision, cancellation
+- [x] The normalized `AgentEvent` stream and the activity shape every tool call collapses into
+- [x] Claude's stream-json read into it, against recorded lines rather than a live CLI (R6)
+- [x] Process supervision: one child, one reader thread, cancellation that takes the agent's own children with it, and a fake agent binary to pin it against
+- [x] The `claude` driver on top: launch arguments, resume from a session id, and `AgentSession` — steering writes a user message into the running turn, and only the permission mode forces a restart
+- [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
 - [ ] Session persistence: tasks, chats, messages; resume from vendor session id
 - [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination
 - [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace, message queueing while the agent is busy
@@ -328,6 +332,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] Protocol handshake carries a version and a wire-size bound (§4.1); daemon-host path rule honoured by every client path
 
 > **Landed already (domain layer, ahead of the milestone):** N1 steering policy and the driver/session traits (`ginka-core::driver`), N2 the in-session-vs-restart rule, N3 the model/effort/tier vocabulary (`ginka-protocol::provider`), N4 completion triggers, command merge and the bounded file index (`ginka-core::composer`), N5 titles (`ginka-protocol::session`), N6 attachments and the blob store, N14 provider settings.
+>
+> **The driver layer is landed:** the normalized event stream and the one activity shape (`ginka-core::driver::event`, `::activity`), Claude's stream-json parsed into it and the session that speaks it (`::claude`), process supervision with cancellation and a fake agent to test it against (`::process`, `ginka-fake-agent`), and provider detection with the settings override (`::probe`).
 >
 > **The reconnect contract is landed too, without its socket:** the versioned handshake and its refusals (`ginka-protocol::envelope`), discovery and the 0600 token file (`ginka-core::daemon`), the bounded event window that answers a resume with events, a gap or a reset (`ginka-core::events`), and the client cursor that deduplicates a replay, refuses to render a hole, and resyncs when the daemon's epoch changes (`ginka-client::cursor`). What remains for M2 is the socket itself, the request/response types over it, and the first real driver.
 
@@ -414,7 +420,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 
 - **Unit** in each crate; domain logic lives in `ginka-core` precisely so it is testable without a window.
 - **Daemon integration tests** against a temp `$HOME` and real git repos created in `tempfile` dirs — this is where the worktree/branch edge cases (detached, locked, manually removed) get pinned down.
-- **A fake agent binary** (Band's `fake-agent.mjs` equivalent, as a Rust test binary) that emits scripted event streams, so chat/session behaviour is testable without burning tokens or network.
+- **A fake agent binary** — `ginka-fake-agent`, a normal binary of `ginka-core` that integration tests find through `CARGO_BIN_EXE_*`. It scripts the awkward cases: a process that hangs after its last line, one that exits non-zero, one that prints a warning on stdout. Session behaviour is pinned against it and against `driver::testing::ScriptedSession`, never a live vendor CLI.
 - **UI tests** with GPUI's test harness for pane/layout logic; screenshot tests are explicitly *not* attempted at v1.
 - **A seeded-session fixture** — a script that fills a temp `GINKA_HOME` with long transcripts, many workspaces and a few running-looking sessions. Every performance and virtualization claim in §6.2 needs something to make it against, and hand-driving an agent for twenty minutes to reproduce a scroll bug is not a workflow.
 - Every bug fix lands with a regression test. Band's `apps/web/e2e` list is a good checklist of the failure modes worth covering (reconnect, parking, virtualization, tab self-heal, workspace switch stability).

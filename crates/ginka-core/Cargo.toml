@@ -5,6 +5,13 @@ edition.workspace = true
 publish.workspace = true
 description = "Ginka domain logic: paths, settings, storage, projects and worktrees"
 
+# A stand-in agent CLI for the process-supervision tests. It is a normal
+# binary so integration tests can find it through CARGO_BIN_EXE_*; it is tiny
+# and this crate is never published.
+[[bin]]
+name = "ginka-fake-agent"
+path = "src/bin/fake_agent.rs"
+
 [dependencies]
 ginka-protocol.workspace = true
 anyhow.workspace = true
