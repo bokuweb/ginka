@@ -158,6 +158,10 @@ impl Shared {
 struct Running {
     /// The process group leader's pid, used to stop the whole tree.
     pid: Option<u32>,
+    /// The way into the turn while it is running, for transports that read
+    /// their input as they work. Cleared when the turn ends, which closes the
+    /// agent's input and lets it exit (§3.3 N1).
+    steer: Arc<Mutex<Option<async_channel::Sender<String>>>>,
     /// Set when the user cancelled, so the exit is not reported as a failure.
     cancelled: Arc<AtomicBool>,
     /// Dropping this would detach the turn; it is kept so the supervisor owns
@@ -252,6 +256,27 @@ impl Supervisor {
         )?;
 
         if self.is_running(&session) {
+            // Into the running turn where the transport can take it; the queue
+            // is what happens when it cannot (§3.3 N1).
+            if let Some(line) = driver.encode_user_message(&spec.prompt) {
+                let sender = self
+                    .running
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&session)
+                    .and_then(|entry| {
+                        entry
+                            .steer
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .clone()
+                    });
+                if let Some(sender) = sender
+                    && sender.try_send(line).is_ok()
+                {
+                    return Ok(());
+                }
+            }
             self.queued
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -311,7 +336,7 @@ impl Supervisor {
         let queued = self.queued.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
 
-        let child = match spawn(&command, &spec) {
+        let mut child = match spawn(&command, &spec, driver.supports_steer()) {
             Ok(child) => child,
             Err(error) => {
                 tracing::error!(%error, agent = driver.id(), "could not start the agent");
@@ -327,6 +352,36 @@ impl Supervisor {
         };
         let pid = Some(child.id());
 
+        // Transports that read their input as they work are given the prompt
+        // that way too, and stay open for whatever is steered in after it. The
+        // channel is the supervisor's end of that pipe; dropping it closes the
+        // agent's input, which is how the turn is ended.
+        let steer: Arc<Mutex<Option<async_channel::Sender<String>>>> = Arc::new(Mutex::new(None));
+        if driver.supports_steer()
+            && let Some(mut stdin) = child.stdin.take()
+        {
+            let (sender, lines) = async_channel::unbounded::<String>();
+            if let Some(first) = driver.encode_user_message(&spec.prompt) {
+                let _ = sender.try_send(first);
+            }
+            *steer.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
+            smol::spawn(async move {
+                use futures_lite::AsyncWriteExt as _;
+                while let Ok(line) = lines.recv().await {
+                    if stdin.write_all(line.as_bytes()).await.is_err()
+                        || stdin.write_all(b"\n").await.is_err()
+                        || stdin.flush().await.is_err()
+                    {
+                        break;
+                    }
+                }
+                // The turn is over: closing the input is what lets the agent
+                // finish rather than wait for a message that is not coming.
+                drop(stdin);
+            })
+            .detach();
+        }
+
         let task = smol::spawn({
             let session = session.clone();
             let cancelled = cancelled.clone();
@@ -334,15 +389,19 @@ impl Supervisor {
             // A turn is one process, so the driver's own counter restarts with
             // it; the session's count is what the transcript is numbered by.
             let turns_so_far = self.context.turns_completed(&session);
+            let steer = steer.clone();
             async move {
                 let state = pump(
                     &context,
-                    &session,
                     driver.as_ref(),
                     child,
-                    &cancelled,
-                    &workspace_path,
-                    turns_so_far,
+                    Turn {
+                        session: &session,
+                        workspace_path: &workspace_path,
+                        turns_so_far,
+                        cancelled: &cancelled,
+                        steer: &steer,
+                    },
                 )
                 .await;
                 running
@@ -391,6 +450,7 @@ impl Supervisor {
                 session,
                 Running {
                     pid,
+                    steer,
                     cancelled,
                     _task: task,
                 },
@@ -399,15 +459,35 @@ impl Supervisor {
 }
 
 /// Read one process to its end, recording everything it said.
+/// What one turn of one session runs with.
+///
+/// Grouped rather than passed as six positional arguments: they travel
+/// together and a call site reads better naming them than counting them.
+struct Turn<'a> {
+    session: &'a SessionId,
+    workspace_path: &'a Path,
+    /// Turns already completed, so the reader's own per-process count carries
+    /// on rather than restarting at one.
+    turns_so_far: u32,
+    /// Set when the user cancelled, so the exit is not read as a crash.
+    cancelled: &'a AtomicBool,
+    /// The way into the turn while it runs, cleared when it ends.
+    steer: &'a Mutex<Option<async_channel::Sender<String>>>,
+}
+
 async fn pump(
     context: &Shared,
-    session: &SessionId,
     driver: &dyn AgentDriver,
     mut child: smol::process::Child,
-    cancelled: &AtomicBool,
-    workspace_path: &Path,
-    turns_so_far: u32,
+    turn: Turn<'_>,
 ) -> SessionState {
+    let Turn {
+        session,
+        workspace_path,
+        turns_so_far,
+        cancelled,
+        steer,
+    } = turn;
     context.set_state(session, SessionState::Running, None);
 
     let stdout = child.stdout.take();
@@ -450,6 +530,10 @@ async fn pump(
                         context.record_usage(session, parse.turn + 1, usage);
                     }
                     AgentEvent::TurnEnd { turn } => {
+                        // Nothing more can be steered into a turn that has
+                        // ended, and dropping the sender closes the agent's
+                        // input so it can exit.
+                        steer.lock().unwrap_or_else(|e| e.into_inner()).take();
                         let label = if last_text.trim().is_empty() {
                             format!("turn {turn}")
                         } else {
@@ -590,7 +674,11 @@ pub(crate) fn sanitize(process: &mut std::process::Command) {
 /// and leaving stdin open makes an agent that expects a terminal hang.
 ///
 /// The environment is sanitized first: see [`is_inherited_session_state`].
-fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Child> {
+fn spawn(
+    command: &CommandSpec,
+    spec: &SessionSpec,
+    streamed_input: bool,
+) -> Result<smol::process::Child> {
     let mut base = std::process::Command::new(&command.program);
     base.args(&command.args).current_dir(&spec.workspace_path);
     sanitize(&mut base);
@@ -611,7 +699,14 @@ fn spawn(command: &CommandSpec, spec: &SessionSpec) -> Result<smol::process::Chi
     // yields a child with no stdout to read.
     let mut process = smol::process::Command::from(base);
     process
-        .stdin(Stdio::null())
+        // Piped only for the transports that read as they work: an agent that
+        // takes its prompt on the command line should see a closed input
+        // rather than one that never says anything.
+        .stdin(if streamed_input {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 

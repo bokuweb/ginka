@@ -64,6 +64,13 @@ impl ClaudeDriver {
             "--print".to_string(),
             "--output-format".to_string(),
             "stream-json".to_string(),
+            // The other half of steering: with its input streamed too, the CLI
+            // keeps reading while it works, so a message written mid-turn
+            // reaches the turn rather than the next one (§3.3 N1). The prompt
+            // arrives the same way, which is why nothing is passed positionally
+            // below.
+            "--input-format".to_string(),
+            "stream-json".to_string(),
             "--include-partial-messages".to_string(),
             "--verbose".to_string(),
         ];
@@ -128,7 +135,6 @@ impl AgentDriver for ClaudeDriver {
 
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
         let mut command = CommandSpec::new(&self.program).args(self.streaming_args(spec));
-        command.args.push(spec.prompt.clone());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
@@ -140,11 +146,18 @@ impl AgentDriver for ClaudeDriver {
             .args(self.streaming_args(spec))
             .arg("--resume")
             .arg(vendor_session_id);
-        command.args.push(spec.prompt.clone());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
         command
+    }
+
+    fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn encode_user_message(&self, text: &str) -> Option<String> {
+        Some(PromptMessage::user(text).to_line())
     }
 
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent> {
@@ -370,10 +383,28 @@ mod tests {
         // Without --verbose the CLI collapses the stream into one final blob.
         assert!(command.args.contains(&"--verbose".to_string()));
         assert!(command.args.contains(&"opus".to_string()));
+        // Input is streamed too, which is what lets a message written while
+        // the turn runs reach that turn (§3.3 N1).
         assert_eq!(
-            command.args.last().map(String::as_str),
-            Some("write the test first"),
-            "the prompt goes last, after the flags"
+            command
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--input-format"),
+            Some(["--input-format".to_string(), "stream-json".to_string()].as_slice()),
+        );
+        // And so the prompt is not on the command line at all: it is the first
+        // message written to the agent.
+        assert!(
+            !command.args.contains(&"write the test first".to_string()),
+            "{:?}",
+            command.args
+        );
+        assert_eq!(
+            driver
+                .encode_user_message("write the test first")
+                .as_deref()
+                .map(|line| line.contains("write the test first")),
+            Some(true)
         );
     }
 
