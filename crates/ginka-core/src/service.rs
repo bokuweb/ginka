@@ -541,10 +541,22 @@ impl Service {
                 let worktree = self.worktree(&workspace)?;
                 let terminal = self
                     .terminals
-                    .open(&worktree.path, rows, cols)
+                    .open(&workspace, &worktree.path, rows, cols)
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::WorkspaceTerminals { workspace } => Ok(Response::Terminals {
+                terminals: self.terminals.list(&workspace),
+            }),
+            Request::TerminalHistory { terminal } => Ok(Response::TerminalHistory {
+                // A terminal that has closed is one the client is asking about
+                // because it has not heard yet, which is a `not found` rather
+                // than a failure.
+                data: self
+                    .terminals
+                    .history(&terminal)
+                    .map_err(|error| RpcError::not_found(error.to_string()))?,
+            }),
             Request::WriteTerminal { terminal, data } => {
                 self.terminals.write(&terminal, &data).map_err(failed)?;
                 Ok(Response::Ack)

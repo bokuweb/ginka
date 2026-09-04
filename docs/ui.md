@@ -152,7 +152,7 @@ per row repeating what a heading says once, and left a reader scanning for
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: worktree label on the left, branch on the right. Click either to switch.
-- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace.
+- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
 > surfaces land in M3, and two empty panels either side of the conversation is

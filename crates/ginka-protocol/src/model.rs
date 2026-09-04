@@ -5,7 +5,7 @@
 //! linking the daemon's domain logic. `ginka-core` persists them; nothing here
 //! knows what a database or a git repository is.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -510,6 +510,16 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
+}
+
+/// One shell the daemon is running, as a tab strip sees it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    pub id: TerminalId,
+    pub workspace: WorkspaceId,
+    /// What it is called in the strip: `shell 1`, `shell 2`, per workspace.
+    pub title: String,
 }
 
 /// A workspace with everything the dashboard draws for it.

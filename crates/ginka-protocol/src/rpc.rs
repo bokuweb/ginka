@@ -8,7 +8,7 @@
 use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, DiffSide, FileEntry, Project, ReviewComment,
-    Session, SessionMatch, SlashCommand, TranscriptEntry, UsageRow, WorkspaceSummary,
+    Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -214,6 +214,14 @@ pub enum Request {
         rows: u16,
         cols: u16,
     },
+    /// The shells already running in a workspace.
+    ///
+    /// A window that has just opened asks this: the daemon kept them running
+    /// while it was gone, and a dock that showed none of them would be hiding
+    /// work that is still going.
+    WorkspaceTerminals { workspace: WorkspaceId },
+    /// What a terminal has printed lately, for a window reattaching to it.
+    TerminalHistory { terminal: TerminalId },
     /// Send keystrokes to a terminal.
     WriteTerminal { terminal: TerminalId, data: String },
     /// Tell a terminal how big its window is now.
@@ -287,6 +295,13 @@ pub enum Response {
     },
     Terminal {
         terminal: TerminalId,
+    },
+    Terminals {
+        terminals: Vec<TerminalInfo>,
+    },
+    /// What a terminal printed before this window was looking.
+    TerminalHistory {
+        data: String,
     },
     Usage {
         by_day: Vec<UsageRow>,

@@ -11,7 +11,8 @@
 
 use crate::service::EventSink;
 use anyhow::{Context, Result};
-use ginka_protocol::{DaemonEvent, TerminalId};
+use ginka_protocol::model::TerminalInfo;
+use ginka_protocol::{DaemonEvent, TerminalId, WorkspaceId};
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
@@ -24,12 +25,30 @@ use std::sync::{Arc, Mutex};
 /// per burst, and 8 KiB is about a screen of dense text.
 const READ_CHUNK: usize = 8 * 1024;
 
+/// How much of a shell's output is kept for a window that comes back.
+///
+/// The daemon holds the pty, so a window that was closed and reopened has
+/// missed everything printed meanwhile; without a replay it reattaches to a
+/// blank screen and a prompt it cannot see. A quarter of a megabyte is several
+/// screens of a build's output and small enough to keep per terminal.
+const HISTORY_LIMIT: usize = 256 * 1024;
+
 /// One running shell.
 struct Running {
     writer: Box<dyn std::io::Write + Send>,
     master: Box<dyn portable_pty::MasterPty + Send>,
     /// Dropping this kills the shell.
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// The workspace it was opened in, so a window can find its shells again.
+    workspace: WorkspaceId,
+    /// What it is called in a tab strip.
+    title: String,
+    /// What it has printed, trimmed to `HISTORY_LIMIT`.
+    ///
+    /// Shared with the thread reading the pty rather than passed through the
+    /// event sink, because the sink's job is to tell the windows that are here
+    /// now and this is for the one that is not.
+    history: Arc<Mutex<String>>,
 }
 
 /// Every terminal the daemon is running.
@@ -52,7 +71,13 @@ impl Terminals {
     /// The user's own shell, from `SHELL`, because a terminal that is not the
     /// one they configured is a terminal that behaves unlike every other one
     /// they use.
-    pub fn open(&self, worktree: &Path, rows: u16, cols: u16) -> Result<TerminalId> {
+    pub fn open(
+        &self,
+        workspace: &WorkspaceId,
+        worktree: &Path,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId> {
         let system = NativePtySystem::default();
         let pair = system
             .openpty(PtySize {
@@ -85,20 +110,61 @@ impl Terminals {
         let writer = pair.master.take_writer().context("taking the pty writer")?;
         let reader = pair.master.try_clone_reader().context("reading the pty")?;
         let id = TerminalId(uuid::Uuid::new_v4().simple().to_string());
+        let history = Arc::new(Mutex::new(String::new()));
 
-        self.pump(id.clone(), reader);
-        self.running
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(
-                id.clone(),
-                Running {
-                    writer,
-                    master: pair.master,
-                    child,
-                },
-            );
+        self.pump(id.clone(), reader, history.clone());
+        let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        // Numbered within the workspace, because that is the strip they appear
+        // in: two shells in two workspaces are both the first one there.
+        let ordinal = running
+            .values()
+            .filter(|other| &other.workspace == workspace)
+            .count()
+            + 1;
+        running.insert(
+            id.clone(),
+            Running {
+                writer,
+                master: pair.master,
+                child,
+                workspace: workspace.clone(),
+                title: format!("shell {ordinal}"),
+                history,
+            },
+        );
         Ok(id)
+    }
+
+    /// The shells running in a workspace, oldest first.
+    ///
+    /// What a window asks for when it opens: the daemon kept them running, and
+    /// a dock that did not show them would be hiding work that is still going.
+    pub fn list(&self, workspace: &WorkspaceId) -> Vec<TerminalInfo> {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let mut found: Vec<TerminalInfo> = running
+            .iter()
+            .filter(|(_, shell)| &shell.workspace == workspace)
+            .map(|(id, shell)| TerminalInfo {
+                id: id.clone(),
+                workspace: shell.workspace.clone(),
+                title: shell.title.clone(),
+            })
+            .collect();
+        // By the name they were given, which counts up as they were opened: a
+        // HashMap has no order and a tab strip that reshuffled itself would be
+        // unusable.
+        found.sort_by(|a, b| a.title.cmp(&b.title));
+        found
+    }
+
+    /// What a terminal has printed lately, for a window that has just found it.
+    pub fn history(&self, id: &TerminalId) -> Result<String> {
+        let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        let shell = running
+            .get(id)
+            .with_context(|| format!("no terminal with id {id}"))?;
+        let history = shell.history.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(history.clone())
     }
 
     /// Forward everything the shell prints, until it stops.
@@ -106,7 +172,12 @@ impl Terminals {
     /// On its own thread rather than the async executor: a pty read is a
     /// blocking file read with no async form on every platform, and one shell
     /// producing output must not occupy a task slot the agents are using.
-    fn pump(&self, id: TerminalId, mut reader: Box<dyn std::io::Read + Send>) {
+    fn pump(
+        &self,
+        id: TerminalId,
+        mut reader: Box<dyn std::io::Read + Send>,
+        history: Arc<Mutex<String>>,
+    ) {
         let events = self.events.clone();
         std::thread::spawn(move || {
             let mut buffer = vec![0u8; READ_CHUNK];
@@ -118,6 +189,7 @@ impl Terminals {
                         // sequence across two reads, and refusing to forward
                         // the chunk would stall the screen over one byte.
                         let data = String::from_utf8_lossy(&buffer[..read]).to_string();
+                        remember(&history, &data);
                         events.emit(DaemonEvent::TerminalOutput {
                             terminal: id.clone(),
                             data,
@@ -174,6 +246,23 @@ impl Terminals {
     }
 }
 
+/// Keep `data` in a terminal's history, dropping the oldest to stay bounded.
+///
+/// Trimmed on a character boundary rather than a byte one: a screen replayed
+/// from half a character starts with a replacement glyph, and the escape
+/// sequences around it are what draw the screen.
+fn remember(history: &Mutex<String>, data: &str) {
+    let mut history = history.lock().unwrap_or_else(|e| e.into_inner());
+    history.push_str(data);
+    if history.len() > HISTORY_LIMIT {
+        let mut cut = history.len() - HISTORY_LIMIT;
+        while cut < history.len() && !history.is_char_boundary(cut) {
+            cut += 1;
+        }
+        history.drain(..cut);
+    }
+}
+
 /// The shell to run.
 ///
 /// The user's own, because a terminal that is not the one they configured is a
@@ -226,6 +315,11 @@ mod tests {
         }
     }
 
+    /// The workspace the test's shells belong to.
+    fn workspace() -> WorkspaceId {
+        WorkspaceId("project/branch".into())
+    }
+
     /// Type a line into a terminal and wait for what it should produce,
     /// typing it again until it does.
     ///
@@ -256,7 +350,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let terminals = Terminals::new(recorder.clone());
 
-        let id = terminals.open(dir.path(), 24, 80).unwrap();
+        let id = terminals.open(&workspace(), dir.path(), 24, 80).unwrap();
 
         assert!(
             typed(&terminals, &id, "echo ginka-was-here\n", || recorder
@@ -278,7 +372,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let terminals = Terminals::new(recorder.clone());
 
-        let id = terminals.open(&worktree, 24, 80).unwrap();
+        let id = terminals.open(&workspace(), &worktree, 24, 80).unwrap();
 
         let name = worktree.file_name().unwrap().to_string_lossy().to_string();
         assert!(
@@ -297,7 +391,7 @@ mod tests {
         let recorder = Arc::new(Recorder::default());
         let terminals = Terminals::new(recorder.clone());
 
-        let id = terminals.open(dir.path(), 24, 80).unwrap();
+        let id = terminals.open(&workspace(), dir.path(), 24, 80).unwrap();
 
         assert!(
             typed(&terminals, &id, "exit\n", || recorder.closed(&id)),
@@ -310,7 +404,7 @@ mod tests {
     fn closing_a_terminal_stops_its_shell_and_forgets_it() {
         let dir = tempfile::tempdir().unwrap();
         let terminals = Terminals::new(Arc::new(Recorder::default()));
-        let id = terminals.open(dir.path(), 24, 80).unwrap();
+        let id = terminals.open(&workspace(), dir.path(), 24, 80).unwrap();
         assert_eq!(terminals.count(), 1);
 
         terminals.close(&id).unwrap();
@@ -327,7 +421,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let recorder = Arc::new(Recorder::default());
         let terminals = Terminals::new(recorder.clone());
-        let id = terminals.open(dir.path(), 24, 80).unwrap();
+        let id = terminals.open(&workspace(), dir.path(), 24, 80).unwrap();
 
         terminals.resize(&id, 40, 132).unwrap();
         assert!(
@@ -347,5 +441,74 @@ mod tests {
             .write(&TerminalId("absent".into()), "hello")
             .unwrap_err();
         assert!(error.to_string().contains("absent"), "{error}");
+    }
+
+    #[test]
+    fn a_window_that_comes_back_is_told_what_it_missed() {
+        // The daemon holds the pty, so a reopened window has missed whatever
+        // was printed meanwhile; without the replay it reattaches to a blank
+        // screen and a prompt it cannot see.
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(Recorder::default());
+        let terminals = Terminals::new(recorder.clone());
+
+        let id = terminals.open(&workspace(), dir.path(), 24, 80).unwrap();
+        assert!(typed(&terminals, &id, "echo replayed-me\n", || recorder
+            .printed(&id)
+            .contains("replayed-me")));
+
+        let history = terminals.history(&id).unwrap();
+        assert!(
+            history.contains("replayed-me"),
+            "the history is what the shell printed: {history:?}"
+        );
+        terminals.close(&id).unwrap();
+        assert!(
+            terminals.history(&id).is_err(),
+            "a terminal that is gone has no history to replay"
+        );
+    }
+
+    #[test]
+    fn history_is_bounded_and_keeps_the_newest() {
+        // A build printing for an hour must not grow the daemon without limit,
+        // and what a returning reader wants is the end of it.
+        let history = Mutex::new(String::new());
+        remember(&history, &"a".repeat(HISTORY_LIMIT));
+        remember(&history, "the newest words");
+        let kept = history.lock().unwrap();
+        assert!(kept.len() <= HISTORY_LIMIT);
+        assert!(kept.ends_with("the newest words"));
+    }
+
+    #[test]
+    fn a_workspaces_shells_are_listed_in_the_order_they_were_opened() {
+        let dir = tempfile::tempdir().unwrap();
+        let terminals = Terminals::new(Arc::new(Recorder::default()));
+        let mine = workspace();
+        let other = WorkspaceId("project/elsewhere".into());
+
+        let first = terminals.open(&mine, dir.path(), 24, 80).unwrap();
+        let second = terminals.open(&mine, dir.path(), 24, 80).unwrap();
+        let elsewhere = terminals.open(&other, dir.path(), 24, 80).unwrap();
+
+        let listed = terminals.list(&mine);
+        assert_eq!(
+            listed.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
+            vec![first.clone(), second.clone()],
+            "one workspace's strip shows that workspace's shells"
+        );
+        assert_eq!(listed[0].title, "shell 1");
+        assert_eq!(listed[1].title, "shell 2");
+        assert_eq!(
+            terminals.list(&other)[0].title,
+            "shell 1",
+            "the first shell in a workspace is its first, whatever else is running"
+        );
+
+        for id in [first, second, elsewhere] {
+            terminals.close(&id).unwrap();
+        }
+        assert!(terminals.list(&mine).is_empty());
     }
 }

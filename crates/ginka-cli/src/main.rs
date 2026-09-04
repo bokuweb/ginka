@@ -603,6 +603,15 @@ fn print(response: Response, patch: bool) {
         // A terminal is opened by a window, which is where it is typed into;
         // printing the id is all a script can do with one.
         Response::Terminal { terminal } => println!("{terminal}"),
+        Response::Terminals { terminals } => {
+            for terminal in terminals {
+                println!("{}\t{}", terminal.id, terminal.title);
+            }
+        }
+        // Escapes and all: what a terminal printed is only meaningful to
+        // something that renders a terminal, and rewriting it here would be
+        // guessing at a screen this end does not have.
+        Response::TerminalHistory { data } => print!("{data}"),
         Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
         Response::ReviewComments { comments } => {
             if comments.is_empty() {

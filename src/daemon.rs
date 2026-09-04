@@ -14,7 +14,7 @@ use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, ReviewComment, Session,
-    SlashCommand, TranscriptEntry,
+    SlashCommand, TerminalInfo, TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
@@ -203,6 +203,32 @@ impl DaemonLink {
             path: path.to_string(),
         })
         .await;
+    }
+
+    /// The shells the daemon is running in a workspace.
+    pub async fn terminals(&self, workspace: &WorkspaceId) -> Vec<TerminalInfo> {
+        match self
+            .ask(Request::WorkspaceTerminals {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Terminals { terminals }) => terminals,
+            _ => Vec::new(),
+        }
+    }
+
+    /// What a shell printed while this window was not looking.
+    pub async fn terminal_history(&self, terminal: &TerminalId) -> Option<String> {
+        match self
+            .ask(Request::TerminalHistory {
+                terminal: terminal.clone(),
+            })
+            .await
+        {
+            Some(Response::TerminalHistory { data }) => Some(data),
+            _ => None,
+        }
     }
 
     /// Leave a comment on a line of the diff.

@@ -18,6 +18,8 @@ use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
+use ginka_protocol::TerminalId;
+use ginka_protocol::model::TerminalInfo;
 
 /// One character on the screen, with how it should be drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -184,6 +186,140 @@ fn colour(from: Color) -> Option<TerminalColor> {
     }
 }
 
+/// One shell in the dock: what it is called, and the screen it draws on.
+pub struct TerminalTab {
+    pub id: TerminalId,
+    pub title: String,
+    pub screen: TerminalScreen,
+}
+
+/// The shells the dock is showing, and which one is in front.
+///
+/// The daemon owns the ptys; this is only the strip and the screens. A window
+/// that reopens finds the shells still running and adopts them, which is why
+/// `adopt` exists at all: the tab a user left is not one this window created.
+#[derive(Default)]
+pub struct TerminalTabs {
+    tabs: Vec<TerminalTab>,
+    active: usize,
+}
+
+impl TerminalTabs {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Every tab, in the order they were opened.
+    pub fn tabs(&self) -> &[TerminalTab] {
+        &self.tabs
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    /// Every tab, to be drawn on or resized.
+    pub fn tabs_mut(&mut self) -> &mut [TerminalTab] {
+        &mut self.tabs
+    }
+
+    /// Which tab is in front.
+    pub fn active_index(&self) -> usize {
+        self.active
+    }
+
+    /// The tab in front, if there is one.
+    pub fn active(&self) -> Option<&TerminalTab> {
+        self.tabs.get(self.active)
+    }
+
+    pub fn active_mut(&mut self) -> Option<&mut TerminalTab> {
+        self.tabs.get_mut(self.active)
+    }
+
+    /// The id of the tab in front: where a keystroke goes.
+    pub fn active_id(&self) -> Option<TerminalId> {
+        self.active().map(|tab| tab.id.clone())
+    }
+
+    /// Add a shell and bring it to the front, because opening one is asking
+    /// to type in it.
+    pub fn open(&mut self, id: TerminalId, title: String, rows: u16, cols: u16) {
+        self.tabs.push(TerminalTab {
+            id,
+            title,
+            screen: TerminalScreen::new(rows, cols),
+        });
+        self.active = self.tabs.len() - 1;
+    }
+
+    /// Show a tab that is already open.
+    pub fn focus(&mut self, index: usize) {
+        if index < self.tabs.len() {
+            self.active = index;
+        }
+    }
+
+    /// Forget a shell, and settle on the one beside it.
+    ///
+    /// The neighbour to the left, the way every tab strip does it: closing the
+    /// third tab leaves the second in front, not the first.
+    pub fn close(&mut self, id: &TerminalId) {
+        let Some(index) = self.tabs.iter().position(|tab| &tab.id == id) else {
+            return;
+        };
+        self.tabs.remove(index);
+        self.active = index
+            .saturating_sub(1)
+            .min(self.tabs.len().saturating_sub(1));
+    }
+
+    /// Feed a shell's output to its screen. Output for a tab this window is
+    /// not showing is dropped: the daemon keeps the history it can replay.
+    pub fn feed(&mut self, id: &TerminalId, data: &str) -> bool {
+        match self.tabs.iter_mut().find(|tab| &tab.id == id) {
+            Some(tab) => {
+                tab.screen.feed(data);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Take on the shells the daemon says are running in this workspace.
+    ///
+    /// Screens for the ones this window has not seen, and no screen thrown
+    /// away for one it has: the tab a user was reading keeps what is on it.
+    /// Anything the daemon no longer lists is gone, whoever closed it.
+    pub fn adopt(&mut self, running: &[TerminalInfo], rows: u16, cols: u16) -> Vec<TerminalId> {
+        let front = self.active_id();
+        let mut adopted = Vec::new();
+        let mut kept: Vec<TerminalTab> = Vec::new();
+        for info in running {
+            match self.tabs.iter().position(|tab| tab.id == info.id) {
+                Some(index) => {
+                    let mut tab = self.tabs.remove(index);
+                    tab.title = info.title.clone();
+                    kept.push(tab);
+                }
+                None => {
+                    adopted.push(info.id.clone());
+                    kept.push(TerminalTab {
+                        id: info.id.clone(),
+                        title: info.title.clone(),
+                        screen: TerminalScreen::new(rows, cols),
+                    });
+                }
+            }
+        }
+        self.tabs = kept;
+        self.active = front
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .unwrap_or(0);
+        adopted
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +420,102 @@ mod tests {
             8,
             "a shell that painted a bar across the width would lose its end"
         );
+    }
+
+    /// What the daemon says about a shell it is running.
+    fn info(id: &str, title: &str) -> TerminalInfo {
+        TerminalInfo {
+            id: TerminalId(id.into()),
+            workspace: ginka_protocol::WorkspaceId("project/branch".into()),
+            title: title.into(),
+        }
+    }
+
+    #[test]
+    fn opening_a_shell_brings_it_to_the_front() {
+        let mut tabs = TerminalTabs::new();
+        tabs.open(TerminalId("one".into()), "shell 1".into(), 24, 80);
+        tabs.open(TerminalId("two".into()), "shell 2".into(), 24, 80);
+        assert_eq!(tabs.active_id(), Some(TerminalId("two".into())));
+        assert_eq!(tabs.tabs().len(), 2);
+    }
+
+    #[test]
+    fn closing_a_tab_settles_on_the_one_beside_it() {
+        // What every tab strip does: closing the third leaves the second in
+        // front, and closing the first leaves whatever is now first.
+        let mut tabs = TerminalTabs::new();
+        for name in ["one", "two", "three"] {
+            tabs.open(TerminalId(name.into()), name.into(), 24, 80);
+        }
+        tabs.close(&TerminalId("three".into()));
+        assert_eq!(tabs.active_id(), Some(TerminalId("two".into())));
+
+        tabs.close(&TerminalId("one".into()));
+        assert_eq!(tabs.active_id(), Some(TerminalId("two".into())));
+
+        tabs.close(&TerminalId("two".into()));
+        assert!(tabs.is_empty());
+        assert_eq!(tabs.active_id(), None, "nothing left to type into");
+    }
+
+    #[test]
+    fn output_lands_on_the_screen_it_belongs_to() {
+        let mut tabs = TerminalTabs::new();
+        tabs.open(TerminalId("one".into()), "shell 1".into(), 24, 80);
+        tabs.open(TerminalId("two".into()), "shell 2".into(), 24, 80);
+
+        assert!(tabs.feed(&TerminalId("one".into()), "behind"));
+        tabs.focus(0);
+        assert!(
+            tabs.active().unwrap().screen.text().contains("behind"),
+            "a tab that was not in front still kept what it printed"
+        );
+        assert!(
+            !tabs.feed(&TerminalId("gone".into()), "nowhere"),
+            "output for a shell this window is not showing is dropped"
+        );
+    }
+
+    #[test]
+    fn a_reopened_window_adopts_the_shells_that_kept_running() {
+        // The point of the daemon owning the pty: the build is still going,
+        // and the window that comes back has to find it.
+        let mut tabs = TerminalTabs::new();
+        let adopted = tabs.adopt(&[info("one", "shell 1"), info("two", "shell 2")], 24, 80);
+        assert_eq!(adopted.len(), 2, "both need their history replayed");
+        assert_eq!(tabs.active_index(), 0);
+
+        tabs.focus(1);
+        tabs.feed(&TerminalId("two".into()), "still building");
+        // The daemon says the same shells are running, plus one opened
+        // elsewhere; nothing on screen is thrown away for that.
+        let adopted = tabs.adopt(
+            &[
+                info("one", "shell 1"),
+                info("two", "shell 2"),
+                info("three", "shell 3"),
+            ],
+            24,
+            80,
+        );
+        assert_eq!(adopted, vec![TerminalId("three".into())]);
+        assert_eq!(
+            tabs.active_id(),
+            Some(TerminalId("two".into())),
+            "the tab being read stays in front"
+        );
+        assert!(
+            tabs.active()
+                .unwrap()
+                .screen
+                .text()
+                .contains("still building")
+        );
+
+        // One of them exited, whoever closed it.
+        tabs.adopt(&[info("one", "shell 1")], 24, 80);
+        assert_eq!(tabs.tabs().len(), 1);
+        assert_eq!(tabs.active_id(), Some(TerminalId("one".into())));
     }
 }

@@ -163,14 +163,12 @@ pub struct Shell {
     rewinding: Option<u32>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
-    /// The shell running in the dock, and what it has printed.
+    /// The shells in the dock, and what each has printed.
     ///
-    /// The daemon owns the pty; this is the screen it is drawn on, which is
-    /// why a window that closes and reopens finds the build still running.
-    terminal: Option<(
-        ginka_protocol::TerminalId,
-        ginka_ui::terminal::TerminalScreen,
-    )>,
+    /// The daemon owns the ptys; these are the screens they are drawn on,
+    /// which is why a window that closes and reopens finds the build still
+    /// running and picks the tab back up.
+    terminals: ginka_ui::terminal::TerminalTabs,
     /// The transcript's scroll position, so the answer can be followed.
     transcript_scroll: ScrollHandle,
     /// Whether the transcript is still following the answer. Dropped by the
@@ -246,6 +244,12 @@ impl Shell {
                         this.start_fresh = false;
                         this.checkpoints = Vec::new();
                         this.rewinding = None;
+                        // The shells belong to the workspace, not to the
+                        // window: a different workspace is a different strip.
+                        this.terminals = ginka_ui::terminal::TerminalTabs::new();
+                        if this.layout.is_open(Panel::TerminalDock) {
+                            this.adopt_terminals(cx);
+                        }
                         this.mentions.clear();
                         // Whatever was half-written here when it was last left.
                         this.composer
@@ -398,24 +402,15 @@ impl Shell {
                         // are for.
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
-                                if let Some((open, screen)) = this.terminal.as_mut()
-                                    && *open == terminal
-                                {
-                                    screen.feed(&data);
+                                if this.terminals.feed(&terminal, &data) {
                                     cx.notify();
                                 }
                             })
                             .map_err(|_| ()),
                         DaemonEvent::TerminalClosed { terminal } => this
                             .update(cx, |this, cx| {
-                                if this
-                                    .terminal
-                                    .as_ref()
-                                    .is_some_and(|(open, _)| open == &terminal)
-                                {
-                                    this.terminal = None;
-                                    cx.notify();
-                                }
+                                this.terminals.close(&terminal);
+                                cx.notify();
                             })
                             .map_err(|_| ()),
                         DaemonEvent::Shutdown => {
@@ -430,6 +425,14 @@ impl Shell {
             }
         })
         .detach();
+        // A window that opens with the dock already open has shells waiting
+        // for it: the daemon kept them running, and finding them is what makes
+        // the process split visible rather than theoretical.
+        cx.defer_in(window, |this, _, cx| {
+            if this.layout.is_open(Panel::TerminalDock) {
+                this.adopt_terminals(cx);
+            }
+        });
         Self {
             layout: Layout::from_settings(&settings),
             link,
@@ -438,7 +441,7 @@ impl Shell {
             agents: Vec::new(),
             reveal: Reveal::new(),
             terminal_focus: cx.focus_handle(),
-            terminal: None,
+            terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
             submitted: false,
             composer_focused: false,
@@ -694,10 +697,13 @@ impl Shell {
                 .await;
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
-                    this.terminal = Some((
-                        terminal,
-                        ginka_ui::terminal::TerminalScreen::new(rows, cols),
-                    ));
+                    let title = this.terminals.tabs().len() + 1;
+                    this.terminals
+                        .open(terminal, format!("shell {title}"), rows, cols);
+                    // The daemon is the one that names them, and it numbers
+                    // them per workspace: adopting straight afterwards is how
+                    // two windows agree on what a tab is called.
+                    this.adopt_terminals(cx);
                     cx.notify();
                 })
                 .ok();
@@ -706,15 +712,60 @@ impl Shell {
         .detach();
     }
 
-    /// Stop the shell in the dock.
-    fn close_terminal(&mut self, cx: &mut Context<Self>) {
-        let Some((terminal, _)) = self.terminal.take() else {
-            return;
-        };
+    /// Stop one of the dock's shells.
+    fn close_terminal(&mut self, terminal: ginka_protocol::TerminalId, cx: &mut Context<Self>) {
+        self.terminals.close(&terminal);
         cx.notify();
         let link = self.link.clone();
         cx.background_spawn(async move { link.close_terminal(&terminal).await })
             .detach();
+    }
+
+    /// Bring one of the dock's shells to the front.
+    fn show_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminals.focus(index);
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Find the shells the daemon kept running in this workspace, and replay
+    /// what they printed while this window was not looking.
+    fn adopt_terminals(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let (rows, cols) = self.dock_size();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let running = cx
+                .background_spawn(async move { link.terminals(&workspace).await })
+                .await;
+            let fresh = this
+                .update(cx, |this, cx| {
+                    cx.notify();
+                    this.terminals.adopt(&running, rows, cols)
+                })
+                .ok()
+                .unwrap_or_default();
+            for terminal in fresh {
+                let link = this
+                    .update(cx, |this, _| this.link.clone())
+                    .ok()
+                    .expect("the window is still open");
+                let asked = terminal.clone();
+                let history = cx
+                    .background_spawn(async move { link.terminal_history(&asked).await })
+                    .await;
+                if let Some(history) = history {
+                    this.update(cx, |this, cx| {
+                        this.terminals.feed(&terminal, &history);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
     }
 
     /// How many rows and columns the dock has room for.
@@ -735,14 +786,13 @@ impl Shell {
     /// bytes: what a terminal *is* is a program reading the bytes a keyboard
     /// produced.
     fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some((terminal, _)) = self.terminal.as_ref() else {
+        let Some(terminal) = self.terminals.active_id() else {
             return;
         };
         let Some(data) = keystroke_bytes(&event.keystroke) else {
             return;
         };
         let link = self.link.clone();
-        let terminal = terminal.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
     }
@@ -914,6 +964,11 @@ impl Shell {
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.layout.toggle(panel);
         self.persist();
+        // A dock that has just opened is one that has to find the shells the
+        // daemon kept running while it was closed.
+        if panel == Panel::TerminalDock && self.layout.is_open(panel) {
+            self.adopt_terminals(cx);
+        }
         cx.notify();
     }
 
@@ -941,17 +996,28 @@ impl Shell {
     /// one is the visible symptom of forgetting.
     fn resize_terminal(&mut self, cx: &mut Context<Self>) {
         let (rows, cols) = self.dock_size();
-        let Some((terminal, screen)) = self.terminal.as_mut() else {
-            return;
-        };
-        if screen.rows() == rows && screen.cols() == cols {
+        // Every shell, not only the one in front: a tab brought forward after
+        // the dock was resized would otherwise be laid out for the old size.
+        let stale: Vec<ginka_protocol::TerminalId> = self
+            .terminals
+            .tabs()
+            .iter()
+            .filter(|tab| tab.screen.rows() != rows || tab.screen.cols() != cols)
+            .map(|tab| tab.id.clone())
+            .collect();
+        if stale.is_empty() {
             return;
         }
-        screen.resize(rows, cols);
-        let terminal = terminal.clone();
+        for tab in self.terminals.tabs_mut() {
+            tab.screen.resize(rows, cols);
+        }
         let link = self.link.clone();
-        cx.background_spawn(async move { link.resize_terminal(&terminal, rows, cols).await })
-            .detach();
+        cx.background_spawn(async move {
+            for terminal in stale {
+                link.resize_terminal(&terminal, rows, cols).await;
+            }
+        })
+        .detach();
         cx.notify();
     }
 
@@ -2199,11 +2265,14 @@ impl Shell {
             )
     }
 
-    /// Placeholder terminal dock. M3 replaces the body with a real PTY grid.
-    /// The terminal dock: a tab strip over whatever shell is running.
+    /// The terminal dock: a tab strip over the shell in front.
+    ///
+    /// One strip per workspace, because the shells are the workspace's: a
+    /// build running in one worktree has nothing to do with the tab a reader
+    /// has open in another.
     fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let running = self.terminal.is_some();
+        let active = self.terminals.active_index();
 
         v_flex()
             .size_full()
@@ -2219,42 +2288,80 @@ impl Shell {
                     .items_center()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(
-                        h_flex()
-                            .id("terminal-tab")
-                            .px_2()
-                            .py_1()
-                            .gap_2()
-                            .items_center()
-                            .rounded(px(tokens.radius.row))
-                            .when(running, |this| this.bg(tokens.colors().row_active()))
-                            .child(
-                                Icon::new(IconName::SquareTerminal)
-                                    .size_3()
-                                    .text_color(tokens.colors().text_secondary),
-                            )
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_secondary)
-                                    .child(rust_i18n::t!("terminal.tab").to_string()),
-                            )
-                            .children(running.then(|| {
-                                div()
-                                    .id("close-terminal")
+                    .children(
+                        self.terminals
+                            .tabs()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, tab)| {
+                                let showing = index == active;
+                                let id = tab.id.clone();
+                                let closing = tab.id.clone();
+                                h_flex()
+                                    .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
+                                    .px_2()
+                                    .py_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .rounded(px(tokens.radius.row))
+                                    .when(showing, |this| this.bg(tokens.colors().row_active()))
                                     .cursor_pointer()
-                                    .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx)))
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.show_terminal(index, window, cx)
+                                    }))
                                     .child(
-                                        Icon::new(IconName::Close)
+                                        Icon::new(IconName::SquareTerminal)
                                             .size_3()
-                                            .text_color(tokens.colors().text_muted),
+                                            .text_color(tokens.colors().text_secondary),
                                     )
-                            })),
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if showing {
+                                                tokens.colors().text_primary
+                                            } else {
+                                                tokens.colors().text_secondary
+                                            })
+                                            .child(tab.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("close-terminal:{id}")))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.close_terminal(closing.clone(), cx)
+                                            }))
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size_3()
+                                                    .text_color(tokens.colors().text_muted),
+                                            ),
+                                    )
+                            }),
                     )
+                    .children((!self.terminals.is_empty()).then(|| {
+                        div()
+                            .id("new-terminal")
+                            .px_1p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
+                            )
+                            .child(
+                                Icon::new(IconName::Plus)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            )
+                    }))
                     .child(div().flex_1()),
             )
-            .child(match &self.terminal {
-                Some((_, screen)) => self.terminal_screen(screen, cx).into_any_element(),
+            .child(match self.terminals.active() {
+                Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
                 None => self.terminal_start(cx).into_any_element(),
             })
     }

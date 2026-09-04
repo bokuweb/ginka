@@ -296,7 +296,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 Goal: the loop that makes the app useful daily — read the diff, comment, send back.
 
 - [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
-- [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay
+- [x] Terminal tabs; reattach with replay
+- [ ] Terminal splits, scrollback search
 - [ ] File-path detection in terminal and chat output → click opens the file
 - [ ] Selection → "add to chat" / "add to terminal"
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
@@ -435,3 +436,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
 | 2026-09-04 | Review comments are held by the daemon and sent as one message | A comment is worth writing before the reader has finished reading, and worth keeping if the window closes; sending each one as it is written interrupts the agent mid-turn and costs a round trip per line. The batch clears only once the agent has it. |
 | 2026-09-04 | Staging is per file, and the commit box follows what is staged | Reading an agent's work usually ends in "these are right, that one is not", and a commit box that took everything anyway would make staging decorative. Nothing staged still means commit everything, which is the common case. |
+| 2026-09-04 | The daemon keeps a bounded scrollback per terminal, and a window replays it on reattach | The pty outlives the window, so a window that comes back has missed whatever was printed meanwhile and would reattach to a blank screen. 256 KiB per shell is several screens of a build and small enough to hold; the newest is what is kept. |
