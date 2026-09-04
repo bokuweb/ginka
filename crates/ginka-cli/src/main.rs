@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch,
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch, UsageRow,
     WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
@@ -63,6 +63,12 @@ enum Command {
         workspace: String,
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
+    },
+    /// Report what the work has cost.
+    Usage {
+        /// How many days back to look.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
     },
     /// Show what has changed in a workspace.
     Changes {
@@ -308,6 +314,7 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Usage { days } => Request::Usage { days: Some(days) },
         Command::Files { workspace, query } => Request::WorkspaceFiles {
             workspace: WorkspaceId(workspace),
             query,
@@ -503,6 +510,7 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::Draft { text } => println!("{text}"),
+        Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
         Response::Committed { commit } => println!(
             "{}",
             rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])
@@ -656,6 +664,37 @@ fn print_matches(matches: &[SessionMatch]) {
             found.title.clone().unwrap_or_default(),
             found.excerpt
         );
+    }
+}
+
+/// What the work cost, by day and by agent.
+fn print_usage(by_day: &[UsageRow], by_agent: &[UsageRow]) {
+    if by_day.is_empty() {
+        println!("{}", rust_i18n::t!("cli.usage.empty"));
+        return;
+    }
+    let row = |row: &UsageRow| {
+        println!(
+            "{:<14} {:>10} in {:>8} out {:>8} cached  {:>4} turns  {}",
+            row.label,
+            row.totals.input_tokens,
+            row.totals.output_tokens,
+            row.totals.cache_read_tokens,
+            row.totals.turns,
+            // A vendor that does not price its work says nothing rather than
+            // zero, which would be a claim that it was free.
+            row.totals
+                .cost_usd
+                .map(|cost| format!("${cost:.2}"))
+                .unwrap_or_default()
+        )
+    };
+    for entry in by_day {
+        row(entry);
+    }
+    println!();
+    for entry in by_agent {
+        row(entry);
     }
 }
 

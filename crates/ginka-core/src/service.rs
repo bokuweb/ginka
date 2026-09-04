@@ -102,6 +102,15 @@ impl Service {
         if orphans > 0 {
             tracing::warn!(orphans, "sessions did not survive the previous daemon");
         }
+        // The retention sweep (`docs/roadmap.md` §4.4): cost history is
+        // interesting for a month and clutter forever.
+        let settings: crate::settings::DaemonSettings =
+            crate::settings::load(&paths.daemon_settings());
+        match crate::usage::sweep(&conn, settings.retention_days) {
+            Ok(swept) if swept > 0 => tracing::info!(swept, "swept old usage"),
+            Err(error) => tracing::warn!(%error, "could not sweep old usage"),
+            _ => {}
+        }
         Ok(Self::new(paths, conn, events))
     }
 
@@ -433,6 +442,14 @@ impl Service {
             Request::SaveComposerDraft { workspace, text } => {
                 session::set_draft(&self.conn(), &workspace, &text, now()).map_err(failed)?;
                 Ok(Response::Ack)
+            }
+            Request::Usage { days } => {
+                let days = days.unwrap_or(30);
+                let conn = self.conn();
+                Ok(Response::Usage {
+                    by_day: crate::usage::by_day(&conn, days).map_err(failed)?,
+                    by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
+                })
             }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;

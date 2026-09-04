@@ -8,7 +8,7 @@
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use crate::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Project, Session, SessionMatch,
-    TranscriptEntry, WorkspaceSummary,
+    TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -146,6 +146,9 @@ pub enum Request {
         text: String,
     },
 
+    /// What the work has cost, by day and by agent.
+    Usage { days: Option<u32> },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
@@ -204,6 +207,10 @@ pub enum Response {
     },
     Draft {
         text: String,
+    },
+    Usage {
+        by_day: Vec<UsageRow>,
+        by_agent: Vec<UsageRow>,
     },
     /// A commit was made, and this is what it is called.
     Committed {

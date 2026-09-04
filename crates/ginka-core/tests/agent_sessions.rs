@@ -834,6 +834,39 @@ fn a_transcript_can_be_searched_for_what_was_said() {
 }
 
 #[test]
+fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
+    // Every driver already reports it; until it was stored, the only place it
+    // existed was a view model that a window closing threw away.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v","total_cost_usd":0.042,"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":900}}"#,
+        ]
+        .join("\n"),
+        "count this",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage { by_day, by_agent } => {
+            let day = by_day.first().expect("it happened today");
+            assert_eq!(day.totals.input_tokens, 1200);
+            assert_eq!(day.totals.output_tokens, 300);
+            assert_eq!(day.totals.cache_read_tokens, 900);
+            assert_eq!(day.totals.cost_usd, Some(0.042));
+
+            let agent = by_agent
+                .iter()
+                .find(|row| row.label == "claude")
+                .expect("filed against the agent that ran it");
+            assert_eq!(agent.totals.input_tokens, 1200);
+        }
+        other => panic!("expected usage, got {other:?}"),
+    }
+}
+
+#[test]
 fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
     let mut fixture = Fixture::new();
     let error = fixture

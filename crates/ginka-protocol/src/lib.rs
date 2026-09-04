@@ -26,7 +26,7 @@ pub use handshake::Handshake;
 pub use ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 pub use model::{
     AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint, DiffLine, FileChange,
-    Hunk, LineKind, Project, ProjectKind, Session, SessionMatch, SessionState, TranscriptEntry,
-    TranscriptPayload, WorkspaceSummary, Worktree,
+    FileEntry, Hunk, LineKind, Project, ProjectKind, Session, SessionMatch, SessionState,
+    TranscriptEntry, TranscriptPayload, UsageRow, UsageTotals, WorkspaceSummary, Worktree,
 };
 pub use rpc::{Request, Response};

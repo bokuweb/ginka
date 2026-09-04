@@ -24,6 +24,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0004_composer_drafts",
         include_str!("../../../db/migrations/0004_composer_drafts.sql"),
     ),
+    (
+        "0005_usage",
+        include_str!("../../../db/migrations/0005_usage.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

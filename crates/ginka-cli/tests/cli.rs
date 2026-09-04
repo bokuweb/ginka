@@ -315,7 +315,10 @@ fn a_workspaces_files_are_searchable_by_any_part_of_their_path() {
     std::fs::write(worktree.join("secret.txt"), "shh\n").unwrap();
 
     let all = home.ok(&["files", "comet/files"]);
-    assert!(all.contains("src/parser.rs"), "a file written now is offered: {all}");
+    assert!(
+        all.contains("src/parser.rs"),
+        "a file written now is offered: {all}"
+    );
     assert!(
         !all.contains("secret.txt"),
         "what the project ignores is not offered: {all}"

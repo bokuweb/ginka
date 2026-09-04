@@ -19,5 +19,6 @@ pub mod registry;
 pub mod service;
 pub mod session;
 pub mod settings;
+pub mod usage;
 
 pub use paths::Paths;

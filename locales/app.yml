@@ -172,6 +172,9 @@ cli.committed:
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
+cli.usage.empty:
+  en: no agent has run yet
+  ja: まだエージェントは実行されていません
 cli.checkpoints.empty:
   en: "no checkpoints yet; they are taken as an agent works"
   ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"

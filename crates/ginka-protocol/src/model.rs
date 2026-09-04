@@ -251,6 +251,34 @@ pub struct FileEntry {
     pub score: u32,
 }
 
+/// What a stretch of work cost.
+///
+/// Totalled from the usage events the drivers report, which are cumulative per
+/// session as the vendor sends them — so a total is the sum of each session's
+/// last word, not of every event.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub reasoning_tokens: u64,
+    /// `None` when no vendor involved priced its work; `Some(0.0)` would claim
+    /// it was free.
+    pub cost_usd: Option<f64>,
+    /// How many turns are behind these numbers.
+    pub turns: u32,
+}
+
+/// What one day, agent or session cost.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageRow {
+    /// What this row is about: a date, an agent's id, or a session's title.
+    pub label: String,
+    pub totals: UsageTotals,
+}
+
 /// Where a search found something.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
