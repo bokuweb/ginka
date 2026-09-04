@@ -55,6 +55,12 @@ pub struct Service {
     /// The shells running in this daemon. Owned here rather than by a window,
     /// so a build started in one keeps running when the window closes.
     terminals: crate::terminal::Terminals,
+    /// What each workspace's git status was the last time it was polled.
+    ///
+    /// Kept so the poller can push only what changed: a client redrawing its
+    /// sidebar every minute because nothing happened is a worse answer than a
+    /// client that is told when something did.
+    statuses: std::collections::HashMap<WorkspaceId, ginka_protocol::model::BranchStatus>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -85,6 +91,7 @@ impl Service {
             conn,
             events,
             drivers: Arc::new(Registry::with_defaults()),
+            statuses: std::collections::HashMap::new(),
             agents: None,
         }
     }
@@ -812,6 +819,70 @@ fn today() -> String {
 }
 
 impl Service {
+    /// Reconcile every project's worktrees against git.
+    ///
+    /// The daemon's own tick rather than each client's: a worktree added with
+    /// the user's own git, or removed by hand, is something every window
+    /// should learn about, and having each of them poll for it is the same
+    /// work done once per window.
+    pub fn sync(&mut self) {
+        let Ok(projects) = self.projects() else {
+            return;
+        };
+        for project in projects {
+            let report = {
+                let conn = self.conn();
+                registry::sync_worktrees(&conn, &project)
+            };
+            match report {
+                Ok(report) if !report.is_empty() => {
+                    tracing::debug!(project = project.name.0, "worktrees reconciled");
+                    self.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: project.name.clone(),
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(%error, project = project.name.0, "could not reconcile")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Re-read every workspace's git status, and push what changed.
+    ///
+    /// Only the difference: a status that is the same as last tick is not news,
+    /// and a push per workspace per minute would be a push that clients learn
+    /// to ignore.
+    pub fn poll_statuses(&mut self) {
+        let Ok(projects) = self.projects() else {
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for project in projects {
+            let Ok(worktrees) = project::list_worktrees(&self.conn(), &project.name) else {
+                continue;
+            };
+            for worktree in worktrees {
+                let id = worktree.workspace_id();
+                seen.insert(id.clone());
+                let Ok(status) = git::branch_status(&worktree.path) else {
+                    continue;
+                };
+                if self.statuses.get(&id) == Some(&status) {
+                    continue;
+                }
+                self.statuses.insert(id.clone(), status);
+                self.events.emit(DaemonEvent::WorkspaceStatusChanged {
+                    workspace: id,
+                    status,
+                });
+            }
+        }
+        // A workspace that is gone is not worth remembering the status of.
+        self.statuses.retain(|id, _| seen.contains(id));
+    }
+
     /// Do what the project asked for in a new worktree.
     ///
     /// A fresh checkout has none of the files the repository deliberately does

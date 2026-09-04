@@ -256,7 +256,7 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [ ] Prune, and the locked-worktree cases `git worktree remove` refuses
 - [x] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
-- [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
+- [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
 - [ ] Virtualize the session list; animate the reorder on the 260 ms curve
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
@@ -447,3 +447,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
 | 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |
 | 2026-09-04 | Whether a question has been answered is a property of the transcript, not of the window | A transcript re-read after a restart has to know as much as one that was watched, and what it knows is that the reader said something afterwards. The card stops offering buttons on that alone. |
+| 2026-09-04 | The daemon polls git on its own clock, and pushes only differences | A worktree added with the user's own git is news for every window, and having each window poll for it is the same work done once per window. A status that has not changed is not news: a push per workspace per minute is one clients learn to ignore. |

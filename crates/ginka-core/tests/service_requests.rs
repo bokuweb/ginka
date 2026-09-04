@@ -637,3 +637,49 @@ fn a_new_worktree_gets_what_the_project_said_it_needs() {
         "the setup command ran in the new worktree"
     );
 }
+
+#[test]
+fn the_poller_pushes_a_status_that_changed_and_stays_quiet_otherwise() {
+    // A push per workspace per minute is a push clients learn to ignore.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "polled".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    fixture.recorder.taken();
+
+    fixture.service.poll_statuses();
+    let first: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert!(!first.is_empty(), "the first look at a workspace is news");
+
+    fixture.service.poll_statuses();
+    let again: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert!(again.is_empty(), "nothing changed: {again:?}");
+
+    // Something the user did in the worktree, which is exactly what the
+    // poller is for.
+    std::fs::write(workspace.worktree.path.join("scratch.txt"), "work\n").unwrap();
+    fixture.service.poll_statuses();
+    let dirty: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert_eq!(dirty.len(), 1, "{dirty:?}");
+}
