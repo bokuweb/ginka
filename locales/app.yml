@@ -108,6 +108,12 @@ surface.terminal.pending:
 surface.git.pending:
   en: The git surface lands in M3.
   ja: git サーフェスは M3 で実装されます。
+terminal.tab:
+  en: shell
+  ja: シェル
+terminal.open:
+  en: Open a terminal here
+  ja: ここでターミナルを開く
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…

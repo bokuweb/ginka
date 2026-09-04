@@ -519,6 +519,9 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::Draft { text } => println!("{text}"),
+        // A terminal is opened by a window, which is where it is typed into;
+        // printing the id is all a script can do with one.
+        Response::Terminal { terminal } => println!("{terminal}"),
         Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
         Response::Commands { commands } => {
             if commands.is_empty() {

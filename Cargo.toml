@@ -35,6 +35,8 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
 
+# The terminal stack the roadmap picked (§4.3): the same one Zed and waku use.
+alacritty_terminal = "0.26"
 anyhow = "1"
 async-channel = "2"
 async-net = "2"
@@ -53,6 +55,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # mentions (§4.3). Small, pure Rust, and the same one Helix and Zed use.
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
+portable-pty = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }

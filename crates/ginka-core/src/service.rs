@@ -52,6 +52,9 @@ pub struct Service {
     events: Arc<dyn EventSink>,
     drivers: Arc<Registry>,
     sessions: Supervisor,
+    /// The shells running in this daemon. Owned here rather than by a window,
+    /// so a build started in one keeps running when the window closes.
+    terminals: crate::terminal::Terminals,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -73,6 +76,7 @@ impl Service {
         Self {
             paths,
             sessions: Supervisor::new(conn.clone(), events.clone()),
+            terminals: crate::terminal::Terminals::new(events.clone()),
             conn,
             events,
             drivers: Arc::new(Registry::with_defaults()),
@@ -467,6 +471,37 @@ impl Service {
                 })
             }
             Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
+
+            Request::OpenTerminal {
+                workspace,
+                rows,
+                cols,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let terminal = self
+                    .terminals
+                    .open(&worktree.path, rows, cols)
+                    .map_err(failed)?;
+                Ok(Response::Terminal { terminal })
+            }
+            Request::WriteTerminal { terminal, data } => {
+                self.terminals.write(&terminal, &data).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::ResizeTerminal {
+                terminal,
+                rows,
+                cols,
+            } => {
+                self.terminals
+                    .resize(&terminal, rows, cols)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::CloseTerminal { terminal } => {
+                self.terminals.close(&terminal).map_err(failed)?;
+                Ok(Response::Ack)
+            }
 
             Request::Shutdown => {
                 // The transport is listening for this: it is the one event a

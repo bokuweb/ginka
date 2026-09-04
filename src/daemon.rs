@@ -17,7 +17,7 @@ use ginka_protocol::model::{
     TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
+use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -228,6 +228,53 @@ impl DaemonLink {
         self.ask(Request::SaveComposerDraft {
             workspace: workspace.clone(),
             text,
+        })
+        .await;
+    }
+
+    /// Start a shell in a workspace, sized for the dock as it is now.
+    pub async fn open_terminal(
+        &self,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Option<TerminalId> {
+        match self
+            .ask(Request::OpenTerminal {
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await
+        {
+            Some(Response::Terminal { terminal }) => Some(terminal),
+            _ => None,
+        }
+    }
+
+    /// Send keystrokes to a terminal.
+    pub async fn write_terminal(&self, terminal: &TerminalId, data: String) {
+        self.ask(Request::WriteTerminal {
+            terminal: terminal.clone(),
+            data,
+        })
+        .await;
+    }
+
+    /// Tell a terminal how big its window is now.
+    pub async fn resize_terminal(&self, terminal: &TerminalId, rows: u16, cols: u16) {
+        self.ask(Request::ResizeTerminal {
+            terminal: terminal.clone(),
+            rows,
+            cols,
+        })
+        .await;
+    }
+
+    /// Close a terminal and stop its shell.
+    pub async fn close_terminal(&self, terminal: &TerminalId) {
+        self.ask(Request::CloseTerminal {
+            terminal: terminal.clone(),
         })
         .await;
     }

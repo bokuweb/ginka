@@ -23,7 +23,7 @@ pub mod rpc;
 pub use envelope::{ClientMessage, RequestId, RpcError, Seq, ServerMessage};
 pub use event::{AgentEvent, DaemonEvent, Usage};
 pub use handshake::Handshake;
-pub use ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+pub use ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 pub use model::{
     AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint, CommandScope,
     DiffLine, FileChange, FileEntry, Hunk, LineKind, Project, ProjectKind, Session, SessionMatch,

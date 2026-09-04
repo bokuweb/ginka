@@ -90,6 +90,16 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// the 15px body size. Reading is what this column is for.
 const TRANSCRIPT_MEASURE: f32 = 780.;
 
+/// The line height the terminal's grid is drawn at, in pixels.
+const TERMINAL_LINE_HEIGHT: f32 = 17.;
+
+/// How wide a terminal is told it is.
+///
+/// Fixed rather than measured: the dock's width changes with every window
+/// resize, and a shell told a new width on every frame spends its time
+/// re-wrapping instead of working. Eighty is what everything assumes anyway.
+const TERMINAL_COLUMNS: u16 = 100;
+
 /// How far from the foot still counts as being at it. About a line of text:
 /// enough that an answer growing between one frame and the next does not read
 /// as the reader scrolling away.
@@ -151,6 +161,16 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// Where keystrokes go when the terminal has the keyboard.
+    terminal_focus: FocusHandle,
+    /// The shell running in the dock, and what it has printed.
+    ///
+    /// The daemon owns the pty; this is the screen it is drawn on, which is
+    /// why a window that closes and reopens finds the build still running.
+    terminal: Option<(
+        ginka_protocol::TerminalId,
+        ginka_ui::terminal::TerminalScreen,
+    )>,
     /// The transcript's scroll position, so the answer can be followed.
     transcript_scroll: ScrollHandle,
     /// Whether the transcript is still following the answer. Dropped by the
@@ -361,6 +381,32 @@ impl Shell {
                         | DaemonEvent::SessionStarted { .. } => {
                             pull_rows(&this, &link, cx).await.map(|_| ())
                         }
+                        // The shell printed something. Straight onto its
+                        // screen: a terminal that lagged behind what was typed
+                        // into it would be unusable for the thing terminals
+                        // are for.
+                        DaemonEvent::TerminalOutput { terminal, data } => this
+                            .update(cx, |this, cx| {
+                                if let Some((open, screen)) = this.terminal.as_mut()
+                                    && *open == terminal
+                                {
+                                    screen.feed(&data);
+                                    cx.notify();
+                                }
+                            })
+                            .map_err(|_| ()),
+                        DaemonEvent::TerminalClosed { terminal } => this
+                            .update(cx, |this, cx| {
+                                if this
+                                    .terminal
+                                    .as_ref()
+                                    .is_some_and(|(open, _)| open == &terminal)
+                                {
+                                    this.terminal = None;
+                                    cx.notify();
+                                }
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::Shutdown => {
                             cx.background_executor().timer(RECONNECT_DELAY).await;
                             Ok(())
@@ -380,6 +426,8 @@ impl Shell {
             transcript_of: None,
             agents: Vec::new(),
             reveal: Reveal::new(),
+            terminal_focus: cx.focus_handle(),
+            terminal: None,
             session_state: None,
             submitted: false,
             composer_focused: false,
@@ -559,6 +607,76 @@ impl Shell {
         .detach();
     }
 
+    /// Start a shell in the workspace on screen.
+    ///
+    /// Sized for the dock as it is now, and focused, because someone who
+    /// opened a terminal means to type in it.
+    fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let (rows, cols) = self.dock_size();
+        let link = self.link.clone();
+        self.terminal_focus.focus(window, cx);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_spawn(async move { link.open_terminal(&workspace, rows, cols).await })
+                .await;
+            if let Some(terminal) = opened {
+                this.update(cx, |this, cx| {
+                    this.terminal = Some((
+                        terminal,
+                        ginka_ui::terminal::TerminalScreen::new(rows, cols),
+                    ));
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Stop the shell in the dock.
+    fn close_terminal(&mut self, cx: &mut Context<Self>) {
+        let Some((terminal, _)) = self.terminal.take() else {
+            return;
+        };
+        cx.notify();
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.close_terminal(&terminal).await })
+            .detach();
+    }
+
+    /// How many rows and columns the dock has room for.
+    ///
+    /// From the dock's height and the window's width at the mono metrics the
+    /// screen is drawn with. Approximate on purpose: the shell only needs to
+    /// know roughly how much room it has, and being a column out is better
+    /// than measuring the grid every frame.
+    fn dock_size(&self) -> (u16, u16) {
+        let height = f32::from(self.layout.size(Panel::TerminalDock));
+        let rows = ((height - 40.) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
+        (rows, TERMINAL_COLUMNS)
+    }
+
+    /// Send a keystroke to the shell.
+    ///
+    /// Translated here rather than passed as a key name, because a pty takes
+    /// bytes: what a terminal *is* is a program reading the bytes a keyboard
+    /// produced.
+    fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some((terminal, _)) = self.terminal.as_ref() else {
+            return;
+        };
+        let Some(data) = keystroke_bytes(&event.keystroke) else {
+            return;
+        };
+        let link = self.link.clone();
+        let terminal = terminal.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
+            .detach();
+    }
+
     /// Stop the agent working in the workspace on screen.
     fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
@@ -695,15 +813,39 @@ impl Shell {
     ///
     /// The slot map comes from the layout, not from a fixed index: with the
     /// sidebar closed, index 0 is the centre column.
+    /// Tell the shell how big its window is now.
+    ///
+    /// The pty has to be told separately from the screen: the shell learns its
+    /// size from the pty, and a full-screen program laying out for the wrong
+    /// one is the visible symptom of forgetting.
+    fn resize_terminal(&mut self, cx: &mut Context<Self>) {
+        let (rows, cols) = self.dock_size();
+        let Some((terminal, screen)) = self.terminal.as_mut() else {
+            return;
+        };
+        if screen.rows() == rows && screen.cols() == cols {
+            return;
+        }
+        screen.resize(rows, cols);
+        let terminal = terminal.clone();
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.resize_terminal(&terminal, rows, cols).await })
+            .detach();
+        cx.notify();
+    }
+
     fn record_resize(
         &mut self,
         slots: Vec<Option<Panel>>,
         state: &Entity<ResizableState>,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) {
         let sizes = state.read(cx).sizes().clone();
         self.layout.record_sizes(&slots, &sizes);
         self.persist();
+        // A dock that changed height is a shell with a different number of
+        // lines to draw into.
+        self.resize_terminal(cx);
     }
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -1937,8 +2079,11 @@ impl Shell {
     }
 
     /// Placeholder terminal dock. M3 replaces the body with a real PTY grid.
-    fn terminal_dock(&self, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
+    /// The terminal dock: a tab strip over whatever shell is running.
+    fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let running = self.terminal.is_some();
+
         v_flex()
             .size_full()
             .border_t_1()
@@ -1955,12 +2100,13 @@ impl Shell {
                     .border_color(tokens.colors().border_subtle)
                     .child(
                         h_flex()
+                            .id("terminal-tab")
                             .px_2()
                             .py_1()
                             .gap_2()
                             .items_center()
                             .rounded(px(tokens.radius.row))
-                            .bg(tokens.colors().bg_raised)
+                            .when(running, |this| this.bg(tokens.colors().row_active()))
                             .child(
                                 Icon::new(IconName::SquareTerminal)
                                     .size_3()
@@ -1970,62 +2116,104 @@ impl Shell {
                                 div()
                                     .text_xs()
                                     .text_color(tokens.colors().text_secondary)
-                                    .child("local"),
+                                    .child(rust_i18n::t!("terminal.tab").to_string()),
                             )
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size_3()
-                                    .text_color(tokens.colors().text_muted),
-                            ),
+                            .children(running.then(|| {
+                                div()
+                                    .id("close-terminal")
+                                    .cursor_pointer()
+                                    .on_click(cx.listener(|this, _, _, cx| this.close_terminal(cx)))
+                                    .child(
+                                        Icon::new(IconName::Close)
+                                            .size_3()
+                                            .text_color(tokens.colors().text_muted),
+                                    )
+                            })),
                     )
-                    .child(
-                        Icon::new(IconName::Plus)
-                            .size_3p5()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size_3()
-                            .text_color(tokens.colors().text_muted),
-                    ),
+                    .child(div().flex_1()),
             )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .px_3()
-                    .py_2()
-                    .items_center()
-                    .font_family(cx.theme_mono_font())
-                    .text_size(px(13.))
-                    // A real prompt is not one colour. Until the PTY lands in
-                    // M3, the placeholder at least has the right shape.
-                    .child(
-                        div()
-                            .text_color(tokens.colors().status_done)
-                            .child("ginka@local"),
-                    )
-                    .child(div().text_color(tokens.colors().text_muted).child(":"))
-                    .child(
-                        div().text_color(tokens.colors().accent).child(
-                            // The real worktree, not a stand-in: a prompt that
-                            // names a directory the user is not in is worse than
-                            // no prompt.
-                            self.session
-                                .as_ref()
-                                .map(|session| session.path.display().to_string())
-                                .unwrap_or_else(|| "~".to_string()),
-                        ),
-                    )
-                    .child(div().text_color(tokens.colors().text_muted).child("$"))
-                    .child(
-                        div()
-                            .ml_1p5()
-                            .w(px(7.))
-                            .h(px(15.))
-                            .bg(tokens.colors().text_secondary),
-                    ),
+            .child(match &self.terminal {
+                Some((_, screen)) => self.terminal_screen(screen, cx).into_any_element(),
+                None => self.terminal_start(cx).into_any_element(),
+            })
+    }
+
+    /// What the dock says before there is a shell in it.
+    fn terminal_start(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex().flex_1().items_center().justify_center().child(
+            div()
+                .id("open-terminal")
+                .px_3()
+                .py_1p5()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .text_sm()
+                .text_color(tokens.colors().text_secondary)
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .on_click(cx.listener(|this, _, window, cx| this.open_terminal(window, cx)))
+                .child(rust_i18n::t!("terminal.open").to_string()),
+        )
+    }
+
+    /// The shell's screen, cell by cell.
+    ///
+    /// Every cell is drawn, blanks included: a shell that painted a bar across
+    /// the width would otherwise lose its right-hand end, and a background
+    /// colour would stop wherever the text did.
+    fn terminal_screen(
+        &self,
+        screen: &ginka_ui::terminal::TerminalScreen,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let mono = cx.theme_mono_font();
+        let rows = screen.rows_of_cells();
+
+        v_flex()
+            .id("terminal-screen")
+            .track_focus(&self.terminal_focus)
+            .key_context("Terminal")
+            .flex_1()
+            .px_2()
+            .py_1()
+            .overflow_hidden()
+            .font_family(mono)
+            .text_size(px(12.5))
+            .line_height(px(17.))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
             )
+            .children(rows.into_iter().map(|row| {
+                h_flex().children(row.into_iter().map(|cell| {
+                    div()
+                        .when(cell.cursor, |this| {
+                            this.bg(tokens.colors().text_primary)
+                                .text_color(tokens.colors().bg_terminal)
+                        })
+                        .when(!cell.cursor, |this| {
+                            this.text_color(
+                                cell.foreground
+                                    .map(|colour| terminal_colour(colour, &tokens))
+                                    .unwrap_or(tokens.colors().text_primary),
+                            )
+                            .when_some(cell.background, |this, colour| {
+                                this.bg(terminal_colour(colour, &tokens))
+                            })
+                        })
+                        .when(cell.bold, |this| this.font_semibold())
+                        .when(cell.italic, |this| this.italic())
+                        .child(if cell.text == ' ' {
+                            // A space with no width is a hole in a painted bar.
+                            SharedString::from("\u{00a0}")
+                        } else {
+                            SharedString::from(cell.text.to_string())
+                        })
+                }))
+            }))
     }
 
     fn center(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2062,6 +2250,77 @@ impl Shell {
                 }),
         )
     }
+}
+
+/// What a terminal's colour looks like in this theme.
+///
+/// The eight ANSI colours and their bright halves are resolved against the
+/// theme's own palette rather than to fixed hexes: a terminal that hardcoded
+/// them would clash with every theme but the one it was written against. What
+/// a program asks for exactly — a truecolour escape — is given exactly.
+fn terminal_colour(colour: ginka_ui::terminal::TerminalColor, tokens: &Tokens) -> Hsla {
+    use ginka_ui::terminal::TerminalColor;
+    let colors = tokens.colors();
+    match colour {
+        TerminalColor::Rgb(red, green, blue) => {
+            gpui::rgb(((red as u32) << 16) | ((green as u32) << 8) | blue as u32).into()
+        }
+        TerminalColor::Named(index) => match index % 8 {
+            0 => colors.text_muted,
+            1 => colors.status_error,
+            2 => colors.status_done,
+            3 => colors.status_attention,
+            4 => colors.accent,
+            5 => colors.status_working,
+            6 => colors.text_secondary,
+            _ => colors.text_primary,
+        },
+    }
+}
+
+/// What a keystroke sends to a shell.
+///
+/// A pty takes bytes, so this is where a key becomes the bytes a terminal
+/// expects: the control characters for `ctrl-`, the escape sequences for the
+/// arrows and the editing keys, and the typed character otherwise. Anything
+/// this does not know is not sent, because a wrong byte is worse than none.
+fn keystroke_bytes(keystroke: &Keystroke) -> Option<String> {
+    let key = keystroke.key.as_str();
+    let modifiers = &keystroke.modifiers;
+
+    if modifiers.control && key.len() == 1 {
+        // ctrl-a is 0x01, and so on up the alphabet; ctrl-c is what stops a
+        // runaway command, which is the whole reason this branch exists.
+        let letter = key.chars().next()?.to_ascii_lowercase();
+        if letter.is_ascii_lowercase() {
+            return Some(((letter as u8 - b'a' + 1) as char).to_string());
+        }
+    }
+
+    let sequence = match key {
+        "enter" => "\r",
+        "tab" => "\t",
+        "backspace" => "\x7f",
+        "escape" => "\x1b",
+        "up" => "\x1b[A",
+        "down" => "\x1b[B",
+        "right" => "\x1b[C",
+        "left" => "\x1b[D",
+        "home" => "\x1b[H",
+        "end" => "\x1b[F",
+        "pageup" => "\x1b[5~",
+        "pagedown" => "\x1b[6~",
+        "delete" => "\x1b[3~",
+        "space" => " ",
+        _ => "",
+    };
+    if !sequence.is_empty() {
+        return Some(sequence.to_string());
+    }
+
+    // What the keyboard actually produced, which is what carries the layout
+    // and the shift state.
+    keystroke.key_char.clone().filter(|typed| !typed.is_empty())
 }
 
 /// Re-read the workspaces and hand back the selected session, if any.

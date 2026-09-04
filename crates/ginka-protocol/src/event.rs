@@ -5,7 +5,7 @@
 //! variants, and nothing above `ginka-core::driver` knows which vendor it is
 //! talking to (`AGENTS.md` rule 6).
 
-use crate::ids::{ProjectName, SessionId, WorkspaceId};
+use crate::ids::{ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{BranchStatus, Session, SessionState, TranscriptEntry};
 use serde::{Deserialize, Serialize};
 
@@ -113,6 +113,14 @@ pub enum DaemonEvent {
         session: SessionId,
         state: SessionState,
     },
+    /// A terminal printed something.
+    ///
+    /// The bytes as the shell wrote them, escapes and all: what they mean is
+    /// the client's business, because it is the one with a screen.
+    TerminalOutput { terminal: TerminalId, data: String },
+    /// A terminal's shell exited, so there is nothing left to type into.
+    TerminalClosed { terminal: TerminalId },
+
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,
 }

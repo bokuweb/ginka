@@ -5,7 +5,7 @@
 //! command line and from the MCP server (`AGENTS.md` rule 3). Adding a private
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Project, Session, SessionMatch,
     SlashCommand, TranscriptEntry, UsageRow, WorkspaceSummary,
@@ -159,6 +159,26 @@ pub enum Request {
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint { checkpoint: CheckpointId },
 
+    /// Start a shell in a workspace.
+    ///
+    /// The daemon owns the pty, so the shell outlives the window that opened
+    /// it — which is the whole point of the process split.
+    OpenTerminal {
+        workspace: WorkspaceId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Send keystrokes to a terminal.
+    WriteTerminal { terminal: TerminalId, data: String },
+    /// Tell a terminal how big its window is now.
+    ResizeTerminal {
+        terminal: TerminalId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Close a terminal and stop its shell.
+    CloseTerminal { terminal: TerminalId },
+
     /// Ask the daemon to exit once it has flushed its state.
     Shutdown,
 }
@@ -215,6 +235,9 @@ pub enum Response {
     },
     Draft {
         text: String,
+    },
+    Terminal {
+        terminal: TerminalId,
     },
     Usage {
         by_day: Vec<UsageRow>,
