@@ -23,6 +23,21 @@ impl WorkspaceId {
     }
 }
 
+impl From<&str> for WorkspaceId {
+    /// Adopt an id that was already built — read back from the database or
+    /// received over the wire. Ids are *created* with [`WorkspaceId::new`];
+    /// this is how one that already exists comes home.
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
+impl From<String> for WorkspaceId {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
 /// Lowercase, collapse every run of non-alphanumeric characters to a single
 /// `-`, and trim the result. Branch names carry `/`, `.` and unicode; ids must
 /// survive being used in paths, URLs and shell arguments.

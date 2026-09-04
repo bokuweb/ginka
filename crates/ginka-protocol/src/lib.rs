@@ -7,6 +7,10 @@
 
 pub mod envelope;
 pub mod ids;
+pub mod provider;
+pub mod session;
 
 pub use envelope::{ClientMessage, RpcError, ServerMessage};
 pub use ids::{ProjectName, WorkspaceId};
+pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
+pub use session::SessionTitle;
