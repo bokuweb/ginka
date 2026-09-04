@@ -277,6 +277,21 @@ impl Shell {
                         })
                         .detach();
                     }
+                    // A new conversation in the workspace already selected:
+                    // the pane clears, and the next message opens a session
+                    // rather than continuing the last one.
+                    SidebarEvent::NewChatRequested => {
+                        this.start_fresh = true;
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.session_state = None;
+                        this.submitted = false;
+                        this.transcript_follows = true;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.composer.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }
                     SidebarEvent::Selected => {
                         this.session = sidebar.read(cx).selected_row().cloned();
                         // A different workspace is a different conversation.
@@ -534,6 +549,9 @@ impl Shell {
         // A transcript read from storage is history, and history is shown
         // whole: watching a conversation you have already had being typed out
         // is a pointless wait.
+        if self.start_fresh {
+            return;
+        }
         let opening = self.transcript_of.as_ref() != Some(session);
         if opening {
             self.transcript = Transcript::new();

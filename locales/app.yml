@@ -14,6 +14,9 @@ sidebar.archived:
 sidebar.empty.title:
   en: No projects yet
   ja: プロジェクトがありません
+sidebar.new_chat:
+  en: New chat
+  ja: 新しいチャット
 sidebar.empty.add:
   en: Add a project…
   ja: プロジェクトを追加…

@@ -27,6 +27,10 @@ pub enum SidebarEvent {
     /// The reader asked for a project to be registered. The sidebar does not
     /// know how to pick a folder or how to reach the daemon; the shell does.
     AddProjectRequested,
+    /// The reader asked to start a new conversation in the selected
+    /// workspace. What that costs — clearing the pane, aiming the next
+    /// message at a new session — is the shell's to decide.
+    NewChatRequested,
 }
 
 impl EventEmitter<SidebarEvent> for SessionSidebar {}
@@ -94,7 +98,40 @@ impl SessionSidebar {
 
     /// The app's own header: what this is, and the two things a header is
     /// for — finding a workspace, and making one.
-    fn header(&self, cx: &App) -> impl IntoElement {
+    /// The front door for a conversation.
+    ///
+    /// Above the list rather than beside the composer: starting a new one is
+    /// the first thing a reader does with this window, and a control they have
+    /// to find inside the last conversation is a control they do not find.
+    fn new_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .id("new-chat")
+            .w_full()
+            .px_3()
+            .py_1p5()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .child(
+                Icon::empty()
+                    .path(ginka_ui::assets::icon::SQUARE_PEN)
+                    .size_4()
+                    .text_color(tokens.colors().text_secondary),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(tokens.colors().text_primary)
+                    .child(rust_i18n::t!("sidebar.new_chat").to_string()),
+            )
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(SidebarEvent::NewChatRequested);
+            }))
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -121,9 +158,17 @@ impl SessionSidebar {
                     .text_color(tokens.colors().text_muted),
             )
             .child(
-                Icon::new(IconName::Plus)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
+                div()
+                    .id("header-new-chat")
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size_4()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::NewChatRequested);
+                    })),
             )
     }
 
@@ -498,6 +543,7 @@ impl Render for SessionSidebar {
             .border_r_1()
             .border_color(border)
             .child(self.header(cx))
+            .child(self.new_chat(cx))
             .when(is_empty, |this| this.child(self.empty_state(cx)))
             .when(!is_empty, |this| {
                 this.child(
