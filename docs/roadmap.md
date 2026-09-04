@@ -308,7 +308,7 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
-- [ ] Pruning old checkpoint refs
+- [x] Pruning old checkpoint refs
 
 **Exit criteria:** a full task cycle — prompt → agent edits → review with 3 line comments → agent revises → commit — without touching another app.
 

@@ -590,7 +590,7 @@ pub fn prune_worktrees(repo: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use ginka_protocol::model::ChangeKind;
 
@@ -706,7 +706,7 @@ prunable
     }
 
     /// A repository with one commit, `.env` ignored, and no remote.
-    fn repository(root: &Path) {
+    pub fn repository(root: &Path) {
         std::fs::create_dir_all(root).unwrap();
         for args in [
             vec!["init", "--initial-branch=main"],

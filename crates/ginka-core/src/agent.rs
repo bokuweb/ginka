@@ -36,6 +36,8 @@ const STDERR_KEPT: usize = 4096;
 struct Shared {
     conn: Arc<Mutex<Connection>>,
     events: Arc<dyn EventSink>,
+    /// How many checkpoints a workspace keeps, from the daemon's settings.
+    checkpoint_limit: u32,
 }
 
 impl Shared {
@@ -102,6 +104,25 @@ impl Shared {
             now(),
         ) {
             tracing::warn!(%error, session = %session, turn, "could not take a checkpoint");
+            return;
+        }
+        // Here rather than on a timer: a workspace only gains checkpoints by
+        // taking one, and this is the moment it just did.
+        match checkpoint::prune(
+            &conn,
+            workspace_path,
+            &stored.workspace,
+            self.checkpoint_limit,
+        ) {
+            Ok(dropped) if dropped > 0 => {
+                tracing::debug!(
+                    dropped,
+                    workspace = stored.workspace.0,
+                    "pruned old checkpoints"
+                )
+            }
+            Err(error) => tracing::warn!(%error, "could not prune old checkpoints"),
+            _ => {}
         }
     }
 
@@ -147,9 +168,17 @@ pub struct Supervisor {
 
 impl Supervisor {
     /// Build a supervisor over the daemon's database and event sink.
-    pub fn new(conn: Arc<Mutex<Connection>>, events: Arc<dyn EventSink>) -> Self {
+    pub fn new(
+        conn: Arc<Mutex<Connection>>,
+        events: Arc<dyn EventSink>,
+        checkpoint_limit: u32,
+    ) -> Self {
         Self {
-            context: Shared { conn, events },
+            context: Shared {
+                conn,
+                events,
+                checkpoint_limit,
+            },
             running: Arc::new(Mutex::new(HashMap::new())),
             queued: Arc::new(Mutex::new(HashMap::new())),
         }

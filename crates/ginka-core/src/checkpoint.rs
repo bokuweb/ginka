@@ -92,6 +92,37 @@ pub fn get(conn: &Connection, id: &CheckpointId) -> Result<Option<Checkpoint>> {
     Ok(rows.next().transpose()?)
 }
 
+/// Drop everything but the newest `keep` checkpoints in a workspace.
+///
+/// Every checkpoint holds a commit alive through a ref, so a workspace an
+/// agent has worked in for a week keeps a week of trees that git would
+/// otherwise collect. Rewinding is something done to recent work; past this
+/// the reader is reading history rather than undoing it.
+///
+/// The ref goes first and the row second: a row with no ref is a rewind that
+/// fails, and a ref with no row is an object nothing will ever collect. Both
+/// are bad, and only the second is invisible.
+pub fn prune(
+    conn: &Connection,
+    workspace_path: &Path,
+    workspace: &WorkspaceId,
+    keep: u32,
+) -> Result<usize> {
+    let all = list(conn, workspace)?;
+    let stale = all.into_iter().skip(keep as usize);
+    let mut dropped = 0;
+    for checkpoint in stale {
+        // Best-effort: a ref that is already gone -- a worktree removed by
+        // hand, a repository re-cloned -- must not stop the row going with it.
+        if let Err(error) = git::drop_snapshot(workspace_path, &reference(&checkpoint.id)) {
+            tracing::debug!(%error, id = checkpoint.id.0, "no ref to drop for this checkpoint");
+        }
+        conn.execute("DELETE FROM checkpoints WHERE id = ?1", [&checkpoint.id.0])?;
+        dropped += 1;
+    }
+    Ok(dropped)
+}
+
 /// Cut a label down to something a menu can show.
 fn trim_label(label: &str) -> String {
     let single_line: String = label
@@ -212,5 +243,51 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn pruning_keeps_the_newest_and_drops_the_refs_of_the_rest() {
+        // Every checkpoint holds a commit alive, so a workspace worked in for
+        // a week keeps a week of trees git would otherwise collect.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        crate::git::tests::repository(&root);
+        let conn = db::open_in_memory().unwrap();
+        stored_session(&conn);
+        let workspace = WorkspaceId("comet/harbor".into());
+
+        for (index, id) in ["a", "b", "c"].iter().enumerate() {
+            std::fs::write(root.join("work.txt"), format!("turn {index}\n")).unwrap();
+            let taken = take(
+                &conn,
+                &root,
+                &workspace,
+                &SessionId("s-1".into()),
+                index as u32,
+                id,
+                100 + index as i64,
+            )
+            .unwrap();
+            assert!(crate::git::head_commit(&root).is_some());
+            assert_ne!(taken.commit, "");
+        }
+
+        assert_eq!(prune(&conn, &root, &workspace, 2).unwrap(), 1);
+        let left = list(&conn, &workspace).unwrap();
+        assert_eq!(left.len(), 2, "the newest two are what a rewind reaches");
+        assert_eq!(left[0].label, "c");
+        assert_eq!(left[1].label, "b");
+    }
+
+    #[test]
+    fn pruning_a_workspace_that_is_within_its_limit_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::open_in_memory().unwrap();
+        stored_session(&conn);
+        insert(&conn, &checkpoint("a", 1, 100)).unwrap();
+
+        let workspace = WorkspaceId("comet/harbor".into());
+        assert_eq!(prune(&conn, dir.path(), &workspace, 10).unwrap(), 0);
+        assert_eq!(list(&conn, &workspace).unwrap().len(), 1);
     }
 }

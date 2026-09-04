@@ -73,9 +73,14 @@ impl Service {
     /// Build a service around an already-open database.
     pub fn new(paths: Paths, conn: Connection, events: Arc<dyn EventSink>) -> Self {
         let conn = Arc::new(Mutex::new(conn));
+        // Read here rather than passed in: how many checkpoints a workspace
+        // keeps is the user's setting, and a service built without one still
+        // has to prune.
+        let settings: crate::settings::DaemonSettings =
+            crate::settings::load(&paths.daemon_settings());
         Self {
+            sessions: Supervisor::new(conn.clone(), events.clone(), settings.checkpoint_limit),
             paths,
-            sessions: Supervisor::new(conn.clone(), events.clone()),
             terminals: crate::terminal::Terminals::new(events.clone()),
             conn,
             events,
