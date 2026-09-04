@@ -279,6 +279,33 @@ pub struct UsageRow {
     pub totals: UsageTotals,
 }
 
+/// Which side of a diff a line number belongs to.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    /// The file as it was.
+    Old,
+    /// The file as the agent left it, which is what a comment usually means.
+    New,
+}
+
+/// A note left on a diff, waiting to be sent back to the agent.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewComment {
+    pub id: String,
+    pub workspace: WorkspaceId,
+    /// Relative to the worktree root.
+    pub path: String,
+    /// `None` is a comment on the file as a whole, which people write.
+    pub line: Option<u32>,
+    pub side: DiffSide,
+    pub text: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
 /// Where a slash command came from.
 ///
 /// The scope is shown beside the name because two commands can share one: a

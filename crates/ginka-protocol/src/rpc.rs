@@ -7,8 +7,8 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Project, Session, SessionMatch,
-    SlashCommand, TranscriptEntry, UsageRow, WorkspaceSummary,
+    AgentStatus, ChangeSource, Changes, Checkpoint, DiffSide, FileEntry, Project, ReviewComment,
+    Session, SessionMatch, SlashCommand, TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -154,6 +154,33 @@ pub enum Request {
     /// What the work has cost, by day and by agent.
     Usage { days: Option<u32> },
 
+    /// Leave a comment on a line of the diff.
+    ///
+    /// Orca's loop: marking the three places that are wrong is a better way to
+    /// tell an agent what to fix than re-prompting it from scratch.
+    AddReviewComment {
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+        side: DiffSide,
+        text: String,
+    },
+    /// Every comment waiting in a workspace, in reading order.
+    ListReviewComments { workspace: WorkspaceId },
+    /// Take one comment back.
+    RemoveReviewComment { comment: String },
+    /// Send the batch to the agent as one message, and clear it.
+    ///
+    /// One message rather than one per comment: an agent given them together
+    /// can see that three of them are the same mistake, and a turn per comment
+    /// is three times the context and three times the cost.
+    SendReviewComments {
+        workspace: WorkspaceId,
+        /// The conversation to send them to. Its agent gets the batch as a
+        /// follow-up, queued if it is still working.
+        session: SessionId,
+    },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
@@ -232,6 +259,9 @@ pub enum Response {
     },
     Commands {
         commands: Vec<SlashCommand>,
+    },
+    ReviewComments {
+        comments: Vec<ReviewComment>,
     },
     Draft {
         text: String,

@@ -867,6 +867,95 @@ fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
 }
 
 #[test]
+fn a_review_goes_back_to_the_agent_as_one_message() {
+    // M3's whole point: read the diff, mark what is wrong, and let the agent
+    // fix it — rather than re-prompting from scratch and throwing away the
+    // reading.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[{args}]"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "write the parser",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    for (path, line, text) in [
+        ("src/main.rs", Some(12), "this unwrap can panic"),
+        ("src/main.rs", Some(48), "same here"),
+        ("README.md", None, "out of date"),
+    ] {
+        fixture.ask(Request::AddReviewComment {
+            workspace: fixture.workspace.clone(),
+            path: path.into(),
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text: text.into(),
+        });
+    }
+
+    match fixture.ask(Request::ListReviewComments {
+        workspace: fixture.workspace.clone(),
+    }) {
+        Response::ReviewComments { comments } => assert_eq!(comments.len(), 3),
+        other => panic!("expected comments, got {other:?}"),
+    }
+
+    fixture.ask(Request::SendReviewComments {
+        workspace: fixture.workspace.clone(),
+        session: session.clone(),
+    });
+
+    // One message, carrying every comment, in reading order.
+    let sent: Vec<String> = fixture
+        .transcript(&session)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::User { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    let batch = sent.last().expect("the review was sent");
+    assert!(
+        batch.contains("src/main.rs:12 — this unwrap can panic"),
+        "{batch}"
+    );
+    assert!(batch.contains("src/main.rs:48 — same here"), "{batch}");
+    assert!(batch.contains("README.md — out of date"), "{batch}");
+    assert_eq!(sent.len(), 2, "one message, not one per comment: {sent:?}");
+
+    // And the batch is spent.
+    match fixture.ask(Request::ListReviewComments {
+        workspace: fixture.workspace.clone(),
+    }) {
+        Response::ReviewComments { comments } => assert!(comments.is_empty()),
+        other => panic!("expected comments, got {other:?}"),
+    }
+}
+
+#[test]
+fn sending_a_review_with_nothing_in_it_says_so() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "nothing to review",
+    );
+    fixture.settle(&session);
+
+    let error = fixture
+        .service
+        .handle(Request::SendReviewComments {
+            workspace: fixture.workspace.clone(),
+            session,
+        })
+        .expect_err("there is nothing to send");
+    assert!(error.message.contains("no comments"), "{}", error.message);
+}
+
+#[test]
 fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
     let mut fixture = Fixture::new();
     let error = fixture

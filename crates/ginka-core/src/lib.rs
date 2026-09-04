@@ -17,6 +17,7 @@ pub mod logging;
 pub mod paths;
 pub mod project;
 pub mod registry;
+pub mod review;
 pub mod service;
 pub mod session;
 pub mod settings;

@@ -10,7 +10,7 @@ use ginka_ui::Tokens;
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Textarea, TextareaState};
+use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::{Icon, IconName, h_flex, v_flex};
 
 pub struct SurfacePanel {
@@ -20,6 +20,13 @@ pub struct SurfacePanel {
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
+    /// The comments waiting to go back to the agent.
+    comments: Vec<ginka_protocol::model::ReviewComment>,
+    /// The line a comment is being written on, and the box it is written in.
+    ///
+    /// One at a time: a review is read line by line, and two open boxes is a
+    /// form, not a margin note.
+    commenting: Option<(String, Option<u32>, Entity<TextareaState>)>,
     /// The commit message being written, if the box is open.
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
@@ -30,6 +37,14 @@ pub struct SurfacePanel {
 pub enum SurfaceEvent {
     /// Commit everything in the workspace with this message.
     Commit(String),
+    /// Leave a comment on a file, and a line of it.
+    Comment {
+        path: String,
+        line: Option<u32>,
+        text: String,
+    },
+    /// Send every waiting comment back to the agent.
+    SendReview,
 }
 
 impl EventEmitter<SurfaceEvent> for SurfacePanel {}
@@ -40,8 +55,22 @@ impl SurfacePanel {
             open: None,
             changes: None,
             expanded: None,
+            comments: Vec::new(),
+            commenting: None,
             message: None,
             complaint: None,
+        }
+    }
+
+    /// Hand the panel the comments waiting in this workspace.
+    pub fn set_comments(
+        &mut self,
+        comments: Vec<ginka_protocol::model::ReviewComment>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.comments != comments {
+            self.comments = comments;
+            cx.notify();
         }
     }
 
@@ -243,8 +272,146 @@ impl SurfacePanel {
                     .iter()
                     .map(|file| self.file_row(file, cx).into_any_element()),
             )
+            .children(self.review_bar(cx))
             .child(self.commit_box(cx))
             .into_any_element()
+    }
+
+    /// The batch of comments, and the way to send it.
+    ///
+    /// Orca's loop, which is what the line numbers on every diff line are for:
+    /// marking the three places that are wrong tells the agent more than
+    /// re-prompting it from scratch, and costs the reader nothing they have not
+    /// already done.
+    fn review_bar(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        if self.comments.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        Some(
+            h_flex()
+                .w_full()
+                .px_3()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .border_t_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(
+                            rust_i18n::t!(
+                                "surface.git.review.waiting",
+                                count = self.comments.len()
+                            )
+                            .to_string(),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("send-review")
+                        .px_2p5()
+                        .py_1()
+                        .rounded(px(tokens.radius.row))
+                        .bg(tokens.colors().row_active())
+                        .text_xs()
+                        .text_color(tokens.colors().text_primary)
+                        .cursor_pointer()
+                        .hover(|this| this.bg(tokens.colors().accent.opacity(0.35)))
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::SendReview)))
+                        .child(rust_i18n::t!("surface.git.review.send").to_string()),
+                ),
+        )
+    }
+
+    /// Start a comment on a line, focused so the next keystroke lands in it.
+    fn comment_on(
+        &mut self,
+        path: String,
+        line: Option<u32>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let state = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.git.comment").to_string())
+                .auto_grow(1, 4)
+                .submit_on_enter(true)
+        });
+        let handle = state.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+        cx.subscribe(&state, |this, state, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
+                let text = state.read(cx).value().trim().to_string();
+                this.finish_comment(text, cx);
+            }
+        })
+        .detach();
+        self.commenting = Some((path, line, state));
+        cx.notify();
+    }
+
+    /// Hand a finished comment to the shell, which is the one holding the
+    /// daemon.
+    fn finish_comment(&mut self, text: String, cx: &mut Context<Self>) {
+        let Some((path, line, _)) = self.commenting.take() else {
+            return;
+        };
+        cx.notify();
+        if text.is_empty() {
+            return;
+        }
+        cx.emit(SurfaceEvent::Comment { path, line, text });
+    }
+
+    /// The comments already left on a line, and the box for a new one.
+    fn line_comments(
+        &self,
+        path: &str,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let mut drawn: Vec<AnyElement> = self
+            .comments
+            .iter()
+            .filter(|comment| comment.path == path && comment.line == line)
+            .map(|comment| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .ml_8()
+                    .border_l_2()
+                    .border_color(tokens.colors().accent)
+                    .bg(tokens.colors().row_hover())
+                    .text_xs()
+                    .text_color(tokens.colors().text_primary)
+                    .child(comment.text.clone())
+                    .into_any_element()
+            })
+            .collect();
+
+        if let Some((open_path, open_line, state)) = &self.commenting
+            && open_path == path
+            && *open_line == line
+        {
+            drawn.push(
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .ml_8()
+                    .border_l_2()
+                    .border_color(tokens.colors().accent)
+                    .child(Textarea::new(state))
+                    .into_any_element(),
+            );
+        }
+        drawn
     }
 
     /// Where the reviewed work is written up and sent.
@@ -463,10 +630,24 @@ impl SurfacePanel {
                                 .child(hunk.header.clone()),
                         )
                         .children(hunk.lines.iter().map(|line| {
+                            let anchor = match line.kind {
+                                LineKind::Removed => line.old_line,
+                                _ => line.new_line,
+                            };
+                            let path = file.path.clone();
                             h_flex()
+                                .id(SharedString::from(format!(
+                                    "line:{}:{:?}:{:?}",
+                                    file.path, line.kind, anchor
+                                )))
                                 .w_full()
                                 .px_3()
                                 .gap_2()
+                                .cursor_pointer()
+                                .hover(|this| this.bg(tokens.colors().row_hover()))
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.comment_on(path.clone(), anchor, window, cx)
+                                }))
                                 .font_family(mono.clone())
                                 .text_xs()
                                 .line_height(px(17.))
@@ -512,6 +693,14 @@ impl SurfacePanel {
                                             line.text
                                         )),
                                 )
+                                .into_any_element()
+                        }))
+                        .children(hunk.lines.iter().flat_map(|line| {
+                            let anchor = match line.kind {
+                                LineKind::Removed => line.old_line,
+                                _ => line.new_line,
+                            };
+                            self.line_comments(&file.path, anchor, cx)
                         }))
                 }))
             })

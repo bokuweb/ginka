@@ -464,6 +464,44 @@ impl Service {
                     by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
                 })
             }
+            Request::AddReviewComment {
+                workspace,
+                path,
+                line,
+                side,
+                text,
+            } => {
+                self.worktree(&workspace)?;
+                if text.trim().is_empty() {
+                    return Err(RpcError::failed(
+                        "a comment with nothing in it says nothing",
+                    ));
+                }
+                crate::review::add(&self.conn(), &workspace, &path, line, side, &text, now())
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::ListReviewComments { workspace } => Ok(Response::ReviewComments {
+                comments: crate::review::list(&self.conn(), &workspace).map_err(failed)?,
+            }),
+            Request::RemoveReviewComment { comment } => {
+                if !crate::review::remove(&self.conn(), &comment).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no comment with id {comment}")));
+                }
+                Ok(Response::Ack)
+            }
+            Request::SendReviewComments { workspace, session } => {
+                let comments = crate::review::list(&self.conn(), &workspace).map_err(failed)?;
+                if comments.is_empty() {
+                    return Err(RpcError::failed("there are no comments to send"));
+                }
+                let message = crate::review::compose(&comments);
+                self.send_message(&session, message)?;
+                // Cleared only once the agent has them: a batch that vanished
+                // into a failed send would be a review done twice.
+                crate::review::clear(&self.conn(), &workspace).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;
                 Ok(Response::Checkpoints {

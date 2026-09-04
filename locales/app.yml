@@ -126,6 +126,15 @@ surface.git.summary:
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。
+surface.git.comment:
+  en: What is wrong with this line?
+  ja: この行の何が問題ですか？
+surface.git.review.waiting:
+  en: "%{count} comment(s) waiting"
+  ja: "%{count} 件のコメントが保留中"
+surface.git.review.send:
+  en: Send to the agent
+  ja: エージェントに送る
 surface.git.write_commit:
   en: Write a commit message…
   ja: コミットメッセージを書く…
@@ -178,6 +187,9 @@ cli.committed:
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
+cli.review.empty:
+  en: no comments are waiting
+  ja: 保留中のコメントはありません
 cli.commands.empty:
   en: "this workspace defines no commands; they live in .claude/commands"
   ja: "このワークスペースにコマンドはありません（.claude/commands に置きます）"

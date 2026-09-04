@@ -226,14 +226,26 @@ mod tests {
         }
     }
 
-    /// Wait for `check` to hold, or give up.
-    fn until(check: impl Fn() -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(10);
+    /// Type a line into a terminal and wait for what it should produce,
+    /// typing it again until it does.
+    ///
+    /// Retried rather than sent once, because a shell that has not finished
+    /// setting up its tty resets it with `TCSAFLUSH`, which throws away
+    /// whatever was typed before it got there. A user retypes the line; a test
+    /// that did not would blame the terminal for the shell's start-up race.
+    fn typed(terminals: &Terminals, id: &TerminalId, line: &str, check: impl Fn() -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
         while Instant::now() < deadline {
-            if check() {
-                return true;
+            // Ignored: a shell that has already gone is one the check is
+            // waiting to hear about, not a reason to fail here.
+            terminals.write(id, line).ok();
+            let again = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < again {
+                if check() {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
             }
-            std::thread::sleep(Duration::from_millis(20));
         }
         false
     }
@@ -245,10 +257,11 @@ mod tests {
         let terminals = Terminals::new(recorder.clone());
 
         let id = terminals.open(dir.path(), 24, 80).unwrap();
-        terminals.write(&id, "echo ginka-was-here\n").unwrap();
 
         assert!(
-            until(|| recorder.printed(&id).contains("ginka-was-here")),
+            typed(&terminals, &id, "echo ginka-was-here\n", || recorder
+                .printed(&id)
+                .contains("ginka-was-here")),
             "the shell's output never arrived: {:?}",
             recorder.printed(&id)
         );
@@ -266,11 +279,12 @@ mod tests {
         let terminals = Terminals::new(recorder.clone());
 
         let id = terminals.open(&worktree, 24, 80).unwrap();
-        terminals.write(&id, "pwd\n").unwrap();
 
         let name = worktree.file_name().unwrap().to_string_lossy().to_string();
         assert!(
-            until(|| recorder.printed(&id).contains(&name)),
+            typed(&terminals, &id, "pwd\n", || recorder
+                .printed(&id)
+                .contains(&name)),
             "it opened somewhere else: {:?}",
             recorder.printed(&id)
         );
@@ -284,10 +298,9 @@ mod tests {
         let terminals = Terminals::new(recorder.clone());
 
         let id = terminals.open(dir.path(), 24, 80).unwrap();
-        terminals.write(&id, "exit\n").unwrap();
 
         assert!(
-            until(|| recorder.closed(&id)),
+            typed(&terminals, &id, "exit\n", || recorder.closed(&id)),
             "a terminal with nothing left to type into has to say so"
         );
         terminals.close(&id).unwrap();
@@ -317,9 +330,10 @@ mod tests {
         let id = terminals.open(dir.path(), 24, 80).unwrap();
 
         terminals.resize(&id, 40, 132).unwrap();
-        terminals.write(&id, "tput cols\n").unwrap();
         assert!(
-            until(|| recorder.printed(&id).contains("132")),
+            typed(&terminals, &id, "tput cols\n", || recorder
+                .printed(&id)
+                .contains("132")),
             "the shell was not told: {:?}",
             recorder.printed(&id)
         );

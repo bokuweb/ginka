@@ -89,6 +89,9 @@ enum Command {
         #[arg(long)]
         patch: bool,
     },
+    /// Leave comments on a diff and send them back to the agent.
+    #[command(subcommand)]
+    Review(ReviewCommand),
     /// Commit a workspace's work.
     Commit {
         /// The workspace id, as shown by `workspace list`.
@@ -226,6 +229,28 @@ enum SessionCommand {
 }
 
 #[derive(Subcommand)]
+enum ReviewCommand {
+    /// Leave a comment on a file, and a line of it.
+    Add {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The file, relative to the worktree root.
+        path: String,
+        /// What is wrong with it.
+        text: String,
+        /// The line it is about. Omitted, the comment is about the file.
+        #[arg(long)]
+        line: Option<u32>,
+    },
+    /// Every comment waiting, in reading order.
+    List { workspace: String },
+    /// Take one comment back.
+    Remove { comment: String },
+    /// Send the batch to a session's agent as one message.
+    Send { workspace: String, session: String },
+}
+
+#[derive(Subcommand)]
 enum CheckpointCommand {
     /// List a workspace's checkpoints, newest first.
     List { workspace: String },
@@ -329,6 +354,30 @@ fn request_for(command: Command) -> Result<Request> {
             query,
             limit: None,
         },
+        Command::Review(ReviewCommand::Add {
+            workspace,
+            path,
+            text,
+            line,
+        }) => Request::AddReviewComment {
+            workspace: WorkspaceId(workspace),
+            path,
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text,
+        },
+        Command::Review(ReviewCommand::List { workspace }) => Request::ListReviewComments {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Review(ReviewCommand::Remove { comment }) => {
+            Request::RemoveReviewComment { comment }
+        }
+        Command::Review(ReviewCommand::Send { workspace, session }) => {
+            Request::SendReviewComments {
+                workspace: WorkspaceId(workspace),
+                session: SessionId(session),
+            }
+        }
         Command::Commit {
             workspace,
             message,
@@ -523,6 +572,23 @@ fn print(response: Response, patch: bool) {
         // printing the id is all a script can do with one.
         Response::Terminal { terminal } => println!("{terminal}"),
         Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
+        Response::ReviewComments { comments } => {
+            if comments.is_empty() {
+                println!("{}", rust_i18n::t!("cli.review.empty"));
+            }
+            for comment in comments {
+                println!(
+                    "{:<34} {}{}  {}",
+                    comment.id,
+                    comment.path,
+                    comment
+                        .line
+                        .map(|line| format!(":{line}"))
+                        .unwrap_or_default(),
+                    comment.text
+                );
+            }
+        }
         Response::Commands { commands } => {
             if commands.is_empty() {
                 println!("{}", rust_i18n::t!("cli.commands.empty"));

@@ -13,8 +13,8 @@
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Session, SlashCommand,
-    TranscriptEntry,
+    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, ReviewComment, Session,
+    SlashCommand, TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
@@ -171,6 +171,46 @@ impl DaemonLink {
                 }
             }
         }
+    }
+
+    /// Leave a comment on a line of the diff.
+    pub async fn add_comment(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        line: Option<u32>,
+        text: String,
+    ) {
+        self.ask(Request::AddReviewComment {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text,
+        })
+        .await;
+    }
+
+    /// The comments waiting in a workspace, in reading order.
+    pub async fn comments(&self, workspace: &WorkspaceId) -> Vec<ReviewComment> {
+        match self
+            .ask(Request::ListReviewComments {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::ReviewComments { comments }) => comments,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Send the waiting comments to a session's agent as one message.
+    pub async fn send_review(&self, workspace: &WorkspaceId, session: &SessionId) {
+        self.ask(Request::SendReviewComments {
+            workspace: workspace.clone(),
+            session: session.clone(),
+        })
+        .await;
     }
 
     /// Put a workspace back to the state a checkpoint captured.

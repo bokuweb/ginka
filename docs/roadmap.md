@@ -303,7 +303,7 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [ ] Split diff, intra-line word diff, revert file
 - [x] Commit: message box under the reviewed files, `ginka commit` / `push`
 - [ ] Stage/unstage per file, agent-generated commit message
-- [ ] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
+- [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
 - [ ] Pruning old checkpoint refs
@@ -433,3 +433,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-03 | A cancel signals the agent's process group only after confirming the agent leads it | A child that did not get its own group is in ours, and signalling a group by its pid then hits something unrelated — on CI, the job. An agent that leads no group is stopped alone. |
 | 2026-09-03 | Only the reader closes a connection's write queue | Two writers into one queue meant whichever stopped first closed it, and on a shutdown the event pump stops first — which dropped the answer to the request that asked for the shutdown. |
 | 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
+| 2026-09-04 | Review comments are held by the daemon and sent as one message | A comment is worth writing before the reader has finished reading, and worth keeping if the window closes; sending each one as it is written interrupts the agent mid-turn and costs a round trip per line. The batch clears only once the agent has it. |

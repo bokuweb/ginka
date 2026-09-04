@@ -214,6 +214,10 @@ impl Shell {
 
         let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
             crate::surfaces::SurfaceEvent::Commit(message) => this.commit(message.clone(), cx),
+            crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
+                this.leave_comment(path.clone(), *line, text.clone(), cx)
+            }
+            crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
         });
 
         let selection =
@@ -675,6 +679,57 @@ impl Shell {
         let terminal = terminal.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
+    }
+
+    /// Leave a comment on a line of the diff.
+    fn leave_comment(
+        &mut self,
+        path: String,
+        line: Option<u32>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.add_comment(&workspace, &path, line, text).await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
+    /// Send the waiting comments to the agent as one message.
+    fn send_review(&mut self, cx: &mut Context<Self>) {
+        let (Some(workspace), Some(session)) = (
+            self.session.as_ref().map(|row| row.workspace.clone()),
+            self.session.as_ref().and_then(|row| row.session.clone()),
+        ) else {
+            return;
+        };
+        // The agent is about to be given work, so the window should say so.
+        self.submitted = true;
+        cx.notify();
+
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.send_review(&workspace, &session).await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
     }
 
     /// Stop the agent working in the workspace on screen.
@@ -2345,7 +2400,7 @@ async fn pull_rows(
             )
         })
         .map_err(|_| ())?;
-    let (rows, agents, checkpoints, changes) = cx
+    let (rows, agents, checkpoints, changes, comments) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Cached by the daemon, so this is a request rather than two
@@ -2355,15 +2410,16 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            let changes = match (&showing, wants_changes) {
-                (Some(workspace), true) => {
+            let (changes, comments) = match (&showing, wants_changes) {
+                (Some(workspace), true) => (
                     listing
                         .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
-                        .await
-                }
-                _ => None,
+                        .await,
+                    listing.comments(workspace).await,
+                ),
+                _ => (None, Vec::new()),
             };
-            (rows, agents, checkpoints, changes)
+            (rows, agents, checkpoints, changes, comments)
         })
         .await;
     tracing::debug!(
@@ -2375,8 +2431,10 @@ async fn pull_rows(
         this.agents = agents;
         this.checkpoints = checkpoints;
         if wants_changes {
-            this.surfaces
-                .update(cx, |surfaces, cx| surfaces.set_changes(changes, cx));
+            this.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_changes(changes, cx);
+                surfaces.set_comments(comments, cx);
+            });
         }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
