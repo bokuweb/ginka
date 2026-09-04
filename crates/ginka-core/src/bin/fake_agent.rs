@@ -39,6 +39,16 @@ fn main() {
             }
             // Something that is not a message at all, on stdout.
             "--noise" => println!("warning: this line is not JSON"),
+            // Stand in for a CLI answering a version probe.
+            "--version" => {
+                println!("ginka-fake-agent 9.9.9 (Claude Code compatible)");
+                std::process::exit(0);
+            }
+            // A CLI that answers a probe with nothing useful.
+            "--silent-version" => {
+                println!("hello");
+                std::process::exit(0);
+            }
             other => panic!("unknown argument {other}"),
         }
         index += 1;

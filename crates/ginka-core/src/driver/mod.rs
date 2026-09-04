@@ -19,13 +19,17 @@
 pub mod activity;
 pub mod claude;
 pub mod event;
+pub mod probe;
 pub mod process;
+pub mod spec;
 pub mod testing;
 
 pub use activity::{ActivityItem, ActivityKind};
-pub use claude::ClaudeStream;
+pub use claude::{ClaudeDriver, ClaudeSession, ClaudeStream};
 pub use event::{AgentEvent, DriverError, TurnOutcome};
+pub use probe::{ProbeResult, probe, probe_with_arg, resolve_binary, resolve_binary_in};
 pub use process::AgentProcess;
+pub use spec::SessionSpec;
 
 use anyhow::Result;
 use ginka_protocol::provider::{OptionOutcome, SessionOptions};
