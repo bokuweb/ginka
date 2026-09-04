@@ -309,8 +309,9 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 
 Goal: a real agent runs in a worktree and its transcript renders.
 
-- [ ] Extract the daemon: WS RPC server, bearer token, `~/.ginka/daemon.json` discovery, auto-spawn + health check + graceful takeover
-- [ ] Request/response + server-push event streams with sequence numbers and replay cursors (so a reconnecting UI never misses events)
+- [ ] Extract the daemon: WS RPC server, auto-spawn + health check + graceful takeover (discovery, the bearer token and the handshake gate are done)
+- [x] Sequence numbers, replay cursors and the epoch that invalidates them, so a reconnecting UI never misses an event and never renders a hole — the policy, tested without a socket
+- [ ] Request/response types and the WebSocket transport that carries them
 - [ ] `AgentDriver` trait + `claude` driver (stream-json over stdio), process supervision, cancellation
 - [ ] Session persistence: tasks, chats, messages; resume from vendor session id
 - [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination
@@ -326,7 +327,9 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] **Provider settings (N14):** disable a provider, override its binary path, from `~/.ginka/settings.json` and the settings UI
 - [ ] Protocol handshake carries a version and a wire-size bound (§4.1); daemon-host path rule honoured by every client path
 
-> **Landed already (domain layer, ahead of the milestone):** N1 steering policy and the driver/session traits (`ginka-core::driver`), N2 the in-session-vs-restart rule, N3 the model/effort/tier vocabulary (`ginka-protocol::provider`), N4 completion triggers, command merge and the bounded file index (`ginka-core::composer`), N5 titles (`ginka-protocol::session`), N6 attachments and the blob store, N14 provider settings. What remains for M2 is the daemon, the wire and the first real driver behind them.
+> **Landed already (domain layer, ahead of the milestone):** N1 steering policy and the driver/session traits (`ginka-core::driver`), N2 the in-session-vs-restart rule, N3 the model/effort/tier vocabulary (`ginka-protocol::provider`), N4 completion triggers, command merge and the bounded file index (`ginka-core::composer`), N5 titles (`ginka-protocol::session`), N6 attachments and the blob store, N14 provider settings.
+>
+> **The reconnect contract is landed too, without its socket:** the versioned handshake and its refusals (`ginka-protocol::envelope`), discovery and the 0600 token file (`ginka-core::daemon`), the bounded event window that answers a resume with events, a gap or a reset (`ginka-core::events`), and the client cursor that deduplicates a replay, refuses to render a hole, and resyncs when the daemon's epoch changes (`ginka-client::cursor`). What remains for M2 is the socket itself, the request/response types over it, and the first real driver.
 
 **Exit criteria:** two agents run concurrently in two worktrees for 30+ minutes; killing and restarting the UI loses no transcript; cancel actually kills the process tree.
 

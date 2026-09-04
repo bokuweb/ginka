@@ -6,11 +6,13 @@
 //! database belongs in `ginka-core`.
 
 pub mod envelope;
+pub mod handshake;
 pub mod ids;
 pub mod provider;
 pub mod session;
 
 pub use envelope::{ClientMessage, RpcError, ServerMessage};
+pub use handshake::DaemonHandshake;
 pub use ids::{ProjectName, WorkspaceId};
 pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
 pub use session::SessionTitle;
