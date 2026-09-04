@@ -553,6 +553,25 @@ impl Service {
             }
             Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
 
+            Request::UploadAttachment { name, data_base64 } => {
+                use base64::Engine as _;
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(data_base64.trim())
+                    .map_err(|error| {
+                        RpcError::malformed(format!("attachment is not valid base64: {error}"))
+                    })?;
+                let stored = crate::attachment::AttachmentStore::new(self.paths.attachments())
+                    .put(&name, &bytes)
+                    .map_err(failed)?;
+                Ok(Response::Attachment {
+                    attachment: ginka_protocol::model::Attachment {
+                        reference: stored.reference,
+                        name: stored.name,
+                        bytes: stored.bytes,
+                    },
+                })
+            }
+
             Request::OpenTerminal {
                 workspace,
                 rows,
@@ -672,7 +691,11 @@ impl Service {
             session: session.clone(),
         });
 
-        let spec = SessionSpec::new(worktree.path, prompt).with_model(model);
+        // The agent reads files, not URIs: an attachment the user mentioned
+        // reaches it as a path on this host (§3.3 N6). The transcript keeps
+        // the reference, so the window can still draw the attachment.
+        let spec =
+            SessionSpec::new(worktree.path, self.expand_attachments(&prompt)).with_model(model);
         self.sessions
             .start(session.id.clone(), driver, spec)
             .map_err(failed)?;
@@ -684,11 +707,21 @@ impl Service {
         let stored = self.session(id)?;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
-        let spec = SessionSpec::new(worktree.path, text).with_model(stored.model.clone());
+        let spec = SessionSpec::new(worktree.path, self.expand_attachments(&text))
+            .with_model(stored.model.clone());
         self.sessions
             .send(id.clone(), driver, spec, stored.vendor_session_id)
             .map_err(failed)?;
         Ok(Response::Ack)
+    }
+
+    /// Turn every attachment reference in a message into a path the agent can
+    /// open. Text with no references comes back unchanged.
+    fn expand_attachments(&self, text: &str) -> String {
+        crate::attachment::expand_references(
+            text,
+            &crate::attachment::AttachmentStore::new(self.paths.attachments()),
+        )
     }
 
     /// Put a workspace back to the state a checkpoint captured.

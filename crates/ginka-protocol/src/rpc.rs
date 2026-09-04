@@ -7,9 +7,9 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide, FileContent, FileEntry,
-    Project, ReviewComment, Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry,
-    UsageRow, WorkspaceSummary,
+    AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide,
+    FileContent, FileEntry, Project, ReviewComment, Session, SessionMatch, SlashCommand,
+    TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -218,6 +218,12 @@ pub enum Request {
 
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
+    /// Store a file the user attached, so a message can refer to it.
+    ///
+    /// The bytes travel base64-encoded because the wire is JSON; the daemon
+    /// writes them once and every later mention is the reference it answers
+    /// with (`docs/roadmap.md` §3.3 N6).
+    UploadAttachment { name: String, data_base64: String },
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint { checkpoint: CheckpointId },
 
@@ -334,6 +340,9 @@ pub enum Response {
     },
     ReviewComments {
         comments: Vec<ReviewComment>,
+    },
+    Attachment {
+        attachment: Attachment,
     },
     Draft {
         text: String,

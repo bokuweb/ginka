@@ -65,6 +65,17 @@ impl Paths {
         self.root.join("projects")
     }
 
+    /// Files the user attached to a message. Daemon-owned: a client sends
+    /// bytes and gets a reference back, never a path (§4.1).
+    pub fn attachments(&self) -> PathBuf {
+        self.root.join("attachments")
+    }
+
+    /// Binary payloads an agent emitted, content-addressed (§3.3 N6).
+    pub fn blobs(&self) -> PathBuf {
+        self.root.join("blobs")
+    }
+
     /// Create every directory Ginka writes into. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         for dir in [
@@ -72,6 +83,8 @@ impl Paths {
             self.logs(),
             self.worktrees(),
             self.scratch_projects(),
+            self.attachments(),
+            self.blobs(),
         ] {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }

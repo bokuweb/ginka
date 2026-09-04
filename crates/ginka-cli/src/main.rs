@@ -57,6 +57,15 @@ enum Command {
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Store a file the daemon keeps, and print the reference a message
+    /// refers to it by.
+    ///
+    /// Mention the reference in a prompt and the agent is handed the file's
+    /// path: `ginka session send <id> "review $(ginka attach diff.patch)"`.
+    Attach {
+        /// The file to store.
+        path: PathBuf,
+    },
     /// List a workspace's files, best matches first.
     Files {
         /// The workspace id, as shown by `workspace list`.
@@ -538,6 +547,20 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             path,
         },
+        Command::Attach { path } => {
+            use base64::Engine as _;
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+            Request::UploadAttachment {
+                // The name is what the reader of a transcript sees; the daemon
+                // never uses it as a path component.
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            }
+        }
         Command::Files { workspace, query } => Request::WorkspaceFiles {
             workspace: WorkspaceId(workspace),
             query,
@@ -780,6 +803,9 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::Draft { text } => println!("{text}"),
+        // The reference and nothing else, so it can be interpolated straight
+        // into the next command.
+        Response::Attachment { attachment } => println!("{}", attachment.reference),
         // A terminal is opened by a window, which is where it is typed into;
         // printing the id is all a script can do with one.
         // The file as it is: a viewer prints what is in it, and anything

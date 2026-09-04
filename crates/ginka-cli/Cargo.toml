@@ -18,6 +18,7 @@ ginka-client.workspace = true
 ginka-core.workspace = true
 ginka-protocol.workspace = true
 anyhow.workspace = true
+base64.workspace = true
 clap.workspace = true
 rusqlite.workspace = true
 rust-i18n.workspace = true

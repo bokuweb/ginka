@@ -1140,3 +1140,39 @@ fn a_fan_out_asks_the_same_question_in_a_worktree_each() {
         );
     }
 }
+
+#[test]
+fn an_attachment_reaches_the_agent_as_a_path_it_can_open() {
+    // The user attaches a file and mentions it; the agent gets somewhere to
+    // read, because that is what an agent can act on (§3.3 N6).
+    use base64::Engine as _;
+    let mut fixture = Fixture::new();
+    let attachment = match fixture
+        .service
+        .handle(Request::UploadAttachment {
+            name: "notes.md".into(),
+            data_base64: base64::engine::general_purpose::STANDARD.encode(b"# hello"),
+        })
+        .unwrap()
+    {
+        Response::Attachment { attachment } => attachment,
+        other => panic!("expected an attachment, got {other:?}"),
+    };
+
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"{prompt}"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+        &format!("summarise {}", attachment.reference),
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let echoed = format!("{:?}", fixture.transcript(&session));
+    assert!(
+        echoed.contains("attachments/"),
+        "the agent was handed a path, not a reference: {echoed}"
+    );
+}

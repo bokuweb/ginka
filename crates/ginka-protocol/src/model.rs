@@ -9,6 +9,23 @@ use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// A file the user attached, as a client sees it.
+///
+/// Deliberately without a path: the bytes live on the daemon's host, and a
+/// client that is not on that host has no business interpreting one
+/// (`docs/roadmap.md` §4.1). What a message carries is the reference, and the
+/// daemon is what turns it back into a file for the agent.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Attachment {
+    /// `ginka-attachment:<id>` — what a message refers to it by.
+    pub reference: String,
+    /// The name the user knows it by. Display only: never a path component.
+    pub name: String,
+    /// How much was stored, so a client can show it without reading it back.
+    pub bytes: usize,
+}
+
 /// A registered repository or folder.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -342,7 +342,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] `codex` driver
 - [ ] **Steering (N1):** inject a follow-up into the running turn where the transport supports it, with the queue as the declared fallback and the outcome surfaced in the transcript
 - [ ] **Session options (N2, N3):** model / reasoning effort / service tier / access mode picker, catalogue discovered from each CLI with a static fallback, and an `apply_options` path that restarts only when the transport cannot absorb the change
-- [ ] **Attachments (N6):** paste/drag images and files into the composer, stored by the daemon and referenced by URI; provider-emitted images externalised to the blob store
+- [x] **Attachments (N6):** the daemon stores an upload and answers with a reference; a message that mentions one reaches the agent as a path it can open. `ginka attach` is the CLI half
+- [ ] Paste and drag into the composer, and externalise provider-emitted images into the blob store
 - [ ] Protocol handshake carries a version and a wire-size bound (§4.1); daemon-host path rule honoured by every client path
 
 > **The domain layer beneath this landed separately** (`docs/roadmap.md` §3.3): the steer-or-queue policy and the in-session-vs-restart rule (`ginka-core::driver`), the model/effort/tier vocabulary (`ginka-protocol::provider`), the two title fields (`::session`), attachments and the blob store, the bounded event window and the client cursor that refuses to render a hole (`ginka-core::events`, `ginka-client::cursor`). What is left is wiring those into the daemon and the drivers that now exist.
