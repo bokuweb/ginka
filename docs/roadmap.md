@@ -254,7 +254,7 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [ ] Project rename, labels, reordering
 - [x] Worktree lifecycle: create (branch from base), remove (force for dirty), pin
 - [ ] Prune, and the locked-worktree cases `git worktree remove` refuses
-- [ ] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
+- [x] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
 - [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
 - [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
@@ -445,3 +445,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |
 | 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |
 | 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
+| 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |

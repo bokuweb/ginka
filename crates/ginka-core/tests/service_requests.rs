@@ -600,3 +600,40 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
     };
     assert!(left.is_empty(), "nothing is left over: {left:?}");
 }
+
+#[test]
+fn a_new_worktree_gets_what_the_project_said_it_needs() {
+    // A fresh checkout has none of the files the repository deliberately does
+    // not track, and an agent started there fails on its first command for a
+    // reason that has nothing to do with its task.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let root = fixture.repo();
+    std::fs::create_dir_all(root.join(".ginka")).unwrap();
+    std::fs::write(
+        root.join(".ginka/config.json"),
+        r#"{"copy": [".env"], "commands": ["echo ready > .setup-ran"]}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join(".env"), "TOKEN=secret\n").unwrap();
+
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "with-setup".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+
+    let worktree = &workspace.worktree.path;
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".env")).unwrap(),
+        "TOKEN=secret\n",
+        "the untracked file the project named came across"
+    );
+    assert!(
+        worktree.join(".setup-ran").is_file(),
+        "the setup command ran in the new worktree"
+    );
+}

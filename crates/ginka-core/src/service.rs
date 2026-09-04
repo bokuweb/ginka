@@ -211,6 +211,7 @@ impl Service {
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
+                self.set_up(&project.path, &path);
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
@@ -808,6 +809,38 @@ fn now() -> i64 {
 /// 23:00 belongs under the day they did it on.
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+impl Service {
+    /// Do what the project asked for in a new worktree.
+    ///
+    /// A fresh checkout has none of the files the repository deliberately does
+    /// not track, and an agent started there fails on its first command for a
+    /// reason that has nothing to do with its task. What went wrong is logged
+    /// rather than returned: the worktree exists by now, and removing it
+    /// because an install failed would throw away the branch the user asked
+    /// for.
+    fn set_up(&self, project: &std::path::Path, worktree: &std::path::Path) {
+        let setup = match crate::setup::read(project) {
+            Ok(setup) => setup,
+            Err(error) => {
+                tracing::warn!(%error, "a project's setup file could not be read");
+                return;
+            }
+        };
+        if setup.copy.is_empty() && setup.commands.is_empty() {
+            return;
+        }
+        let report = crate::setup::run(project, worktree, &setup);
+        for problem in &report.problems {
+            tracing::warn!(problem, worktree = %worktree.display(), "setting up the worktree");
+        }
+        tracing::info!(
+            copied = report.copied.len(),
+            ran = report.ran.len(),
+            "ran the project's setup"
+        );
+    }
 }
 
 /// Turn a domain failure into the protocol's generic failure.
