@@ -11,13 +11,25 @@
 //! what makes vendor formats testable against recorded fixtures instead of
 //! against a live CLI (`docs/roadmap.md` §7 R6).
 
+pub mod activity;
 pub mod claude;
 pub mod codex;
+pub mod event;
 pub mod probe;
+pub mod process;
+pub mod spec;
 pub mod testing;
+pub use activity::{ActivityItem, ActivityKind};
+pub use claude::{ClaudeDriver, ClaudeSession, ClaudeStream};
+pub use event::{AgentEvent, DriverError};
+
+pub use probe::{ProbeResult, probe, probe_with_arg, resolve_binary, resolve_binary_in};
+pub use process::AgentProcess;
+/// What the `claude` driver's own command builder takes. The `SessionSpec`
+/// below is the wider one the supervisor starts a session from.
+pub use spec::SessionSpec as ProcessSessionSpec;
 
 use anyhow::Result;
-use ginka_protocol::AgentEvent;
 use ginka_protocol::provider::{OptionOutcome, SessionOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -132,6 +144,10 @@ pub struct ParseState {
     /// Lines it did not. A session that ends with only these has hit a format
     /// change, and says so rather than reporting an empty success.
     pub unrecognized: usize,
+    /// The `claude` reader's own state. Parsing is a fold over a session's
+    /// lines — a tool result has to find the call it belongs to — so the state
+    /// travels with the session rather than with the driver, which is shared.
+    pub stream: claude::ClaudeStream,
 }
 
 impl ParseState {

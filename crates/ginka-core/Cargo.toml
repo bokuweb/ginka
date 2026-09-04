@@ -8,6 +8,9 @@ description = "Ginka domain logic: paths, settings, storage, projects and worktr
 # A scripted stand-in for a vendor CLI, so session behaviour is testable
 # without a network or a token budget. It lives in this package because
 # `CARGO_BIN_EXE_` is only set for binaries of the package under test.
+# A stand-in agent CLI for the process-supervision tests. It is a normal
+# binary so integration tests can find it through CARGO_BIN_EXE_*; it is tiny
+# and this crate is never published.
 [[bin]]
 name = "ginka-fake-agent"
 path = "src/bin/fake_agent.rs"

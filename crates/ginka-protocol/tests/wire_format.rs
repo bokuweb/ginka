@@ -5,6 +5,7 @@
 //! change for a daemon and a UI that ship separately, so the JSON is asserted
 //! literally rather than only round-tripped.
 
+use ginka_protocol::event::ActivityItem;
 use ginka_protocol::event::{AgentEvent, DaemonEvent, Usage};
 use ginka_protocol::model::{ProjectKind, SessionState};
 use ginka_protocol::rpc::{Request, Response};
@@ -108,17 +109,25 @@ fn agent_events_are_tagged_by_kind() {
         ),
         (
             AgentEvent::ToolCall {
-                id: "call_1".into(),
-                name: "read_file".into(),
-                input: json!({ "path": "src/main.rs" }),
+                activity: ActivityItem::from_tool(
+                    Some("call_1".into()),
+                    "read_file",
+                    &json!({ "path": "src/main.rs" }),
+                ),
             },
             "tool_call",
         ),
         (
             AgentEvent::ToolResult {
-                id: "call_1".into(),
-                output: "fn main() {}".into(),
-                is_error: false,
+                activity: {
+                    let mut activity = ActivityItem::from_tool(
+                        Some("call_1".into()),
+                        "read_file",
+                        &json!({ "path": "src/main.rs" }),
+                    );
+                    activity.complete_with("fn main() {}", false);
+                    activity
+                },
             },
             "tool_result",
         ),

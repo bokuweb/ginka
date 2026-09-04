@@ -121,9 +121,15 @@ impl Transcript {
     pub fn activity(&self) -> Activity {
         match self.blocks.last() {
             Some(Block::Assistant { .. }) => Activity::Writing,
+            // The title, not the kind: "cargo test" says what the agent is
+            // doing where "run" only says what sort of thing it is.
             Some(Block::Tool {
-                name, output: None, ..
-            }) => Activity::Running { tool: name.clone() },
+                input,
+                output: None,
+                ..
+            }) => Activity::Running {
+                tool: input.clone(),
+            },
             _ => Activity::Thinking,
         }
     }
@@ -183,18 +189,21 @@ impl Transcript {
         match event {
             AgentEvent::TextDelta { text } => self.append_text(text),
             AgentEvent::Reasoning { text } => self.append_reasoning(text),
-            AgentEvent::ToolCall { id, name, input } => self.blocks.push(Block::Tool {
-                id: id.clone(),
-                name: name.clone(),
-                input: render_input(input),
+            // The driver already normalized the call into one shape; the block
+            // keeps the kind as its label and the title as the line the reader
+            // scans.
+            AgentEvent::ToolCall { activity } => self.blocks.push(Block::Tool {
+                id: activity.id.clone().unwrap_or_default(),
+                name: activity.kind_str().to_string(),
+                input: activity.title.clone(),
                 output: None,
                 is_error: false,
             }),
-            AgentEvent::ToolResult {
-                id,
-                output,
-                is_error,
-            } => self.attach_result(id, output, *is_error),
+            AgentEvent::ToolResult { activity } => self.attach_result(
+                activity.id.as_deref().unwrap_or_default(),
+                activity.detail.as_deref().unwrap_or_default(),
+                activity.failed,
+            ),
             AgentEvent::AskUser {
                 id,
                 question,
@@ -217,6 +226,20 @@ impl Transcript {
                 state: *state,
                 summary: summary.clone(),
             }),
+            // A shape this build does not understand is shown, not dropped: it
+            // is how a vendor's format change first reaches a reader (R6).
+            AgentEvent::Unsupported { shape } => {
+                self.append_text(&format!("(not understood: {shape})"))
+            }
+            // Session bookkeeping the conversation does not render.
+            AgentEvent::Connected { .. }
+            | AgentEvent::Commands { .. }
+            | AgentEvent::TurnStarted
+            | AgentEvent::Permission { .. }
+            | AgentEvent::SteerAccepted
+            | AgentEvent::SteerRejected { .. }
+            | AgentEvent::AgentTitle { .. }
+            | AgentEvent::ProcessExited { .. } => {}
         }
     }
 
@@ -517,29 +540,10 @@ pub fn head_of(text: &str, limit: usize) -> String {
     )
 }
 
-/// A tool's arguments as one line.
-///
-/// Objects are unwrapped to `key=value` pairs: `{"file_path": "a.rs"}` reads as
-/// noise, `file_path=a.rs` reads as what the agent did.
-fn render_input(input: &serde_json::Value) -> String {
-    match input {
-        serde_json::Value::Object(fields) => fields
-            .iter()
-            .map(|(key, value)| match value {
-                serde_json::Value::String(text) => format!("{key}={text}"),
-                other => format!("{key}={other}"),
-            })
-            .collect::<Vec<_>>()
-            .join(" "),
-        serde_json::Value::Null => String::new(),
-        serde_json::Value::String(text) => text.clone(),
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ginka_protocol::event::ActivityItem;
     use serde_json::json;
 
     fn user(seq: u64, text: &str) -> TranscriptEntry {
@@ -548,6 +552,13 @@ mod tests {
             at: 0,
             payload: TranscriptPayload::User { text: text.into() },
         }
+    }
+
+    /// A tool call that already produced its result.
+    fn completed(id: &str, output: &str, failed: bool) -> ActivityItem {
+        let mut activity = ActivityItem::from_tool(Some(id.into()), "tool", &json!({}));
+        activity.complete_with(output, failed);
+        activity
     }
 
     fn agent(seq: u64, event: AgentEvent) -> TranscriptEntry {
@@ -633,18 +644,18 @@ mod tests {
             agent(
                 1,
                 AgentEvent::ToolCall {
-                    id: "t1".into(),
-                    name: "Read".into(),
-                    input: json!({ "file_path": "a.rs" }),
+                    activity: ActivityItem::from_tool(
+                        Some("t1".into()),
+                        "Read",
+                        &json!({ "file_path": "a.rs" }),
+                    ),
                 },
             ),
             text(2, "reading"),
             agent(
                 3,
                 AgentEvent::ToolResult {
-                    id: "t1".into(),
-                    output: "fn main() {}".into(),
-                    is_error: false,
+                    activity: completed("t1", "fn main() {}", false),
                 },
             ),
         ]);
@@ -652,8 +663,8 @@ mod tests {
             transcript.blocks()[0],
             Block::Tool {
                 id: "t1".into(),
-                name: "Read".into(),
-                input: "file_path=a.rs".into(),
+                name: "tool".into(),
+                input: "a.rs".into(),
                 output: Some("fn main() {}".into()),
                 is_error: false,
             }
@@ -668,9 +679,7 @@ mod tests {
         transcript.extend(&[agent(
             1,
             AgentEvent::ToolResult {
-                id: "orphan".into(),
-                output: "surprise".into(),
-                is_error: true,
+                activity: completed("orphan", "surprise", true),
             },
         )]);
         assert!(matches!(
@@ -690,9 +699,7 @@ mod tests {
             agent(
                 seq,
                 AgentEvent::ToolCall {
-                    id: "t".into(),
-                    name: "Bash".into(),
-                    input: json!({}),
+                    activity: ActivityItem::from_tool(Some("t".into()), "Bash", &json!({})),
                 },
             )
         };
@@ -700,9 +707,7 @@ mod tests {
             agent(
                 seq,
                 AgentEvent::ToolResult {
-                    id: "t".into(),
-                    output: output.into(),
-                    is_error: false,
+                    activity: completed("t", output, false),
                 },
             )
         };
@@ -895,9 +900,7 @@ mod tests {
         transcript.apply(&agent(
             2,
             AgentEvent::ToolCall {
-                id: "t".into(),
-                name: "Bash".into(),
-                input: json!({}),
+                activity: ActivityItem::from_tool(Some("t".into()), "Bash", &json!({})),
             },
         ));
         assert_eq!(
@@ -910,9 +913,7 @@ mod tests {
         transcript.apply(&agent(
             3,
             AgentEvent::ToolResult {
-                id: "t".into(),
-                output: "done".into(),
-                is_error: false,
+                activity: completed("t", "done", false),
             },
         ));
         assert_eq!(
@@ -985,17 +986,6 @@ mod tests {
             "one\ntwo",
             "short output is untouched"
         );
-    }
-
-    #[test]
-    fn tool_arguments_read_as_what_the_agent_did() {
-        assert_eq!(
-            render_input(&json!({ "file_path": "src/main.rs" })),
-            "file_path=src/main.rs"
-        );
-        assert_eq!(render_input(&json!({})), "");
-        assert_eq!(render_input(&serde_json::Value::Null), "");
-        assert_eq!(render_input(&json!("ls -la")), "ls -la");
     }
 
     #[test]

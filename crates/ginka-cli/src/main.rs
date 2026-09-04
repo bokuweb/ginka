@@ -1079,12 +1079,17 @@ mod ginka_cli_format {
         match event {
             AgentEvent::TextDelta { text } => text.clone(),
             AgentEvent::Reasoning { text } => format!("(thinking) {text}"),
-            AgentEvent::ToolCall { name, input, .. } => format!("[{name}] {input}"),
-            AgentEvent::ToolResult {
-                output, is_error, ..
-            } => {
-                let marker = if *is_error { "!" } else { " " };
-                format!("[result]{marker} {}", output.lines().next().unwrap_or(""))
+            AgentEvent::ToolCall { activity } => {
+                format!("[{}] {}", activity.kind_str(), activity.title)
+            }
+            AgentEvent::ToolResult { activity } => {
+                let marker = if activity.failed { "!" } else { " " };
+                let first = activity
+                    .detail
+                    .as_deref()
+                    .and_then(|detail| detail.lines().next())
+                    .unwrap_or("");
+                format!("[result]{marker} {first}")
             }
             AgentEvent::AskUser { question, .. } => format!("? {question}"),
             AgentEvent::PlanProposal { plan, .. } => format!("plan: {plan}"),
@@ -1098,6 +1103,30 @@ mod ginka_cli_format {
                 state.as_str(),
                 summary.clone().unwrap_or_default()
             ),
+            AgentEvent::Connected { model, .. } => match model {
+                Some(model) => format!("-- connected ({model}) --"),
+                None => "-- connected --".to_string(),
+            },
+            AgentEvent::AgentTitle { title } => format!("-- titled: {title} --"),
+            AgentEvent::Permission { request } => format!("? permission: {request}"),
+            AgentEvent::SteerRejected { reason } => format!(
+                "-- steer refused{} --",
+                reason
+                    .as_deref()
+                    .map(|reason| format!(": {reason}"))
+                    .unwrap_or_default()
+            ),
+            AgentEvent::ProcessExited { code } => match code {
+                Some(code) => format!("-- agent exited ({code}) --"),
+                None => "-- agent exited --".to_string(),
+            },
+            // Said out loud rather than dropped: a shape this build does not
+            // know is how a vendor's format change first shows up.
+            AgentEvent::Unsupported { shape } => format!("-- not understood: {shape} --"),
+            // Nothing a transcript reader needs to see.
+            AgentEvent::Commands { .. } | AgentEvent::TurnStarted | AgentEvent::SteerAccepted => {
+                String::new()
+            }
         }
     }
 
@@ -1151,9 +1180,15 @@ mod ginka_cli_format {
                 at: 0,
                 payload: TranscriptPayload::Agent {
                     event: AgentEvent::ToolResult {
-                        id: "t".into(),
-                        output: "no such file\nmore".into(),
-                        is_error: true,
+                        activity: {
+                            let mut activity = ginka_protocol::event::ActivityItem::from_tool(
+                                Some("t".into()),
+                                "Read",
+                                &serde_json::json!({}),
+                            );
+                            activity.complete_with("no such file\nmore", true);
+                            activity
+                        },
                     },
                 },
             };

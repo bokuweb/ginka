@@ -3,12 +3,12 @@
 //! Runs `codex exec --json`, which writes one JSON object per line. Two
 //! generations of that format are in the wild — a `thread`/`item`/`turn`
 //! vocabulary, and an older envelope with the payload under `msg` — and both
-//! are handled, because the CLI a user has installed is not ours to choose.
+//! are handled, because crate::driver::ActivityItem;
 //!
 //! As with every driver, the shapes are pinned by the fixtures below rather
 //! than by a live session.
 
-use super::{AgentDriver, CommandSpec, ParseState, ProviderModel, SessionSpec};
+use super::{ActivityItem, AgentDriver, CommandSpec, ParseState, ProviderModel, SessionSpec};
 use ginka_protocol::model::SessionState;
 use ginka_protocol::{AgentEvent, Usage};
 use serde_json::Value;
@@ -239,30 +239,31 @@ fn parse_item(item: &Value) -> Vec<AgentEvent> {
             // Codex reports a command once it has run, so the call and its
             // result arrive together; the pairing the UI draws is still made
             // here rather than left for it to infer.
+            let activity = ActivityItem::from_tool(
+                Some(id),
+                "shell",
+                &serde_json::json!({ "command": command }),
+            );
+            let mut finished = activity.clone();
+            finished.complete_with(
+                item.get("aggregated_output")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                item.get("exit_code")
+                    .and_then(Value::as_i64)
+                    .is_some_and(|code| code != 0),
+            );
             vec![
-                AgentEvent::ToolCall {
-                    id: id.clone(),
-                    name: "shell".to_string(),
-                    input: serde_json::json!({ "command": command }),
-                },
-                AgentEvent::ToolResult {
-                    id,
-                    output: item
-                        .get("aggregated_output")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_string(),
-                    is_error: item
-                        .get("exit_code")
-                        .and_then(Value::as_i64)
-                        .is_some_and(|code| code != 0),
-                },
+                AgentEvent::ToolCall { activity },
+                AgentEvent::ToolResult { activity: finished },
             ]
         }
         "file_change" => vec![AgentEvent::ToolCall {
-            id,
-            name: "edit".to_string(),
-            input: item.get("changes").cloned().unwrap_or(Value::Null),
+            activity: ActivityItem::from_tool(
+                Some(id),
+                "edit",
+                &item.get("changes").cloned().unwrap_or(Value::Null),
+            ),
         }],
         _ => Vec::new(),
     }
@@ -296,33 +297,33 @@ fn parse_legacy(msg: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
         Some("exec_command_begin") => {
             state.recognized += 1;
             vec![AgentEvent::ToolCall {
-                id: msg
-                    .get("call_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or("call")
-                    .to_string(),
-                name: "shell".to_string(),
-                input: msg.get("command").cloned().unwrap_or(Value::Null),
+                activity: ActivityItem::from_tool(
+                    msg.get("call_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    "shell",
+                    &msg.get("command").cloned().unwrap_or(Value::Null),
+                ),
             }]
         }
         Some("exec_command_end") => {
             state.recognized += 1;
-            vec![AgentEvent::ToolResult {
-                id: msg
-                    .get("call_id")
+            let mut activity = ActivityItem::from_tool(
+                msg.get("call_id")
                     .and_then(Value::as_str)
-                    .unwrap_or("call")
-                    .to_string(),
-                output: msg
-                    .get("stdout")
+                    .map(str::to_string),
+                "shell",
+                &Value::Null,
+            );
+            activity.complete_with(
+                msg.get("stdout")
                     .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string(),
-                is_error: msg
-                    .get("exit_code")
+                    .unwrap_or_default(),
+                msg.get("exit_code")
                     .and_then(Value::as_i64)
                     .is_some_and(|code| code != 0),
-            }]
+            );
+            vec![AgentEvent::ToolResult { activity }]
         }
         Some("task_complete") => {
             state.recognized += 1;
@@ -370,6 +371,7 @@ fn usage_from(usage: &Value) -> Usage {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn parse(lines: &[&str]) -> (Vec<AgentEvent>, ParseState) {
@@ -449,19 +451,20 @@ mod tests {
         let (events, _) = parse(&[
             r#"{"type":"item.completed","item":{"id":"item_1","item_type":"command_execution","command":"cargo test","aggregated_output":"ok","exit_code":0}}"#,
         ]);
+        // The result completes the call rather than restating it: the row
+        // keeps the title it was given.
+        let call = ActivityItem::from_tool(
+            Some("item_1".into()),
+            "shell",
+            &serde_json::json!({ "command": "cargo test" }),
+        );
+        let mut finished = call.clone();
+        finished.complete_with("ok", false);
         assert_eq!(
             events,
             vec![
-                AgentEvent::ToolCall {
-                    id: "item_1".into(),
-                    name: "shell".into(),
-                    input: serde_json::json!({ "command": "cargo test" }),
-                },
-                AgentEvent::ToolResult {
-                    id: "item_1".into(),
-                    output: "ok".into(),
-                    is_error: false,
-                },
+                AgentEvent::ToolCall { activity: call },
+                AgentEvent::ToolResult { activity: finished },
             ]
         );
     }
@@ -473,7 +476,7 @@ mod tests {
         ]);
         assert!(matches!(
             events.as_slice(),
-            [_, AgentEvent::ToolResult { is_error: true, .. }]
+            [_, AgentEvent::ToolResult { activity }] if activity.failed
         ));
     }
 

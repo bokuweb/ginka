@@ -1,31 +1,93 @@
-//! A scripted stand-in for a vendor's agent CLI.
+//! A stand-in for a vendor's CLI, for tests that need a real process.
 //!
-//! Session behaviour — supervision, cancellation, queued follow-ups, resume —
-//! has to be testable without a network, an account or a token budget, so the
-//! tests run this instead of `claude` (`docs/roadmap.md` §6.1). It speaks
-//! Claude Code's `stream-json`, which means the real driver is what parses it.
+//! Session behaviour is pinned against this rather than a live agent: no
+//! tokens, no network, and the awkward cases — a process that hangs after its
+//! last line, one that exits non-zero, one that prints a warning on stdout —
+//! are scripted here instead of waited for in the wild.
 //!
-//! The script is a file named by `GINKA_FAKE_AGENT_SCRIPT`, one directive per
-//! line:
-//!
-//! - `#sleep <ms>` — wait, so a test can cancel mid-turn.
-//! - `#read` — block until a line arrives on stdin.
-//! - `#stderr <text>` — write to stderr.
-//! - `#spawn <file>` — start a long-lived child and write its pid to `file`,
-//!   so a test can check that cancelling reached the whole process tree and
-//!   not only the agent.
-//! - `#exit <code>` — exit immediately with that status.
-//! - anything else — write the line to stdout verbatim.
-//!
-//! `{prompt}` in a line is replaced with the last command-line argument, which
-//! is where every driver in this workspace puts the prompt. `{session}` is
-//! replaced with `GINKA_FAKE_AGENT_SESSION`, defaulting to `fake-session`, and
-//! `{args}` with the whole command line — which is how a test asserts that a
-//! follow-up was started as a resume rather than as a fresh session.
+//! It is a normal binary of this crate so integration tests can find it
+//! through `CARGO_BIN_EXE_ginka-fake-agent`.
 
 use std::io::{BufRead, Write};
 
 fn main() {
+    // Two ways to script this, because two suites do. A script file exercises
+    // the daemon's supervisor with directives it can pause and block on; the
+    // flags exercise the driver's own reading of a stream. Neither knows about
+    // the other, so the file wins when it is set.
+    if std::env::var_os("GINKA_FAKE_AGENT_SCRIPT").is_some() {
+        return scripted();
+    }
+    flags();
+}
+
+/// Flag-driven: what the driver tests script.
+fn flags() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut exit_code = 0;
+    let mut hang = false;
+    let mut echo_stdin = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        match args[index].as_str() {
+            // Print each line of a file, in order, as the agent's output.
+            "--script" => {
+                index += 1;
+                let path = args.get(index).expect("--script needs a path");
+                let text = std::fs::read_to_string(path).expect("script is readable");
+                for line in text.lines() {
+                    println!("{line}");
+                    let _ = std::io::stdout().flush();
+                }
+            }
+            // Answer each line on stdin with an assistant message carrying it.
+            "--echo-stdin" => echo_stdin = true,
+            // Stay alive with nothing to say, so a test can cancel it.
+            "--hang" => hang = true,
+            "--exit-code" => {
+                index += 1;
+                exit_code = args[index].parse().expect("--exit-code needs a number");
+            }
+            // Something that is not a message at all, on stdout.
+            "--noise" => println!("warning: this line is not JSON"),
+            // Stand in for a CLI answering a version probe.
+            "--version" => {
+                println!("ginka-fake-agent 9.9.9 (Claude Code compatible)");
+                std::process::exit(0);
+            }
+            // A CLI that answers a probe with nothing useful.
+            "--silent-version" => {
+                println!("hello");
+                std::process::exit(0);
+            }
+            other => panic!("unknown argument {other}"),
+        }
+        index += 1;
+    }
+
+    if echo_stdin {
+        for line in std::io::stdin().lock().lines() {
+            let line = line.expect("stdin is readable");
+            let payload = serde_json::json!({
+                "type": "assistant",
+                "message": {"content": [{"type": "text", "text": line}]}
+            });
+            println!("{payload}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    if hang {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(3_600));
+        }
+    }
+    std::process::exit(exit_code);
+}
+
+/// File-driven: what the daemon's session tests script.
+fn scripted() {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let prompt = arguments.last().cloned().unwrap_or_default();
     let joined = arguments.join(" ");

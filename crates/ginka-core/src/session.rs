@@ -268,7 +268,9 @@ fn excerpt(payload: &str, query: &str) -> String {
             TranscriptPayload::Agent { event } => match event {
                 ginka_protocol::AgentEvent::TextDelta { text }
                 | ginka_protocol::AgentEvent::Reasoning { text } => text,
-                ginka_protocol::AgentEvent::ToolResult { output, .. } => output,
+                ginka_protocol::AgentEvent::ToolResult { activity } => {
+                    activity.detail.clone().unwrap_or_default()
+                }
                 other => format!("{other:?}"),
             },
         })
