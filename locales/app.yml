@@ -14,6 +14,9 @@ sidebar.archived:
 sidebar.empty.title:
   en: No projects yet
   ja: プロジェクトがありません
+sidebar.empty.add:
+  en: Add a project…
+  ja: プロジェクトを追加…
 sidebar.empty.hint:
   en: ginka project add .
   ja: ginka project add .

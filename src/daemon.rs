@@ -12,6 +12,8 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
+use std::path::PathBuf;
+
 use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
     ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
@@ -187,6 +189,19 @@ impl DaemonLink {
     }
 
     /// Put a file into the next commit, or take it back out.
+    /// Register a repository or folder.
+    ///
+    /// The path is one this window picked, so it is a path on *this* machine.
+    /// That is only the same thing as a daemon-host path while the daemon is
+    /// the local child process, which is why the picker is offered only then
+    /// (`docs/roadmap.md` §4.1).
+    pub async fn add_project(&self, path: PathBuf) -> bool {
+        matches!(
+            self.ask(Request::AddProject { path }).await,
+            Some(Response::Project { .. })
+        )
+    }
+
     pub async fn stage(&self, workspace: &WorkspaceId, path: &str, staged: bool) {
         self.ask(Request::StageFile {
             workspace: workspace.clone(),

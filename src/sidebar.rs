@@ -24,6 +24,9 @@ use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
 /// the sidebar is drawn.
 pub enum SidebarEvent {
     Selected,
+    /// The reader asked for a project to be registered. The sidebar does not
+    /// know how to pick a folder or how to reach the daemon; the shell does.
+    AddProjectRequested,
 }
 
 impl EventEmitter<SidebarEvent> for SessionSidebar {}
@@ -361,7 +364,7 @@ impl SessionSidebar {
     ///
     /// Says how to fix it rather than only that the list is empty. The command
     /// is the real one, so it can be copied straight into a terminal.
-    fn empty_state(&self, cx: &App) -> impl IntoElement {
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         v_flex()
             .flex_1()
@@ -375,6 +378,23 @@ impl SessionSidebar {
                     .text_color(tokens.colors().text_secondary)
                     .child(rust_i18n::t!("sidebar.empty.title").to_string()),
             )
+            .child(
+                div()
+                    .id("add-project")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().accent)
+                    .text_xs()
+                    .text_color(tokens.colors().text_primary)
+                    .cursor_pointer()
+                    .child(rust_i18n::t!("sidebar.empty.add").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::AddProjectRequested);
+                    })),
+            )
+            // The command stays: a window is not the only way in, and a reader
+            // who prefers the terminal should not have to guess the name.
             .child(
                 div()
                     .px_2()

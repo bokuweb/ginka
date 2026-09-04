@@ -249,6 +249,34 @@ impl Shell {
                 &sidebar,
                 window,
                 |this, sidebar, event, window, cx| match event {
+                    // The window's own way in. The command in the empty state
+                    // still works and is still shown, but a reader who has just
+                    // opened the app should not have to leave it to put
+                    // something in it.
+                    SidebarEvent::AddProjectRequested => {
+                        let link = this.link.clone();
+                        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+                            files: false,
+                            // A project is a directory: a repository, or a
+                            // folder to work in.
+                            directories: true,
+                            multiple: false,
+                            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
+                        });
+                        cx.spawn(async move |_, _| {
+                            // Cancelled, or the platform refused to ask: either
+                            // way there is nothing to register.
+                            if let Ok(Ok(Some(paths))) = chosen.await
+                                && let Some(path) = paths.into_iter().next()
+                            {
+                                // The daemon announces the change, and the
+                                // sidebar is filled from that announcement
+                                // rather than from here.
+                                link.add_project(path).await;
+                            }
+                        })
+                        .detach();
+                    }
                     SidebarEvent::Selected => {
                         this.session = sidebar.read(cx).selected_row().cloned();
                         // A different workspace is a different conversation.
