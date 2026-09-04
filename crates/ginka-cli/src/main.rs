@@ -70,6 +70,21 @@ enum Command {
         #[arg(long)]
         patch: bool,
     },
+    /// Commit a workspace's work.
+    Commit {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The commit message.
+        message: String,
+        /// Commit only what is already staged.
+        #[arg(long)]
+        staged: bool,
+    },
+    /// Push a workspace's branch, setting an upstream if it has none.
+    Push {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Rewind a workspace to a saved state.
     #[command(subcommand)]
     Checkpoint(CheckpointCommand),
@@ -267,6 +282,18 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Commit {
+            workspace,
+            message,
+            staged,
+        } => Request::Commit {
+            workspace: WorkspaceId(workspace),
+            message,
+            all: !staged,
+        },
+        Command::Push { workspace } => Request::Push {
+            workspace: WorkspaceId(workspace),
+        },
         Command::Changes {
             workspace,
             staged,
@@ -422,6 +449,10 @@ fn print(response: Response, patch: bool) {
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::Committed { commit } => println!(
+            "{}",
+            rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])
+        ),
         Response::Transcript { entries } => {
             if entries.is_empty() {
                 println!("{}", rust_i18n::t!("cli.transcript.empty"));

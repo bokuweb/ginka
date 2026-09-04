@@ -145,6 +145,33 @@ impl DaemonLink {
         }
     }
 
+    /// Commit a workspace's work, everything in it.
+    ///
+    /// The error is the message git gave, because that is the one the user can
+    /// act on: an identity that is not configured, a hook that refused, or
+    /// nothing to commit at all.
+    pub async fn commit(&self, workspace: &WorkspaceId, message: String) -> Result<(), String> {
+        let client = self.client().await.ok_or("no daemon")?;
+        match client
+            .request(Request::Commit {
+                workspace: workspace.clone(),
+                message,
+                all: true,
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if error.code == "failed" {
+                    Err(error.message)
+                } else {
+                    self.forget();
+                    Err(error.message)
+                }
+            }
+        }
+    }
+
     /// Put a workspace back to the state a checkpoint captured.
     pub async fn restore(&self, checkpoint: &CheckpointId) {
         self.ask(Request::RestoreCheckpoint {

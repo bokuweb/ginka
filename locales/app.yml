@@ -120,6 +120,21 @@ surface.git.summary:
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。
+surface.git.write_commit:
+  en: Write a commit message…
+  ja: コミットメッセージを書く…
+surface.git.message:
+  en: What this change is for
+  ja: この変更の目的
+surface.git.commit:
+  en: Commit
+  ja: コミット
+surface.git.cancel:
+  en: Cancel
+  ja: やめる
+surface.git.needs_message:
+  en: A commit needs a message.
+  ja: コミットにはメッセージが必要です。
 surface.empty.title:
   en: Open a surface
   ja: サーフェスを開く
@@ -151,6 +166,9 @@ cli.changes.empty:
 cli.changes.total:
   en: "%{files} file(s), +%{added} -%{removed}"
   ja: "%{files} ファイル, +%{added} -%{removed}"
+cli.committed:
+  en: "committed %{commit}"
+  ja: "%{commit} をコミットしました"
 cli.checkpoints.empty:
   en: "no checkpoints yet; they are taken as an agent works"
   ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"

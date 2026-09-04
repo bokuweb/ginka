@@ -319,6 +319,30 @@ impl Service {
                     changes: Changes { source, files },
                 })
             }
+            Request::Commit {
+                workspace,
+                message,
+                all,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if message.trim().is_empty() {
+                    return Err(RpcError::failed("a commit needs a message"));
+                }
+                let commit = git::commit(&worktree.path, &message, all).map_err(failed)?;
+                // The branch moved, so what the sidebar says about it is stale.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Committed { commit })
+            }
+            Request::Push { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                git::push(&worktree.path).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;
                 Ok(Response::Checkpoints {

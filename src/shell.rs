@@ -184,6 +184,10 @@ impl Shell {
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|_| SurfacePanel::new());
 
+        let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
+            crate::surfaces::SurfaceEvent::Commit(message) => this.commit(message.clone(), cx),
+        });
+
         let selection = cx.subscribe(&sidebar, |this, sidebar, event, cx| match event {
             SidebarEvent::Selected => {
                 this.session = sidebar.read(cx).selected_row().cloned();
@@ -366,7 +370,7 @@ impl Shell {
             session,
             sidebar,
             surfaces,
-            _subscriptions: vec![appearance, selection, submitted],
+            _subscriptions: vec![appearance, selection, submitted, committing],
         }
     }
 
@@ -504,6 +508,24 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             cx.background_spawn(async move { link.restore(&checkpoint).await })
                 .await;
+        })
+        .detach();
+    }
+
+    /// Commit the workspace's work, and say so if git would not.
+    fn commit(&mut self, message: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = cx
+                .background_spawn(async move { link.commit(&workspace, message).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_commit_result(outcome.err(), cx)
+            });
         })
         .detach();
     }

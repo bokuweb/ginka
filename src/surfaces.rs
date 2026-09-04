@@ -10,6 +10,7 @@ use ginka_ui::Tokens;
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::input::{Textarea, TextareaState};
 use gpui_component::{Icon, IconName, h_flex, v_flex};
 
 pub struct SurfacePanel {
@@ -19,7 +20,19 @@ pub struct SurfacePanel {
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
+    /// The commit message being written, if the box is open.
+    message: Option<Entity<TextareaState>>,
+    /// Why the last commit did not happen.
+    complaint: Option<SharedString>,
 }
+
+/// Emitted when the panel wants the shell to do something only it can.
+pub enum SurfaceEvent {
+    /// Commit everything in the workspace with this message.
+    Commit(String),
+}
+
+impl EventEmitter<SurfaceEvent> for SurfacePanel {}
 
 impl SurfacePanel {
     pub fn new() -> Self {
@@ -27,7 +40,19 @@ impl SurfacePanel {
             open: None,
             changes: None,
             expanded: None,
+            message: None,
+            complaint: None,
         }
+    }
+
+    /// Say why a commit did not happen, or clear it once one did.
+    pub fn set_commit_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
+        self.complaint = complaint.map(SharedString::from);
+        if self.complaint.is_none() {
+            // It went in; the message belongs to the commit now.
+            self.message = None;
+        }
+        cx.notify();
     }
 
     /// Which surface is showing, so the shell knows what to keep fetching.
@@ -218,7 +243,132 @@ impl SurfacePanel {
                     .iter()
                     .map(|file| self.file_row(file, cx).into_any_element()),
             )
+            .child(self.commit_box(cx))
             .into_any_element()
+    }
+
+    /// Where the reviewed work is written up and sent.
+    ///
+    /// Under the files rather than above them: the message is what you write
+    /// once you have read them, and a box at the top invites writing it first.
+    fn commit_box(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let open = self.message.clone();
+
+        v_flex()
+            .w_full()
+            .p_2()
+            .gap_1p5()
+            .border_t_1()
+            .border_color(tokens.colors().border_subtle)
+            .children(self.complaint.clone().map(|why| {
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(why)
+            }))
+            .child(match open {
+                Some(state) => v_flex()
+                    .w_full()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .w_full()
+                            .px_2()
+                            .py_1p5()
+                            .rounded(px(tokens.radius.panel))
+                            .bg(tokens.colors().bg_surface)
+                            .border_1()
+                            .border_color(tokens.colors().border_subtle)
+                            .child(Textarea::new(&state)),
+                    )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("commit")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(tokens.radius.row))
+                                    .bg(tokens.colors().accent.opacity(0.9))
+                                    .text_xs()
+                                    .text_color(tokens.colors().bg_window)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().accent))
+                                    .on_click(cx.listener(|this, _, _, cx| this.commit(cx)))
+                                    .child(rust_i18n::t!("surface.git.commit").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id("cancel-commit")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(tokens.radius.row))
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.message = None;
+                                        this.complaint = None;
+                                        cx.notify();
+                                    }))
+                                    .child(rust_i18n::t!("surface.git.cancel").to_string()),
+                            ),
+                    )
+                    .into_any_element(),
+                None => div()
+                    .id("write-commit")
+                    .w_full()
+                    .px_2p5()
+                    .py_1p5()
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(|this, _, window, cx| this.write_commit(window, cx)))
+                    .child(rust_i18n::t!("surface.git.write_commit").to_string())
+                    .into_any_element(),
+            })
+    }
+
+    /// Open the message box, focused, so the next keystroke lands in it.
+    fn write_commit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let state = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.git.message").to_string())
+                .auto_grow(1, 6)
+        });
+        let handle = state.read(cx).focus_handle(cx);
+        handle.focus(window, cx);
+        self.message = Some(state);
+        self.complaint = None;
+        cx.notify();
+    }
+
+    /// Hand the message to the shell, which is the one holding the daemon.
+    fn commit(&mut self, cx: &mut Context<Self>) {
+        let Some(state) = self.message.as_ref() else {
+            return;
+        };
+        let message = state.read(cx).value().trim().to_string();
+        if message.is_empty() {
+            self.complaint = Some(
+                rust_i18n::t!("surface.git.needs_message")
+                    .to_string()
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        cx.emit(SurfaceEvent::Commit(message));
     }
 
     /// One file, and its diff when it is the one being read.

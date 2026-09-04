@@ -258,6 +258,50 @@ fn changes_are_readable_from_the_command_line() {
 }
 
 #[test]
+fn work_can_be_committed_once_it_has_been_read() {
+    // The other half of the review loop: read the diff, then commit it,
+    // without leaving the tool.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "commit-me"]);
+    let worktree = home
+        .root()
+        .join("worktrees")
+        .join("comet")
+        .join("commit-me");
+    std::fs::write(worktree.join("added.rs"), "fn new() {}\n").unwrap();
+
+    let committed = home.ok(&["commit", "comet/commit-me", "the agent's work"]);
+    assert!(committed.contains("committed"), "{committed}");
+
+    // Everything the review listed went in, including the file git had never
+    // seen, and nothing is left behind.
+    assert!(
+        home.ok(&["changes", "comet/commit-me"])
+            .contains("nothing has changed"),
+        "the worktree is clean afterwards"
+    );
+    let listed = home.ok(&["workspace", "list", "comet"]);
+    assert!(listed.contains("clean"), "{listed}");
+}
+
+#[test]
+fn committing_nothing_says_what_git_said() {
+    // The message is on git's stdout, and an error with no message is not
+    // something a user can act on.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "empty"]);
+
+    let output = home.run(&["commit", "comet/empty", "nothing to say"]);
+    assert!(!output.status.success());
+    let complaint = String::from_utf8_lossy(&output.stderr);
+    assert!(complaint.contains("nothing to commit"), "{complaint}");
+}
+
+#[test]
 fn sessions_and_checkpoints_are_listable_before_any_agent_has_run() {
     // An empty list is an answer; a user asking what is going on in a fresh
     // workspace should not meet an error.

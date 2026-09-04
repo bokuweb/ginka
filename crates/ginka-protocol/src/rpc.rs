@@ -97,6 +97,19 @@ pub enum Request {
         source: ChangeSource,
     },
 
+    /// Commit a workspace's work.
+    ///
+    /// `all` stages everything first, including files git has never seen,
+    /// which is what a review that just listed those files leads the user to
+    /// expect.
+    Commit {
+        workspace: WorkspaceId,
+        message: String,
+        all: bool,
+    },
+    /// Push a workspace's branch, setting an upstream if it has none.
+    Push { workspace: WorkspaceId },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
@@ -146,6 +159,10 @@ pub enum Response {
     },
     Changes {
         changes: Changes,
+    },
+    /// A commit was made, and this is what it is called.
+    Committed {
+        commit: String,
     },
 }
 

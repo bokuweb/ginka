@@ -57,10 +57,35 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
             "git {} failed in {}: {}",
             args.join(" "),
             repo.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
+            complaint(&output)
         );
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// What git said about a failure.
+///
+/// Usually stderr, but not always: `git commit` with nothing staged explains
+/// itself on stdout, and an error whose only message went to the stream we
+/// ignored reaches the user as no message at all.
+fn complaint(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !stderr.is_empty() {
+        return stderr;
+    }
+    // Every line of it, because the useful one is not always the first: a
+    // commit with nothing staged says "On branch main" before it says why it
+    // did nothing. Bounded, because a failing command can be talkative.
+    let said = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("; ");
+    if said.chars().count() <= 300 {
+        return said;
+    }
+    said.chars().take(299).collect::<String>() + "…"
 }
 
 /// Whether `path` is inside a git working tree.
@@ -453,6 +478,39 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
     Ok(crate::diff::parse(&patch))
 }
 
+/// Commit what is in the worktree.
+///
+/// `all` stages everything first, including files git has never seen, which is
+/// what a review that just showed those files leads the user to expect. Without
+/// it only what is already staged is committed.
+///
+/// The commit is the *user's*, so it takes their identity — unlike a
+/// checkpoint, which is the app's. A machine with no identity configured fails
+/// here with git's own message, which is the right one: this is a commit that
+/// will carry their name in a history other people read.
+pub fn commit(worktree: &Path, message: &str, all: bool) -> Result<String> {
+    if all {
+        git(worktree, &["add", "-A"])?;
+    }
+    git(worktree, &["commit", "-m", message])?;
+    head_commit(worktree).context("committed, but git reports no HEAD")
+}
+
+/// Push the worktree's branch, setting an upstream if it has none.
+///
+/// A branch cut for a workspace has never been pushed, so the first push is
+/// always the one that needs `--set-upstream`; making the caller know that is
+/// making them do git's bookkeeping.
+pub fn push(worktree: &Path) -> Result<String> {
+    let branch = current_branch(worktree).context("a detached HEAD has no branch to push")?;
+    let status = branch_status(worktree)?;
+    if status.untracked_branch {
+        git(worktree, &["push", "--set-upstream", "origin", &branch])
+    } else {
+        git(worktree, &["push"])
+    }
+}
+
 /// Drop git's records of worktrees whose directories are gone.
 pub fn prune_worktrees(repo: &Path) -> Result<()> {
     git(repo, &["worktree", "prune"])?;
@@ -721,6 +779,59 @@ prunable
             git(&root, &["ls-tree", "-r", "--name-only", &commit])
                 .unwrap()
                 .contains("draft.txt")
+        );
+    }
+
+    #[test]
+    fn committing_takes_everything_the_review_showed() {
+        // A review that listed an untracked file and then committed without it
+        // would be lying about what it just showed.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+        std::fs::write(root.join("added.rs"), "fn new() {}\n").unwrap();
+
+        let sha = commit(&root, "the agent's work", true).unwrap();
+        assert_eq!(sha, head_commit(&root).unwrap());
+        assert!(
+            branch_status(&root).unwrap().is_clean(),
+            "nothing is left over"
+        );
+
+        let listed = git(&root, &["show", "--name-only", "--format=", &sha]).unwrap();
+        assert!(listed.contains("added.rs"), "{listed}");
+        assert!(listed.contains("tracked.txt"), "{listed}");
+    }
+
+    #[test]
+    fn committing_without_staging_takes_only_what_was_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("ready.txt"), "staged\n").unwrap();
+        git(&root, &["add", "ready.txt"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "not yet\n").unwrap();
+
+        let sha = commit(&root, "only what was ready", false).unwrap();
+        let listed = git(&root, &["show", "--name-only", "--format=", &sha]).unwrap();
+        assert!(listed.contains("ready.txt"));
+        assert!(!listed.contains("tracked.txt"));
+        assert!(
+            branch_status(&root).unwrap().dirty,
+            "the rest is still there"
+        );
+    }
+
+    #[test]
+    fn a_commit_with_nothing_to_commit_says_so_rather_than_succeeding() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let error = commit(&root, "nothing", true).unwrap_err();
+        assert!(
+            error.to_string().contains("nothing to commit"),
+            "git's own words are the clearest here: {error}"
         );
     }
 
