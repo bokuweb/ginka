@@ -50,6 +50,21 @@ impl WorkspaceId {
 #[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct SessionId(pub String);
 
+/// Identifies one terminal: a shell running in a workspace.
+///
+/// Opaque, assigned by the daemon, which is what owns the pty.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "export", ts(type = "string"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalId(pub String);
+
+impl fmt::Display for TerminalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Identifies one checkpoint: a workspace state snapshotted at a turn boundary.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

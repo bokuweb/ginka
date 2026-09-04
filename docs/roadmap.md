@@ -56,9 +56,11 @@ waku is the existence proof that this app can be built in Rust + GPUI, and its s
 > **Where this stands (2026-09-02):** the crate split, the authenticated
 > client–daemon RPC, the driver abstraction with `claude` and `codex`, the
 > git-backed checkpoints, the TypeScript export, the config split and the
-> scratch workspaces, and `rust-i18n` with `en` and `ja`, are all in. What is
-> left from this list is scheduled rather than skipped: ACP (M5),
-> `alacritty_terminal` (M3), and `ropey` and `nucleo-matcher` (M4).
+> scratch workspaces, `rust-i18n` with `en` and `ja`, the review-and-commit
+> loop, session titles/forks/search, composer drafts and completions, usage
+> reporting and `alacritty_terminal` are all in. What is left from this list is
+> scheduled rather than skipped: ACP and the remaining drivers (M5), `ropey`
+> and the editor (M4).
 
 - **Crate split**: `waku-protocol` (wire types) / `waku-core` (domain + drivers) / `waku-daemon` (headless server) / `waku-client` (RPC client) / root binary (GPUI UI). Ginka mirrors this.
 - **Client–daemon split over authenticated WebSocket RPC**, with the daemon owning SQLite, the agent processes and git. The UI holds no authoritative state.
@@ -252,14 +254,14 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [ ] Project rename, labels, reordering
 - [x] Worktree lifecycle: create (branch from base), remove (force for dirty), pin
 - [ ] Prune, and the locked-worktree cases `git worktree remove` refuses
-- [ ] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
+- [x] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
-- [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
+- [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
 - [ ] Virtualize the session list; animate the reorder on the 260 ms curve
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
-- [ ] Command palette + global keymap infrastructure
-- [ ] Workspace picker / quick switcher
+- [x] Command palette + global keymap infrastructure
+- [x] Workspace picker / quick switcher (in the palette)
 
 **Exit criteria:** create and delete 20 worktrees across 3 projects; state survives restart; sync self-heals after manual `git worktree add` outside the app.
 
@@ -279,8 +281,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Message queueing while the agent is busy
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [x] Agent and model pickers in the composer, and a new-session toggle
-- [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace
-- [ ] Plan approval and ask-user-question interaction modes. The events and the `respond_to_agent` request exist; no shipped driver can interrupt a turn to raise them, so this waits on ACP
+- [x] Composer: `@file` mentions, slash commands from `.claude/commands`, drafts persisted per workspace
+- [x] Plan approval and ask-user-question cards: the events, the `respond_to_agent` request, and the transcript cards that answer them. No shipped driver can interrupt a turn to raise one yet, so the loop is only closed once ACP lands (M5)
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
 - [x] `codex` driver (both generations of its JSONL)
@@ -293,16 +295,20 @@ Goal: a real agent runs in a worktree and its transcript renders.
 
 Goal: the loop that makes the app useful daily — read the diff, comment, send back.
 
-- [ ] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`; bezel's `terminal` crate is the reference implementation)
-- [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay + width sync
+- [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
+- [x] Terminal tabs; reattach with replay
+- [ ] Terminal splits, scrollback search
 - [ ] File-path detection in terminal and chat output → click opens the file
 - [ ] Selection → "add to chat" / "add to terminal"
-- [ ] Changes panel: status tree, per-file diff (unified + split), intra-line word diff, revert file
-- [ ] Commit dialog: stage/unstage, message composer, agent-generated message
-- [ ] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
+- [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
+- [x] Intra-line word diff
+- [ ] Split diff
+- [x] Commit: message box under the reviewed files, `ginka commit` / `push`
+- [x] Stage/unstage per file, revert a file; agent-generated commit message still open
+- [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints (waku): snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
-- [ ] Pruning old checkpoint refs
+- [x] Pruning old checkpoint refs
 
 **Exit criteria:** a full task cycle — prompt → agent edits → review with 3 line comments → agent revises → commit — without touching another app.
 
@@ -312,14 +318,18 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 
 Goal: stop context-switching to an editor for reads, and make the app scriptable.
 
-- [ ] File tree, quick open (nucleo), content search (ripgrep-as-library), cross-worktree search
+- [x] File listing with `nucleo` matching, behind `@` in the composer and `ginka files`
+- [x] Content search in a workspace, behind the same box as the file finder and `ginka search`
+- [ ] File tree, quick open, cross-worktree search
+- [x] A files surface: find a file in the worktree and read it (read-only)
 - [ ] Integrate `gpui-component`'s `CodeEditor`: file tabs, editor history (go back/forward), markdown + image preview
 - [ ] LSP wiring through `CodeEditor`: go-to-definition, hover, diagnostics
 - [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea`, per-workspace persistence, panel visibility rules, `docs/ui.md` §3.4 empty state
 - [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron
 - [ ] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`)
-- [ ] MCP server on the daemon exposing the same operations to agents
-- [ ] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
+- [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
+- [x] **Fan-out (Orca):** one prompt → N worktrees, from `ginka fan-out` and over MCP
+- [ ] Fan-out's side-by-side comparison view, and merging the winner
 
 **Exit criteria:** an agent can create a workspace, start a sibling agent, and read its diff entirely through the CLI/MCP.
 
@@ -328,7 +338,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 ### M5 — Depth (target: 4 weeks)
 
 - [ ] Cronjobs: scheduler, project/workspace scope, `via: chat | terminal`, overlap-skip, run history
-- [ ] Reports: usage events from drivers + on-disk session scanner with watermarks, cost aggregation by day/project/model, retention sweep
+- [x] Reports: usage events from drivers, cost aggregation by day and agent, retention sweep
+- [ ] On-disk session scanner with watermarks, and aggregation by project/model
 - [ ] Embedded browser surface via `gpui-component`'s `webview` crate: address bar with history autocomplete, find-in-page, per-workspace history with frecency
 - [ ] Design mode: click an element → send HTML/CSS/screenshot to the agent
 - [ ] Notifications + sounds on agent completion / attention needed
@@ -427,3 +438,15 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-03 | A cancel signals the agent's process group only after confirming the agent leads it | A child that did not get its own group is in ours, and signalling a group by its pid then hits something unrelated — on CI, the job. An agent that leads no group is stopped alone. |
 | 2026-09-03 | Only the reader closes a connection's write queue | Two writers into one queue meant whichever stopped first closed it, and on a shutdown the event pump stops first — which dropped the answer to the request that asked for the shutdown. |
 | 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
+| 2026-09-04 | Review comments are held by the daemon and sent as one message | A comment is worth writing before the reader has finished reading, and worth keeping if the window closes; sending each one as it is written interrupts the agent mid-turn and costs a round trip per line. The batch clears only once the agent has it. |
+| 2026-09-04 | Staging is per file, and the commit box follows what is staged | Reading an agent's work usually ends in "these are right, that one is not", and a commit box that took everything anyway would make staging decorative. Nothing staged still means commit everything, which is the common case. |
+| 2026-09-04 | The daemon keeps a bounded scrollback per terminal, and a window replays it on reattach | The pty outlives the window, so a window that comes back has missed whatever was printed meanwhile and would reattach to a blank screen. 256 KiB per shell is several screens of a build and small enough to hold; the newest is what is kept. |
+| 2026-09-04 | The daemon resolves a file read inside the worktree and bounds it | A client does not choose which of the user's files the daemon opens, so `../` is refused rather than followed, and half a megabyte is the most a side panel is given: a minified bundle laid out as text is how a window stops responding. |
+| 2026-09-04 | Word-level marks are computed in `ginka-core`, not asked of git | `--word-diff` returns a different text format to parse, and the pairing rule and the "too different to mark" threshold are judgement calls worth testing. One line against one line is short enough for a plain LCS. |
+| 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |
+| 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |
+| 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
+| 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |
+| 2026-09-04 | Whether a question has been answered is a property of the transcript, not of the window | A transcript re-read after a restart has to know as much as one that was watched, and what it knows is that the reader said something afterwards. The card stops offering buttons on that alone. |
+| 2026-09-04 | The daemon polls git on its own clock, and pushes only differences | A worktree added with the user's own git is news for every window, and having each window poll for it is the same work done once per window. A status that has not changed is not news: a push per workspace per minute is one clients learn to ignore. |
+| 2026-09-04 | A fan-out is the same requests a person would send, sent in a loop | Each arm gets the project's setup, its own checkpoint and its own worktree because it went through `create_workspace` and `start_session` rather than around them. An arm that fails is reported and the rest carry on: two answers are worth having when the third never started. |

@@ -18,7 +18,8 @@ use anyhow::Result;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    AgentStatus, Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
+    AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionState,
+    WorkspaceSummary, Worktree,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
@@ -51,6 +52,15 @@ pub struct Service {
     events: Arc<dyn EventSink>,
     drivers: Arc<Registry>,
     sessions: Supervisor,
+    /// The shells running in this daemon. Owned here rather than by a window,
+    /// so a build started in one keeps running when the window closes.
+    terminals: crate::terminal::Terminals,
+    /// What each workspace's git status was the last time it was polled.
+    ///
+    /// Kept so the poller can push only what changed: a client redrawing its
+    /// sidebar every minute because nothing happened is a worse answer than a
+    /// client that is told when something did.
+    statuses: std::collections::HashMap<WorkspaceId, ginka_protocol::model::BranchStatus>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -69,12 +79,19 @@ impl Service {
     /// Build a service around an already-open database.
     pub fn new(paths: Paths, conn: Connection, events: Arc<dyn EventSink>) -> Self {
         let conn = Arc::new(Mutex::new(conn));
+        // Read here rather than passed in: how many checkpoints a workspace
+        // keeps is the user's setting, and a service built without one still
+        // has to prune.
+        let settings: crate::settings::DaemonSettings =
+            crate::settings::load(&paths.daemon_settings());
         Self {
+            sessions: Supervisor::new(conn.clone(), events.clone(), settings.checkpoint_limit),
             paths,
-            sessions: Supervisor::new(conn.clone(), events.clone()),
+            terminals: crate::terminal::Terminals::new(events.clone()),
             conn,
             events,
             drivers: Arc::new(Registry::with_defaults()),
+            statuses: std::collections::HashMap::new(),
             agents: None,
         }
     }
@@ -100,6 +117,15 @@ impl Service {
         let orphans = session::mark_orphans_failed(&conn, now())?;
         if orphans > 0 {
             tracing::warn!(orphans, "sessions did not survive the previous daemon");
+        }
+        // The retention sweep (`docs/roadmap.md` §4.4): cost history is
+        // interesting for a month and clutter forever.
+        let settings: crate::settings::DaemonSettings =
+            crate::settings::load(&paths.daemon_settings());
+        match crate::usage::sweep(&conn, settings.retention_days) {
+            Ok(swept) if swept > 0 => tracing::info!(swept, "swept old usage"),
+            Err(error) => tracing::warn!(%error, "could not sweep old usage"),
+            _ => {}
         }
         Ok(Self::new(paths, conn, events))
     }
@@ -192,6 +218,7 @@ impl Service {
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
+                self.set_up(&project.path, &path);
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
@@ -269,6 +296,13 @@ impl Service {
                 prompt,
                 model,
             } => self.start_session(workspace, &agent, prompt, model),
+            Request::FanOut {
+                project,
+                branch_prefix,
+                base,
+                prompt,
+                attempts,
+            } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
             Request::RespondToAgent {
                 session, response, ..
@@ -279,6 +313,73 @@ impl Service {
                 // that can interrupt a turn will override this.
                 self.send_message(&session, response)
             }
+            Request::RenameSession { session, title } => {
+                if !session::rename(&self.conn(), &session, &title).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no session with id {session}")));
+                }
+                Ok(Response::Ack)
+            }
+            Request::RemoveSession { session } => {
+                let stored = self.session(&session)?;
+                // Whatever is running for it has to go first, or the daemon
+                // keeps feeding a transcript that no longer exists.
+                self.sessions.cancel(&session);
+                if !session::remove(&self.conn(), &session).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no session with id {session}")));
+                }
+                self.events.emit(DaemonEvent::SessionStateChanged {
+                    session,
+                    state: SessionState::Cancelled,
+                });
+                if let Some((project, _)) = stored.workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
+            Request::ForkSession { session, after } => {
+                let original = self.session(&session)?;
+                let now = now();
+                let fork = Session {
+                    id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+                    workspace: original.workspace.clone(),
+                    agent: original.agent.clone(),
+                    model: original.model.clone(),
+                    // A fork has not run anything yet, and inherits the
+                    // vendor's own conversation so that continuing it
+                    // continues where the original was.
+                    state: SessionState::Idle,
+                    title: Some(match &original.title {
+                        Some(title) => format!("{title} (fork)"),
+                        None => "fork".to_string(),
+                    }),
+                    summary: None,
+                    vendor_session_id: original.vendor_session_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                {
+                    let conn = self.conn();
+                    session::insert(&conn, &fork).map_err(failed)?;
+                    session::copy_transcript(&conn, &session, &fork.id, after).map_err(failed)?;
+                }
+                self.events.emit(DaemonEvent::SessionStarted {
+                    session: fork.clone(),
+                });
+                Ok(Response::Session { session: fork })
+            }
+            Request::SearchSessions {
+                workspace,
+                query,
+                limit,
+            } => Ok(Response::SessionMatches {
+                matches: session::search(
+                    &self.conn(),
+                    workspace.as_ref(),
+                    &query,
+                    limit.unwrap_or(50),
+                )
+                .map_err(failed)?,
+            }),
             Request::CancelSession { session } => {
                 self.session(&session)?;
                 self.sessions.cancel(&session);
@@ -296,6 +397,154 @@ impl Service {
                 })
             }
 
+            Request::WorkspaceChanges { workspace, source } => {
+                let worktree = self.worktree(&workspace)?;
+                let files = match &source {
+                    // A checkpoint names a commit, and the commit is what git
+                    // can be asked about.
+                    ChangeSource::SinceCheckpoint { checkpoint } => {
+                        let stored = checkpoint::get(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {}",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        git::changes_since(&worktree.path, &stored.commit).map_err(failed)?
+                    }
+                    other => git::changes(&worktree.path, other).map_err(failed)?,
+                };
+                Ok(Response::Changes {
+                    changes: Changes { source, files },
+                })
+            }
+            Request::Commit {
+                workspace,
+                message,
+                all,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if message.trim().is_empty() {
+                    return Err(RpcError::failed("a commit needs a message"));
+                }
+                let commit = git::commit(&worktree.path, &message, all).map_err(failed)?;
+                // The branch moved, so what the sidebar says about it is stale.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Committed { commit })
+            }
+            Request::StageFile {
+                workspace,
+                path,
+                staged,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if staged {
+                    git::stage(&worktree.path, &path).map_err(failed)?;
+                } else {
+                    git::unstage(&worktree.path, &path).map_err(failed)?;
+                }
+                Ok(Response::Ack)
+            }
+            Request::RevertFile { workspace, path } => {
+                let worktree = self.worktree(&workspace)?;
+                git::revert_file(&worktree.path, &path).map_err(failed)?;
+                // The file is back to what it was, so the sidebar's count of
+                // what is uncommitted is stale.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
+            Request::Push { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                git::push(&worktree.path).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
+            Request::WorkspaceFiles {
+                workspace,
+                query,
+                limit,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let paths = crate::files::list(&worktree.path).map_err(failed)?;
+                Ok(Response::Files {
+                    files: crate::files::search(
+                        &paths,
+                        query.as_deref().unwrap_or_default(),
+                        limit
+                            .map(|limit| limit as usize)
+                            .unwrap_or(crate::files::DEFAULT_LIMIT),
+                    ),
+                })
+            }
+            Request::SlashCommands { workspace, query } => {
+                let worktree = self.worktree(&workspace)?;
+                // The user's own commands live in their home, which is theirs
+                // rather than Ginka's `GINKA_HOME`.
+                let found = crate::commands::discover(&worktree.path, dirs::home_dir().as_deref());
+                Ok(Response::Commands {
+                    commands: crate::commands::search(&found, query.as_deref().unwrap_or_default()),
+                })
+            }
+            Request::ComposerDraft { workspace } => Ok(Response::Draft {
+                text: session::draft(&self.conn(), &workspace).map_err(failed)?,
+            }),
+            Request::SaveComposerDraft { workspace, text } => {
+                session::set_draft(&self.conn(), &workspace, &text, now()).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::Usage { days } => {
+                let days = days.unwrap_or(30);
+                let conn = self.conn();
+                Ok(Response::Usage {
+                    by_day: crate::usage::by_day(&conn, days).map_err(failed)?,
+                    by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
+                })
+            }
+            Request::AddReviewComment {
+                workspace,
+                path,
+                line,
+                side,
+                text,
+            } => {
+                self.worktree(&workspace)?;
+                if text.trim().is_empty() {
+                    return Err(RpcError::failed(
+                        "a comment with nothing in it says nothing",
+                    ));
+                }
+                crate::review::add(&self.conn(), &workspace, &path, line, side, &text, now())
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::ListReviewComments { workspace } => Ok(Response::ReviewComments {
+                comments: crate::review::list(&self.conn(), &workspace).map_err(failed)?,
+            }),
+            Request::RemoveReviewComment { comment } => {
+                if !crate::review::remove(&self.conn(), &comment).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no comment with id {comment}")));
+                }
+                Ok(Response::Ack)
+            }
+            Request::SendReviewComments { workspace, session } => {
+                let comments = crate::review::list(&self.conn(), &workspace).map_err(failed)?;
+                if comments.is_empty() {
+                    return Err(RpcError::failed("there are no comments to send"));
+                }
+                let message = crate::review::compose(&comments);
+                self.send_message(&session, message)?;
+                // Cleared only once the agent has them: a batch that vanished
+                // into a failed send would be a review done twice.
+                crate::review::clear(&self.conn(), &workspace).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;
                 Ok(Response::Checkpoints {
@@ -303,6 +552,69 @@ impl Service {
                 })
             }
             Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
+
+            Request::OpenTerminal {
+                workspace,
+                rows,
+                cols,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let terminal = self
+                    .terminals
+                    .open(&workspace, &worktree.path, rows, cols)
+                    .map_err(failed)?;
+                Ok(Response::Terminal { terminal })
+            }
+            Request::SearchContent {
+                workspace,
+                query,
+                limit,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let limit = limit
+                    .map(|limit| limit as usize)
+                    .unwrap_or(crate::files::DEFAULT_LIMIT);
+                Ok(Response::Matches {
+                    matches: crate::files::search_content(&worktree.path, &query, limit)
+                        .map_err(failed)?,
+                })
+            }
+            Request::ReadFile { workspace, path } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::FileContent {
+                    file: crate::files::read(&worktree.path, &path).map_err(failed)?,
+                })
+            }
+            Request::WorkspaceTerminals { workspace } => Ok(Response::Terminals {
+                terminals: self.terminals.list(&workspace),
+            }),
+            Request::TerminalHistory { terminal } => Ok(Response::TerminalHistory {
+                // A terminal that has closed is one the client is asking about
+                // because it has not heard yet, which is a `not found` rather
+                // than a failure.
+                data: self
+                    .terminals
+                    .history(&terminal)
+                    .map_err(|error| RpcError::not_found(error.to_string()))?,
+            }),
+            Request::WriteTerminal { terminal, data } => {
+                self.terminals.write(&terminal, &data).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::ResizeTerminal {
+                terminal,
+                rows,
+                cols,
+            } => {
+                self.terminals
+                    .resize(&terminal, rows, cols)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::CloseTerminal { terminal } => {
+                self.terminals.close(&terminal).map_err(failed)?;
+                Ok(Response::Ack)
+            }
 
             Request::Shutdown => {
                 // The transport is listening for this: it is the one event a
@@ -346,6 +658,10 @@ impl Service {
             agent: driver.id().to_string(),
             model: model.clone(),
             state: SessionState::Starting,
+            // What this conversation is about, taken from what was asked. The
+            // user can rename it; nothing else writes it, because the agent's
+            // own summary is a different thing and changes every turn.
+            title: Some(title_from(&prompt)),
             summary: None,
             vendor_session_id: None,
             created_at: now,
@@ -479,6 +795,23 @@ impl Service {
     }
 }
 
+/// A conversation's title, from the prompt that opened it.
+///
+/// The first line, because a prompt's first line is its subject and the rest
+/// is detail; bounded, because a title is read in a list.
+fn title_from(prompt: &str) -> String {
+    let first = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.chars().count() <= 72 {
+        return first.to_string();
+    }
+    let kept: String = first.chars().take(71).collect();
+    format!("{kept}…")
+}
+
 /// Unix seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -490,6 +823,152 @@ fn now() -> i64 {
 /// 23:00 belongs under the day they did it on.
 fn today() -> String {
     chrono::Local::now().format("%Y-%m-%d").to_string()
+}
+
+impl Service {
+    /// Ask the same question in one worktree per attempt.
+    ///
+    /// Each arm goes through the same requests a person would send, so an arm
+    /// gets the project's setup and its own checkpoint exactly as a hand-made
+    /// workspace does. An arm that fails is reported and the rest carry on:
+    /// two answers are worth having even when the third never started.
+    fn fan_out(
+        &mut self,
+        project: ProjectName,
+        prefix: &str,
+        base: Option<String>,
+        prompt: &str,
+        attempts: &[ginka_protocol::rpc::Attempt],
+    ) -> Result<Response, RpcError> {
+        if attempts.is_empty() {
+            return Err(RpcError::failed("a fan-out needs at least one attempt"));
+        }
+        let mut started = Vec::new();
+        let mut failed = Vec::new();
+        for (index, attempt) in attempts.iter().enumerate() {
+            let branch = format!("{prefix}-{}", index + 1);
+            let workspace = match self.handle(Request::CreateWorkspace {
+                project: project.clone(),
+                branch: branch.clone(),
+                base: base.clone(),
+            }) {
+                Ok(Response::Workspace { workspace }) => workspace,
+                Ok(other) => {
+                    failed.push(format!("{branch}: unexpected answer {other:?}"));
+                    continue;
+                }
+                Err(error) => {
+                    failed.push(format!("{branch}: {}", error.message));
+                    continue;
+                }
+            };
+            match self.handle(Request::StartSession {
+                workspace: workspace.worktree.workspace_id(),
+                agent: attempt.agent.clone(),
+                prompt: prompt.to_string(),
+                model: attempt.model.clone(),
+            }) {
+                Ok(Response::Session { session }) => started.push(session),
+                Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
+                Err(error) => failed.push(format!("{branch}: {}", error.message)),
+            }
+        }
+        Ok(Response::FannedOut { started, failed })
+    }
+
+    /// Reconcile every project's worktrees against git.
+    ///
+    /// The daemon's own tick rather than each client's: a worktree added with
+    /// the user's own git, or removed by hand, is something every window
+    /// should learn about, and having each of them poll for it is the same
+    /// work done once per window.
+    pub fn sync(&mut self) {
+        let Ok(projects) = self.projects() else {
+            return;
+        };
+        for project in projects {
+            let report = {
+                let conn = self.conn();
+                registry::sync_worktrees(&conn, &project)
+            };
+            match report {
+                Ok(report) if !report.is_empty() => {
+                    tracing::debug!(project = project.name.0, "worktrees reconciled");
+                    self.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: project.name.clone(),
+                    });
+                }
+                Err(error) => {
+                    tracing::debug!(%error, project = project.name.0, "could not reconcile")
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Re-read every workspace's git status, and push what changed.
+    ///
+    /// Only the difference: a status that is the same as last tick is not news,
+    /// and a push per workspace per minute would be a push that clients learn
+    /// to ignore.
+    pub fn poll_statuses(&mut self) {
+        let Ok(projects) = self.projects() else {
+            return;
+        };
+        let mut seen = std::collections::HashSet::new();
+        for project in projects {
+            let Ok(worktrees) = project::list_worktrees(&self.conn(), &project.name) else {
+                continue;
+            };
+            for worktree in worktrees {
+                let id = worktree.workspace_id();
+                seen.insert(id.clone());
+                let Ok(status) = git::branch_status(&worktree.path) else {
+                    continue;
+                };
+                if self.statuses.get(&id) == Some(&status) {
+                    continue;
+                }
+                self.statuses.insert(id.clone(), status);
+                self.events.emit(DaemonEvent::WorkspaceStatusChanged {
+                    workspace: id,
+                    status,
+                });
+            }
+        }
+        // A workspace that is gone is not worth remembering the status of.
+        self.statuses.retain(|id, _| seen.contains(id));
+    }
+
+    /// Do what the project asked for in a new worktree.
+    ///
+    /// A fresh checkout has none of the files the repository deliberately does
+    /// not track, and an agent started there fails on its first command for a
+    /// reason that has nothing to do with its task. What went wrong is logged
+    /// rather than returned: the worktree exists by now, and removing it
+    /// because an install failed would throw away the branch the user asked
+    /// for.
+    fn set_up(&self, project: &std::path::Path, worktree: &std::path::Path) {
+        let setup = match crate::setup::read(project) {
+            Ok(setup) => setup,
+            Err(error) => {
+                tracing::warn!(%error, "a project's setup file could not be read");
+                return;
+            }
+        };
+        if setup.copy.is_empty() && setup.commands.is_empty() {
+            return;
+        }
+        let report = crate::setup::run(project, worktree, &setup);
+        for problem in &report.problems {
+            tracing::warn!(problem, worktree = %worktree.display(), "setting up the worktree");
+        }
+        tracing::info!(
+            copied = report.copied.len(),
+            ran = report.ran.len(),
+            "ran the project's setup"
+        );
+    }
 }
 
 /// Turn a domain failure into the protocol's generic failure.
@@ -507,6 +986,20 @@ mod tests {
         let paths = Paths::with_root(dir.path().join("state"));
         let mut service = Service::open(paths, Arc::new(NullSink)).unwrap();
         assert_eq!(service.handle(Request::Ping).unwrap(), Response::Ack);
+    }
+
+    #[test]
+    fn a_conversation_is_titled_by_what_was_asked_of_it() {
+        assert_eq!(
+            title_from("Fix the parser\n\nIt drops the last token."),
+            "Fix the parser",
+            "the first line is the subject; the rest is detail"
+        );
+        assert_eq!(title_from("   \n  spaced  \n"), "spaced");
+        assert_eq!(title_from(""), "");
+        let long = title_from(&"x".repeat(200));
+        assert_eq!(long.chars().count(), 72, "a title is read in a list");
+        assert!(long.ends_with('…'));
     }
 
     #[test]

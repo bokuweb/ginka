@@ -27,14 +27,22 @@ use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     Icon, IconName, StyledExt as _, TitleBar, h_flex,
-    input::{InputEvent, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
 use std::sync::Arc;
 use std::time::Duration;
 
-actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
+actions!(
+    shell,
+    [
+        ToggleSidebar,
+        ToggleRightPanel,
+        ToggleTerminalDock,
+        TogglePalette
+    ]
+);
 
 /// What the composer is offering a choice of.
 ///
@@ -46,6 +54,10 @@ enum Picker {
     Agent,
     /// Which of that agent's models it runs on.
     Model,
+    /// Which file the `@` being typed means.
+    Mention,
+    /// Which command the `/` being typed means.
+    Command,
 }
 
 const CONTEXT: &str = "Shell";
@@ -68,6 +80,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-j", ToggleTerminalDock, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-j", ToggleTerminalDock, Some(CONTEXT)),
+        // `docs/ui.md` §6: every action is reachable from here, so this is the
+        // one chord that has to work wherever the focus happens to be.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
     ]);
 }
 
@@ -85,6 +103,16 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// The transcript's measure, in pixels: `docs/ui.md` §3.3's ~72 characters at
 /// the 15px body size. Reading is what this column is for.
 const TRANSCRIPT_MEASURE: f32 = 780.;
+
+/// The line height the terminal's grid is drawn at, in pixels.
+const TERMINAL_LINE_HEIGHT: f32 = 17.;
+
+/// How wide a terminal is told it is.
+///
+/// Fixed rather than measured: the dock's width changes with every window
+/// resize, and a shell told a new width on every frame spends its time
+/// re-wrapping instead of working. Eighty is what everything assumes anyway.
+const TERMINAL_COLUMNS: u16 = 100;
 
 /// How far from the foot still counts as being at it. About a line of text:
 /// enough that an answer growing between one frame and the next does not read
@@ -127,6 +155,10 @@ pub struct Shell {
     composer_focused: bool,
     /// Which picker is open above the composer, if any.
     picker: Option<Picker>,
+    /// The files offered for the mention being typed, if one is.
+    mentions: Vec<ginka_protocol::model::FileEntry>,
+    /// The commands offered for the `/` being typed, if one is.
+    commands: Vec<ginka_protocol::model::SlashCommand>,
     /// The agent the user chose, which beats whatever would have been picked
     /// for them. `None` until they choose one.
     chosen_agent: Option<String>,
@@ -143,6 +175,17 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// Where keystrokes go when the terminal has the keyboard.
+    terminal_focus: FocusHandle,
+    /// The command palette, while it is open: what is typed into it, the
+    /// entries that match, and which one Return would run.
+    palette: Option<Palette>,
+    /// The shells in the dock, and what each has printed.
+    ///
+    /// The daemon owns the ptys; these are the screens they are drawn on,
+    /// which is why a window that closes and reopens finds the build still
+    /// running and picks the tab back up.
+    terminals: ginka_ui::terminal::TerminalTabs,
     /// The transcript's scroll position, so the answer can be followed.
     transcript_scroll: ScrollHandle,
     /// Whether the transcript is still following the answer. Dropped by the
@@ -182,26 +225,59 @@ impl Shell {
         // selection is wired up that is simply the first.
         let session = rows.first().cloned();
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
-        let surfaces = cx.new(|_| SurfacePanel::new());
+        let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
 
-        let selection = cx.subscribe(&sidebar, |this, sidebar, event, cx| match event {
-            SidebarEvent::Selected => {
-                this.session = sidebar.read(cx).selected_row().cloned();
-                // A different workspace is a different conversation.
-                this.transcript = Transcript::new();
-                this.transcript_of = None;
-                this.session_state = None;
-                this.submitted = false;
-                this.transcript_follows = true;
-                this.picker = None;
-                this.chosen_agent = None;
-                this.chosen_model = None;
-                this.start_fresh = false;
-                this.checkpoints = Vec::new();
-                this.rewinding = None;
-                cx.notify();
+        let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
+            crate::surfaces::SurfaceEvent::Commit {
+                message,
+                only_staged,
+            } => this.commit(message.clone(), *only_staged, cx),
+            crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
+                this.leave_comment(path.clone(), *line, text.clone(), cx)
             }
+            crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+            crate::surfaces::SurfaceEvent::Stage { path, staged } => {
+                this.stage(path.clone(), *staged, cx)
+            }
+            crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
+            crate::surfaces::SurfaceEvent::FindFiles(query) => this.find_files(query.clone(), cx),
+            crate::surfaces::SurfaceEvent::OpenFile(path) => this.open_file(path.clone(), cx),
         });
+
+        let selection =
+            cx.subscribe_in(
+                &sidebar,
+                window,
+                |this, sidebar, event, window, cx| match event {
+                    SidebarEvent::Selected => {
+                        this.session = sidebar.read(cx).selected_row().cloned();
+                        // A different workspace is a different conversation.
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.session_state = None;
+                        this.submitted = false;
+                        this.transcript_follows = true;
+                        this.picker = None;
+                        this.chosen_agent = None;
+                        this.chosen_model = None;
+                        this.start_fresh = false;
+                        this.checkpoints = Vec::new();
+                        this.rewinding = None;
+                        // The shells belong to the workspace, not to the
+                        // window: a different workspace is a different strip.
+                        this.terminals = ginka_ui::terminal::TerminalTabs::new();
+                        if this.layout.is_open(Panel::TerminalDock) {
+                            this.adopt_terminals(cx);
+                        }
+                        this.mentions.clear();
+                        // Whatever was half-written here when it was last left.
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.load_draft(window, cx);
+                        cx.notify();
+                    }
+                },
+            );
 
         let composer = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -217,7 +293,16 @@ impl Shell {
             &composer,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
-                InputEvent::PressEnter { shift: false, .. } => this.submit(window, cx),
+                InputEvent::PressEnter { shift: false, .. } => {
+                    // A mention being chosen is not a message being sent.
+                    // Something being chosen is not a message being sent.
+                    match this.picker {
+                        Some(Picker::Mention) => this.take_first_mention(window, cx),
+                        Some(Picker::Command) => this.take_first_command(window, cx),
+                        _ => this.submit(window, cx),
+                    }
+                }
+                InputEvent::Change => this.composer_changed(window, cx),
                 InputEvent::Focus => {
                     this.composer_focused = true;
                     cx.notify();
@@ -330,6 +415,23 @@ impl Shell {
                         | DaemonEvent::SessionStarted { .. } => {
                             pull_rows(&this, &link, cx).await.map(|_| ())
                         }
+                        // The shell printed something. Straight onto its
+                        // screen: a terminal that lagged behind what was typed
+                        // into it would be unusable for the thing terminals
+                        // are for.
+                        DaemonEvent::TerminalOutput { terminal, data } => this
+                            .update(cx, |this, cx| {
+                                if this.terminals.feed(&terminal, &data) {
+                                    cx.notify();
+                                }
+                            })
+                            .map_err(|_| ()),
+                        DaemonEvent::TerminalClosed { terminal } => this
+                            .update(cx, |this, cx| {
+                                this.terminals.close(&terminal);
+                                cx.notify();
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::Shutdown => {
                             cx.background_executor().timer(RECONNECT_DELAY).await;
                             Ok(())
@@ -342,6 +444,14 @@ impl Shell {
             }
         })
         .detach();
+        // A window that opens with the dock already open has shells waiting
+        // for it: the daemon kept them running, and finding them is what makes
+        // the process split visible rather than theoretical.
+        cx.defer_in(window, |this, _, cx| {
+            if this.layout.is_open(Panel::TerminalDock) {
+                this.adopt_terminals(cx);
+            }
+        });
         Self {
             layout: Layout::from_settings(&settings),
             link,
@@ -349,10 +459,15 @@ impl Shell {
             transcript_of: None,
             agents: Vec::new(),
             reveal: Reveal::new(),
+            palette: None,
+            terminal_focus: cx.focus_handle(),
+            terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
             submitted: false,
             composer_focused: false,
             picker: None,
+            mentions: Vec::new(),
+            commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
             start_fresh: false,
@@ -366,7 +481,7 @@ impl Shell {
             session,
             sidebar,
             surfaces,
-            _subscriptions: vec![appearance, selection, submitted],
+            _subscriptions: vec![appearance, selection, submitted, committing],
         }
     }
 
@@ -508,6 +623,291 @@ impl Shell {
         .detach();
     }
 
+    /// Commit the workspace's work, and say so if git would not.
+    fn commit(&mut self, message: String, only_staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = cx
+                .background_spawn(
+                    async move { link.commit(&workspace, message, !only_staged).await },
+                )
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_commit_result(outcome.err(), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Put a file into the next commit, or take it back out.
+    fn stage(&mut self, path: String, staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move { link.stage(&workspace, &path, staged).await })
+                .await;
+            // The staged set and the diff both moved; the refresh reads both.
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Throw away a file's uncommitted work.
+    fn revert(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async move { link.revert(&workspace, &path).await })
+                .await;
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Re-read the diff, the staged set and the comments for the workspace on
+    /// screen, without waiting for the next tick.
+    fn refresh_changes(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let (changes, staged, comments) = cx
+                .background_spawn(async move {
+                    let changes = link
+                        .changes(&workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .await;
+                    let staged = link.staged_paths(&workspace).await;
+                    let comments = link.comments(&workspace).await;
+                    (changes, staged, comments)
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_changes(changes, cx);
+                surfaces.set_staged(staged, cx);
+                surfaces.set_comments(comments, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Find the workspace's files that match what was typed into the finder.
+    fn find_files(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let (found, matched) = cx
+                .background_spawn(async move {
+                    // Both at once: a reader who knows what the code says and
+                    // not what it is called is asking the same question.
+                    let found = link.files(&workspace, &query).await;
+                    let matched = link.search_content(&workspace, &query).await;
+                    (found, matched)
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_files(found, cx);
+                surfaces.set_matches(matched, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Read a file and show it in the files surface.
+    fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&workspace, &path).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_file(file, cx));
+        })
+        .detach();
+    }
+
+    /// Start a shell in the workspace on screen.
+    ///
+    /// Sized for the dock as it is now, and focused, because someone who
+    /// opened a terminal means to type in it.
+    fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let (rows, cols) = self.dock_size();
+        let link = self.link.clone();
+        self.terminal_focus.focus(window, cx);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_spawn(async move { link.open_terminal(&workspace, rows, cols).await })
+                .await;
+            if let Some(terminal) = opened {
+                this.update(cx, |this, cx| {
+                    let title = this.terminals.tabs().len() + 1;
+                    this.terminals
+                        .open(terminal, format!("shell {title}"), rows, cols);
+                    // The daemon is the one that names them, and it numbers
+                    // them per workspace: adopting straight afterwards is how
+                    // two windows agree on what a tab is called.
+                    this.adopt_terminals(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Stop one of the dock's shells.
+    fn close_terminal(&mut self, terminal: ginka_protocol::TerminalId, cx: &mut Context<Self>) {
+        self.terminals.close(&terminal);
+        cx.notify();
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.close_terminal(&terminal).await })
+            .detach();
+    }
+
+    /// Bring one of the dock's shells to the front.
+    fn show_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminals.focus(index);
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Find the shells the daemon kept running in this workspace, and replay
+    /// what they printed while this window was not looking.
+    fn adopt_terminals(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let (rows, cols) = self.dock_size();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let running = cx
+                .background_spawn(async move { link.terminals(&workspace).await })
+                .await;
+            let fresh = this
+                .update(cx, |this, cx| {
+                    cx.notify();
+                    this.terminals.adopt(&running, rows, cols)
+                })
+                .ok()
+                .unwrap_or_default();
+            for terminal in fresh {
+                let Ok(link) = this.update(cx, |this, _| this.link.clone()) else {
+                    return;
+                };
+                let asked = terminal.clone();
+                let history = cx
+                    .background_spawn(async move { link.terminal_history(&asked).await })
+                    .await;
+                if let Some(history) = history {
+                    this.update(cx, |this, cx| {
+                        this.terminals.feed(&terminal, &history);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// How many rows and columns the dock has room for.
+    ///
+    /// From the dock's height and the window's width at the mono metrics the
+    /// screen is drawn with. Approximate on purpose: the shell only needs to
+    /// know roughly how much room it has, and being a column out is better
+    /// than measuring the grid every frame.
+    fn dock_size(&self) -> (u16, u16) {
+        let height = f32::from(self.layout.size(Panel::TerminalDock));
+        let rows = ((height - 40.) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
+        (rows, TERMINAL_COLUMNS)
+    }
+
+    /// Send a keystroke to the shell.
+    ///
+    /// Translated here rather than passed as a key name, because a pty takes
+    /// bytes: what a terminal *is* is a program reading the bytes a keyboard
+    /// produced.
+    fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.active_id() else {
+            return;
+        };
+        let Some(data) = keystroke_bytes(&event.keystroke) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
+            .detach();
+    }
+
+    /// Leave a comment on a line of the diff.
+    fn leave_comment(
+        &mut self,
+        path: String,
+        line: Option<u32>,
+        text: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.add_comment(&workspace, &path, line, text).await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
+    /// Send the waiting comments to the agent as one message.
+    fn send_review(&mut self, cx: &mut Context<Self>) {
+        let (Some(workspace), Some(session)) = (
+            self.session.as_ref().map(|row| row.workspace.clone()),
+            self.session.as_ref().and_then(|row| row.session.clone()),
+        ) else {
+            return;
+        };
+        // The agent is about to be given work, so the window should say so.
+        self.submitted = true;
+        cx.notify();
+
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.send_review(&workspace, &session).await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
     /// Stop the agent working in the workspace on screen.
     fn stop(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
@@ -556,6 +956,13 @@ impl Shell {
         };
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
+        // The draft belonged to the prompt that has just been sent.
+        {
+            let link = self.link.clone();
+            let workspace = row.workspace.clone();
+            cx.background_spawn(async move { link.save_draft(&workspace, String::new()).await })
+                .detach();
+        }
         // Before the daemon has answered: the user pressed enter, and the
         // window saying nothing for a round trip reads as a window that
         // dropped it.
@@ -617,6 +1024,11 @@ impl Shell {
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.layout.toggle(panel);
         self.persist();
+        // A dock that has just opened is one that has to find the shells the
+        // daemon kept running while it was closed.
+        if panel == Panel::TerminalDock && self.layout.is_open(panel) {
+            self.adopt_terminals(cx);
+        }
         cx.notify();
     }
 
@@ -637,15 +1049,50 @@ impl Shell {
     ///
     /// The slot map comes from the layout, not from a fixed index: with the
     /// sidebar closed, index 0 is the centre column.
+    /// Tell the shell how big its window is now.
+    ///
+    /// The pty has to be told separately from the screen: the shell learns its
+    /// size from the pty, and a full-screen program laying out for the wrong
+    /// one is the visible symptom of forgetting.
+    fn resize_terminal(&mut self, cx: &mut Context<Self>) {
+        let (rows, cols) = self.dock_size();
+        // Every shell, not only the one in front: a tab brought forward after
+        // the dock was resized would otherwise be laid out for the old size.
+        let stale: Vec<ginka_protocol::TerminalId> = self
+            .terminals
+            .tabs()
+            .iter()
+            .filter(|tab| tab.screen.rows() != rows || tab.screen.cols() != cols)
+            .map(|tab| tab.id.clone())
+            .collect();
+        if stale.is_empty() {
+            return;
+        }
+        for tab in self.terminals.tabs_mut() {
+            tab.screen.resize(rows, cols);
+        }
+        let link = self.link.clone();
+        cx.background_spawn(async move {
+            for terminal in stale {
+                link.resize_terminal(&terminal, rows, cols).await;
+            }
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn record_resize(
         &mut self,
         slots: Vec<Option<Panel>>,
         state: &Entity<ResizableState>,
-        cx: &mut App,
+        cx: &mut Context<Self>,
     ) {
         let sizes = state.read(cx).sizes().clone();
         self.layout.record_sizes(&slots, &sizes);
         self.persist();
+        // A dock that changed height is a shell with a different number of
+        // lines to draw into.
+        self.resize_terminal(cx);
     }
 
     fn on_toggle_sidebar(&mut self, _: &ToggleSidebar, _: &mut Window, cx: &mut Context<Self>) {
@@ -659,6 +1106,119 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.toggle(Panel::RightPanel, cx);
+    }
+
+    /// Open the palette, or close it if it is already open.
+    fn on_toggle_palette(
+        &mut self,
+        _: &TogglePalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("palette.placeholder").to_string())
+        });
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let typed = query.read(cx).value().to_string();
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.typed = typed;
+                    // The list moved under the cursor, so the cursor goes back
+                    // to the top: Return must never run something the reader
+                    // has not looked at.
+                    palette.chosen = 0;
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        self.palette = Some(Palette {
+            query,
+            typed: String::new(),
+            chosen: 0,
+        });
+        cx.notify();
+    }
+
+    /// The entries the palette is offering, in the order it offers them.
+    fn palette_entries(&self, cx: &App) -> Vec<ginka_ui::palette::Entry> {
+        let Some(palette) = self.palette.as_ref() else {
+            return Vec::new();
+        };
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        ginka_ui::palette::filter(
+            ginka_ui::palette::entries(&self.layout, &rows),
+            &palette.typed,
+        )
+    }
+
+    /// Move the cursor through the palette without leaving the keyboard.
+    fn palette_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.palette_entries(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.palette = None;
+                cx.notify();
+            }
+            "down" => {
+                palette.chosen = (palette.chosen + 1).min(found.len().saturating_sub(1));
+                cx.notify();
+            }
+            "up" => {
+                palette.chosen = palette.chosen.saturating_sub(1);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(entry) = found.get(palette.chosen) {
+                    let command = entry.command.clone();
+                    self.palette = None;
+                    self.run_command(command, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Do what a palette entry says.
+    fn run_command(
+        &mut self,
+        command: ginka_ui::palette::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::Command;
+        match command {
+            Command::TogglePanel(panel) => self.toggle(panel, cx),
+            Command::ShowSurface(surface) => {
+                // A surface nobody can see is not shown: opening the panel is
+                // part of showing what is in it.
+                if !self.layout.is_open(Panel::RightPanel) {
+                    self.toggle(Panel::RightPanel, cx);
+                }
+                self.surfaces
+                    .update(cx, |surfaces, cx| surfaces.show(surface, cx));
+            }
+            Command::NewTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.open_terminal(window, cx);
+            }
+            Command::Switch(workspace) => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+            }
+        }
+        cx.notify();
     }
 
     fn on_toggle_terminal_dock(
@@ -838,6 +1398,170 @@ impl Shell {
             )
     }
 
+    /// A question the agent is waiting on, with its answers as buttons.
+    ///
+    /// The options are the agent's own words, so they are sent back verbatim:
+    /// a card that paraphrased what the reader chose would be answering a
+    /// different question. Once answered it is history, and history is read
+    /// rather than clicked.
+    fn asked(
+        &self,
+        index: usize,
+        id: &str,
+        question: &str,
+        options: &[String],
+        answered: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_2()
+            .rounded(px(tokens.radius.card))
+            .bg(tokens.colors().bg_surface)
+            .border_1()
+            .border_color(if answered {
+                tokens.colors().border_subtle
+            } else {
+                tokens.colors().status_attention.opacity(0.55)
+            })
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .text_color(tokens.colors().text_primary)
+                    .child(question.to_string()),
+            )
+            .child(
+                h_flex()
+                    .flex_wrap()
+                    .gap_2()
+                    .children(options.iter().enumerate().map(|(at, option)| {
+                        let answer = option.clone();
+                        let asked = id.to_string();
+                        div()
+                            .id(SharedString::from(format!("ask-{index}-{at}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .text_sm()
+                            .when(answered, |this| {
+                                this.text_color(tokens.colors().text_muted)
+                                    .border_1()
+                                    .border_color(tokens.colors().border_subtle)
+                            })
+                            .when(!answered, |this| {
+                                this.bg(tokens.colors().row_active())
+                                    .text_color(tokens.colors().text_primary)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().accent.opacity(0.35)))
+                            })
+                            .when(!answered, |this| {
+                                this.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.respond(asked.clone(), answer.clone(), cx)
+                                }))
+                            })
+                            .child(option.clone())
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// A plan the agent wants approved, with the two answers it can take.
+    fn proposed(
+        &self,
+        index: usize,
+        id: &str,
+        plan: &str,
+        answered: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let approve = id.to_string();
+        let reject = id.to_string();
+        v_flex()
+            .w_full()
+            .p_3()
+            .gap_2()
+            .rounded(px(tokens.radius.card))
+            .bg(tokens.colors().bg_surface)
+            .border_1()
+            .border_color(if answered {
+                tokens.colors().border_subtle
+            } else {
+                tokens.colors().accent.opacity(0.55)
+            })
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .line_height(px(25.))
+                    .text_color(tokens.colors().text_primary)
+                    .child(plan.to_string()),
+            )
+            .children((!answered).then(|| {
+                h_flex()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("plan-yes-{index}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .bg(tokens.colors().accent.opacity(0.9))
+                            .text_sm()
+                            .text_color(tokens.colors().bg_window)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().accent))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                // English, because this one is read by the
+                                // agent rather than by the user: the label
+                                // beside it is what the user reads.
+                                this.respond(
+                                    approve.clone(),
+                                    "Approved. Go ahead with this plan.".into(),
+                                    cx,
+                                )
+                            }))
+                            .child(rust_i18n::t!("transcript.plan.approve").to_string()),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("plan-no-{index}")))
+                            .px_2p5()
+                            .py_1()
+                            .rounded(px(tokens.radius.row))
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.respond(
+                                    reject.clone(),
+                                    "Not approved. Stop and wait for further instructions.".into(),
+                                    cx,
+                                )
+                            }))
+                            .child(rust_i18n::t!("transcript.plan.reject").to_string()),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    /// Answer whatever the agent is waiting on.
+    fn respond(&mut self, request_id: String, response: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        // Folded in as the reader's own words straight away: the daemon will
+        // say the same thing back, and waiting for it is a card that stays
+        // clickable after it has been clicked.
+        self.transcript.answer(&request_id);
+        let link = self.link.clone();
+        cx.notify();
+        cx.background_spawn(async move { link.respond(&session, &request_id, &response).await })
+            .detach();
+    }
+
     /// The line that says the agent is still there.
     ///
     /// An agent between tokens looks exactly like one that has died, and the
@@ -980,24 +1704,14 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
-            TranscriptBlock::Question { question, options } => v_flex()
-                .w_full()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(15.))
-                        .text_color(tokens.colors().accent)
-                        .child(question.clone()),
-                )
-                .children(options.iter().map(|option| {
-                    div()
-                        .text_sm()
-                        .text_color(tokens.colors().text_secondary)
-                        .child(format!("· {option}"))
-                }))
-                .into_any_element(),
-            TranscriptBlock::Plan { plan } => {
-                prose(plan, tokens.colors().text_secondary).into_any_element()
+            TranscriptBlock::Question {
+                id,
+                question,
+                options,
+                answered,
+            } => self.asked(index, id, question, options, *answered, cx),
+            TranscriptBlock::Plan { id, plan, answered } => {
+                self.proposed(index, id, plan, *answered, cx)
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.
@@ -1370,6 +2084,47 @@ impl Shell {
                     )
                 })
                 .collect(),
+            Picker::Command => self
+                .commands
+                .iter()
+                .map(|command| {
+                    let name = command.name.clone();
+                    self.picker_row(
+                        SharedString::from(format!("command:{}", command.name)),
+                        format!("/{}", command.name),
+                        Some(match &command.argument_hint {
+                            Some(hint) => format!("{hint} · {}", command.description),
+                            None => command.description.clone(),
+                        }),
+                        false,
+                        cx.listener(move |this, _, window, cx| {
+                            this.choose_command(&name.clone(), window, cx)
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
+            Picker::Mention => self
+                .mentions
+                .iter()
+                .map(|file| {
+                    let path = file.path.clone();
+                    self.picker_row(
+                        SharedString::from(format!("mention:{}", file.path)),
+                        file.name.clone(),
+                        // The directory, quietly, because two files with the
+                        // same name are told apart by where they are.
+                        file.path
+                            .rsplit_once('/')
+                            .map(|(directory, _)| directory.to_string()),
+                        false,
+                        cx.listener(move |this, _, window, cx| {
+                            this.choose_mention(&path.clone(), window, cx)
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
             Picker::Model => self
                 .models()
                 .into_iter()
@@ -1464,6 +2219,154 @@ impl Shell {
                     .map(|agent| agent.models.clone())
             })
             .unwrap_or_default()
+    }
+
+    /// Put back what was being typed here when it was last left.
+    fn load_draft(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let text = cx
+                .background_spawn(async move { link.draft(&workspace).await })
+                .await;
+            if text.is_empty() {
+                return;
+            }
+            this.update_in(cx, |this, window, cx| {
+                // Only into an empty composer: a draft arriving late must not
+                // overwrite something the user has already started typing.
+                if this.composer.read(cx).value().is_empty() {
+                    this.composer
+                        .update(cx, |state, cx| state.set_value(text, window, cx));
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// What the composer does on every keystroke.
+    ///
+    /// Two things, both of which have to be cheap: keep the draft, so leaving
+    /// does not lose it, and offer files while a mention is being typed.
+    fn composer_changed(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+
+        // Written through the daemon rather than held here: a second window on
+        // the same workspace is looking at the same draft.
+        let link = self.link.clone();
+        let saving = text.clone();
+        let for_draft = workspace.clone();
+        cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
+            .detach();
+
+        // A command takes the whole prompt, so it is asked about first.
+        if let Some(query) = ginka_ui::transcript::command_being_typed(&text) {
+            let query = query.to_string();
+            let link = self.link.clone();
+            let for_commands = workspace.clone();
+            cx.spawn(async move |this, cx| {
+                let found = cx
+                    .background_spawn(async move { link.commands(&for_commands, &query).await })
+                    .await;
+                this.update(cx, |this, cx| {
+                    let still =
+                        ginka_ui::transcript::command_being_typed(&this.composer.read(cx).value())
+                            .is_some();
+                    this.commands = found;
+                    this.picker = (still && !this.commands.is_empty()).then_some(Picker::Command);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        if self.picker == Some(Picker::Command) {
+            self.picker = None;
+            self.commands.clear();
+        }
+
+        match ginka_ui::transcript::mention_being_typed(&text) {
+            Some(query) => {
+                let query = query.to_string();
+                let link = self.link.clone();
+                cx.spawn(async move |this, cx| {
+                    let found = cx
+                        .background_spawn(async move { link.files(&workspace, &query).await })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        // Only if a mention is still being typed: the answer
+                        // may arrive after the user finished the word.
+                        let still = ginka_ui::transcript::mention_being_typed(
+                            &this.composer.read(cx).value(),
+                        )
+                        .is_some();
+                        this.mentions = found;
+                        this.picker = (still && !this.mentions.is_empty())
+                            .then_some(Picker::Mention)
+                            .or(match this.picker {
+                                Some(Picker::Mention) => None,
+                                other => other,
+                            });
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+            None => {
+                if self.picker == Some(Picker::Mention) {
+                    self.picker = None;
+                    self.mentions.clear();
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Put a chosen command into the prompt in place of what was typed.
+    fn choose_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let completed = ginka_ui::transcript::complete_command(&text, name);
+        self.composer
+            .update(cx, |state, cx| state.set_value(completed, window, cx));
+        self.picker = None;
+        self.commands.clear();
+        cx.notify();
+    }
+
+    /// Enter with the command picker open takes the best match.
+    fn take_first_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(best) = self.commands.first().map(|command| command.name.clone()) else {
+            return;
+        };
+        self.choose_command(&best, window, cx);
+    }
+
+    /// Put a chosen file into the prompt in place of what was typed.
+    fn choose_mention(&mut self, path: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let completed = ginka_ui::transcript::complete_mention(&text, path);
+        self.composer
+            .update(cx, |state, cx| state.set_value(completed, window, cx));
+        self.picker = None;
+        self.mentions.clear();
+        cx.notify();
+    }
+
+    /// Enter with the mention picker open takes the best match.
+    fn take_first_mention(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(best) = self.mentions.first().map(|entry| entry.path.clone()) else {
+            return;
+        };
+        self.choose_mention(&best, window, cx);
     }
 
     /// Open a picker, or close it if it is the one already open.
@@ -1689,9 +2592,15 @@ impl Shell {
             )
     }
 
-    /// Placeholder terminal dock. M3 replaces the body with a real PTY grid.
-    fn terminal_dock(&self, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
+    /// The terminal dock: a tab strip over the shell in front.
+    ///
+    /// One strip per workspace, because the shells are the workspace's: a
+    /// build running in one worktree has nothing to do with the tab a reader
+    /// has open in another.
+    fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let active = self.terminals.active_index();
+
         v_flex()
             .size_full()
             .border_t_1()
@@ -1706,79 +2615,160 @@ impl Shell {
                     .items_center()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(
-                        h_flex()
-                            .px_2()
+                    .children(
+                        self.terminals
+                            .tabs()
+                            .iter()
+                            .enumerate()
+                            .map(|(index, tab)| {
+                                let showing = index == active;
+                                let id = tab.id.clone();
+                                let closing = tab.id.clone();
+                                h_flex()
+                                    .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
+                                    .px_2()
+                                    .py_1()
+                                    .gap_2()
+                                    .items_center()
+                                    .rounded(px(tokens.radius.row))
+                                    .when(showing, |this| this.bg(tokens.colors().row_active()))
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.show_terminal(index, window, cx)
+                                    }))
+                                    .child(
+                                        Icon::new(IconName::SquareTerminal)
+                                            .size_3()
+                                            .text_color(tokens.colors().text_secondary),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(if showing {
+                                                tokens.colors().text_primary
+                                            } else {
+                                                tokens.colors().text_secondary
+                                            })
+                                            .child(tab.title.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(format!("close-terminal:{id}")))
+                                            .cursor_pointer()
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                this.close_terminal(closing.clone(), cx)
+                                            }))
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size_3()
+                                                    .text_color(tokens.colors().text_muted),
+                                            ),
+                                    )
+                            }),
+                    )
+                    .children((!self.terminals.is_empty()).then(|| {
+                        div()
+                            .id("new-terminal")
+                            .px_1p5()
                             .py_1()
-                            .gap_2()
-                            .items_center()
                             .rounded(px(tokens.radius.row))
-                            .bg(tokens.colors().bg_raised)
-                            .child(
-                                Icon::new(IconName::SquareTerminal)
-                                    .size_3()
-                                    .text_color(tokens.colors().text_secondary),
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
                             )
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_secondary)
-                                    .child("local"),
-                            )
-                            .child(
-                                Icon::new(IconName::Close)
+                                Icon::new(IconName::Plus)
                                     .size_3()
                                     .text_color(tokens.colors().text_muted),
-                            ),
-                    )
-                    .child(
-                        Icon::new(IconName::Plus)
-                            .size_3p5()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .child(div().flex_1())
-                    .child(
-                        Icon::new(IconName::ChevronDown)
-                            .size_3()
-                            .text_color(tokens.colors().text_muted),
-                    ),
+                            )
+                    }))
+                    .child(div().flex_1()),
             )
-            .child(
-                h_flex()
-                    .flex_1()
-                    .px_3()
-                    .py_2()
-                    .items_center()
-                    .font_family(cx.theme_mono_font())
-                    .text_size(px(13.))
-                    // A real prompt is not one colour. Until the PTY lands in
-                    // M3, the placeholder at least has the right shape.
-                    .child(
-                        div()
-                            .text_color(tokens.colors().status_done)
-                            .child("ginka@local"),
-                    )
-                    .child(div().text_color(tokens.colors().text_muted).child(":"))
-                    .child(
-                        div().text_color(tokens.colors().accent).child(
-                            // The real worktree, not a stand-in: a prompt that
-                            // names a directory the user is not in is worse than
-                            // no prompt.
-                            self.session
-                                .as_ref()
-                                .map(|session| session.path.display().to_string())
-                                .unwrap_or_else(|| "~".to_string()),
-                        ),
-                    )
-                    .child(div().text_color(tokens.colors().text_muted).child("$"))
-                    .child(
-                        div()
-                            .ml_1p5()
-                            .w(px(7.))
-                            .h(px(15.))
-                            .bg(tokens.colors().text_secondary),
-                    ),
+            .child(match self.terminals.active() {
+                Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
+                None => self.terminal_start(cx).into_any_element(),
+            })
+    }
+
+    /// What the dock says before there is a shell in it.
+    fn terminal_start(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex().flex_1().items_center().justify_center().child(
+            div()
+                .id("open-terminal")
+                .px_3()
+                .py_1p5()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .text_sm()
+                .text_color(tokens.colors().text_secondary)
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .on_click(cx.listener(|this, _, window, cx| this.open_terminal(window, cx)))
+                .child(rust_i18n::t!("terminal.open").to_string()),
+        )
+    }
+
+    /// The shell's screen, cell by cell.
+    ///
+    /// Every cell is drawn, blanks included: a shell that painted a bar across
+    /// the width would otherwise lose its right-hand end, and a background
+    /// colour would stop wherever the text did.
+    fn terminal_screen(
+        &self,
+        screen: &ginka_ui::terminal::TerminalScreen,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let mono = cx.theme_mono_font();
+        let rows = screen.rows_of_cells();
+
+        v_flex()
+            .id("terminal-screen")
+            .track_focus(&self.terminal_focus)
+            .key_context("Terminal")
+            .flex_1()
+            .px_2()
+            .py_1()
+            .overflow_hidden()
+            .font_family(mono)
+            .text_size(px(12.5))
+            .line_height(px(17.))
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
             )
+            .children(rows.into_iter().map(|row| {
+                h_flex().children(row.into_iter().map(|cell| {
+                    div()
+                        .when(cell.cursor, |this| {
+                            this.bg(tokens.colors().text_primary)
+                                .text_color(tokens.colors().bg_terminal)
+                        })
+                        .when(!cell.cursor, |this| {
+                            this.text_color(
+                                cell.foreground
+                                    .map(|colour| terminal_colour(colour, &tokens))
+                                    .unwrap_or(tokens.colors().text_primary),
+                            )
+                            .when_some(cell.background, |this, colour| {
+                                this.bg(terminal_colour(colour, &tokens))
+                            })
+                        })
+                        .when(cell.bold, |this| this.font_semibold())
+                        .when(cell.italic, |this| this.italic())
+                        .child(if cell.text == ' ' {
+                            // A space with no width is a hole in a painted bar.
+                            SharedString::from("\u{00a0}")
+                        } else {
+                            SharedString::from(cell.text.to_string())
+                        })
+                }))
+            }))
     }
 
     fn center(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1817,6 +2807,77 @@ impl Shell {
     }
 }
 
+/// What a terminal's colour looks like in this theme.
+///
+/// The eight ANSI colours and their bright halves are resolved against the
+/// theme's own palette rather than to fixed hexes: a terminal that hardcoded
+/// them would clash with every theme but the one it was written against. What
+/// a program asks for exactly — a truecolour escape — is given exactly.
+fn terminal_colour(colour: ginka_ui::terminal::TerminalColor, tokens: &Tokens) -> Hsla {
+    use ginka_ui::terminal::TerminalColor;
+    let colors = tokens.colors();
+    match colour {
+        TerminalColor::Rgb(red, green, blue) => {
+            gpui::rgb(((red as u32) << 16) | ((green as u32) << 8) | blue as u32).into()
+        }
+        TerminalColor::Named(index) => match index % 8 {
+            0 => colors.text_muted,
+            1 => colors.status_error,
+            2 => colors.status_done,
+            3 => colors.status_attention,
+            4 => colors.accent,
+            5 => colors.status_working,
+            6 => colors.text_secondary,
+            _ => colors.text_primary,
+        },
+    }
+}
+
+/// What a keystroke sends to a shell.
+///
+/// A pty takes bytes, so this is where a key becomes the bytes a terminal
+/// expects: the control characters for `ctrl-`, the escape sequences for the
+/// arrows and the editing keys, and the typed character otherwise. Anything
+/// this does not know is not sent, because a wrong byte is worse than none.
+fn keystroke_bytes(keystroke: &Keystroke) -> Option<String> {
+    let key = keystroke.key.as_str();
+    let modifiers = &keystroke.modifiers;
+
+    if modifiers.control && key.len() == 1 {
+        // ctrl-a is 0x01, and so on up the alphabet; ctrl-c is what stops a
+        // runaway command, which is the whole reason this branch exists.
+        let letter = key.chars().next()?.to_ascii_lowercase();
+        if letter.is_ascii_lowercase() {
+            return Some(((letter as u8 - b'a' + 1) as char).to_string());
+        }
+    }
+
+    let sequence = match key {
+        "enter" => "\r",
+        "tab" => "\t",
+        "backspace" => "\x7f",
+        "escape" => "\x1b",
+        "up" => "\x1b[A",
+        "down" => "\x1b[B",
+        "right" => "\x1b[C",
+        "left" => "\x1b[D",
+        "home" => "\x1b[H",
+        "end" => "\x1b[F",
+        "pageup" => "\x1b[5~",
+        "pagedown" => "\x1b[6~",
+        "delete" => "\x1b[3~",
+        "space" => " ",
+        _ => "",
+    };
+    if !sequence.is_empty() {
+        return Some(sequence.to_string());
+    }
+
+    // What the keyboard actually produced, which is what carries the layout
+    // and the shift state.
+    keystroke.key_char.clone().filter(|typed| !typed.is_empty())
+}
+
 /// Re-read the workspaces and hand back the selected session, if any.
 ///
 /// `Err` means the window has gone, which is how both loops know to stop.
@@ -1828,12 +2889,18 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let showing = this
-        .update(cx, |this, _| {
-            this.session.as_ref().map(|row| row.workspace.clone())
+    let (showing, wants_changes) = this
+        .update(cx, |this, cx| {
+            (
+                this.session.as_ref().map(|row| row.workspace.clone()),
+                // Only while the surface that shows them is open: reading a
+                // diff runs git over the whole worktree, and a panel nobody
+                // opened is not worth that on every tick.
+                this.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Git),
+            )
         })
         .map_err(|_| ())?;
-    let (rows, agents, checkpoints) = cx
+    let (rows, agents, checkpoints, changes, staged, comments) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Cached by the daemon, so this is a request rather than two
@@ -1843,7 +2910,17 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            (rows, agents, checkpoints)
+            let (changes, staged, comments) = match (&showing, wants_changes) {
+                (Some(workspace), true) => (
+                    listing
+                        .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .await,
+                    listing.staged_paths(workspace).await,
+                    listing.comments(workspace).await,
+                ),
+                _ => (None, Vec::new(), Vec::new()),
+            };
+            (rows, agents, checkpoints, changes, staged, comments)
         })
         .await;
     tracing::debug!(
@@ -1854,6 +2931,13 @@ async fn pull_rows(
     this.update(cx, |this, cx| {
         this.agents = agents;
         this.checkpoints = checkpoints;
+        if wants_changes {
+            this.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_changes(changes, cx);
+                surfaces.set_staged(staged, cx);
+                surfaces.set_comments(comments, cx);
+            });
+        }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         this.session = this.sidebar.read(cx).selected_row().cloned();
@@ -1909,6 +2993,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
+            .on_action(cx.listener(Self::on_toggle_palette))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
@@ -1945,5 +3030,113 @@ impl Render for Shell {
                         }),
                 ),
             )
+            .children(self.palette_view(cx))
     }
+}
+
+impl Shell {
+    /// The palette itself: a box over the window with what matches under it.
+    ///
+    /// Over everything rather than in a column: it is the one control that is
+    /// about the window rather than about what is in it.
+    fn palette_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let palette = self.palette.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let found = self.palette_entries(cx);
+        let chosen = palette.chosen;
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .id("palette")
+                        .mt(px(120.))
+                        .w(px(560.))
+                        .max_h(px(420.))
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.palette_key(event, window, cx)
+                        }))
+                        .child(
+                            div()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(Input::new(&palette.query)),
+                        )
+                        .child(
+                            v_flex()
+                                .id("palette-entries")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .py_1()
+                                .children(found.iter().enumerate().map(|(index, entry)| {
+                                    let command = entry.command.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("palette:{}", entry.id)))
+                                        .w_full()
+                                        .px_3()
+                                        .py_1p5()
+                                        .gap_2()
+                                        .items_center()
+                                        .when(index == chosen, |this| {
+                                            this.bg(tokens.colors().row_active())
+                                        })
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.palette = None;
+                                            this.run_command(command.clone(), window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_sm()
+                                                .text_color(tokens.colors().text_primary)
+                                                .truncate()
+                                                .child(entry.label.clone()),
+                                        )
+                                        .children(entry.hint.clone().map(|hint| {
+                                            div()
+                                                .text_xs()
+                                                .text_color(tokens.colors().text_muted)
+                                                .child(hint)
+                                        }))
+                                }))
+                                .children(found.is_empty().then(|| {
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(rust_i18n::t!("palette.empty").to_string())
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// The palette's own state while it is open.
+struct Palette {
+    query: Entity<InputState>,
+    /// What has been typed, kept here so the filter is not a read of the input
+    /// on every frame.
+    typed: String,
+    /// Which entry Return would run.
+    chosen: usize,
 }

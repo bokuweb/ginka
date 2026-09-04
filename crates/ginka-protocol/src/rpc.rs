@@ -5,8 +5,12 @@
 //! command line and from the MCP server (`AGENTS.md` rule 3). Adding a private
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
-use crate::model::{AgentStatus, Checkpoint, Project, Session, TranscriptEntry, WorkspaceSummary};
+use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+use crate::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide, FileContent, FileEntry,
+    Project, ReviewComment, Session, SessionMatch, SlashCommand, TerminalInfo, TranscriptEntry,
+    UsageRow, WorkspaceSummary,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -65,6 +69,21 @@ pub enum Request {
         prompt: String,
         model: Option<String>,
     },
+    /// Ask the same question in several worktrees at once.
+    ///
+    /// Orca's fan-out: a task with more than one reasonable approach is worth
+    /// trying more than once, and comparing three answers costs less than
+    /// re-prompting one agent three times. One worktree per attempt, so the
+    /// attempts cannot tread on each other.
+    FanOut {
+        project: ProjectName,
+        /// What the branches are called: `<prefix>-1`, `<prefix>-2`, …
+        branch_prefix: String,
+        base: Option<String>,
+        prompt: String,
+        /// One attempt per entry. The same agent can appear more than once.
+        attempts: Vec<Attempt>,
+    },
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
@@ -76,6 +95,26 @@ pub enum Request {
         request_id: String,
         response: String,
     },
+    /// Rename a conversation. An empty title clears it back to none.
+    RenameSession { session: SessionId, title: String },
+    /// Forget a session and its transcript and checkpoints.
+    RemoveSession { session: SessionId },
+    /// Take a copy of a conversation as it was, and carry on from there.
+    ///
+    /// `after` is the transcript position to fork at; `None` forks the whole
+    /// thing. The fork inherits the vendor's session id, so continuing it
+    /// continues the same conversation with the agent.
+    ForkSession {
+        session: SessionId,
+        after: Option<u64>,
+    },
+    /// Find transcript entries containing `query`.
+    SearchSessions {
+        workspace: Option<WorkspaceId>,
+        query: String,
+        limit: Option<u32>,
+    },
+
     /// Kill the agent's process tree.
     CancelSession { session: SessionId },
     /// Read a transcript. `after` pages forward from a sequence number.
@@ -85,13 +124,162 @@ pub enum Request {
         limit: Option<u32>,
     },
 
+    /// What has changed in a workspace, against `source`.
+    ///
+    /// The review half of the loop: an agent that edited twelve files is only
+    /// useful if the twelve are readable without leaving the window.
+    WorkspaceChanges {
+        workspace: WorkspaceId,
+        source: ChangeSource,
+    },
+
+    /// Commit a workspace's work.
+    ///
+    /// `all` stages everything first, including files git has never seen,
+    /// which is what a review that just listed those files leads the user to
+    /// expect.
+    Commit {
+        workspace: WorkspaceId,
+        message: String,
+        all: bool,
+    },
+    /// Put one file into the next commit, or take it back out.
+    ///
+    /// Per file, because "these three are right and that one is not" is the
+    /// ordinary outcome of reading an agent's work, and committing all of it
+    /// is not the only thing a reader may want to do about it.
+    StageFile {
+        workspace: WorkspaceId,
+        path: String,
+        /// `true` stages it, `false` takes it back out.
+        staged: bool,
+    },
+    /// Throw away one file's uncommitted work.
+    ///
+    /// Destructive and not undoable through git: a file the agent invented is
+    /// deleted. The caller confirms; the daemon does as it is told.
+    RevertFile {
+        workspace: WorkspaceId,
+        path: String,
+    },
+    /// Push a workspace's branch, setting an upstream if it has none.
+    Push { workspace: WorkspaceId },
+
+    /// The files in a workspace, best matches for `query` first.
+    ///
+    /// What `@` in the composer reaches for, and what a quick-open will.
+    WorkspaceFiles {
+        workspace: WorkspaceId,
+        query: Option<String>,
+        limit: Option<u32>,
+    },
+    /// The commands a workspace offers after `/`.
+    SlashCommands {
+        workspace: WorkspaceId,
+        query: Option<String>,
+    },
+    /// What the user was in the middle of typing in a workspace.
+    ComposerDraft { workspace: WorkspaceId },
+    /// Keep what they are typing. An empty draft forgets it.
+    SaveComposerDraft {
+        workspace: WorkspaceId,
+        text: String,
+    },
+
+    /// What the work has cost, by day and by agent.
+    Usage { days: Option<u32> },
+
+    /// Leave a comment on a line of the diff.
+    ///
+    /// Orca's loop: marking the three places that are wrong is a better way to
+    /// tell an agent what to fix than re-prompting it from scratch.
+    AddReviewComment {
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+        side: DiffSide,
+        text: String,
+    },
+    /// Every comment waiting in a workspace, in reading order.
+    ListReviewComments { workspace: WorkspaceId },
+    /// Take one comment back.
+    RemoveReviewComment { comment: String },
+    /// Send the batch to the agent as one message, and clear it.
+    ///
+    /// One message rather than one per comment: an agent given them together
+    /// can see that three of them are the same mistake, and a turn per comment
+    /// is three times the context and three times the cost.
+    SendReviewComments {
+        workspace: WorkspaceId,
+        /// The conversation to send them to. Its agent gets the batch as a
+        /// follow-up, queued if it is still working.
+        session: SessionId,
+    },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint { checkpoint: CheckpointId },
 
+    /// Start a shell in a workspace.
+    ///
+    /// The daemon owns the pty, so the shell outlives the window that opened
+    /// it — which is the whole point of the process split.
+    OpenTerminal {
+        workspace: WorkspaceId,
+        rows: u16,
+        cols: u16,
+    },
+    /// The lines in a workspace's files that contain `query`.
+    ///
+    /// The other half of finding something: a reader who knows what the code
+    /// says and not what it is called cannot get there by path.
+    SearchContent {
+        workspace: WorkspaceId,
+        query: String,
+        limit: Option<u32>,
+    },
+
+    /// Read one of a workspace's files, for the panel that shows it.
+    ///
+    /// Bounded and resolved inside the worktree by the daemon: a client asking
+    /// for `../../.ssh/id_rsa` is asking the daemon to do something it will
+    /// not do.
+    ReadFile {
+        workspace: WorkspaceId,
+        path: String,
+    },
+
+    /// The shells already running in a workspace.
+    ///
+    /// A window that has just opened asks this: the daemon kept them running
+    /// while it was gone, and a dock that showed none of them would be hiding
+    /// work that is still going.
+    WorkspaceTerminals { workspace: WorkspaceId },
+    /// What a terminal has printed lately, for a window reattaching to it.
+    TerminalHistory { terminal: TerminalId },
+    /// Send keystrokes to a terminal.
+    WriteTerminal { terminal: TerminalId, data: String },
+    /// Tell a terminal how big its window is now.
+    ResizeTerminal {
+        terminal: TerminalId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Close a terminal and stop its shell.
+    CloseTerminal { terminal: TerminalId },
+
     /// Ask the daemon to exit once it has flushed its state.
     Shutdown,
+}
+
+/// One arm of a fan-out.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Attempt {
+    /// A driver id: `claude`, `codex`, …
+    pub agent: String,
+    pub model: Option<String>,
 }
 
 /// What the daemon answers with.
@@ -123,6 +311,9 @@ pub enum Response {
     Sessions {
         sessions: Vec<Session>,
     },
+    SessionMatches {
+        matches: Vec<SessionMatch>,
+    },
     Session {
         session: Session,
     },
@@ -131,6 +322,52 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    Changes {
+        changes: Changes,
+    },
+    Files {
+        files: Vec<FileEntry>,
+    },
+    Commands {
+        commands: Vec<SlashCommand>,
+    },
+    ReviewComments {
+        comments: Vec<ReviewComment>,
+    },
+    Draft {
+        text: String,
+    },
+    Terminal {
+        terminal: TerminalId,
+    },
+    FileContent {
+        file: FileContent,
+    },
+    Matches {
+        matches: Vec<ContentMatch>,
+    },
+    Terminals {
+        terminals: Vec<TerminalInfo>,
+    },
+    /// What a fan-out started, and what it could not.
+    FannedOut {
+        started: Vec<Session>,
+        /// One line per attempt that did not start, in the order they were
+        /// asked for: an arm that failed must not take the others with it.
+        failed: Vec<String>,
+    },
+    /// What a terminal printed before this window was looking.
+    TerminalHistory {
+        data: String,
+    },
+    Usage {
+        by_day: Vec<UsageRow>,
+        by_agent: Vec<UsageRow>,
+    },
+    /// A commit was made, and this is what it is called.
+    Committed {
+        commit: String,
     },
 }
 

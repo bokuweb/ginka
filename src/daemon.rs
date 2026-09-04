@@ -12,9 +12,12 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
-use ginka_protocol::model::{AgentStatus, Checkpoint, Session, TranscriptEntry};
+use ginka_protocol::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
+    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
+};
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
+use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -129,10 +132,286 @@ impl DaemonLink {
         }
     }
 
+    /// What has changed in a workspace, against `source`.
+    pub async fn changes(&self, workspace: &WorkspaceId, source: ChangeSource) -> Option<Changes> {
+        match self
+            .ask(Request::WorkspaceChanges {
+                workspace: workspace.clone(),
+                source,
+            })
+            .await
+        {
+            Some(Response::Changes { changes }) => Some(changes),
+            _ => None,
+        }
+    }
+
+    /// Commit a workspace's work, everything in it.
+    ///
+    /// The error is the message git gave, because that is the one the user can
+    /// act on: an identity that is not configured, a hook that refused, or
+    /// nothing to commit at all.
+    pub async fn commit(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+        all: bool,
+    ) -> Result<(), String> {
+        let client = self.client().await.ok_or("no daemon")?;
+        match client
+            .request(Request::Commit {
+                workspace: workspace.clone(),
+                message,
+                all,
+            })
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(error) => {
+                if error.code == "failed" {
+                    Err(error.message)
+                } else {
+                    self.forget();
+                    Err(error.message)
+                }
+            }
+        }
+    }
+
+    /// The paths staged for the next commit.
+    pub async fn staged_paths(&self, workspace: &WorkspaceId) -> Vec<String> {
+        match self.changes(workspace, ChangeSource::Staged).await {
+            Some(changes) => changes.files.into_iter().map(|file| file.path).collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Put a file into the next commit, or take it back out.
+    pub async fn stage(&self, workspace: &WorkspaceId, path: &str, staged: bool) {
+        self.ask(Request::StageFile {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            staged,
+        })
+        .await;
+    }
+
+    /// Throw away a file's uncommitted work.
+    pub async fn revert(&self, workspace: &WorkspaceId, path: &str) {
+        self.ask(Request::RevertFile {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+        })
+        .await;
+    }
+
+    /// Answer a question or a plan the agent is waiting on.
+    pub async fn respond(&self, session: &SessionId, request_id: &str, response: &str) {
+        self.ask(Request::RespondToAgent {
+            session: session.clone(),
+            request_id: request_id.to_string(),
+            response: response.to_string(),
+        })
+        .await;
+    }
+
+    /// The lines in a workspace's files that contain `query`.
+    pub async fn search_content(&self, workspace: &WorkspaceId, query: &str) -> Vec<ContentMatch> {
+        match self
+            .ask(Request::SearchContent {
+                workspace: workspace.clone(),
+                query: query.to_string(),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::Matches { matches }) => matches,
+            _ => Vec::new(),
+        }
+    }
+
+    /// One of a workspace's files, as text.
+    pub async fn read_file(&self, workspace: &WorkspaceId, path: &str) -> Option<FileContent> {
+        match self
+            .ask(Request::ReadFile {
+                workspace: workspace.clone(),
+                path: path.to_string(),
+            })
+            .await
+        {
+            Some(Response::FileContent { file }) => Some(file),
+            _ => None,
+        }
+    }
+
+    /// The shells the daemon is running in a workspace.
+    pub async fn terminals(&self, workspace: &WorkspaceId) -> Vec<TerminalInfo> {
+        match self
+            .ask(Request::WorkspaceTerminals {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Terminals { terminals }) => terminals,
+            _ => Vec::new(),
+        }
+    }
+
+    /// What a shell printed while this window was not looking.
+    pub async fn terminal_history(&self, terminal: &TerminalId) -> Option<String> {
+        match self
+            .ask(Request::TerminalHistory {
+                terminal: terminal.clone(),
+            })
+            .await
+        {
+            Some(Response::TerminalHistory { data }) => Some(data),
+            _ => None,
+        }
+    }
+
+    /// Leave a comment on a line of the diff.
+    pub async fn add_comment(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        line: Option<u32>,
+        text: String,
+    ) {
+        self.ask(Request::AddReviewComment {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text,
+        })
+        .await;
+    }
+
+    /// The comments waiting in a workspace, in reading order.
+    pub async fn comments(&self, workspace: &WorkspaceId) -> Vec<ReviewComment> {
+        match self
+            .ask(Request::ListReviewComments {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::ReviewComments { comments }) => comments,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Send the waiting comments to a session's agent as one message.
+    pub async fn send_review(&self, workspace: &WorkspaceId, session: &SessionId) {
+        self.ask(Request::SendReviewComments {
+            workspace: workspace.clone(),
+            session: session.clone(),
+        })
+        .await;
+    }
+
     /// Put a workspace back to the state a checkpoint captured.
     pub async fn restore(&self, checkpoint: &CheckpointId) {
         self.ask(Request::RestoreCheckpoint {
             checkpoint: checkpoint.clone(),
+        })
+        .await;
+    }
+
+    /// The files in a workspace that match `query`, best first.
+    pub async fn files(&self, workspace: &WorkspaceId, query: &str) -> Vec<FileEntry> {
+        match self
+            .ask(Request::WorkspaceFiles {
+                workspace: workspace.clone(),
+                query: Some(query.to_string()),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The commands this workspace offers after `/`.
+    pub async fn commands(&self, workspace: &WorkspaceId, query: &str) -> Vec<SlashCommand> {
+        match self
+            .ask(Request::SlashCommands {
+                workspace: workspace.clone(),
+                query: Some(query.to_string()),
+            })
+            .await
+        {
+            Some(Response::Commands { commands }) => commands,
+            _ => Vec::new(),
+        }
+    }
+
+    /// What was being typed in a workspace when it was last left.
+    pub async fn draft(&self, workspace: &WorkspaceId) -> String {
+        match self
+            .ask(Request::ComposerDraft {
+                workspace: workspace.clone(),
+            })
+            .await
+        {
+            Some(Response::Draft { text }) => text,
+            _ => String::new(),
+        }
+    }
+
+    /// Keep what is being typed, so leaving does not lose it.
+    pub async fn save_draft(&self, workspace: &WorkspaceId, text: String) {
+        self.ask(Request::SaveComposerDraft {
+            workspace: workspace.clone(),
+            text,
+        })
+        .await;
+    }
+
+    /// Start a shell in a workspace, sized for the dock as it is now.
+    pub async fn open_terminal(
+        &self,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Option<TerminalId> {
+        match self
+            .ask(Request::OpenTerminal {
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await
+        {
+            Some(Response::Terminal { terminal }) => Some(terminal),
+            _ => None,
+        }
+    }
+
+    /// Send keystrokes to a terminal.
+    pub async fn write_terminal(&self, terminal: &TerminalId, data: String) {
+        self.ask(Request::WriteTerminal {
+            terminal: terminal.clone(),
+            data,
+        })
+        .await;
+    }
+
+    /// Tell a terminal how big its window is now.
+    pub async fn resize_terminal(&self, terminal: &TerminalId, rows: u16, cols: u16) {
+        self.ask(Request::ResizeTerminal {
+            terminal: terminal.clone(),
+            rows,
+            cols,
+        })
+        .await;
+    }
+
+    /// Close a terminal and stop its shell.
+    pub async fn close_terminal(&self, terminal: &TerminalId) {
+        self.ask(Request::CloseTerminal {
+            terminal: terminal.clone(),
         })
         .await;
     }

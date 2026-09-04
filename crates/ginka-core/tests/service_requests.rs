@@ -10,6 +10,7 @@ mod support;
 use ginka_core::service::{EventSink, Service};
 use ginka_core::{Paths, db};
 use ginka_protocol::event::DaemonEvent;
+use ginka_protocol::model::ChangeSource;
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{ProjectName, WorkspaceId};
 use std::path::Path;
@@ -537,4 +538,148 @@ fn the_service_reports_where_its_state_lives() {
     let fixture = Fixture::new();
     assert!(fixture.service.paths().root().ends_with("state"));
     assert!(Path::new(fixture.service.paths().root()).is_dir());
+}
+
+#[test]
+fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
+    // The half of the review loop that is not a comment: some of what the
+    // agent did is right, and the rest is to be thrown away.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "review".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let id = workspace.id();
+    let worktree = &workspace.worktree.path;
+    std::fs::write(worktree.join("keep.txt"), "worth keeping\n").unwrap();
+    std::fs::write(worktree.join("wrong.txt"), "not worth keeping\n").unwrap();
+
+    fixture.ask(Request::StageFile {
+        workspace: id.clone(),
+        path: "keep.txt".into(),
+        staged: true,
+    });
+    let staged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id.clone(),
+        source: ChangeSource::Staged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    let paths: Vec<&str> = staged.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["keep.txt"], "only the file that was staged");
+
+    fixture.ask(Request::RevertFile {
+        workspace: id.clone(),
+        path: "wrong.txt".into(),
+    });
+    assert!(
+        !worktree.join("wrong.txt").exists(),
+        "a file the agent invented and the reader rejected is gone"
+    );
+
+    match fixture.ask(Request::Commit {
+        workspace: id.clone(),
+        message: "keep the good half".into(),
+        all: false,
+    }) {
+        Response::Committed { commit } => assert!(!commit.is_empty()),
+        other => panic!("expected a commit, got {other:?}"),
+    }
+    let left = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id,
+        source: ChangeSource::Uncommitted,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert!(left.is_empty(), "nothing is left over: {left:?}");
+}
+
+#[test]
+fn a_new_worktree_gets_what_the_project_said_it_needs() {
+    // A fresh checkout has none of the files the repository deliberately does
+    // not track, and an agent started there fails on its first command for a
+    // reason that has nothing to do with its task.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let root = fixture.repo();
+    std::fs::create_dir_all(root.join(".ginka")).unwrap();
+    std::fs::write(
+        root.join(".ginka/config.json"),
+        r#"{"copy": [".env"], "commands": ["echo ready > .setup-ran"]}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join(".env"), "TOKEN=secret\n").unwrap();
+
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "with-setup".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+
+    let worktree = &workspace.worktree.path;
+    assert_eq!(
+        std::fs::read_to_string(worktree.join(".env")).unwrap(),
+        "TOKEN=secret\n",
+        "the untracked file the project named came across"
+    );
+    assert!(
+        worktree.join(".setup-ran").is_file(),
+        "the setup command ran in the new worktree"
+    );
+}
+
+#[test]
+fn the_poller_pushes_a_status_that_changed_and_stays_quiet_otherwise() {
+    // A push per workspace per minute is a push clients learn to ignore.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "polled".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    fixture.recorder.taken();
+
+    fixture.service.poll_statuses();
+    let first: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert!(!first.is_empty(), "the first look at a workspace is news");
+
+    fixture.service.poll_statuses();
+    let again: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert!(again.is_empty(), "nothing changed: {again:?}");
+
+    // Something the user did in the worktree, which is exactly what the
+    // poller is for.
+    std::fs::write(workspace.worktree.path.join("scratch.txt"), "work\n").unwrap();
+    fixture.service.poll_statuses();
+    let dirty: Vec<_> = fixture
+        .recorder
+        .taken()
+        .into_iter()
+        .filter(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. }))
+        .collect();
+    assert_eq!(dirty.len(), 1, "{dirty:?}");
 }

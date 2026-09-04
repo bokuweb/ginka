@@ -36,6 +36,8 @@ const STDERR_KEPT: usize = 4096;
 struct Shared {
     conn: Arc<Mutex<Connection>>,
     events: Arc<dyn EventSink>,
+    /// How many checkpoints a workspace keeps, from the daemon's settings.
+    checkpoint_limit: u32,
 }
 
 impl Shared {
@@ -62,6 +64,25 @@ impl Shared {
         session::turns_completed(&conn, session).unwrap_or(0)
     }
 
+    /// Record what a turn had cost by the time the vendor said so.
+    fn record_usage(&self, session: &SessionId, turn: u32, usage: &ginka_protocol::Usage) {
+        let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+        let Ok(Some(stored)) = session::get(&conn, session) else {
+            return;
+        };
+        if let Err(error) = crate::usage::record(
+            &conn,
+            session,
+            turn,
+            &stored.agent,
+            stored.model.as_deref(),
+            usage,
+            now(),
+        ) {
+            tracing::warn!(%error, session = %session, "could not record what a turn cost");
+        }
+    }
+
     /// Snapshot the worktree so this point in the transcript can be returned
     /// to.
     ///
@@ -83,6 +104,25 @@ impl Shared {
             now(),
         ) {
             tracing::warn!(%error, session = %session, turn, "could not take a checkpoint");
+            return;
+        }
+        // Here rather than on a timer: a workspace only gains checkpoints by
+        // taking one, and this is the moment it just did.
+        match checkpoint::prune(
+            &conn,
+            workspace_path,
+            &stored.workspace,
+            self.checkpoint_limit,
+        ) {
+            Ok(dropped) if dropped > 0 => {
+                tracing::debug!(
+                    dropped,
+                    workspace = stored.workspace.0,
+                    "pruned old checkpoints"
+                )
+            }
+            Err(error) => tracing::warn!(%error, "could not prune old checkpoints"),
+            _ => {}
         }
     }
 
@@ -128,9 +168,17 @@ pub struct Supervisor {
 
 impl Supervisor {
     /// Build a supervisor over the daemon's database and event sink.
-    pub fn new(conn: Arc<Mutex<Connection>>, events: Arc<dyn EventSink>) -> Self {
+    pub fn new(
+        conn: Arc<Mutex<Connection>>,
+        events: Arc<dyn EventSink>,
+        checkpoint_limit: u32,
+    ) -> Self {
         Self {
-            context: Shared { conn, events },
+            context: Shared {
+                conn,
+                events,
+                checkpoint_limit,
+            },
             running: Arc::new(Mutex::new(HashMap::new())),
             queued: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -371,6 +419,11 @@ async fn pump(
                     }
                     AgentEvent::TextDelta { text } if !text.trim().is_empty() => {
                         last_text.push_str(text);
+                    }
+                    // Cumulative for the session as the vendor reports it, so
+                    // it is filed against the turn it was current at.
+                    AgentEvent::Usage { usage } => {
+                        context.record_usage(session, parse.turn + 1, usage);
                     }
                     AgentEvent::TurnEnd { turn } => {
                         let label = if last_text.trim().is_empty() {

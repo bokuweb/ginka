@@ -67,6 +67,12 @@ pub struct DaemonSettings {
     pub status_poll_secs: u64,
     /// Days of task and usage history to keep.
     pub retention_days: u32,
+    /// How many checkpoints a workspace keeps.
+    ///
+    /// Each one holds a commit alive, so an old workspace accumulates objects
+    /// git would otherwise collect. Rewinding is a thing done to recent work:
+    /// past this many turns the reader is reading history, not undoing it.
+    pub checkpoint_limit: u32,
     /// Per-agent overrides, keyed by driver id (`claude`, `codex`, …).
     ///
     /// A user whose agent CLI is version-managed, behind a wrapper script or
@@ -93,6 +99,7 @@ impl Default for DaemonSettings {
             sync_interval_secs: 15,
             status_poll_secs: 60,
             retention_days: 30,
+            checkpoint_limit: 200,
             agents: BTreeMap::new(),
         }
     }

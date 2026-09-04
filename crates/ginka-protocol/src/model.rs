@@ -5,7 +5,7 @@
 //! linking the daemon's domain logic. `ginka-core` persists them; nothing here
 //! knows what a database or a git repository is.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -118,6 +118,12 @@ pub struct Session {
     pub agent: String,
     pub model: Option<String>,
     pub state: SessionState,
+    /// What this conversation is about.
+    ///
+    /// Taken from the opening prompt and renameable. Distinct from `summary`,
+    /// which is what the agent is doing *now* and changes every turn: a title
+    /// is how a conversation is found again a week later.
+    pub title: Option<String>,
     /// One line describing what the agent is doing, for the sidebar.
     pub summary: Option<String>,
     /// The vendor's own session id, when it has one. This is what a resume is
@@ -233,6 +239,116 @@ pub enum TranscriptPayload {
     Agent { event: crate::event::AgentEvent },
 }
 
+/// One file in a workspace, as a picker shows it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileEntry {
+    /// Relative to the worktree root, which is what a mention inserts.
+    pub path: String,
+    /// The last segment, shown apart from the rest so a list reads as names.
+    pub name: String,
+    /// How well it matched, for ordering. Zero when nothing was typed.
+    pub score: u32,
+}
+
+/// What a stretch of work cost.
+///
+/// Totalled from the usage events the drivers report, which are cumulative per
+/// session as the vendor sends them — so a total is the sum of each session's
+/// last word, not of every event.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub reasoning_tokens: u64,
+    /// `None` when no vendor involved priced its work; `Some(0.0)` would claim
+    /// it was free.
+    pub cost_usd: Option<f64>,
+    /// How many turns are behind these numbers.
+    pub turns: u32,
+}
+
+/// What one day, agent or session cost.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageRow {
+    /// What this row is about: a date, an agent's id, or a session's title.
+    pub label: String,
+    pub totals: UsageTotals,
+}
+
+/// Which side of a diff a line number belongs to.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    /// The file as it was.
+    Old,
+    /// The file as the agent left it, which is what a comment usually means.
+    New,
+}
+
+/// A note left on a diff, waiting to be sent back to the agent.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewComment {
+    pub id: String,
+    pub workspace: WorkspaceId,
+    /// Relative to the worktree root.
+    pub path: String,
+    /// `None` is a comment on the file as a whole, which people write.
+    pub line: Option<u32>,
+    pub side: DiffSide,
+    pub text: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
+/// Where a slash command came from.
+///
+/// The scope is shown beside the name because two commands can share one: a
+/// project's `/review` and the user's own `/review` are different commands, and
+/// which one runs is decided by this.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandScope {
+    /// Defined in the workspace, so it travels with the code.
+    Project,
+    /// Defined in the user's own home, so it travels with them.
+    User,
+}
+
+/// A command the composer offers after `/`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Without the slash: `review`, `test`, `frontend/fix`.
+    pub name: String,
+    /// One line, from the file's frontmatter or its first heading.
+    pub description: String,
+    pub scope: CommandScope,
+    /// What the command expects after its name, when it says.
+    pub argument_hint: Option<String>,
+}
+
+/// Where a search found something.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMatch {
+    pub session: SessionId,
+    pub workspace: WorkspaceId,
+    pub title: Option<String>,
+    /// The transcript position, so the client can page straight to it.
+    pub seq: u64,
+    /// Unix seconds.
+    pub at: i64,
+    /// The line the query was found in, cut to something a list can show.
+    pub excerpt: String,
+}
+
 /// A workspace state snapshotted at a turn boundary, so a transcript position
 /// maps to a working tree the user can go back to.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
@@ -288,6 +404,164 @@ impl AgentStatus {
     }
 }
 
+/// What a set of changes was asked for against.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "against", rename_all = "snake_case")]
+pub enum ChangeSource {
+    /// Everything not committed, staged or not, including files git has never
+    /// seen — an agent's new file is the change most worth reading.
+    Uncommitted,
+    /// What is staged for the next commit.
+    Staged,
+    /// What has happened since a checkpoint: the answer to "what did this turn
+    /// actually do".
+    SinceCheckpoint { checkpoint: CheckpointId },
+}
+
+/// How one file changed.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// One line of a diff.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineKind {
+    /// Unchanged, shown for context.
+    Context,
+    Added,
+    Removed,
+}
+
+/// One line of a hunk, with the numbers it has on each side.
+///
+/// Both numbers are kept because a review comment is anchored to a line on one
+/// side or the other, and a hunk header alone cannot say which.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub kind: LineKind,
+    pub text: String,
+    /// The line's number before the change, absent for an added line.
+    pub old_line: Option<u32>,
+    /// Its number after, absent for a removed line.
+    pub new_line: Option<u32>,
+    /// The parts of `text` that actually differ from the line it replaced.
+    ///
+    /// Empty when there is nothing worth pointing at — a line with no partner,
+    /// or one rewritten so completely that marking it up would be marking all
+    /// of it. Byte ranges into `text`, in order and not overlapping.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<Span>,
+}
+
+/// A range of bytes in a line.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Span {
+    pub start: u32,
+    pub end: u32,
+}
+
+/// A run of changed lines with the context around it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hunk {
+    /// The `@@ … @@` line, including whatever git put after it.
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One file's changes.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    /// Relative to the worktree root.
+    pub path: String,
+    /// Where it came from, for a rename.
+    pub old_path: Option<String>,
+    pub kind: ChangeKind,
+    pub added: u32,
+    pub removed: u32,
+    /// A binary file has counts but no hunks: there is nothing to read.
+    pub binary: bool,
+    pub hunks: Vec<Hunk>,
+}
+
+impl FileChange {
+    /// The path to show: a rename is best read as `old → new`.
+    pub fn label(&self) -> String {
+        match &self.old_path {
+            Some(old) if old != &self.path => format!("{old} → {}", self.path),
+            _ => self.path.clone(),
+        }
+    }
+}
+
+/// Everything that changed, and what it was measured against.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Changes {
+    pub source: ChangeSource,
+    pub files: Vec<FileChange>,
+}
+
+impl Changes {
+    /// Lines added and removed across every file.
+    pub fn totals(&self) -> (u32, u32) {
+        self.files.iter().fold((0, 0), |(added, removed), file| {
+            (added + file.added, removed + file.removed)
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
+/// One line of a file that matched a search.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContentMatch {
+    /// Relative to the worktree root.
+    pub path: String,
+    /// 1-based, as an editor counts them.
+    pub line: u32,
+    /// The line itself, as it is in the file.
+    pub text: String,
+}
+
+/// A file, as the panel that shows it needs it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileContent {
+    /// Relative to the worktree root.
+    pub path: String,
+    pub text: String,
+    /// A binary file has no text worth showing; saying so beats showing none.
+    pub binary: bool,
+    /// Whether there is more of it than was sent.
+    pub truncated: bool,
+}
+
+/// One shell the daemon is running, as a tab strip sees it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalInfo {
+    pub id: TerminalId,
+    pub workspace: WorkspaceId,
+    /// What it is called in the strip: `shell 1`, `shell 2`, per workspace.
+    pub title: String,
+}
+
 /// A workspace with everything the dashboard draws for it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -337,6 +611,7 @@ mod tests {
             agent: "claude".into(),
             model: None,
             state,
+            title: None,
             summary: None,
             vendor_session_id: None,
             created_at: 0,

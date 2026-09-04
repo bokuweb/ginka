@@ -36,11 +36,23 @@ pub enum Block {
     },
     /// The agent is blocked on the user.
     Question {
+        /// What an answer is sent against.
+        id: String,
         question: String,
         options: Vec<String>,
+        /// Whether the reader has already replied to it.
+        ///
+        /// Kept on the block rather than in the view: a transcript re-read
+        /// after a restart has to know as much as one that was watched, and
+        /// what it knows is that the reader said something afterwards.
+        answered: bool,
     },
     /// A plan the agent wants approved before acting.
-    Plan { plan: String },
+    Plan {
+        id: String,
+        plan: String,
+        answered: bool,
+    },
     /// A turn boundary. A checkpoint was taken here.
     TurnEnd { turn: u32 },
     /// How the session ended.
@@ -138,6 +150,10 @@ impl Transcript {
 
         match &entry.payload {
             TranscriptPayload::User { text } => {
+                // Anything the reader says answers whatever they were being
+                // asked: the agent is not going to ask twice and wait for the
+                // second answer first.
+                self.answer_everything_open();
                 self.blocks.push(Block::User { text: text.clone() })
             }
             TranscriptPayload::Agent { event } => self.fold(event),
@@ -180,14 +196,20 @@ impl Transcript {
                 is_error,
             } => self.attach_result(id, output, *is_error),
             AgentEvent::AskUser {
-                question, options, ..
+                id,
+                question,
+                options,
             } => self.blocks.push(Block::Question {
+                id: id.clone(),
                 question: question.clone(),
                 options: options.clone(),
+                answered: false,
             }),
-            AgentEvent::PlanProposal { plan, .. } => {
-                self.blocks.push(Block::Plan { plan: plan.clone() })
-            }
+            AgentEvent::PlanProposal { id, plan } => self.blocks.push(Block::Plan {
+                id: id.clone(),
+                plan: plan.clone(),
+                answered: false,
+            }),
             // Accounting belongs in the context bar, not in the conversation.
             AgentEvent::Usage { usage } => self.usage = *usage,
             AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn }),
@@ -195,6 +217,38 @@ impl Transcript {
                 state: *state,
                 summary: summary.clone(),
             }),
+        }
+    }
+
+    /// Mark one question or plan answered, before the daemon says so.
+    ///
+    /// A card that stays clickable after it has been clicked invites a second
+    /// answer to a question that has one.
+    pub fn answer(&mut self, id: &str) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question {
+                    id: asked,
+                    answered,
+                    ..
+                }
+                | Block::Plan {
+                    id: asked,
+                    answered,
+                    ..
+                } if asked == id => *answered = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Mark every question and plan still waiting as answered.
+    fn answer_everything_open(&mut self) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question { answered, .. } | Block::Plan { answered, .. } => *answered = true,
+                _ => {}
+            }
         }
     }
 
@@ -942,5 +996,175 @@ mod tests {
         assert_eq!(render_input(&json!({})), "");
         assert_eq!(render_input(&serde_json::Value::Null), "");
         assert_eq!(render_input(&json!("ls -la")), "ls -la");
+    }
+
+    #[test]
+    fn a_question_carries_what_an_answer_is_sent_against() {
+        // Without the id there is nothing to answer to, and the card is a
+        // paragraph with buttons that do nothing.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[agent(
+            1,
+            AgentEvent::AskUser {
+                id: "ask-1".into(),
+                question: "Which one?".into(),
+                options: vec!["this".into(), "that".into()],
+            },
+        )]);
+        match transcript.blocks().last().unwrap() {
+            Block::Question {
+                id,
+                options,
+                answered,
+                ..
+            } => {
+                assert_eq!(id, "ask-1");
+                assert_eq!(options.len(), 2);
+                assert!(!answered, "nobody has said anything yet");
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saying_anything_answers_what_was_being_asked() {
+        // A transcript re-read after a restart has to know as much as one that
+        // was watched, and what it knows is that the reader replied.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::PlanProposal {
+                    id: "plan-1".into(),
+                    plan: "do the thing".into(),
+                },
+            ),
+            user(2, "go ahead"),
+        ]);
+        let answered = transcript
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, Block::Plan { answered: true, .. }));
+        assert!(answered, "{:?}", transcript.blocks());
+    }
+}
+
+/// What the composer is completing, read from the text before the caret.
+///
+/// A mention is `@` followed by anything that is not a space, and it only
+/// counts at the end of what has been typed: `@src/main.rs and now what?` is a
+/// finished mention in a sentence, not a picker that should still be open.
+pub fn mention_being_typed(text: &str) -> Option<&str> {
+    let last_line = text.rsplit('\n').next()?;
+    let at = last_line.rfind('@')?;
+    // `foo@bar` is an address, not a mention: one has to start a word.
+    let starts_a_word = at == 0
+        || last_line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+    if !starts_a_word {
+        return None;
+    }
+    let query = &last_line[at + 1..];
+    (!query.contains(char::is_whitespace)).then_some(query)
+}
+
+/// What command is being typed, if the prompt is one.
+///
+/// Only at the very start: `/review` is a command, and "see /usr/bin for the
+/// path" is a sentence about a directory. A command takes the whole prompt, so
+/// there is nothing before it to check.
+pub fn command_being_typed(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    (!rest.contains(char::is_whitespace)).then_some(rest)
+}
+
+/// Replace the command being typed with `name`.
+pub fn complete_command(text: &str, name: &str) -> String {
+    if command_being_typed(text).is_none() {
+        return text.to_string();
+    }
+    format!("/{name} ")
+}
+
+/// Replace the mention being typed with `path`, and say what the text becomes.
+///
+/// The trailing space is deliberate: a mention is finished once it is chosen,
+/// and the next thing typed is a sentence rather than more of the path.
+pub fn complete_mention(text: &str, path: &str) -> String {
+    let Some(query) = mention_being_typed(text) else {
+        return text.to_string();
+    };
+    let cut = text.len() - query.len();
+    format!("{}{path} ", &text[..cut])
+}
+
+#[cfg(test)]
+mod mentions {
+    use super::*;
+
+    #[test]
+    fn an_at_sign_starts_a_mention() {
+        assert_eq!(mention_being_typed("look at @src/ma"), Some("src/ma"));
+        assert_eq!(mention_being_typed("@"), Some(""));
+    }
+
+    #[test]
+    fn a_finished_mention_is_not_still_being_typed() {
+        // Otherwise the picker stays open over the rest of the sentence.
+        assert_eq!(mention_being_typed("@src/main.rs and then"), None);
+    }
+
+    #[test]
+    fn an_address_is_not_a_mention() {
+        assert_eq!(mention_being_typed("mail me at bob@example"), None);
+    }
+
+    #[test]
+    fn nothing_typed_is_not_a_mention() {
+        assert_eq!(mention_being_typed(""), None);
+        assert_eq!(mention_being_typed("no at sign here"), None);
+    }
+
+    #[test]
+    fn only_the_line_being_typed_counts() {
+        assert_eq!(mention_being_typed("@old/path\nand now"), None);
+        assert_eq!(mention_being_typed("first line\n@sec"), Some("sec"));
+    }
+
+    #[test]
+    fn choosing_a_file_finishes_the_mention() {
+        assert_eq!(
+            complete_mention("look at @src/ma", "src/main.rs"),
+            "look at @src/main.rs ",
+            "a chosen mention is finished, and what follows is a sentence"
+        );
+        assert_eq!(complete_mention("@", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn a_slash_at_the_start_is_a_command() {
+        assert_eq!(command_being_typed("/rev"), Some("rev"));
+        assert_eq!(command_being_typed("/"), Some(""));
+    }
+
+    #[test]
+    fn a_slash_anywhere_else_is_a_path() {
+        // "see /usr/bin for the path" is a sentence, not a command.
+        assert_eq!(command_being_typed("see /usr/bin"), None);
+        // And a command with an argument is no longer being chosen.
+        assert_eq!(command_being_typed("/review src/main.rs"), None);
+    }
+
+    #[test]
+    fn choosing_a_command_replaces_what_was_typed() {
+        assert_eq!(complete_command("/rev", "review"), "/review ");
+        assert_eq!(complete_command("not a command", "review"), "not a command");
+    }
+
+    #[test]
+    fn completing_when_nothing_is_being_typed_changes_nothing() {
+        assert_eq!(complete_mention("plain text", "x.rs"), "plain text");
     }
 }

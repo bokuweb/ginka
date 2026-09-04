@@ -50,6 +50,10 @@ pub struct Daemon {
     paths: Paths,
     /// Connections that have not finished writing yet.
     live: Arc<std::sync::atomic::AtomicUsize>,
+    /// How often worktrees are reconciled against git.
+    sync_every: std::time::Duration,
+    /// How often each workspace's git status is re-read.
+    status_every: std::time::Duration,
 }
 
 impl Daemon {
@@ -97,6 +101,8 @@ impl Daemon {
             handshake,
             paths,
             live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            sync_every: std::time::Duration::from_secs(settings.sync_interval_secs.max(1)),
+            status_every: std::time::Duration::from_secs(settings.status_poll_secs.max(1)),
         })
     }
 
@@ -145,6 +151,48 @@ impl Daemon {
             }
         };
 
+        // The daemon's own clock. A worktree added with the user's own git, a
+        // branch that has moved, work left uncommitted -- every window wants
+        // to know, and having each of them poll for it is the same work done
+        // once per window.
+        let watching = {
+            let service = self.service.clone();
+            let sync_every = self.sync_every;
+            let status_every = self.status_every;
+            async move {
+                let mut next_sync = std::time::Instant::now() + sync_every;
+                let mut next_status = std::time::Instant::now();
+                loop {
+                    let now = std::time::Instant::now();
+                    let wake = next_sync.min(next_status);
+                    if wake > now {
+                        smol::Timer::at(wake).await;
+                    }
+                    let now = std::time::Instant::now();
+                    let (sync, status) = (now >= next_sync, now >= next_status);
+                    if sync {
+                        next_sync = now + sync_every;
+                    }
+                    if status {
+                        next_status = now + status_every;
+                    }
+                    // git shells out, so this goes to the blocking pool rather
+                    // than holding the executor a request is being served on.
+                    let service = service.clone();
+                    smol::unblock(move || {
+                        let mut service = service.lock().unwrap_or_else(|e| e.into_inner());
+                        if sync {
+                            service.sync();
+                        }
+                        if status {
+                            service.poll_statuses();
+                        }
+                    })
+                    .await;
+                }
+            }
+        };
+
         let stopping = async {
             while let Some(entry) = shutdown.next().await {
                 if entry.event == DaemonEvent::Shutdown {
@@ -177,7 +225,7 @@ impl Daemon {
         };
 
         futures_util::future::select(
-            Box::pin(accepting),
+            futures_util::future::select(Box::pin(accepting), Box::pin(watching)),
             futures_util::future::select(Box::pin(stopping), Box::pin(signalled)),
         )
         .await;

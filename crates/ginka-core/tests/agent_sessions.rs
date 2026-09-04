@@ -209,6 +209,28 @@ impl Fixture {
         }
     }
 
+    /// Ask the service, and take the answer.
+    fn ask(&mut self, request: Request) -> Response {
+        self.service
+            .handle(request)
+            .unwrap_or_else(|error| panic!("request failed: {error}"))
+    }
+
+    /// The stored session, as the daemon has it.
+    fn stored(&mut self, id: &SessionId) -> ginka_protocol::model::Session {
+        match self
+            .service
+            .handle(Request::ListSessions { workspace: None })
+            .unwrap()
+        {
+            Response::Sessions { sessions } => sessions
+                .into_iter()
+                .find(|session| &session.id == id)
+                .expect("the session is stored"),
+            other => panic!("expected sessions, got {other:?}"),
+        }
+    }
+
     fn transcript(&mut self, id: &SessionId) -> Vec<TranscriptPayload> {
         match self
             .service
@@ -682,6 +704,258 @@ fn turns_keep_counting_across_the_processes_that_ran_them() {
 }
 
 #[test]
+fn a_conversation_is_titled_renameable_and_forgettable() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "Fix the parser\n\nIt drops the last token.",
+    );
+    fixture.settle(&session);
+
+    let stored = fixture.stored(&session);
+    assert_eq!(
+        stored.title.as_deref(),
+        Some("Fix the parser"),
+        "a conversation is titled by what was asked of it"
+    );
+
+    fixture.ask(Request::RenameSession {
+        session: session.clone(),
+        title: "The tokenizer".into(),
+    });
+    assert_eq!(
+        fixture.stored(&session).title.as_deref(),
+        Some("The tokenizer")
+    );
+
+    fixture.ask(Request::RemoveSession {
+        session: session.clone(),
+    });
+    match fixture.ask(Request::ListSessions { workspace: None }) {
+        Response::Sessions { sessions } => {
+            assert!(sessions.iter().all(|listed| listed.id != session))
+        }
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
+    // Taking the same work somewhere else without losing where it came from.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first answer"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "the original",
+    );
+    fixture.settle(&session);
+    let original = fixture.transcript(&session);
+    assert!(original.len() > 2);
+
+    // Fork at the agent's first words, dropping everything after.
+    let forked = match fixture.ask(Request::ForkSession {
+        session: session.clone(),
+        after: Some(2),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+
+    assert_eq!(forked.workspace, fixture.workspace);
+    assert_eq!(
+        forked.vendor_session_id.as_deref(),
+        Some("vendor-1"),
+        "continuing a fork continues the agent's own conversation"
+    );
+    assert_eq!(forked.title.as_deref(), Some("the original (fork)"));
+
+    let copied = fixture.transcript(&forked.id);
+    assert_eq!(copied.len(), 2, "up to the point it was forked at");
+    assert_eq!(copied[0], original[0], "and it is the same conversation");
+
+    // The original is untouched.
+    assert_eq!(fixture.transcript(&session).len(), original.len());
+}
+
+#[test]
+fn a_transcript_can_be_searched_for_what_was_said() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"the tokenizer drops the last token"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "look into the parser",
+    );
+    fixture.settle(&session);
+
+    match fixture.ask(Request::SearchSessions {
+        workspace: None,
+        query: "tokenizer".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => {
+            let found = matches.first().expect("the agent said it");
+            assert_eq!(found.session, session);
+            assert!(
+                found.excerpt.contains("tokenizer"),
+                "the excerpt is what was said, not the json it is stored in: {}",
+                found.excerpt
+            );
+            assert!(found.seq > 0);
+        }
+        other => panic!("expected matches, got {other:?}"),
+    }
+
+    // And the user's own words are searchable too.
+    match fixture.ask(Request::SearchSessions {
+        workspace: Some(fixture.workspace.clone()),
+        query: "look into".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => assert!(!matches.is_empty()),
+        other => panic!("expected matches, got {other:?}"),
+    }
+
+    // A query that matches nothing is an empty answer, not an error.
+    match fixture.ask(Request::SearchSessions {
+        workspace: None,
+        query: "nothing said this".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => assert!(matches.is_empty()),
+        other => panic!("expected matches, got {other:?}"),
+    }
+}
+
+#[test]
+fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
+    // Every driver already reports it; until it was stored, the only place it
+    // existed was a view model that a window closing threw away.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v","total_cost_usd":0.042,"usage":{"input_tokens":1200,"output_tokens":300,"cache_read_input_tokens":900}}"#,
+        ]
+        .join("\n"),
+        "count this",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage { by_day, by_agent } => {
+            let day = by_day.first().expect("it happened today");
+            assert_eq!(day.totals.input_tokens, 1200);
+            assert_eq!(day.totals.output_tokens, 300);
+            assert_eq!(day.totals.cache_read_tokens, 900);
+            assert_eq!(day.totals.cost_usd, Some(0.042));
+
+            let agent = by_agent
+                .iter()
+                .find(|row| row.label == "claude")
+                .expect("filed against the agent that ran it");
+            assert_eq!(agent.totals.input_tokens, 1200);
+        }
+        other => panic!("expected usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_review_goes_back_to_the_agent_as_one_message() {
+    // M3's whole point: read the diff, mark what is wrong, and let the agent
+    // fix it — rather than re-prompting from scratch and throwing away the
+    // reading.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[{args}]"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "write the parser",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    for (path, line, text) in [
+        ("src/main.rs", Some(12), "this unwrap can panic"),
+        ("src/main.rs", Some(48), "same here"),
+        ("README.md", None, "out of date"),
+    ] {
+        fixture.ask(Request::AddReviewComment {
+            workspace: fixture.workspace.clone(),
+            path: path.into(),
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text: text.into(),
+        });
+    }
+
+    match fixture.ask(Request::ListReviewComments {
+        workspace: fixture.workspace.clone(),
+    }) {
+        Response::ReviewComments { comments } => assert_eq!(comments.len(), 3),
+        other => panic!("expected comments, got {other:?}"),
+    }
+
+    fixture.ask(Request::SendReviewComments {
+        workspace: fixture.workspace.clone(),
+        session: session.clone(),
+    });
+
+    // One message, carrying every comment, in reading order.
+    let sent: Vec<String> = fixture
+        .transcript(&session)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::User { text } => Some(text),
+            _ => None,
+        })
+        .collect();
+    let batch = sent.last().expect("the review was sent");
+    assert!(
+        batch.contains("src/main.rs:12 — this unwrap can panic"),
+        "{batch}"
+    );
+    assert!(batch.contains("src/main.rs:48 — same here"), "{batch}");
+    assert!(batch.contains("README.md — out of date"), "{batch}");
+    assert_eq!(sent.len(), 2, "one message, not one per comment: {sent:?}");
+
+    // And the batch is spent.
+    match fixture.ask(Request::ListReviewComments {
+        workspace: fixture.workspace.clone(),
+    }) {
+        Response::ReviewComments { comments } => assert!(comments.is_empty()),
+        other => panic!("expected comments, got {other:?}"),
+    }
+}
+
+#[test]
+fn sending_a_review_with_nothing_in_it_says_so() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "nothing to review",
+    );
+    fixture.settle(&session);
+
+    let error = fixture
+        .service
+        .handle(Request::SendReviewComments {
+            workspace: fixture.workspace.clone(),
+            session,
+        })
+        .expect_err("there is nothing to send");
+    assert!(error.message.contains("no comments"), "{}", error.message);
+}
+
+#[test]
 fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
     let mut fixture = Fixture::new();
     let error = fixture
@@ -798,4 +1072,71 @@ fn restoring_a_checkpoint_that_does_not_exist_is_not_found() {
         })
         .expect_err("there is no such checkpoint");
     assert_eq!(error.code, "not_found");
+}
+
+#[test]
+fn a_fan_out_asks_the_same_question_in_a_worktree_each() {
+    // Orca's idea: a task with more than one reasonable approach is worth
+    // trying more than once, and the attempts must not tread on each other.
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"on it"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"on it","session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let (started, failed) = match fixture
+        .service
+        .handle(Request::FanOut {
+            project: ProjectName("comet".into()),
+            branch_prefix: "attempt".into(),
+            base: None,
+            prompt: "make it faster".into(),
+            attempts: vec![
+                ginka_protocol::rpc::Attempt {
+                    agent: "claude".into(),
+                    model: None,
+                },
+                ginka_protocol::rpc::Attempt {
+                    agent: "claude".into(),
+                    model: None,
+                },
+                // A driver this build does not have: the arm fails and the
+                // others carry on.
+                ginka_protocol::rpc::Attempt {
+                    agent: "no-such-agent".into(),
+                    model: None,
+                },
+            ],
+        })
+        .unwrap()
+    {
+        Response::FannedOut { started, failed } => (started, failed),
+        other => panic!("expected a fan-out, got {other:?}"),
+    };
+
+    assert_eq!(started.len(), 2, "two arms started: {failed:?}");
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    let workspaces: Vec<String> = started
+        .iter()
+        .map(|session| session.workspace.0.clone())
+        .collect();
+    assert_eq!(
+        workspaces,
+        vec!["comet/attempt-1", "comet/attempt-2"],
+        "one worktree each, named in order"
+    );
+
+    for session in &started {
+        assert_eq!(
+            fixture.settle(&session.id),
+            SessionState::Finished,
+            "every arm runs its own agent"
+        );
+    }
 }

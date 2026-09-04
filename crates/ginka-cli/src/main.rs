@@ -16,8 +16,11 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
-use ginka_protocol::model::{AgentStatus, Checkpoint, Project, Session, WorkspaceSummary};
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch, UsageRow,
+    WorkspaceSummary,
+};
+use ginka_protocol::rpc::{Attempt, Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
 
@@ -54,6 +57,113 @@ enum Command {
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// List a workspace's files, best matches first.
+    Files {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// What to look for. Any subsequence of a path will do.
+        query: Option<String>,
+    },
+    /// Ask the same question in several worktrees at once.
+    ///
+    /// One worktree per attempt, so the attempts cannot tread on each other,
+    /// and the branches are `<prefix>-1`, `<prefix>-2`, …
+    FanOut {
+        /// The project to cut the worktrees in.
+        project: String,
+        /// What the branches are called.
+        prefix: String,
+        /// The prompt every attempt is given.
+        prompt: String,
+        /// One per attempt: a driver id, optionally `agent:model`. Repeats are
+        /// how the same agent is asked twice.
+        #[arg(long = "agent", required = true)]
+        agents: Vec<String>,
+        /// What to branch from. The project's default branch otherwise.
+        #[arg(long)]
+        base: Option<String>,
+    },
+    /// Find lines in a workspace's files.
+    Search {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The text to look for. Taken literally, not as a pattern.
+        query: String,
+    },
+    /// Print one of a workspace's files.
+    Show {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+    },
+    /// List the commands a workspace offers after `/`.
+    Commands {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
+    /// Report what the work has cost.
+    Usage {
+        /// How many days back to look.
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
+    /// Show what has changed in a workspace.
+    Changes {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Show what is staged for the next commit instead of everything.
+        #[arg(long)]
+        staged: bool,
+        /// Show what has happened since a checkpoint, by its id.
+        #[arg(long)]
+        since: Option<String>,
+        /// Print the diff itself rather than a summary.
+        #[arg(long)]
+        patch: bool,
+    },
+    /// Leave comments on a diff and send them back to the agent.
+    #[command(subcommand)]
+    Review(ReviewCommand),
+    /// Put a file into the next commit, or take it back out.
+    Stage {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Take it back out instead of putting it in.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Throw away a file's uncommitted work.
+    ///
+    /// A file the agent created is deleted, which git cannot undo.
+    Revert {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+    },
+    /// Commit a workspace's work.
+    Commit {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The commit message.
+        message: String,
+        /// Commit only what is already staged.
+        #[arg(long)]
+        staged: bool,
+    },
+    /// Push a workspace's branch, setting an upstream if it has none.
+    Push {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
+    /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
+    ///
+    /// Spawned by the agent, not by the user: the state stays in the daemon
+    /// and this is a bridge to it.
+    Mcp,
     /// Rewind a workspace to a saved state.
     #[command(subcommand)]
     Checkpoint(CheckpointCommand),
@@ -148,6 +258,24 @@ enum SessionCommand {
     Send { session: String, text: String },
     /// Stop an agent's process tree.
     Cancel { session: String },
+    /// Rename a conversation.
+    Rename { session: String, title: String },
+    /// Forget a session, its transcript and its checkpoints.
+    Remove { session: String },
+    /// Take a copy of a conversation as it was, and carry on from there.
+    Fork {
+        session: String,
+        /// The transcript position to fork at. Defaults to all of it.
+        #[arg(long)]
+        after: Option<u64>,
+    },
+    /// Find what was said, across conversations.
+    Search {
+        query: String,
+        /// Limit to one workspace, by id.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     /// Print a session's transcript.
     Log {
         session: String,
@@ -155,6 +283,28 @@ enum SessionCommand {
         #[arg(long)]
         after: Option<u64>,
     },
+}
+
+#[derive(Subcommand)]
+enum ReviewCommand {
+    /// Leave a comment on a file, and a line of it.
+    Add {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The file, relative to the worktree root.
+        path: String,
+        /// What is wrong with it.
+        text: String,
+        /// The line it is about. Omitted, the comment is about the file.
+        #[arg(long)]
+        line: Option<u32>,
+    },
+    /// Every comment waiting, in reading order.
+    List { workspace: String },
+    /// Take one comment back.
+    Remove { comment: String },
+    /// Send the batch to a session's agent as one message.
+    Send { workspace: String, session: String },
 }
 
 #[derive(Subcommand)]
@@ -176,8 +326,12 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Doctor => doctor(&paths),
+        Command::Mcp => mcp(&paths),
         Command::Daemon(command) => daemon(&paths, command, cli.json),
         command => {
+            // Read before the command is consumed: how a diff is printed is
+            // the one thing the response alone does not say.
+            let patch = matches!(command, Command::Changes { patch: true, .. });
             let request = request_for(command)?;
             let response = smol::block_on(async {
                 let client = connect(&paths).await?;
@@ -189,11 +343,111 @@ fn main() -> Result<()> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                print(response);
+                print(response, patch);
             }
             Ok(())
         }
     }
+}
+
+/// Speak MCP on stdin and stdout until the agent closes them.
+///
+/// Line-delimited JSON, one message per line, which is the stdio transport the
+/// spec describes. Every tool call becomes a daemon request, so an agent has
+/// exactly the capabilities a person does (`AGENTS.md` rule 3).
+///
+/// The daemon is connected to lazily, on the first call rather than at start:
+/// an agent that lists the tools and never uses one should not have started a
+/// daemon by asking.
+fn mcp(paths: &Paths) -> Result<()> {
+    use ginka_core::mcp;
+    use std::io::{BufRead as _, Write as _};
+
+    let input = std::io::stdin();
+    let mut output = std::io::stdout();
+    let mut client: Option<Client> = None;
+
+    for line in input.lock().lines() {
+        let line = line.context("reading the agent's message")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let message: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(message) => message,
+            Err(error) => {
+                // Nothing to answer to: a message that did not parse has no id
+                // to reply against, so the error carries a null one.
+                let reply =
+                    mcp::error(serde_json::Value::Null, mcp::PARSE_ERROR, error.to_string());
+                writeln!(output, "{reply}")?;
+                output.flush()?;
+                continue;
+            }
+        };
+        let method = message
+            .get("method")
+            .and_then(|method| method.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let id = message.get("id").cloned();
+        // A notification has no id and takes no answer -- writing one back is
+        // how a client ends up waiting for a reply to nothing.
+        let Some(id) = id else {
+            continue;
+        };
+
+        let reply = match method.as_str() {
+            "initialize" => mcp::reply(id, mcp::server_info()),
+            "tools/list" => mcp::reply(id, mcp::tool_list()),
+            "ping" => mcp::reply(id, serde_json::json!({})),
+            "tools/call" => {
+                let empty = serde_json::json!({});
+                let params = message.get("params").unwrap_or(&empty);
+                let name = params
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .unwrap_or_default();
+                let arguments = params
+                    .get("arguments")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                match mcp::request_for(name, &arguments) {
+                    Err(error) => mcp::reply(id, mcp::tool_failure(error.to_string())),
+                    Ok(request) => {
+                        let answered = smol::block_on(async {
+                            if client.is_none() {
+                                client = Some(connect(paths).await?);
+                            }
+                            let daemon = client.as_ref().expect("just connected");
+                            daemon
+                                .request(request)
+                                .await
+                                .map_err(|error| anyhow::anyhow!("{error}"))
+                        });
+                        match answered {
+                            Ok(response) => {
+                                mcp::reply(id, mcp::tool_result(serde_json::to_string(&response)?))
+                            }
+                            Err(error) => {
+                                // The daemon may have gone; the next call
+                                // reconnects rather than failing forever.
+                                client = None;
+                                mcp::reply(id, mcp::tool_failure(error.to_string()))
+                            }
+                        }
+                    }
+                }
+            }
+            other => mcp::error(
+                id,
+                mcp::METHOD_NOT_FOUND,
+                format!("no method called {other}"),
+            ),
+        };
+        writeln!(output, "{reply}")?;
+        output.flush()?;
+    }
+    Ok(())
 }
 
 /// Find the daemon, starting one if there is none.
@@ -248,6 +502,111 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Usage { days } => Request::Usage { days: Some(days) },
+        Command::Commands { workspace } => Request::SlashCommands {
+            workspace: WorkspaceId(workspace),
+            query: None,
+        },
+        Command::FanOut {
+            project,
+            prefix,
+            prompt,
+            agents,
+            base,
+        } => Request::FanOut {
+            project: ProjectName(project),
+            branch_prefix: prefix,
+            base,
+            prompt,
+            attempts: agents
+                .into_iter()
+                .map(|agent| match agent.split_once(':') {
+                    Some((agent, model)) => Attempt {
+                        agent: agent.to_string(),
+                        model: Some(model.to_string()),
+                    },
+                    None => Attempt { agent, model: None },
+                })
+                .collect(),
+        },
+        Command::Search { workspace, query } => Request::SearchContent {
+            workspace: WorkspaceId(workspace),
+            query,
+            limit: None,
+        },
+        Command::Show { workspace, path } => Request::ReadFile {
+            workspace: WorkspaceId(workspace),
+            path,
+        },
+        Command::Files { workspace, query } => Request::WorkspaceFiles {
+            workspace: WorkspaceId(workspace),
+            query,
+            limit: None,
+        },
+        Command::Review(ReviewCommand::Add {
+            workspace,
+            path,
+            text,
+            line,
+        }) => Request::AddReviewComment {
+            workspace: WorkspaceId(workspace),
+            path,
+            line,
+            side: ginka_protocol::DiffSide::New,
+            text,
+        },
+        Command::Review(ReviewCommand::List { workspace }) => Request::ListReviewComments {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Review(ReviewCommand::Remove { comment }) => {
+            Request::RemoveReviewComment { comment }
+        }
+        Command::Review(ReviewCommand::Send { workspace, session }) => {
+            Request::SendReviewComments {
+                workspace: WorkspaceId(workspace),
+                session: SessionId(session),
+            }
+        }
+        Command::Stage {
+            workspace,
+            path,
+            undo,
+        } => Request::StageFile {
+            workspace: WorkspaceId(workspace),
+            path,
+            staged: !undo,
+        },
+        Command::Revert { workspace, path } => Request::RevertFile {
+            workspace: WorkspaceId(workspace),
+            path,
+        },
+        Command::Commit {
+            workspace,
+            message,
+            staged,
+        } => Request::Commit {
+            workspace: WorkspaceId(workspace),
+            message,
+            all: !staged,
+        },
+        Command::Push { workspace } => Request::Push {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Changes {
+            workspace,
+            staged,
+            since,
+            ..
+        } => Request::WorkspaceChanges {
+            workspace: WorkspaceId(workspace),
+            source: match (staged, since) {
+                (_, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+                    checkpoint: CheckpointId(checkpoint),
+                },
+                (true, None) => ChangeSource::Staged,
+                (false, None) => ChangeSource::Uncommitted,
+            },
+        },
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
         },
@@ -269,6 +628,22 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Cancel { session }) => Request::CancelSession {
             session: SessionId(session),
         },
+        Command::Session(SessionCommand::Rename { session, title }) => Request::RenameSession {
+            session: SessionId(session),
+            title,
+        },
+        Command::Session(SessionCommand::Remove { session }) => Request::RemoveSession {
+            session: SessionId(session),
+        },
+        Command::Session(SessionCommand::Fork { session, after }) => Request::ForkSession {
+            session: SessionId(session),
+            after,
+        },
+        Command::Session(SessionCommand::Search { query, workspace }) => Request::SearchSessions {
+            workspace: workspace.map(WorkspaceId),
+            query,
+            limit: None,
+        },
         Command::Session(SessionCommand::Log { session, after }) => Request::SessionTranscript {
             session: SessionId(session),
             after,
@@ -285,7 +660,8 @@ fn request_for(command: Command) -> Result<Request> {
         }
 
         // Handled before this point, without a daemon.
-        Command::Doctor | Command::Daemon(_) => unreachable!("handled in main"),
+        // Not one request each: handled in `main` before this is reached.
+        Command::Doctor | Command::Daemon(_) | Command::Mcp => unreachable!("handled in main"),
     })
 }
 
@@ -376,7 +752,7 @@ fn describe_daemon(paths: &Paths) -> String {
 }
 
 /// Print a response as a person reads it.
-fn print(response: Response) {
+fn print(response: Response, patch: bool) {
     match response {
         Response::Ack => println!("{}", rust_i18n::t!("cli.done")),
         Response::Projects { projects } => print_projects(&projects),
@@ -385,8 +761,85 @@ fn print(response: Response) {
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
         Response::Sessions { sessions } => print_sessions(&sessions),
+        Response::SessionMatches { matches } => print_matches(&matches),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
+        Response::FannedOut { started, failed } => {
+            print_sessions(&started);
+            // On stderr: the sessions that did start are the answer, and a
+            // script reading stdout should not have to filter complaints out
+            // of it.
+            for problem in failed {
+                eprintln!("{problem}");
+            }
+        }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
+        Response::Changes { changes } => print_changes(&changes, patch),
+        Response::Files { files } => {
+            for file in files {
+                println!("{}", file.path);
+            }
+        }
+        Response::Draft { text } => println!("{text}"),
+        // A terminal is opened by a window, which is where it is typed into;
+        // printing the id is all a script can do with one.
+        // The file as it is: a viewer prints what is in it, and anything
+        // added here would be something a pipe has to strip back out.
+        Response::FileContent { file } => print!("{}", file.text),
+        // `path:line: text`, which is what every other search prints and what
+        // an editor knows how to open.
+        Response::Matches { matches } => {
+            for hit in matches {
+                println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
+        Response::Terminal { terminal } => println!("{terminal}"),
+        Response::Terminals { terminals } => {
+            for terminal in terminals {
+                println!("{}\t{}", terminal.id, terminal.title);
+            }
+        }
+        // Escapes and all: what a terminal printed is only meaningful to
+        // something that renders a terminal, and rewriting it here would be
+        // guessing at a screen this end does not have.
+        Response::TerminalHistory { data } => print!("{data}"),
+        Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
+        Response::ReviewComments { comments } => {
+            if comments.is_empty() {
+                println!("{}", rust_i18n::t!("cli.review.empty"));
+            }
+            for comment in comments {
+                println!(
+                    "{:<34} {}{}  {}",
+                    comment.id,
+                    comment.path,
+                    comment
+                        .line
+                        .map(|line| format!(":{line}"))
+                        .unwrap_or_default(),
+                    comment.text
+                );
+            }
+        }
+        Response::Commands { commands } => {
+            if commands.is_empty() {
+                println!("{}", rust_i18n::t!("cli.commands.empty"));
+            }
+            for command in commands {
+                println!(
+                    "/{:<24} {:<8} {}",
+                    command.name,
+                    match command.scope {
+                        ginka_protocol::CommandScope::Project => "project",
+                        ginka_protocol::CommandScope::User => "user",
+                    },
+                    command.description
+                );
+            }
+        }
+        Response::Committed { commit } => println!(
+            "{}",
+            rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])
+        ),
         Response::Transcript { entries } => {
             if entries.is_empty() {
                 println!("{}", rust_i18n::t!("cli.transcript.empty"));
@@ -465,8 +918,108 @@ fn print_sessions(sessions: &[Session]) {
             session.workspace.0,
             session.agent,
             session.state.as_str(),
-            session.summary.clone().unwrap_or_default()
+            // The title says what the conversation is about; the summary says
+            // what it is doing. A list is read for the first.
+            session
+                .title
+                .clone()
+                .or_else(|| session.summary.clone())
+                .unwrap_or_default()
         );
+    }
+}
+
+/// What changed, as a summary or as the diff itself.
+fn print_changes(changes: &Changes, patch: bool) {
+    if changes.is_empty() {
+        println!("{}", rust_i18n::t!("cli.changes.empty"));
+        return;
+    }
+    for file in &changes.files {
+        println!(
+            "{:<4} +{:<5} -{:<5} {}",
+            match file.kind {
+                ginka_protocol::ChangeKind::Added => "add",
+                ginka_protocol::ChangeKind::Modified => "mod",
+                ginka_protocol::ChangeKind::Deleted => "del",
+                ginka_protocol::ChangeKind::Renamed => "ren",
+            },
+            file.added,
+            file.removed,
+            file.label()
+        );
+        if !patch {
+            continue;
+        }
+        for hunk in &file.hunks {
+            println!("  {}", hunk.header);
+            for line in &hunk.lines {
+                let marker = match line.kind {
+                    ginka_protocol::LineKind::Added => '+',
+                    ginka_protocol::LineKind::Removed => '-',
+                    ginka_protocol::LineKind::Context => ' ',
+                };
+                println!("  {marker}{}", line.text);
+            }
+        }
+    }
+    let (added, removed) = changes.totals();
+    println!(
+        "{}",
+        rust_i18n::t!(
+            "cli.changes.total",
+            files = changes.files.len(),
+            added = added,
+            removed = removed
+        )
+    );
+}
+
+/// Where a search found what it was looking for.
+fn print_matches(matches: &[SessionMatch]) {
+    if matches.is_empty() {
+        println!("{}", rust_i18n::t!("cli.search.empty"));
+        return;
+    }
+    for found in matches {
+        println!(
+            "{:<34} {:<5} {:<24} {}",
+            found.session.0,
+            found.seq,
+            found.title.clone().unwrap_or_default(),
+            found.excerpt
+        );
+    }
+}
+
+/// What the work cost, by day and by agent.
+fn print_usage(by_day: &[UsageRow], by_agent: &[UsageRow]) {
+    if by_day.is_empty() {
+        println!("{}", rust_i18n::t!("cli.usage.empty"));
+        return;
+    }
+    let row = |row: &UsageRow| {
+        println!(
+            "{:<14} {:>10} in {:>8} out {:>8} cached  {:>4} turns  {}",
+            row.label,
+            row.totals.input_tokens,
+            row.totals.output_tokens,
+            row.totals.cache_read_tokens,
+            row.totals.turns,
+            // A vendor that does not price its work says nothing rather than
+            // zero, which would be a claim that it was free.
+            row.totals
+                .cost_usd
+                .map(|cost| format!("${cost:.2}"))
+                .unwrap_or_default()
+        )
+    };
+    for entry in by_day {
+        row(entry);
+    }
+    println!();
+    for entry in by_agent {
+        row(entry);
     }
 }
 

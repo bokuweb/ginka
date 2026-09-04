@@ -530,6 +530,7 @@ mod tests {
             agent: agent.into(),
             model: None,
             state,
+            title: None,
             summary: None,
             vendor_session_id: None,
             created_at: 0,
