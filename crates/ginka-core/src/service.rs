@@ -18,7 +18,8 @@ use anyhow::Result;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    AgentStatus, Project, ProjectKind, Session, SessionState, WorkspaceSummary, Worktree,
+    AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionState,
+    WorkspaceSummary, Worktree,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
@@ -296,6 +297,28 @@ impl Service {
                 })
             }
 
+            Request::WorkspaceChanges { workspace, source } => {
+                let worktree = self.worktree(&workspace)?;
+                let files = match &source {
+                    // A checkpoint names a commit, and the commit is what git
+                    // can be asked about.
+                    ChangeSource::SinceCheckpoint { checkpoint } => {
+                        let stored = checkpoint::get(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {}",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        git::changes_since(&worktree.path, &stored.commit).map_err(failed)?
+                    }
+                    other => git::changes(&worktree.path, other).map_err(failed)?,
+                };
+                Ok(Response::Changes {
+                    changes: Changes { source, files },
+                })
+            }
             Request::ListCheckpoints { workspace } => {
                 self.worktree(&workspace)?;
                 Ok(Response::Checkpoints {

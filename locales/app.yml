@@ -108,6 +108,18 @@ surface.terminal.pending:
 surface.git.pending:
   en: The git surface lands in M3.
   ja: git サーフェスは M3 で実装されます。
+surface.git.reading:
+  en: Reading the worktree…
+  ja: ワークツリーを読んでいます…
+surface.git.clean:
+  en: Nothing has changed
+  ja: 変更はありません
+surface.git.summary:
+  en: "%{files} changed"
+  ja: "%{files} ファイルが変更"
+surface.git.binary:
+  en: A binary file. There is nothing to read.
+  ja: バイナリファイルです。表示できる内容はありません。
 surface.empty.title:
   en: Open a surface
   ja: サーフェスを開く
@@ -133,6 +145,12 @@ cli.workspaces.empty:
 cli.sessions.empty:
   en: "no sessions yet; try `ginka session start <workspace> <prompt>`"
   ja: "セッションはまだありません。`ginka session start <workspace> <prompt>` を試してください"
+cli.changes.empty:
+  en: nothing has changed
+  ja: 変更はありません
+cli.changes.total:
+  en: "%{files} file(s), +%{added} -%{removed}"
+  ja: "%{files} ファイル, +%{added} -%{removed}"
 cli.checkpoints.empty:
   en: "no checkpoints yet; they are taken as an agent works"
   ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"

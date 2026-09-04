@@ -12,7 +12,9 @@
 
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
-use ginka_protocol::model::{AgentStatus, Checkpoint, Session, TranscriptEntry};
+use ginka_protocol::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, Session, TranscriptEntry,
+};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
@@ -126,6 +128,20 @@ impl DaemonLink {
         {
             Some(Response::Checkpoints { checkpoints }) => checkpoints,
             _ => Vec::new(),
+        }
+    }
+
+    /// What has changed in a workspace, against `source`.
+    pub async fn changes(&self, workspace: &WorkspaceId, source: ChangeSource) -> Option<Changes> {
+        match self
+            .ask(Request::WorkspaceChanges {
+                workspace: workspace.clone(),
+                source,
+            })
+            .await
+        {
+            Some(Response::Changes { changes }) => Some(changes),
+            _ => None,
         }
     }
 

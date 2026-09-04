@@ -16,7 +16,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
-use ginka_protocol::model::{AgentStatus, Checkpoint, Project, Session, WorkspaceSummary};
+use ginka_protocol::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, WorkspaceSummary,
+};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
@@ -54,6 +56,20 @@ enum Command {
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
+    /// Show what has changed in a workspace.
+    Changes {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Show what is staged for the next commit instead of everything.
+        #[arg(long)]
+        staged: bool,
+        /// Show what has happened since a checkpoint, by its id.
+        #[arg(long)]
+        since: Option<String>,
+        /// Print the diff itself rather than a summary.
+        #[arg(long)]
+        patch: bool,
+    },
     /// Rewind a workspace to a saved state.
     #[command(subcommand)]
     Checkpoint(CheckpointCommand),
@@ -178,6 +194,9 @@ fn main() -> Result<()> {
         Command::Doctor => doctor(&paths),
         Command::Daemon(command) => daemon(&paths, command, cli.json),
         command => {
+            // Read before the command is consumed: how a diff is printed is
+            // the one thing the response alone does not say.
+            let patch = matches!(command, Command::Changes { patch: true, .. });
             let request = request_for(command)?;
             let response = smol::block_on(async {
                 let client = connect(&paths).await?;
@@ -189,7 +208,7 @@ fn main() -> Result<()> {
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                print(response);
+                print(response, patch);
             }
             Ok(())
         }
@@ -248,6 +267,21 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Changes {
+            workspace,
+            staged,
+            since,
+            ..
+        } => Request::WorkspaceChanges {
+            workspace: WorkspaceId(workspace),
+            source: match (staged, since) {
+                (_, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+                    checkpoint: CheckpointId(checkpoint),
+                },
+                (true, None) => ChangeSource::Staged,
+                (false, None) => ChangeSource::Uncommitted,
+            },
+        },
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
         },
@@ -376,7 +410,7 @@ fn describe_daemon(paths: &Paths) -> String {
 }
 
 /// Print a response as a person reads it.
-fn print(response: Response) {
+fn print(response: Response, patch: bool) {
     match response {
         Response::Ack => println!("{}", rust_i18n::t!("cli.done")),
         Response::Projects { projects } => print_projects(&projects),
@@ -387,6 +421,7 @@ fn print(response: Response) {
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
+        Response::Changes { changes } => print_changes(&changes, patch),
         Response::Transcript { entries } => {
             if entries.is_empty() {
                 println!("{}", rust_i18n::t!("cli.transcript.empty"));
@@ -468,6 +503,52 @@ fn print_sessions(sessions: &[Session]) {
             session.summary.clone().unwrap_or_default()
         );
     }
+}
+
+/// What changed, as a summary or as the diff itself.
+fn print_changes(changes: &Changes, patch: bool) {
+    if changes.is_empty() {
+        println!("{}", rust_i18n::t!("cli.changes.empty"));
+        return;
+    }
+    for file in &changes.files {
+        println!(
+            "{:<4} +{:<5} -{:<5} {}",
+            match file.kind {
+                ginka_protocol::ChangeKind::Added => "add",
+                ginka_protocol::ChangeKind::Modified => "mod",
+                ginka_protocol::ChangeKind::Deleted => "del",
+                ginka_protocol::ChangeKind::Renamed => "ren",
+            },
+            file.added,
+            file.removed,
+            file.label()
+        );
+        if !patch {
+            continue;
+        }
+        for hunk in &file.hunks {
+            println!("  {}", hunk.header);
+            for line in &hunk.lines {
+                let marker = match line.kind {
+                    ginka_protocol::LineKind::Added => '+',
+                    ginka_protocol::LineKind::Removed => '-',
+                    ginka_protocol::LineKind::Context => ' ',
+                };
+                println!("  {marker}{}", line.text);
+            }
+        }
+    }
+    let (added, removed) = changes.totals();
+    println!(
+        "{}",
+        rust_i18n::t!(
+            "cli.changes.total",
+            files = changes.files.len(),
+            added = added,
+            removed = removed
+        )
+    );
 }
 
 fn print_checkpoints(checkpoints: &[Checkpoint]) {

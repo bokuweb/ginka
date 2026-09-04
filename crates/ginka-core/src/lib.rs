@@ -7,6 +7,7 @@
 pub mod agent;
 pub mod checkpoint;
 pub mod db;
+pub mod diff;
 pub mod driver;
 pub mod git;
 pub mod i18n;

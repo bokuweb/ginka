@@ -6,7 +6,10 @@
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
-use crate::model::{AgentStatus, Checkpoint, Project, Session, TranscriptEntry, WorkspaceSummary};
+use crate::model::{
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, TranscriptEntry,
+    WorkspaceSummary,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -85,6 +88,15 @@ pub enum Request {
         limit: Option<u32>,
     },
 
+    /// What has changed in a workspace, against `source`.
+    ///
+    /// The review half of the loop: an agent that edited twelve files is only
+    /// useful if the twelve are readable without leaving the window.
+    WorkspaceChanges {
+        workspace: WorkspaceId,
+        source: ChangeSource,
+    },
+
     /// Every checkpoint taken in a workspace, newest first.
     ListCheckpoints { workspace: WorkspaceId },
     /// Put the worktree back to a checkpoint's state.
@@ -131,6 +143,9 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    Changes {
+        changes: Changes,
     },
 }
 

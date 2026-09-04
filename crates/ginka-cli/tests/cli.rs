@@ -213,6 +213,51 @@ fn a_scratch_workspace_needs_no_repository() {
 }
 
 #[test]
+fn changes_are_readable_from_the_command_line() {
+    // The review half of the loop, without a window: what an agent did to a
+    // worktree is the thing a script most often wants next.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "review-me"]);
+    let worktree = home
+        .root()
+        .join("worktrees")
+        .join("comet")
+        .join("review-me");
+
+    // Nothing yet.
+    assert!(
+        home.ok(&["changes", "comet/review-me"])
+            .contains("nothing has changed"),
+        "a clean worktree says so"
+    );
+
+    std::fs::write(worktree.join("README.md"), "rewritten\n").unwrap();
+    std::fs::write(worktree.join("added.rs"), "fn new() {}\n").unwrap();
+
+    let summary = home.ok(&["changes", "comet/review-me"]);
+    assert!(summary.contains("README.md"), "{summary}");
+    assert!(
+        summary.contains("added.rs"),
+        "an agent's new file is part of what it changed: {summary}"
+    );
+    assert!(summary.contains("2 file(s)"), "{summary}");
+
+    let patch = home.ok(&["changes", "comet/review-me", "--patch"]);
+    assert!(patch.contains("+rewritten"), "the diff itself: {patch}");
+
+    // And the same shapes for a program.
+    let json = home.ok(&["--json", "changes", "comet/review-me"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["result"], serde_json::json!("changes"));
+    assert_eq!(
+        parsed["changes"]["source"]["against"],
+        serde_json::json!("uncommitted")
+    );
+}
+
+#[test]
 fn sessions_and_checkpoints_are_listable_before_any_agent_has_run() {
     // An empty list is an answer; a user asking what is going on in a fresh
     // workspace should not meet an error.

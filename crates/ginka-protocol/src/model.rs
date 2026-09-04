@@ -288,6 +288,114 @@ impl AgentStatus {
     }
 }
 
+/// What a set of changes was asked for against.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "against", rename_all = "snake_case")]
+pub enum ChangeSource {
+    /// Everything not committed, staged or not, including files git has never
+    /// seen — an agent's new file is the change most worth reading.
+    Uncommitted,
+    /// What is staged for the next commit.
+    Staged,
+    /// What has happened since a checkpoint: the answer to "what did this turn
+    /// actually do".
+    SinceCheckpoint { checkpoint: CheckpointId },
+}
+
+/// How one file changed.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+}
+
+/// One line of a diff.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LineKind {
+    /// Unchanged, shown for context.
+    Context,
+    Added,
+    Removed,
+}
+
+/// One line of a hunk, with the numbers it has on each side.
+///
+/// Both numbers are kept because a review comment is anchored to a line on one
+/// side or the other, and a hunk header alone cannot say which.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub kind: LineKind,
+    pub text: String,
+    /// The line's number before the change, absent for an added line.
+    pub old_line: Option<u32>,
+    /// Its number after, absent for a removed line.
+    pub new_line: Option<u32>,
+}
+
+/// A run of changed lines with the context around it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Hunk {
+    /// The `@@ … @@` line, including whatever git put after it.
+    pub header: String,
+    pub lines: Vec<DiffLine>,
+}
+
+/// One file's changes.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileChange {
+    /// Relative to the worktree root.
+    pub path: String,
+    /// Where it came from, for a rename.
+    pub old_path: Option<String>,
+    pub kind: ChangeKind,
+    pub added: u32,
+    pub removed: u32,
+    /// A binary file has counts but no hunks: there is nothing to read.
+    pub binary: bool,
+    pub hunks: Vec<Hunk>,
+}
+
+impl FileChange {
+    /// The path to show: a rename is best read as `old → new`.
+    pub fn label(&self) -> String {
+        match &self.old_path {
+            Some(old) if old != &self.path => format!("{old} → {}", self.path),
+            _ => self.path.clone(),
+        }
+    }
+}
+
+/// Everything that changed, and what it was measured against.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Changes {
+    pub source: ChangeSource,
+    pub files: Vec<FileChange>,
+}
+
+impl Changes {
+    /// Lines added and removed across every file.
+    pub fn totals(&self) -> (u32, u32) {
+        self.files.iter().fold((0, 0), |(added, removed), file| {
+            (added + file.added, removed + file.removed)
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
+    }
+}
+
 /// A workspace with everything the dashboard draws for it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

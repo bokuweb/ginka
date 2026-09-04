@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
 pub use ginka_protocol::model::BranchStatus;
+use ginka_protocol::model::{ChangeSource, FileChange};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -390,6 +391,68 @@ fn git_with_env(repo: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Stri
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+/// Everything that has changed in a worktree, against `source`.
+///
+/// Untracked files are included in the uncommitted view by adding them to the
+/// index with `--intent-to-add`, which is how `git diff` is made to see a file
+/// it has never met. An agent's brand new file is the change most worth
+/// reading, and a review that silently omitted it would be worse than useless.
+/// `--intent-to-add` records only the path, so nothing of the user's staging is
+/// disturbed.
+pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>> {
+    // Rename detection and no colour: this is parsed, not printed.
+    let common = ["--no-color", "--find-renames", "--no-ext-diff", "-U3"];
+
+    let patch = match source {
+        ChangeSource::Uncommitted => {
+            // Best-effort: a repository with no commits has nothing to add to,
+            // and a failure here only costs the untracked files.
+            git(worktree, &["add", "--intent-to-add", "--all"]).ok();
+            let mut args = vec!["diff", "HEAD"];
+            args.extend(common);
+            // A repository with no commits cannot be diffed against HEAD.
+            match head_commit(worktree) {
+                Some(_) => git(worktree, &args)?,
+                None => {
+                    let mut args = vec!["diff"];
+                    args.extend(common);
+                    git(worktree, &args)?
+                }
+            }
+        }
+        ChangeSource::Staged => {
+            let mut args = vec!["diff", "--cached"];
+            args.extend(common);
+            git(worktree, &args)?
+        }
+        ChangeSource::SinceCheckpoint { .. } => {
+            unreachable!("a checkpoint is resolved to a commit before this is called")
+        }
+    };
+
+    Ok(crate::diff::parse(&patch))
+}
+
+/// Everything that has changed since `commit`, including untracked files.
+///
+/// This is what "what did this turn do" means: the checkpoint taken at the end
+/// of the turn before it is the thing worth comparing against.
+pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
+    git(worktree, &["add", "--intent-to-add", "--all"]).ok();
+    let patch = git(
+        worktree,
+        &[
+            "diff",
+            commit,
+            "--no-color",
+            "--find-renames",
+            "--no-ext-diff",
+            "-U3",
+        ],
+    )?;
+    Ok(crate::diff::parse(&patch))
+}
+
 /// Drop git's records of worktrees whose directories are gone.
 pub fn prune_worktrees(repo: &Path) -> Result<()> {
     git(repo, &["worktree", "prune"])?;
@@ -399,6 +462,7 @@ pub fn prune_worktrees(repo: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ginka_protocol::model::ChangeKind;
 
     #[test]
     fn parses_a_main_worktree_and_a_linked_one() {
@@ -658,6 +722,89 @@ prunable
                 .unwrap()
                 .contains("draft.txt")
         );
+    }
+
+    #[test]
+    fn an_agents_new_file_is_part_of_what_it_changed() {
+        // The change most worth reading is the one git has never seen, and a
+        // review that silently omitted it would be worse than useless.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("added.rs"), "fn new() {}\n").unwrap();
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+
+        let changed = changes(&root, &ChangeSource::Uncommitted).unwrap();
+        let paths: Vec<&str> = changed.iter().map(|file| file.path.as_str()).collect();
+        assert!(paths.contains(&"added.rs"), "{paths:?}");
+        assert!(paths.contains(&"tracked.txt"), "{paths:?}");
+
+        let new_file = changed.iter().find(|file| file.path == "added.rs").unwrap();
+        assert_eq!(new_file.kind, ChangeKind::Added);
+        assert_eq!(new_file.added, 1);
+        assert!(!new_file.hunks.is_empty(), "its contents are readable");
+    }
+
+    #[test]
+    fn asking_for_changes_does_not_stage_the_users_work() {
+        // Untracked files are made visible with `--intent-to-add`, which
+        // records the path and nothing else; a review must not quietly stage a
+        // half-finished file for the user's next commit.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "edited\n").unwrap();
+
+        changes(&root, &ChangeSource::Uncommitted).unwrap();
+        let staged = git(&root, &["diff", "--cached", "--name-only"]).unwrap();
+        assert!(
+            !staged.contains("tracked.txt"),
+            "an edited file must not become staged by being read: {staged}"
+        );
+    }
+
+    #[test]
+    fn staged_and_unstaged_work_are_told_apart() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("staged.txt"), "ready\n").unwrap();
+        git(&root, &["add", "staged.txt"]).unwrap();
+        std::fs::write(root.join("tracked.txt"), "not ready\n").unwrap();
+
+        let staged = changes(&root, &ChangeSource::Staged).unwrap();
+        let paths: Vec<&str> = staged.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["staged.txt"]);
+    }
+
+    #[test]
+    fn what_happened_since_a_checkpoint_is_readable() {
+        // The point of taking one at every turn: "what did this turn do".
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let before = snapshot(&root, REF, "before the turn").unwrap();
+
+        std::fs::write(root.join("tracked.txt"), "the agent's work\n").unwrap();
+        std::fs::write(root.join("agent.rs"), "fn added() {}\n").unwrap();
+
+        let changed = changes_since(&root, &before).unwrap();
+        let paths: Vec<&str> = changed.iter().map(|file| file.path.as_str()).collect();
+        assert!(paths.contains(&"tracked.txt"), "{paths:?}");
+        assert!(paths.contains(&"agent.rs"), "{paths:?}");
+    }
+
+    #[test]
+    fn a_repository_with_no_commits_still_reports_its_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("empty");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "--initial-branch=main"]).unwrap();
+        std::fs::write(root.join("first.txt"), "words\n").unwrap();
+
+        let changed = changes(&root, &ChangeSource::Uncommitted).unwrap();
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].path, "first.txt");
     }
 
     #[test]

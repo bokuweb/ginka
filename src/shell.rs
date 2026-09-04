@@ -1828,12 +1828,18 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let showing = this
-        .update(cx, |this, _| {
-            this.session.as_ref().map(|row| row.workspace.clone())
+    let (showing, wants_changes) = this
+        .update(cx, |this, cx| {
+            (
+                this.session.as_ref().map(|row| row.workspace.clone()),
+                // Only while the surface that shows them is open: reading a
+                // diff runs git over the whole worktree, and a panel nobody
+                // opened is not worth that on every tick.
+                this.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Git),
+            )
         })
         .map_err(|_| ())?;
-    let (rows, agents, checkpoints) = cx
+    let (rows, agents, checkpoints, changes) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Cached by the daemon, so this is a request rather than two
@@ -1843,7 +1849,15 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            (rows, agents, checkpoints)
+            let changes = match (&showing, wants_changes) {
+                (Some(workspace), true) => {
+                    listing
+                        .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .await
+                }
+                _ => None,
+            };
+            (rows, agents, checkpoints, changes)
         })
         .await;
     tracing::debug!(
@@ -1854,6 +1868,10 @@ async fn pull_rows(
     this.update(cx, |this, cx| {
         this.agents = agents;
         this.checkpoints = checkpoints;
+        if wants_changes {
+            this.surfaces
+                .update(cx, |surfaces, cx| surfaces.set_changes(changes, cx));
+        }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         this.session = this.sidebar.read(cx).selected_row().cloned();
