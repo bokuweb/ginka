@@ -107,3 +107,33 @@ fn extension_of(name: &str) -> Option<String> {
     let usable = extension.len() <= 8 && extension.chars().all(|c| c.is_ascii_alphanumeric());
     usable.then(|| extension.to_ascii_lowercase())
 }
+
+/// Replace every attachment reference in `text` with the file's path on the
+/// daemon's host.
+///
+/// This is what an agent is given: it reads files, not URIs. A reference that
+/// resolves to nothing is left exactly as it was — replacing it with an empty
+/// string would hand the agent a sentence with a hole in it and no way to say
+/// what went missing.
+pub fn expand_references(text: &str, store: &AttachmentStore) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find(ATTACHMENT_SCHEME) {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + ATTACHMENT_SCHEME.len()..];
+        let end = after
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_'))
+            .unwrap_or(after.len());
+        let (id, tail) = after.split_at(end);
+        let reference = format!("{ATTACHMENT_SCHEME}{id}");
+
+        match store.path_of(&reference).filter(|path| path.exists()) {
+            Some(path) => out.push_str(&path.to_string_lossy()),
+            // Not ours, gone, or trying to climb out of the store.
+            None => out.push_str(&reference),
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
