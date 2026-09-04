@@ -280,6 +280,73 @@ impl Service {
                 // that can interrupt a turn will override this.
                 self.send_message(&session, response)
             }
+            Request::RenameSession { session, title } => {
+                if !session::rename(&self.conn(), &session, &title).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no session with id {session}")));
+                }
+                Ok(Response::Ack)
+            }
+            Request::RemoveSession { session } => {
+                let stored = self.session(&session)?;
+                // Whatever is running for it has to go first, or the daemon
+                // keeps feeding a transcript that no longer exists.
+                self.sessions.cancel(&session);
+                if !session::remove(&self.conn(), &session).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no session with id {session}")));
+                }
+                self.events.emit(DaemonEvent::SessionStateChanged {
+                    session,
+                    state: SessionState::Cancelled,
+                });
+                if let Some((project, _)) = stored.workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
+            Request::ForkSession { session, after } => {
+                let original = self.session(&session)?;
+                let now = now();
+                let fork = Session {
+                    id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+                    workspace: original.workspace.clone(),
+                    agent: original.agent.clone(),
+                    model: original.model.clone(),
+                    // A fork has not run anything yet, and inherits the
+                    // vendor's own conversation so that continuing it
+                    // continues where the original was.
+                    state: SessionState::Idle,
+                    title: Some(match &original.title {
+                        Some(title) => format!("{title} (fork)"),
+                        None => "fork".to_string(),
+                    }),
+                    summary: None,
+                    vendor_session_id: original.vendor_session_id.clone(),
+                    created_at: now,
+                    updated_at: now,
+                };
+                {
+                    let conn = self.conn();
+                    session::insert(&conn, &fork).map_err(failed)?;
+                    session::copy_transcript(&conn, &session, &fork.id, after).map_err(failed)?;
+                }
+                self.events.emit(DaemonEvent::SessionStarted {
+                    session: fork.clone(),
+                });
+                Ok(Response::Session { session: fork })
+            }
+            Request::SearchSessions {
+                workspace,
+                query,
+                limit,
+            } => Ok(Response::SessionMatches {
+                matches: session::search(
+                    &self.conn(),
+                    workspace.as_ref(),
+                    &query,
+                    limit.unwrap_or(50),
+                )
+                .map_err(failed)?,
+            }),
             Request::CancelSession { session } => {
                 self.session(&session)?;
                 self.sessions.cancel(&session);
@@ -393,6 +460,10 @@ impl Service {
             agent: driver.id().to_string(),
             model: model.clone(),
             state: SessionState::Starting,
+            // What this conversation is about, taken from what was asked. The
+            // user can rename it; nothing else writes it, because the agent's
+            // own summary is a different thing and changes every turn.
+            title: Some(title_from(&prompt)),
             summary: None,
             vendor_session_id: None,
             created_at: now,
@@ -526,6 +597,23 @@ impl Service {
     }
 }
 
+/// A conversation's title, from the prompt that opened it.
+///
+/// The first line, because a prompt's first line is its subject and the rest
+/// is detail; bounded, because a title is read in a list.
+fn title_from(prompt: &str) -> String {
+    let first = prompt
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    if first.chars().count() <= 72 {
+        return first.to_string();
+    }
+    let kept: String = first.chars().take(71).collect();
+    format!("{kept}…")
+}
+
 /// Unix seconds.
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -554,6 +642,20 @@ mod tests {
         let paths = Paths::with_root(dir.path().join("state"));
         let mut service = Service::open(paths, Arc::new(NullSink)).unwrap();
         assert_eq!(service.handle(Request::Ping).unwrap(), Response::Ack);
+    }
+
+    #[test]
+    fn a_conversation_is_titled_by_what_was_asked_of_it() {
+        assert_eq!(
+            title_from("Fix the parser\n\nIt drops the last token."),
+            "Fix the parser",
+            "the first line is the subject; the rest is detail"
+        );
+        assert_eq!(title_from("   \n  spaced  \n"), "spaced");
+        assert_eq!(title_from(""), "");
+        let long = title_from(&"x".repeat(200));
+        assert_eq!(long.chars().count(), 72, "a title is read in a list");
+        assert!(long.ends_with('…'));
     }
 
     #[test]

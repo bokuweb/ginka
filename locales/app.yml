@@ -169,6 +169,9 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.search.empty:
+  en: nothing said that
+  ja: 一致するものはありません
 cli.checkpoints.empty:
   en: "no checkpoints yet; they are taken as an agent works"
   ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"

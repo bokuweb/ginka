@@ -17,7 +17,8 @@ use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, WorkspaceSummary,
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch,
+    WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
@@ -179,6 +180,24 @@ enum SessionCommand {
     Send { session: String, text: String },
     /// Stop an agent's process tree.
     Cancel { session: String },
+    /// Rename a conversation.
+    Rename { session: String, title: String },
+    /// Forget a session, its transcript and its checkpoints.
+    Remove { session: String },
+    /// Take a copy of a conversation as it was, and carry on from there.
+    Fork {
+        session: String,
+        /// The transcript position to fork at. Defaults to all of it.
+        #[arg(long)]
+        after: Option<u64>,
+    },
+    /// Find what was said, across conversations.
+    Search {
+        query: String,
+        /// Limit to one workspace, by id.
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     /// Print a session's transcript.
     Log {
         session: String,
@@ -330,6 +349,22 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Cancel { session }) => Request::CancelSession {
             session: SessionId(session),
         },
+        Command::Session(SessionCommand::Rename { session, title }) => Request::RenameSession {
+            session: SessionId(session),
+            title,
+        },
+        Command::Session(SessionCommand::Remove { session }) => Request::RemoveSession {
+            session: SessionId(session),
+        },
+        Command::Session(SessionCommand::Fork { session, after }) => Request::ForkSession {
+            session: SessionId(session),
+            after,
+        },
+        Command::Session(SessionCommand::Search { query, workspace }) => Request::SearchSessions {
+            workspace: workspace.map(WorkspaceId),
+            query,
+            limit: None,
+        },
         Command::Session(SessionCommand::Log { session, after }) => Request::SessionTranscript {
             session: SessionId(session),
             after,
@@ -446,6 +481,7 @@ fn print(response: Response, patch: bool) {
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
         Response::Sessions { sessions } => print_sessions(&sessions),
+        Response::SessionMatches { matches } => print_matches(&matches),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
@@ -531,7 +567,13 @@ fn print_sessions(sessions: &[Session]) {
             session.workspace.0,
             session.agent,
             session.state.as_str(),
-            session.summary.clone().unwrap_or_default()
+            // The title says what the conversation is about; the summary says
+            // what it is doing. A list is read for the first.
+            session
+                .title
+                .clone()
+                .or_else(|| session.summary.clone())
+                .unwrap_or_default()
         );
     }
 }
@@ -580,6 +622,23 @@ fn print_changes(changes: &Changes, patch: bool) {
             removed = removed
         )
     );
+}
+
+/// Where a search found what it was looking for.
+fn print_matches(matches: &[SessionMatch]) {
+    if matches.is_empty() {
+        println!("{}", rust_i18n::t!("cli.search.empty"));
+        return;
+    }
+    for found in matches {
+        println!(
+            "{:<34} {:<5} {:<24} {}",
+            found.session.0,
+            found.seq,
+            found.title.clone().unwrap_or_default(),
+            found.excerpt
+        );
+    }
 }
 
 fn print_checkpoints(checkpoints: &[Checkpoint]) {

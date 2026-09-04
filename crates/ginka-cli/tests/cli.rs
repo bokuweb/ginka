@@ -302,6 +302,15 @@ fn committing_nothing_says_what_git_said() {
 }
 
 #[test]
+fn searching_conversations_that_do_not_exist_yet_is_an_empty_answer() {
+    // Not an error: a user searching a fresh install has asked a reasonable
+    // question and the answer is "nothing".
+    let home = Home::new();
+    let found = home.ok(&["session", "search", "anything"]);
+    assert!(found.contains("nothing said that"), "{found}");
+}
+
+#[test]
 fn sessions_and_checkpoints_are_listable_before_any_agent_has_run() {
     // An empty list is an answer; a user asking what is going on in a fresh
     // workspace should not meet an error.

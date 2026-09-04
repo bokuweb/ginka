@@ -7,8 +7,8 @@
 
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use crate::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, TranscriptEntry,
-    WorkspaceSummary,
+    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch,
+    TranscriptEntry, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -79,6 +79,26 @@ pub enum Request {
         request_id: String,
         response: String,
     },
+    /// Rename a conversation. An empty title clears it back to none.
+    RenameSession { session: SessionId, title: String },
+    /// Forget a session and its transcript and checkpoints.
+    RemoveSession { session: SessionId },
+    /// Take a copy of a conversation as it was, and carry on from there.
+    ///
+    /// `after` is the transcript position to fork at; `None` forks the whole
+    /// thing. The fork inherits the vendor's session id, so continuing it
+    /// continues the same conversation with the agent.
+    ForkSession {
+        session: SessionId,
+        after: Option<u64>,
+    },
+    /// Find transcript entries containing `query`.
+    SearchSessions {
+        workspace: Option<WorkspaceId>,
+        query: String,
+        limit: Option<u32>,
+    },
+
     /// Kill the agent's process tree.
     CancelSession { session: SessionId },
     /// Read a transcript. `after` pages forward from a sequence number.
@@ -147,6 +167,9 @@ pub enum Response {
     },
     Sessions {
         sessions: Vec<Session>,
+    },
+    SessionMatches {
+        matches: Vec<SessionMatch>,
     },
     Session {
         session: Session,

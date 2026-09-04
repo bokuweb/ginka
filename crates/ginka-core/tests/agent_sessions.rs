@@ -209,6 +209,28 @@ impl Fixture {
         }
     }
 
+    /// Ask the service, and take the answer.
+    fn ask(&mut self, request: Request) -> Response {
+        self.service
+            .handle(request)
+            .unwrap_or_else(|error| panic!("request failed: {error}"))
+    }
+
+    /// The stored session, as the daemon has it.
+    fn stored(&mut self, id: &SessionId) -> ginka_protocol::model::Session {
+        match self
+            .service
+            .handle(Request::ListSessions { workspace: None })
+            .unwrap()
+        {
+            Response::Sessions { sessions } => sessions
+                .into_iter()
+                .find(|session| &session.id == id)
+                .expect("the session is stored"),
+            other => panic!("expected sessions, got {other:?}"),
+        }
+    }
+
     fn transcript(&mut self, id: &SessionId) -> Vec<TranscriptPayload> {
         match self
             .service
@@ -679,6 +701,136 @@ fn turns_keep_counting_across_the_processes_that_ran_them() {
         vec![0, 1, 2],
         "each turn's checkpoint has to be tellable from the others"
     );
+}
+
+#[test]
+fn a_conversation_is_titled_renameable_and_forgettable() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "Fix the parser\n\nIt drops the last token.",
+    );
+    fixture.settle(&session);
+
+    let stored = fixture.stored(&session);
+    assert_eq!(
+        stored.title.as_deref(),
+        Some("Fix the parser"),
+        "a conversation is titled by what was asked of it"
+    );
+
+    fixture.ask(Request::RenameSession {
+        session: session.clone(),
+        title: "The tokenizer".into(),
+    });
+    assert_eq!(
+        fixture.stored(&session).title.as_deref(),
+        Some("The tokenizer")
+    );
+
+    fixture.ask(Request::RemoveSession {
+        session: session.clone(),
+    });
+    match fixture.ask(Request::ListSessions { workspace: None }) {
+        Response::Sessions { sessions } => {
+            assert!(sessions.iter().all(|listed| listed.id != session))
+        }
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
+    // Taking the same work somewhere else without losing where it came from.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"first answer"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "the original",
+    );
+    fixture.settle(&session);
+    let original = fixture.transcript(&session);
+    assert!(original.len() > 2);
+
+    // Fork at the agent's first words, dropping everything after.
+    let forked = match fixture.ask(Request::ForkSession {
+        session: session.clone(),
+        after: Some(2),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+
+    assert_eq!(forked.workspace, fixture.workspace);
+    assert_eq!(
+        forked.vendor_session_id.as_deref(),
+        Some("vendor-1"),
+        "continuing a fork continues the agent's own conversation"
+    );
+    assert_eq!(forked.title.as_deref(), Some("the original (fork)"));
+
+    let copied = fixture.transcript(&forked.id);
+    assert_eq!(copied.len(), 2, "up to the point it was forked at");
+    assert_eq!(copied[0], original[0], "and it is the same conversation");
+
+    // The original is untouched.
+    assert_eq!(fixture.transcript(&session).len(), original.len());
+}
+
+#[test]
+fn a_transcript_can_be_searched_for_what_was_said() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"the tokenizer drops the last token"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        ]
+        .join("\n"),
+        "look into the parser",
+    );
+    fixture.settle(&session);
+
+    match fixture.ask(Request::SearchSessions {
+        workspace: None,
+        query: "tokenizer".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => {
+            let found = matches.first().expect("the agent said it");
+            assert_eq!(found.session, session);
+            assert!(
+                found.excerpt.contains("tokenizer"),
+                "the excerpt is what was said, not the json it is stored in: {}",
+                found.excerpt
+            );
+            assert!(found.seq > 0);
+        }
+        other => panic!("expected matches, got {other:?}"),
+    }
+
+    // And the user's own words are searchable too.
+    match fixture.ask(Request::SearchSessions {
+        workspace: Some(fixture.workspace.clone()),
+        query: "look into".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => assert!(!matches.is_empty()),
+        other => panic!("expected matches, got {other:?}"),
+    }
+
+    // A query that matches nothing is an empty answer, not an error.
+    match fixture.ask(Request::SearchSessions {
+        workspace: None,
+        query: "nothing said this".into(),
+        limit: None,
+    }) {
+        Response::SessionMatches { matches } => assert!(matches.is_empty()),
+        other => panic!("expected matches, got {other:?}"),
+    }
 }
 
 #[test]

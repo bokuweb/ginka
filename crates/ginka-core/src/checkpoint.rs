@@ -137,6 +137,7 @@ mod tests {
             agent: "claude".into(),
             model: None,
             state: SessionState::Running,
+            title: None,
             summary: None,
             vendor_session_id: None,
             created_at: 0,

@@ -118,6 +118,12 @@ pub struct Session {
     pub agent: String,
     pub model: Option<String>,
     pub state: SessionState,
+    /// What this conversation is about.
+    ///
+    /// Taken from the opening prompt and renameable. Distinct from `summary`,
+    /// which is what the agent is doing *now* and changes every turn: a title
+    /// is how a conversation is found again a week later.
+    pub title: Option<String>,
     /// One line describing what the agent is doing, for the sidebar.
     pub summary: Option<String>,
     /// The vendor's own session id, when it has one. This is what a resume is
@@ -231,6 +237,21 @@ pub enum TranscriptPayload {
     User { text: String },
     /// Anything the driver emitted, already normalized.
     Agent { event: crate::event::AgentEvent },
+}
+
+/// Where a search found something.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionMatch {
+    pub session: SessionId,
+    pub workspace: WorkspaceId,
+    pub title: Option<String>,
+    /// The transcript position, so the client can page straight to it.
+    pub seq: u64,
+    /// Unix seconds.
+    pub at: i64,
+    /// The line the query was found in, cut to something a list can show.
+    pub excerpt: String,
 }
 
 /// A workspace state snapshotted at a turn boundary, so a transcript position
@@ -445,6 +466,7 @@ mod tests {
             agent: "claude".into(),
             model: None,
             state,
+            title: None,
             summary: None,
             vendor_session_id: None,
             created_at: 0,
