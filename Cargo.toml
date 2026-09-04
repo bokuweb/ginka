@@ -53,6 +53,7 @@ futures-lite = "2"
 futures-util = { version = "0.3", default-features = false, features = ["std", "sink", "async-await"] }
 # The matcher the roadmap picked for quick-open, the command palette and file
 # mentions (§4.3). Small, pure Rust, and the same one Helix and Zed use.
+base64 = "0.22"
 nucleo-matcher = "0.3"
 parking_lot = "0.12"
 portable-pty = "0.9"
@@ -61,6 +62,7 @@ rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 smol = "2"
+sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"

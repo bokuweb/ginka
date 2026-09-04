@@ -89,7 +89,14 @@ impl Shared {
     /// A workspace that is not a repository, or one whose directory has gone,
     /// cannot be snapshotted; that is logged and the turn carries on, because
     /// losing the ability to rewind is not a reason to stop an agent.
-    fn checkpoint(&self, session: &SessionId, workspace_path: &Path, turn: u32, label: &str) {
+    fn checkpoint(
+        &self,
+        session: &SessionId,
+        workspace_path: &Path,
+        turn: u32,
+        label: &str,
+        start: Option<&checkpoint::TurnStart>,
+    ) {
         let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
         let Ok(Some(stored)) = session::get(&conn, session) else {
             return;
@@ -97,10 +104,13 @@ impl Shared {
         if let Err(error) = checkpoint::take(
             &conn,
             workspace_path,
-            &stored.workspace,
-            session,
-            turn,
+            checkpoint::TurnRef {
+                workspace: &stored.workspace,
+                session,
+                turn,
+            },
             label,
+            start,
             now(),
         ) {
             tracing::warn!(%error, session = %session, turn, "could not take a checkpoint");
@@ -212,6 +222,9 @@ impl Supervisor {
             &spec.workspace_path,
             0,
             &format!("before: {}", spec.prompt),
+            // Turn zero *is* the starting state; there is nothing earlier to
+            // have been handed.
+            None,
         );
         self.run_turn(session, driver, spec, None);
         Ok(())
@@ -403,6 +416,17 @@ async fn pump(
         turn: turns_so_far,
         ..ParseState::default()
     };
+    // Captured before the agent runs, so a file the user edited in the terminal
+    // between turns counts as part of what the agent was handed rather than as
+    // part of what it did (§3.3 N8). Failing to take it is not a reason to stop
+    // a turn, so it is logged and the turn carries on without it.
+    let turn_start = match checkpoint::begin(workspace_path, session, turns_so_far + 1) {
+        Ok(start) => Some(start),
+        Err(error) => {
+            tracing::warn!(%error, session = %session, "could not capture the turn's starting state");
+            None
+        }
+    };
     let mut reported: Option<(SessionState, Option<String>)> = None;
     // What the agent last said, which is the useful label for the checkpoint
     // taken at the end of the turn.
@@ -431,7 +455,13 @@ async fn pump(
                         } else {
                             last_text.clone()
                         };
-                        context.checkpoint(session, workspace_path, *turn, &label);
+                        context.checkpoint(
+                            session,
+                            workspace_path,
+                            *turn,
+                            &label,
+                            turn_start.as_ref(),
+                        );
                         last_text.clear();
                     }
                     _ => {}

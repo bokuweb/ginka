@@ -10,6 +10,13 @@
 //! of* that turn, and a total across sessions is the sum of each one's last
 //! word — not of every row, which would count the same tokens once per turn.
 
+pub mod pricing;
+
+pub use pricing::{
+    CostQuality, DaySlice, ModelRate, ModelSlice, PlanUsage, PlanWindow, RateTable, TokenTotals,
+    UsageEvent, UsageSummary, summarize,
+};
+
 use anyhow::Result;
 use ginka_protocol::model::{UsageRow, UsageTotals};
 use ginka_protocol::{SessionId, Usage};

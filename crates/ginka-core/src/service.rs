@@ -520,29 +520,29 @@ impl Service {
                         "a comment with nothing in it says nothing",
                     ));
                 }
-                crate::review::add(&self.conn(), &workspace, &path, line, side, &text, now())
+                crate::comments::add(&self.conn(), &workspace, &path, line, side, &text, now())
                     .map_err(failed)?;
                 Ok(Response::Ack)
             }
             Request::ListReviewComments { workspace } => Ok(Response::ReviewComments {
-                comments: crate::review::list(&self.conn(), &workspace).map_err(failed)?,
+                comments: crate::comments::list(&self.conn(), &workspace).map_err(failed)?,
             }),
             Request::RemoveReviewComment { comment } => {
-                if !crate::review::remove(&self.conn(), &comment).map_err(failed)? {
+                if !crate::comments::remove(&self.conn(), &comment).map_err(failed)? {
                     return Err(RpcError::not_found(format!("no comment with id {comment}")));
                 }
                 Ok(Response::Ack)
             }
             Request::SendReviewComments { workspace, session } => {
-                let comments = crate::review::list(&self.conn(), &workspace).map_err(failed)?;
+                let comments = crate::comments::list(&self.conn(), &workspace).map_err(failed)?;
                 if comments.is_empty() {
                     return Err(RpcError::failed("there are no comments to send"));
                 }
-                let message = crate::review::compose(&comments);
+                let message = crate::comments::compose(&comments);
                 self.send_message(&session, message)?;
                 // Cleared only once the agent has them: a batch that vanished
                 // into a failed send would be a review done twice.
-                crate::review::clear(&self.conn(), &workspace).map_err(failed)?;
+                crate::comments::clear(&self.conn(), &workspace).map_err(failed)?;
                 Ok(Response::Ack)
             }
             Request::ListCheckpoints { workspace } => {
@@ -705,10 +705,13 @@ impl Service {
         checkpoint::take(
             &self.conn(),
             &worktree.path,
-            &checkpoint.workspace,
-            &checkpoint.session,
-            checkpoint.turn,
+            checkpoint::TurnRef {
+                workspace: &checkpoint.workspace,
+                session: &checkpoint.session,
+                turn: checkpoint.turn,
+            },
             &format!("before restoring: {}", checkpoint.label),
+            None,
             now(),
         )
         .map_err(failed)?;

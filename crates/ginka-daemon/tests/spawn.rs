@@ -90,11 +90,13 @@ fn a_stale_handshake_is_replaced_rather_than_trusted() {
     ginka_daemon::handshake::write(
         &home.paths.daemon_handshake(),
         &Handshake {
+            protocol_version: ginka_protocol::envelope::PROTOCOL_VERSION,
             // Binding port 1 needs privileges, so nothing is listening there.
             port: 1,
             token: "stale".into(),
             pid: 999_999,
             version: "0.0.0".into(),
+            epoch: 1,
         },
     )
     .unwrap();

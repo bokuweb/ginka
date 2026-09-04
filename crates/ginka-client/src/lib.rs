@@ -18,6 +18,7 @@ use async_tungstenite::tungstenite::Message;
 use async_tungstenite::tungstenite::client::IntoClientRequest;
 use async_tungstenite::tungstenite::http::HeaderValue;
 use futures_util::StreamExt;
+use ginka_protocol::envelope::PROTOCOL_VERSION;
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{
     ClientMessage, DaemonEvent, Handshake, RequestId, RpcError, Seq, ServerMessage,
@@ -34,6 +35,10 @@ pub struct Event {
     pub seq: Seq,
     pub payload: DaemonEvent,
 }
+
+pub mod cursor;
+
+pub use cursor::{Delivery, EventCursor};
 
 /// Where a reconnecting client resumes the event stream from.
 #[derive(Debug, Clone, Copy, Default)]
@@ -84,10 +89,38 @@ impl Client {
             .context("the daemon refused the connection")?;
         let (mut sink, mut incoming) = socket.split();
 
-        // The daemon greets an authenticated connection before anything else,
-        // and the greeting carries the position the stream is at.
+        // Nothing is asked before the hello: the daemon answers it with the
+        // contract it speaks, which run it is, and the position the stream is
+        // at. A version mismatch is refused by name rather than half-working.
+        sink.send(Message::Text(
+            serde_json::to_string(&ClientMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                token: handshake.token.clone(),
+            })
+            .context("encoding the hello")?
+            .into(),
+        ))
+        .await
+        .context("sending the hello")?;
+
         let (version, current_seq) = match next_message(&mut incoming).await {
-            Some(ServerMessage::Hello { version, seq }) => (version, seq),
+            Some(ServerMessage::Welcome {
+                protocol_version,
+                version,
+                epoch: _,
+                seq,
+            }) => {
+                if protocol_version != PROTOCOL_VERSION {
+                    return Err(anyhow!(
+                        "this build speaks protocol {PROTOCOL_VERSION} and the daemon speaks \
+                         {protocol_version}; one of them needs updating"
+                    ));
+                }
+                (version, seq)
+            }
+            Some(ServerMessage::Rejected { reason }) => {
+                return Err(anyhow!("the daemon refused the connection: {reason:?}"));
+            }
             other => {
                 return Err(anyhow!(
                     "the daemon did not greet the connection: {other:?}"
@@ -143,7 +176,7 @@ impl Client {
                                 tracing::warn!(oldest, "missed events; a re-read is needed");
                                 resync_needed.store(true, Ordering::Relaxed);
                             }
-                            ServerMessage::Hello { .. } => {}
+                            ServerMessage::Welcome { .. } | ServerMessage::Rejected { .. } => {}
                         }
                     }
                     // The socket is gone: fail everything still waiting rather

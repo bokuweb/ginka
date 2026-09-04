@@ -8,10 +8,9 @@ Guidance for AI coding agents (and humans) working in this repository.
 
 It is a native reimplementation of what [band-app/band](https://github.com/band-app/band) does — manage many coding agents across many projects and git worktrees, with chat, terminal, diff review and status in one window — replacing Band's Electron + local Node server with a single Rust binary plus a background daemon.
 
-Two other projects inform the design:
+[Orca](https://www.onorca.dev/) informs the interaction design: prompt fan-out across worktrees, diff-line comments batched back to the agent, click-an-element design mode.
 
-- [Orca](https://www.onorca.dev/) — interaction ideas: prompt fan-out across worktrees, diff-line comments batched back to the agent, click-an-element design mode.
-- [egoist/waku](https://github.com/egoist/waku) — the technical blueprint: Rust + GPUI, client/daemon split over WebSocket RPC, per-provider drivers, git-backed conversation checkpoints, local SQLite.
+**Ginka is written here.** Other clients in this space are worth reading for behaviour and for the edge cases they have already hit, and worth looking at for how they render. No code from any of them is copied, ported or paraphrased into this repository — see the roadmap's R9 and its decision log.
 
 **Read [`docs/roadmap.md`](docs/roadmap.md) before starting any non-trivial work.** It holds the architecture, the crate layout, the data model, the milestone plan and the open decisions. This file is the short version; the roadmap is authoritative.
 
@@ -39,6 +38,22 @@ Two other projects inform the design:
 
 What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
 
+**The domain layer for N1–N14 has landed ahead of its milestones** (roadmap §3.3), test-first and with no UI on top of it yet:
+
+| Module | What it decides |
+| --- | --- |
+| `ginka-protocol::provider` | provider kinds, access modes, the model/effort/tier vocabulary, and when an option change forces a restart |
+| `ginka-protocol::session` | the two title fields and their precedence |
+| `ginka-core::driver` | the session traits, the steer-or-queue policy, and `apply_session_options` |
+| `ginka-core::composer` | completion triggers, provider+disk command merge, the bounded `@file` index |
+| `ginka-core::checkpoint` | three refs per turn, turn diffs, rewind |
+| `ginka-core::review` | diffs by source, including "this turn" |
+| `ginka-core::commit` | the cheap-tier policy, the prompt, the commit path |
+| `ginka-core::transcript` | sessions, messages and daemon-side search |
+| `ginka-core::skills`, `::blob`, `::attachment`, `::usage` | the skill library, image externalisation, uploads, cost and plan headroom |
+
+`ginka-core::driver::testing::ScriptedSession` is how session behaviour is tested — never a live vendor CLI.
+
 ## Commands
 
 ```bash
@@ -60,6 +75,9 @@ cargo run -p ginka-cli -- mcp                   # serve those shapes to an agent
 
 cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```
+
+`cargo clippy`/`cargo test` on the whole workspace also builds the GPUI app; the domain crates alone are
+`cargo test -p ginka-core -p ginka-protocol`, which is the fast loop.
 
 `GINKA_HOME` overrides `~/.ginka`; point it at a temp directory rather than testing against your real state. `GINKA_LOG` sets the tracing filter.
 
@@ -101,7 +119,7 @@ These are load-bearing. Violating them creates work that has to be undone.
 ## UI stack
 
 - **Linked:** [`gpui-component`](https://github.com/longbridge/gpui-component) — dock layout (resizable panels, draggable tabs), virtualized list/table, `CodeEditor` with tree-sitter + LSP, markdown, charts, sidebar, webview.
-- **Design reference, not a dependency:** [`bezel`](https://bezel.gallery/) (MIT, [crabtalk/bezel](https://github.com/crabtalk/bezel)). Where it is genuinely ahead — the glass/vibrancy theme, animated agent status orbs, composer slash-command and link handling, motion helpers — **port the code with attribution**. Do not add it to `Cargo.toml`; see rule 9.
+- **Design reference, not a dependency:** [`bezel`](https://bezel.gallery/) ([crabtalk/bezel](https://github.com/crabtalk/bezel)). Where it is genuinely ahead — the glass/vibrancy theme, animated agent status orbs, composer slash-command and link handling, motion helpers — **look at it and build ours**. Its licence would permit copying; we still do not, and its code targets a different `gpui` fork anyway. Do not add it to `Cargo.toml`; see rule 9.
 - **Ours by design:** agent status glyphs, the glass theme layer, transcript event views (tool cards, reasoning, plan approval, ask-user, diff sidecars), and the terminal view. `docs/ui.md` §5.
 - Before writing any widget, check `gpui-component`'s gallery for an existing one.
 
@@ -111,8 +129,9 @@ These are load-bearing. Violating them creates work that has to be undone.
 - **`gpui` comes in transitively via `gpui-component`.** Bump the toolkit, never GPUI directly, and do it as its own PR.
 - **Errors:** `anyhow` at binary boundaries, typed errors (`thiserror`) inside `ginka-core` and `ginka-protocol`.
 - **Async:** `smol` and GPUI's executor. Do not introduce a second reactor without a note in the roadmap's decision log.
-- **Tests:** every bug fix lands with a regression test. Agent-session behaviour is tested against the fake-agent test binary, never against a live vendor CLI.
+- **Tests:** test-first for anything with a decision in it — the test says what the rule is, and the awkward cases (a refused steer, a hand edit between turns, an unpriced model) are the point. Every bug fix lands with a regression test. Agent-session behaviour is tested against `ScriptedSession`, never a live vendor CLI; git behaviour against a real repository in a temp directory (`crates/ginka-core/tests/support`).
 - **i18n:** user-visible strings go through `rust-i18n`. `en` and `ja` are both maintained.
+- **a11y is a rule, not a polish pass.** Every control reachable by mouse is reachable by keyboard with visible focus; decorative animation honours the system reduce-motion setting; nothing encodes meaning in colour, hover or motion alone. Roadmap §6.4.
 - **English in the repository.** Code, comments, docs, commit messages and pull requests are written in English, no matter what language the conversation that produced them was in.
 - **Commits and pull requests:** imperative subject, explain *why* in the body. Reference the roadmap milestone when the change advances one. A PR description says what changed and what it is for, in the same voice as the commit.
 - **Comments are rustdoc.** Every public item — module, type, trait, function, field, variant — carries a `///` comment; every crate and module root carries a `//!` header saying what lives there and what it owns. Document what a caller must know: invariants, panics, errors, units, and the constraint that made the code look the way it does (why the workspace id is derived from `name`, why a poll is throttled). Do not restate what the signature already says, and do not leave a public item undocumented because it looks obvious.
@@ -121,5 +140,6 @@ These are load-bearing. Violating them creates work that has to be undone.
 
 - When a change alters architecture, data model, or scope, **update `docs/roadmap.md` in the same change** — including the decision log at the bottom. When it alters layout, tokens or component choices, update `docs/ui.md`.
 - Do not silently expand scope. The roadmap's §3.2 non-goals and the milestone ordering are deliberate; if something seems missing, it is probably deferred on purpose.
-- Prefer reading Band's and waku's source for prior art before designing from scratch — both are open and both have already hit the edge cases (worktree sync, terminal reattach, session resume).
+- Prefer reading prior art for behaviour before designing from scratch — Band and the other open agent clients have already hit the edge cases (worktree sync, terminal reattach, session resume). **Read them; write our own.** Take the requirement away from the reading and implement it here; do not copy, port or paraphrase a file with it open. Most of that prior art is GPL-3.0, so copying would settle the licence question (roadmap Q3) by accident — but the rule holds for permissively licensed code too, because an implementation we did not write is one we cannot debug.
+- The requirements that constrain interfaces live in roadmap §3.3 as N1–N16. If you are about to design something that sounds like one of them — steering, session options, checkpoints, attachments, titles, updates — read that row first.
 - Keep this file and `CLAUDE.md` truthful. If you add commands, add them here once they actually work.

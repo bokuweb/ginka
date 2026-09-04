@@ -9,6 +9,7 @@
 //! can be exercised against a throwaway repository in a temporary directory.
 
 use anyhow::{Context, Result, bail};
+use std::ffi::OsStr;
 
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
@@ -1263,4 +1264,105 @@ prunable
         );
         assert_eq!(parse_grep_line("nothing useful"), None);
     }
+}
+
+/// A `git` invocation bound to one directory.
+///
+/// The functions above answer a question each and build their own commands.
+/// The checkpoint, review and commit paths instead run sequences of plumbing
+/// against the same repository — often with a temporary index or a fixed
+/// identity in the environment — so they share this runner rather than each
+/// spelling out `Command::new("git")`.
+#[derive(Debug, Clone)]
+pub struct Git {
+    cwd: PathBuf,
+}
+
+impl Git {
+    pub fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self { cwd: cwd.into() }
+    }
+
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
+    /// Run git and return its trimmed stdout, failing on a non-zero exit.
+    pub fn run<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<String> {
+        match self.try_run(args, &[])? {
+            Outcome::Ok(stdout) => Ok(stdout),
+            Outcome::Failed { status, stderr } => {
+                bail!("git {} failed ({status}): {stderr}", describe(args))
+            }
+        }
+    }
+
+    /// Run git with extra environment — a temporary index, a fixed identity.
+    pub fn run_with_env<S: AsRef<OsStr>>(
+        &self,
+        args: &[S],
+        env: &[(&str, &OsStr)],
+    ) -> Result<String> {
+        match self.try_run(args, env)? {
+            Outcome::Ok(stdout) => Ok(stdout),
+            Outcome::Failed { status, stderr } => {
+                bail!("git {} failed ({status}): {stderr}", describe(args))
+            }
+        }
+    }
+
+    /// Run git, treating a non-zero exit as an answer rather than an error.
+    /// `rev-parse --verify` on a ref that does not exist is a question, not a
+    /// failure.
+    pub fn query<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<Option<String>> {
+        Ok(match self.try_run(args, &[])? {
+            Outcome::Ok(stdout) => Some(stdout),
+            Outcome::Failed { .. } => None,
+        })
+    }
+
+    /// Run git and hand back its exit code with its output, for the commands
+    /// where a non-zero status is part of the answer (`diff --no-index` exits
+    /// 1 when it finds a difference).
+    pub fn run_lenient<S: AsRef<OsStr>>(&self, args: &[S]) -> Result<(i32, String)> {
+        Ok(match self.try_run(args, &[])? {
+            Outcome::Ok(stdout) => (0, stdout),
+            Outcome::Failed { status, stderr: _ } => (status, String::new()),
+        })
+    }
+
+    fn try_run<S: AsRef<OsStr>>(&self, args: &[S], env: &[(&str, &OsStr)]) -> Result<Outcome> {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(&self.cwd);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command
+            .output()
+            .with_context(|| format!("running git {} in {}", describe(args), self.cwd.display()))?;
+        if output.status.success() {
+            Ok(Outcome::Ok(
+                String::from_utf8_lossy(&output.stdout)
+                    .trim_end()
+                    .to_string(),
+            ))
+        } else {
+            Ok(Outcome::Failed {
+                status: output.status.code().unwrap_or(-1),
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            })
+        }
+    }
+}
+
+enum Outcome {
+    Ok(String),
+    Failed { status: i32, stderr: String },
+}
+
+fn describe<S: AsRef<OsStr>>(args: &[S]) -> String {
+    args.iter()
+        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }

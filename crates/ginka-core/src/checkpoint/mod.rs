@@ -10,11 +10,15 @@
 //! never be the thing that loses work.
 
 use crate::git;
+
+pub mod turns;
+
 use anyhow::Result;
 use ginka_protocol::model::Checkpoint;
 use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
 use rusqlite::Connection;
 use std::path::Path;
+pub use turns::{Checkpoints, TurnId, TurnStart};
 
 /// The longest label kept for the rewind menu.
 const LABEL_LIMIT: usize = 80;
@@ -28,16 +32,49 @@ pub fn reference(id: &CheckpointId) -> String {
     format!("refs/ginka/checkpoints/{}", id.0)
 }
 
+/// Capture the state a turn is about to be handed.
+///
+/// Called before the agent runs, which is the whole point: a file the user
+/// edited in the terminal between turns is part of what the agent was *given*,
+/// not part of what it did, and only a snapshot taken at this moment can tell
+/// the two apart (`docs/roadmap.md` §3.3 N8). Failing to take it is logged by
+/// the caller and the turn carries on — losing the ability to attribute a diff
+/// is not a reason to stop an agent.
+pub fn begin(workspace_path: &Path, session: &SessionId, turn: u32) -> Result<TurnStart> {
+    Checkpoints::new(workspace_path).capture_turn_start(&turn_id(session, turn))
+}
+
+/// The turn a checkpoint belongs to, in the ref namespace's own terms.
+pub fn turn_id(session: &SessionId, turn: u32) -> TurnId {
+    TurnId::new(&session.0, turn as usize)
+}
+
+/// Which turn of which session, in which workspace, a checkpoint belongs to.
+///
+/// Grouped rather than passed as three positional arguments: they travel
+/// together everywhere and a call site reads better naming them than counting
+/// them.
+#[derive(Debug, Clone, Copy)]
+pub struct TurnRef<'a> {
+    pub workspace: &'a WorkspaceId,
+    pub session: &'a SessionId,
+    pub turn: u32,
+}
+
 /// Snapshot a worktree and record the checkpoint.
 pub fn take(
     conn: &Connection,
     workspace_path: &Path,
-    workspace: &WorkspaceId,
-    session: &SessionId,
-    turn: u32,
+    at: TurnRef<'_>,
     label: &str,
+    start: Option<&TurnStart>,
     now: i64,
 ) -> Result<Checkpoint> {
+    let TurnRef {
+        workspace,
+        session,
+        turn,
+    } = at;
     let id = CheckpointId(uuid::Uuid::new_v4().simple().to_string());
     let label = trim_label(label);
     let commit = git::snapshot(
@@ -56,6 +93,15 @@ pub fn take(
         created_at: now,
     };
     insert(conn, &checkpoint)?;
+    if let Some(start) = start {
+        // Written beside the ending commit rather than instead of it: the pair
+        // is what makes "what did this turn change" answerable without
+        // attributing a hand edit made between turns to the agent (§3.3 N8).
+        conn.execute(
+            "UPDATE checkpoints SET start_commit = ?2, base_commit = ?3 WHERE id = ?1",
+            rusqlite::params![checkpoint.id.0, start.commit, start.base_commit],
+        )?;
+    }
     Ok(checkpoint)
 }
 
@@ -261,10 +307,13 @@ mod tests {
             let taken = take(
                 &conn,
                 &root,
-                &workspace,
-                &SessionId("s-1".into()),
-                index as u32,
+                TurnRef {
+                    workspace: &workspace,
+                    session: &SessionId("s-1".into()),
+                    turn: index as u32,
+                },
                 id,
+                None,
                 100 + index as i64,
             )
             .unwrap();

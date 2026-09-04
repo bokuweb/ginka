@@ -1,319 +1,269 @@
-//! Comments left on a diff, and the message they become.
+//! Diffs, addressed by source.
 //!
-//! Orca's idea, and the reason the diff carries a line number on every line:
-//! re-prompting an agent from scratch after reading its work throws away the
-//! reading. Marking the three places that are wrong and sending those is a
-//! better feedback loop, and it is cheap on top of a diff view.
-//!
-//! Comments are anchored to a file and a line rather than to a diff, because
-//! the diff is regenerated on every read and its hunks move while "line 42 of
-//! `src/main.rs`" stays what the reader meant. They belong to the workspace
-//! rather than the session: an agent can finish, the user can read the diff
-//! over lunch, and the comments are still about the same worktree.
+//! The review surface never asks "what does `git status` say" — it asks a
+//! question with a subject: what did *this turn* change, what is staged, what
+//! has this branch done since it forked. `git status` can answer only one of
+//! those, and the one it answers is not the one the review loop asks most.
+//! See `docs/roadmap.md` §3.3 N7.
 
-use anyhow::Result;
-use ginka_protocol::WorkspaceId;
-use ginka_protocol::model::{DiffSide, ReviewComment};
-use rusqlite::Connection;
+use anyhow::{Context, Result};
+use std::collections::BTreeMap;
+use std::path::Path;
 
-/// The stored value for a side.
-fn side_str(side: DiffSide) -> &'static str {
-    match side {
-        DiffSide::Old => "old",
-        DiffSide::New => "new",
+use crate::checkpoint::TurnId;
+use crate::git::Git;
+
+/// Git's well-known empty tree, used as the parent of a root commit.
+const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+/// How much of an untracked file is inlined into a patch before it is cut. A
+/// review is read by a person and sent to an agent; neither wants a megabyte
+/// of generated fixture.
+const MAX_UNTRACKED_PATCH_BYTES: usize = 512 * 1024;
+
+/// Which change set to render.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DiffSource {
+    /// What one agent turn changed, from its checkpoints.
+    Turn(TurnId),
+    /// Everything not committed: staged and unstaged together, plus untracked.
+    Uncommitted,
+    /// Working tree against the index.
+    Unstaged,
+    /// Index against `HEAD`.
+    Staged,
+    /// One commit against its parent.
+    Committed(String),
+    /// Everything this branch has done since it forked from `base`.
+    Branch { base: String },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    TypeChanged,
+    Unknown,
+}
+
+impl ChangeStatus {
+    fn parse(code: &str) -> Self {
+        match code.chars().next() {
+            Some('A') => Self::Added,
+            Some('M') => Self::Modified,
+            Some('D') => Self::Deleted,
+            Some('R') => Self::Renamed,
+            Some('T') => Self::TypeChanged,
+            _ => Self::Unknown,
+        }
     }
 }
 
-/// Read a stored side, defaulting to the new one.
-///
-/// A comment is almost always about the file as it now is, and a row this
-/// build cannot read is better shown against the current file than dropped.
-fn side_from(value: &str) -> DiffSide {
-    match value {
-        "old" => DiffSide::Old,
-        _ => DiffSide::New,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileChange {
+    pub path: String,
+    pub status: ChangeStatus,
+    /// `None` for a binary file, where lines are not the unit.
+    pub insertions: Option<u32>,
+    pub deletions: Option<u32>,
+    pub is_binary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Review {
+    pub source: DiffSource,
+    /// Sorted by path, so a re-render never reshuffles the list under a
+    /// reader who is part-way down it.
+    pub files: Vec<FileChange>,
+    pub patch: String,
+}
+
+impl Review {
+    pub fn insertions(&self) -> u32 {
+        self.files.iter().filter_map(|file| file.insertions).sum()
+    }
+
+    pub fn deletions(&self) -> u32 {
+        self.files.iter().filter_map(|file| file.deletions).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.files.is_empty()
     }
 }
 
-/// Leave a comment.
-pub fn add(
-    conn: &Connection,
-    workspace: &WorkspaceId,
-    path: &str,
-    line: Option<u32>,
-    side: DiffSide,
-    text: &str,
-    now: i64,
-) -> Result<ReviewComment> {
-    let comment = ReviewComment {
-        id: uuid::Uuid::new_v4().simple().to_string(),
-        workspace: workspace.clone(),
-        path: path.to_string(),
-        line,
-        side,
-        text: text.trim().to_string(),
-        created_at: now,
+/// Build the change set for one source.
+pub fn review(worktree: &Path, source: &DiffSource) -> Result<Review> {
+    let git = Git::new(worktree);
+    let (revs, include_untracked) = revisions_for(&git, source)?;
+
+    let Some(revs) = revs else {
+        // A turn that was never checkpointed has no range to diff, which is an
+        // empty answer rather than an error: the session may simply predate
+        // checkpointing.
+        return Ok(Review {
+            source: source.clone(),
+            files: Vec::new(),
+            patch: String::new(),
+        });
     };
-    conn.execute(
-        "INSERT INTO review_comments (id, workspace_id, path, line, side, text, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            comment.id,
-            comment.workspace.0,
-            comment.path,
-            comment.line,
-            side_str(comment.side),
-            comment.text,
-            comment.created_at,
-        ],
-    )?;
-    Ok(comment)
-}
 
-/// Every comment waiting in a workspace, in reading order.
-///
-/// By file and then by line, which is the order someone reads a diff in and
-/// therefore the order the agent should be given them in.
-pub fn list(conn: &Connection, workspace: &WorkspaceId) -> Result<Vec<ReviewComment>> {
-    let mut statement = conn.prepare(
-        "SELECT id, workspace_id, path, line, side, text, created_at
-           FROM review_comments
-          WHERE workspace_id = ?1
-          ORDER BY path, line, created_at",
-    )?;
-    let rows = statement.query_map([&workspace.0], |row| {
-        Ok(ReviewComment {
-            id: row.get(0)?,
-            workspace: WorkspaceId(row.get(1)?),
-            path: row.get(2)?,
-            line: row.get(3)?,
-            side: side_from(&row.get::<_, String>(4)?),
-            text: row.get(5)?,
-            created_at: row.get(6)?,
-        })
-    })?;
-    Ok(rows.collect::<Result<_, _>>()?)
-}
+    let mut files = tracked_changes(&git, &revs)?;
+    let mut patch = tracked_patch(&git, &revs)?;
 
-/// Take one comment back.
-pub fn remove(conn: &Connection, id: &str) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM review_comments WHERE id = ?1", [id])? > 0)
-}
-
-/// Forget every comment in a workspace, once they have been sent.
-pub fn clear(conn: &Connection, workspace: &WorkspaceId) -> Result<usize> {
-    Ok(conn.execute(
-        "DELETE FROM review_comments WHERE workspace_id = ?1",
-        [&workspace.0],
-    )?)
-}
-
-/// The message a batch of comments becomes.
-///
-/// One message rather than one per comment: an agent given them together can
-/// see that three of them are the same mistake, and a turn per comment is
-/// three times the context and three times the cost.
-///
-/// The file and line are written the way a person would write them, because
-/// that is what every agent has been trained to read — `src/main.rs:42` is
-/// unambiguous to a model and to the human reading the transcript later.
-pub fn compose(comments: &[ReviewComment]) -> String {
-    if comments.is_empty() {
-        return String::new();
+    if include_untracked {
+        for path in untracked_paths(&git)? {
+            let (change, file_patch) = untracked_change(worktree, &path)?;
+            files.push(change);
+            patch.push_str(&file_patch);
+        }
     }
 
-    let mut message = String::from(
-        "I read the diff and left comments. Please address each one, and say what you \
-         changed for each:\n\n",
-    );
-    let mut current = "";
-    for comment in comments {
-        if comment.path != current {
-            current = &comment.path;
-            message.push_str(&format!("{}\n", comment.path));
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(Review {
+        source: source.clone(),
+        files,
+        patch,
+    })
+}
+
+/// The revision arguments for a source, and whether untracked files count as
+/// part of it. `Ok(None)` means "there is nothing to compare".
+fn revisions_for(git: &Git, source: &DiffSource) -> Result<(Option<Vec<String>>, bool)> {
+    Ok(match source {
+        // Working-tree sources: untracked files are part of the answer,
+        // because a file the agent created is a change whether or not anyone
+        // has told git about it yet.
+        DiffSource::Uncommitted => (Some(vec!["HEAD".into()]), true),
+        DiffSource::Unstaged => (Some(Vec::new()), true),
+        DiffSource::Staged => (Some(vec!["--cached".into()]), false),
+        DiffSource::Committed(rev) => {
+            let parent = git
+                .query(&["rev-parse", "--verify", "--quiet", &format!("{rev}^")])?
+                .unwrap_or_else(|| EMPTY_TREE.to_string());
+            (Some(vec![parent, rev.clone()]), false)
         }
-        match comment.line {
-            Some(line) => {
-                message.push_str(&format!("  {}:{line} — {}\n", comment.path, comment.text))
+        DiffSource::Branch { base } => {
+            let Some(fork) = git.query(&["merge-base", base, "HEAD"])? else {
+                return Ok((None, false));
+            };
+            (Some(vec![fork]), true)
+        }
+        DiffSource::Turn(turn) => {
+            let start = git.query(&["rev-parse", "--verify", "--quiet", &turn.start_ref()])?;
+            let end = git.query(&["rev-parse", "--verify", "--quiet", &turn.end_ref()])?;
+            match (start, end) {
+                (Some(start), Some(end)) => (Some(vec![start, end]), false),
+                _ => (None, false),
             }
-            None => message.push_str(&format!("  {} — {}\n", comment.path, comment.text)),
         }
-    }
-    message
+    })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::db;
-
-    fn workspace() -> WorkspaceId {
-        WorkspaceId("comet/harbor".into())
+fn tracked_changes(git: &Git, revs: &[String]) -> Result<Vec<FileChange>> {
+    let mut counts: BTreeMap<String, (Option<u32>, Option<u32>)> = BTreeMap::new();
+    for line in run_diff(git, revs, &["--numstat"])?.lines() {
+        let mut parts = line.split('\t');
+        let (Some(insertions), Some(deletions), Some(path)) =
+            (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        // Git writes "-" for both counts of a binary file.
+        counts.insert(
+            path.to_string(),
+            (insertions.parse().ok(), deletions.parse().ok()),
+        );
     }
 
-    fn comment(path: &str, line: Option<u32>, text: &str) -> ReviewComment {
-        ReviewComment {
-            id: format!("{path}:{line:?}"),
-            workspace: workspace(),
-            path: path.into(),
-            line,
-            side: DiffSide::New,
-            text: text.into(),
-            created_at: 0,
+    let mut files = Vec::new();
+    for line in run_diff(git, revs, &["--name-status"])?.lines() {
+        let Some((code, path)) = line.split_once('\t') else {
+            continue;
+        };
+        let path = path.to_string();
+        let (insertions, deletions) = counts.remove(&path).unwrap_or((None, None));
+        files.push(FileChange {
+            path,
+            status: ChangeStatus::parse(code),
+            insertions,
+            deletions,
+            is_binary: insertions.is_none() && deletions.is_none(),
+        });
+    }
+    Ok(files)
+}
+
+fn tracked_patch(git: &Git, revs: &[String]) -> Result<String> {
+    run_diff(git, revs, &[])
+}
+
+fn run_diff(git: &Git, revs: &[String], extra: &[&str]) -> Result<String> {
+    let mut args: Vec<String> = vec!["diff".into(), "--no-color".into(), "--no-renames".into()];
+    args.extend(extra.iter().map(|arg| (*arg).to_string()));
+    args.extend(revs.iter().cloned());
+    git.run(&args).context("running git diff")
+}
+
+fn untracked_paths(git: &Git) -> Result<Vec<String>> {
+    // `--exclude-standard` is what keeps `.gitignore`d build output and
+    // secrets out of every review.
+    let listing = git.run(&["ls-files", "--others", "--exclude-standard"])?;
+    Ok(listing.lines().map(str::to_string).collect())
+}
+
+/// Untracked files have no counterpart in the index, so git cannot diff them
+/// against anything; the patch is synthesised instead of shelling out to
+/// `diff --no-index`, which would need a platform-specific null device.
+fn untracked_change(worktree: &Path, path: &str) -> Result<(FileChange, String)> {
+    let bytes = std::fs::read(worktree.join(path))
+        .with_context(|| format!("reading untracked file {path}"))?;
+    let is_binary = bytes.contains(&0);
+    let header = format!("diff --git a/{path} b/{path}\nnew file mode 100644\n");
+
+    if is_binary {
+        return Ok((
+            FileChange {
+                path: path.to_string(),
+                status: ChangeStatus::Added,
+                insertions: None,
+                deletions: None,
+                is_binary: true,
+            },
+            format!("{header}Binary files /dev/null and b/{path} differ\n"),
+        ));
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let mut body = format!(
+        "--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    let mut truncated = false;
+    for line in &lines {
+        if body.len() + line.len() > MAX_UNTRACKED_PATCH_BYTES {
+            truncated = true;
+            break;
         }
+        body.push('+');
+        body.push_str(line);
+        body.push('\n');
+    }
+    if truncated {
+        body.push_str("+… truncated: the file is too large to show in full\n");
     }
 
-    #[test]
-    fn comments_come_back_in_the_order_a_diff_is_read_in() {
-        // By file and then by line, which is also the order the agent should
-        // be given them in.
-        let conn = db::open_in_memory().unwrap();
-        add(
-            &conn,
-            &workspace(),
-            "src/main.rs",
-            Some(80),
-            DiffSide::New,
-            "later",
-            2,
-        )
-        .unwrap();
-        add(
-            &conn,
-            &workspace(),
-            "src/main.rs",
-            Some(12),
-            DiffSide::New,
-            "earlier",
-            1,
-        )
-        .unwrap();
-        add(
-            &conn,
-            &workspace(),
-            "README.md",
-            Some(1),
-            DiffSide::New,
-            "first file",
-            3,
-        )
-        .unwrap();
-
-        let listed = list(&conn, &workspace()).unwrap();
-        let order: Vec<(&str, Option<u32>)> = listed
-            .iter()
-            .map(|comment| (comment.path.as_str(), comment.line))
-            .collect();
-        assert_eq!(
-            order,
-            vec![
-                ("README.md", Some(1)),
-                ("src/main.rs", Some(12)),
-                ("src/main.rs", Some(80))
-            ]
-        );
-    }
-
-    #[test]
-    fn a_comment_on_a_whole_file_is_allowed() {
-        // People write "this file should not exist".
-        let conn = db::open_in_memory().unwrap();
-        add(
-            &conn,
-            &workspace(),
-            "junk.rs",
-            None,
-            DiffSide::New,
-            "delete this",
-            1,
-        )
-        .unwrap();
-        assert_eq!(list(&conn, &workspace()).unwrap()[0].line, None);
-    }
-
-    #[test]
-    fn comments_belong_to_their_own_workspace() {
-        let conn = db::open_in_memory().unwrap();
-        add(
-            &conn,
-            &workspace(),
-            "a.rs",
-            Some(1),
-            DiffSide::New,
-            "mine",
-            1,
-        )
-        .unwrap();
-        add(
-            &conn,
-            &WorkspaceId("comet/other".into()),
-            "b.rs",
-            Some(1),
-            DiffSide::New,
-            "theirs",
-            1,
-        )
-        .unwrap();
-        assert_eq!(list(&conn, &workspace()).unwrap().len(), 1);
-    }
-
-    #[test]
-    fn a_comment_can_be_taken_back_and_a_batch_cleared() {
-        let conn = db::open_in_memory().unwrap();
-        let kept = add(
-            &conn,
-            &workspace(),
-            "a.rs",
-            Some(1),
-            DiffSide::New,
-            "keep",
-            1,
-        )
-        .unwrap();
-        let regretted = add(
-            &conn,
-            &workspace(),
-            "a.rs",
-            Some(2),
-            DiffSide::New,
-            "oops",
-            1,
-        )
-        .unwrap();
-
-        assert!(remove(&conn, &regretted.id).unwrap());
-        assert!(!remove(&conn, "never-existed").unwrap());
-        assert_eq!(list(&conn, &workspace()).unwrap(), vec![kept]);
-
-        assert_eq!(clear(&conn, &workspace()).unwrap(), 1);
-        assert!(list(&conn, &workspace()).unwrap().is_empty());
-    }
-
-    #[test]
-    fn a_batch_becomes_one_message_grouped_by_file() {
-        // One message rather than one per comment: an agent given them
-        // together can see that three of them are the same mistake.
-        let message = compose(&[
-            comment("src/main.rs", Some(12), "this unwrap can panic"),
-            comment("src/main.rs", Some(48), "same here"),
-            comment("README.md", None, "out of date"),
-        ]);
-
-        assert!(
-            message.contains("src/main.rs:12 — this unwrap can panic"),
-            "{message}"
-        );
-        assert!(message.contains("src/main.rs:48 — same here"), "{message}");
-        assert!(message.contains("README.md — out of date"), "{message}");
-        assert_eq!(
-            message.matches("src/main.rs\n").count(),
-            1,
-            "the file is named once as a heading: {message}"
-        );
-    }
-
-    #[test]
-    fn nothing_to_say_is_no_message_at_all() {
-        assert_eq!(compose(&[]), "");
-    }
+    Ok((
+        FileChange {
+            path: path.to_string(),
+            status: ChangeStatus::Added,
+            insertions: Some(lines.len() as u32),
+            deletions: Some(0),
+            is_binary: false,
+        },
+        format!("{header}{body}"),
+    ))
 }

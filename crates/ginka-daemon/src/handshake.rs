@@ -69,10 +69,12 @@ mod tests {
 
     fn sample(port: u16) -> Handshake {
         Handshake {
+            protocol_version: ginka_protocol::envelope::PROTOCOL_VERSION,
             port,
             token: "secret".into(),
             pid: std::process::id(),
             version: "0.0.0".into(),
+            epoch: 1,
         }
     }
 

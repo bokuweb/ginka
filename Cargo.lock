@@ -2408,6 +2408,7 @@ name = "ginka-core"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "dirs",
  "futures-lite",
@@ -2418,6 +2419,7 @@ dependencies = [
  "rust-i18n",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "smol",
  "tempfile",
  "thiserror 2.0.20",

@@ -1,7 +1,8 @@
 use anyhow::{Context, Result};
+use ginka_protocol::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Settings the UI owns: `~/.ginka/app.json`.
 ///
@@ -73,6 +74,9 @@ pub struct DaemonSettings {
     /// git would otherwise collect. Rewinding is a thing done to recent work:
     /// past this many turns the reader is reading history, not undoing it.
     pub checkpoint_limit: u32,
+    /// Providers the user has switched off. Absent means enabled, so the file
+    /// stays empty until someone actually turns something off.
+    pub disabled_providers: Vec<ProviderKind>,
     /// Per-agent overrides, keyed by driver id (`claude`, `codex`, …).
     ///
     /// A user whose agent CLI is version-managed, behind a wrapper script or
@@ -80,6 +84,46 @@ pub struct DaemonSettings {
     /// for is ignored rather than refused, so a settings file can outlive the
     /// build that reads it.
     pub agents: BTreeMap<String, AgentSettings>,
+}
+
+impl DaemonSettings {
+    pub fn is_enabled(&self, provider: ProviderKind) -> bool {
+        !self.disabled_providers.contains(&provider)
+    }
+
+    /// Enable or disable a provider. Re-enabling removes the entry rather than
+    /// leaving a tombstone, so the file only ever records real choices.
+    pub fn set_enabled(&mut self, provider: ProviderKind, enabled: bool) {
+        if enabled {
+            self.disabled_providers.retain(|kind| *kind != provider);
+        } else if !self.disabled_providers.contains(&provider) {
+            self.disabled_providers.push(provider);
+        }
+    }
+
+    /// Where a provider's CLI actually is, when autodetection cannot find it.
+    ///
+    /// Agent CLIs are installed through version managers, nix profiles and
+    /// plain checkouts; without this, a failed probe is a dead end with no way
+    /// out from inside the app (`docs/roadmap.md` §3.3 N14).
+    pub fn binary_override(&self, provider: ProviderKind) -> Option<&Path> {
+        self.agents
+            .get(provider.as_str())
+            .and_then(|agent| agent.program.as_deref())
+            .map(Path::new)
+    }
+
+    /// `None` clears the override and returns the provider to autodetection.
+    pub fn set_binary_override(&mut self, provider: ProviderKind, path: Option<PathBuf>) {
+        let entry = self
+            .agents
+            .entry(provider.as_str().to_string())
+            .or_default();
+        entry.program = path.map(|path| path.to_string_lossy().into_owned());
+        if entry.program.is_none() && entry.env.is_empty() {
+            self.agents.remove(provider.as_str());
+        }
+    }
 }
 
 /// How to run one agent.
@@ -100,6 +144,7 @@ impl Default for DaemonSettings {
             status_poll_secs: 60,
             retention_days: 30,
             checkpoint_limit: 200,
+            disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
         }
     }

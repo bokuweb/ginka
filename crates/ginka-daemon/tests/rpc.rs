@@ -123,11 +123,13 @@ fn a_stale_handshake_does_not_stop_a_daemon_from_starting() {
     ginka_daemon::handshake::write(
         &paths.daemon_handshake(),
         &Handshake {
+            protocol_version: ginka_protocol::envelope::PROTOCOL_VERSION,
             // Port 1 needs privileges to bind, so nothing is listening on it.
             port: 1,
             token: "stale".into(),
             pid: 999_999,
             version: "0.0.0".into(),
+            epoch: 1,
         },
     )
     .unwrap();

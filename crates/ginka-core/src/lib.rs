@@ -5,11 +5,18 @@
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
 pub mod agent;
+pub mod attachment;
+pub mod blob;
 pub mod checkpoint;
 pub mod commands;
+pub mod comments;
+pub mod commit;
+pub mod composer;
+pub mod daemon;
 pub mod db;
 pub mod diff;
 pub mod driver;
+pub mod events;
 pub mod files;
 pub mod git;
 pub mod i18n;
@@ -23,6 +30,7 @@ pub mod service;
 pub mod session;
 pub mod settings;
 pub mod setup;
+pub mod skills;
 pub mod terminal;
 pub mod usage;
 

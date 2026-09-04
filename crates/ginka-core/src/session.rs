@@ -16,9 +16,10 @@ use rusqlite::{Connection, OptionalExtension as _};
 pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions
-            (id, workspace_id, agent, model, state, title, summary,
-             vendor_session_id, created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            (id, workspace_id, provider, model, state, agent_title,
+             agent_title_is_placeholder, summary, vendor_session_id,
+             created_at, updated_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10)",
         rusqlite::params![
             session.id.0,
             session.workspace.0,
@@ -161,10 +162,15 @@ pub fn transcript(
 }
 
 /// Rename a session. Returns whether there was one to rename.
+/// Rename a session.
+///
+/// Writes the *user's* title column, which is the one that wins: an agent
+/// naming its own session later must not overwrite a name the user typed
+/// (`docs/roadmap.md` §3.3 N5).
 pub fn rename(conn: &Connection, id: &SessionId, title: &str) -> Result<bool> {
     let title = title.trim();
     let updated = conn.execute(
-        "UPDATE sessions SET title = ?1 WHERE id = ?2",
+        "UPDATE sessions SET user_title = ?1 WHERE id = ?2",
         rusqlite::params![(!title.is_empty()).then_some(title), id.0],
     )?;
     Ok(updated > 0)
@@ -219,7 +225,8 @@ pub fn search(
     let pattern = format!("%{}%", query.replace('%', "\\%").replace('_', "\\_"));
 
     let mut statement = conn.prepare(
-        "SELECT e.session_id, s.workspace_id, s.title, e.seq, e.at, e.payload
+        "SELECT e.session_id, s.workspace_id, COALESCE(s.user_title, s.agent_title),
+                  e.seq, e.at, e.payload
            FROM session_events e
            JOIN sessions s ON s.id = e.session_id
           WHERE e.payload LIKE ?1 ESCAPE '\\'
@@ -352,10 +359,12 @@ pub fn mark_orphans_failed(conn: &Connection, now: i64) -> Result<usize> {
     )?)
 }
 
-const SELECT_ALL: &str = "SELECT id, workspace_id, agent, model, state, title, summary, \
+const SELECT_ALL: &str = "SELECT id, workspace_id, provider, model, state, \
+     COALESCE(user_title, agent_title), summary, \
      vendor_session_id, created_at, updated_at FROM sessions";
 const ORDER: &str = "ORDER BY updated_at DESC, created_at DESC";
-const SELECT: &str = "SELECT id, workspace_id, agent, model, state, title, summary, \
+const SELECT: &str = "SELECT id, workspace_id, provider, model, state, \
+     COALESCE(user_title, agent_title), summary, \
      vendor_session_id, created_at, updated_at FROM sessions WHERE id = ?1";
 
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {

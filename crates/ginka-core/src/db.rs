@@ -13,12 +13,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../db/migrations/0001_projects_and_worktrees.sql"),
     ),
     (
-        "0002_sessions_and_checkpoints",
-        include_str!("../../../db/migrations/0002_sessions_and_checkpoints.sql"),
+        "0002_sessions_and_messages",
+        include_str!("../../../db/migrations/0002_sessions_and_messages.sql"),
     ),
     (
-        "0003_session_titles",
-        include_str!("../../../db/migrations/0003_session_titles.sql"),
+        "0003_agent_sessions",
+        include_str!("../../../db/migrations/0003_agent_sessions.sql"),
     ),
     (
         "0004_composer_drafts",

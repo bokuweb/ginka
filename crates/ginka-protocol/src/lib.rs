@@ -18,9 +18,14 @@ pub mod event;
 pub mod handshake;
 pub mod ids;
 pub mod model;
+pub mod provider;
 pub mod rpc;
+pub mod session;
 
-pub use envelope::{ClientMessage, RequestId, RpcError, Seq, ServerMessage};
+pub use envelope::{
+    ClientMessage, HandshakeRejection, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, RequestId,
+    RpcError, Seq, ServerMessage,
+};
 pub use event::{AgentEvent, DaemonEvent, Usage};
 pub use handshake::Handshake;
 pub use ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
@@ -30,4 +35,6 @@ pub use model::{
     Session, SessionMatch, SessionState, SlashCommand, TranscriptEntry, TranscriptPayload,
     UsageRow, UsageTotals, WorkspaceSummary, Worktree,
 };
+pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
 pub use rpc::{Request, Response};
+pub use session::SessionTitle;

@@ -8,10 +8,19 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Overrides discovery with an explicit `host:port`. This is what makes a
+/// daemon running outside the app testable at all.
+pub const DAEMON_ADDRESS_ENV: &str = "GINKA_DAEMON_ADDRESS";
+/// Overrides the token that would have come from the handshake file.
+pub const DAEMON_TOKEN_ENV: &str = "GINKA_DAEMON_TOKEN";
+
 /// The contents of `~/.ginka/daemon.json`.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Handshake {
+    /// The wire contract the daemon speaks. A number rather than the build
+    /// version below, because that is what a client can actually compare.
+    pub protocol_version: u32,
     /// The loopback port the daemon accepted on. Never a wildcard: the daemon
     /// asks the OS for a free port and publishes the one it got.
     pub port: u16,
@@ -21,8 +30,11 @@ pub struct Handshake {
     /// The daemon's process id, so a client can report which process it is
     /// talking to — and a user can kill it.
     pub pid: u32,
-    /// The daemon's version, so a client can refuse a protocol it predates.
+    /// The daemon's build version, for reporting which process is running.
     pub version: String,
+    /// Identifies this daemon *run*. Event sequence numbers are per run, so a
+    /// client that reconnects across a restart must resync rather than resume.
+    pub epoch: u64,
 }
 
 impl Handshake {
@@ -35,6 +47,11 @@ impl Handshake {
     pub fn authorization(&self) -> String {
         format!("Bearer {}", self.token)
     }
+
+    /// Whether this build and that daemon agree about the wire.
+    pub fn speaks_our_protocol(&self) -> bool {
+        self.protocol_version == crate::envelope::PROTOCOL_VERSION
+    }
 }
 
 #[cfg(test)]
@@ -43,10 +60,12 @@ mod tests {
 
     fn handshake() -> Handshake {
         Handshake {
+            protocol_version: crate::envelope::PROTOCOL_VERSION,
             port: 51_234,
             token: "t0ken".into(),
             pid: 42,
             version: "0.0.0".into(),
+            epoch: 1,
         }
     }
 
@@ -58,5 +77,13 @@ mod tests {
     #[test]
     fn the_token_is_presented_as_a_bearer_credential() {
         assert_eq!(handshake().authorization(), "Bearer t0ken");
+    }
+
+    #[test]
+    fn a_daemon_on_another_contract_is_recognised_as_such() {
+        let mut newer = handshake();
+        newer.protocol_version = crate::envelope::PROTOCOL_VERSION + 1;
+        assert!(!newer.speaks_our_protocol());
+        assert!(handshake().speaks_our_protocol());
     }
 }

@@ -80,13 +80,16 @@ impl Daemon {
         let port = listener.local_addr()?.port();
         let listener = async_net::TcpListener::try_from(listener)?;
 
+        let epoch = ginka_core::daemon::new_epoch();
         let handshake = Handshake {
+            protocol_version: ginka_protocol::envelope::PROTOCOL_VERSION,
             port,
             // A v4 uuid is 122 bits of randomness from the OS; the token only
             // has to be unguessable by another local process.
             token: uuid::Uuid::new_v4().simple().to_string(),
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            epoch,
         };
 
         let hub = Arc::new(Hub::new(EVENT_WINDOW));
@@ -132,6 +135,7 @@ impl Daemon {
                             service: self.service.clone(),
                             token: self.handshake.token.clone(),
                             version: self.handshake.version.clone(),
+                            epoch: self.handshake.epoch,
                         };
                         let live = self.live.clone();
                         live.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -301,6 +305,8 @@ struct Connection {
     service: Arc<Mutex<Service>>,
     token: String,
     version: String,
+    /// This daemon run, which a client compares against the cursor it stored.
+    epoch: u64,
 }
 
 impl Connection {
@@ -312,14 +318,6 @@ impl Connection {
         // reader and the event pump never interleave halves of a frame.
         let (outbound, to_write) = async_channel::unbounded::<ServerMessage>();
         let events = self.hub.subscribe();
-
-        outbound
-            .send(ServerMessage::Hello {
-                version: self.version.clone(),
-                seq: self.hub.current_seq(),
-            })
-            .await
-            .ok();
 
         let writing = async move {
             while let Ok(message) = to_write.recv().await {
@@ -452,6 +450,16 @@ impl Connection {
         };
 
         match message {
+            // The version is checked before the token, so a client on the
+            // wrong contract is told that rather than sent chasing a token
+            // problem it does not have.
+            ClientMessage::Hello { .. } => Dispatched::just(ginka_core::daemon::greet(
+                &self.token,
+                self.epoch,
+                self.hub.current_seq(),
+                &self.version,
+                &message,
+            )),
             ClientMessage::Request { id, payload } => {
                 let stop = matches!(payload, Request::Shutdown);
                 let answer = match self.handle(payload).await {
