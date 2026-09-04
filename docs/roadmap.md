@@ -1,6 +1,6 @@
 # Ginka Roadmap
 
-> Status: **M0 landed except the items still unchecked in §5**. This document is the plan the milestones execute against.
+> Status: **in progress**. M0 and M1 are largely landed and M2's daemon, drivers and sessions are in; the remaining gaps are marked below.
 > Last updated: 2026-09-04
 
 ## 1. Vision
@@ -277,7 +277,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [ ] **Visual sign-off against `docs/ui.md` (R8).** Blocked: this environment has neither screen-recording nor accessibility permission, so the window cannot be captured or measured here. Run `cargo run` and look.
 - [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
 - [ ] Motion helpers of our own; 260 ms list reordering
-- [ ] `export_types` binary for the protocol crate
+- [x] `export-types` binary for the protocol crate (`--features export`; the output is a build product and is not committed)
 - [ ] Hot-reload settings on change
 - [ ] Crash handler
 - [ ] `rust-i18n` wired up with `locales/{en,ja}.yml` — §6.4 assumes it and nothing is wired yet; every string added before it lands is one to retrofit
@@ -290,16 +290,18 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 
 Goal: the workspace list from Band's dashboard, fully working, with no agents yet.
 
-- [ ] Project registry: add/remove/rename, `git` vs `plain` kind detection, default-branch probe, labels, reordering
-- [ ] Worktree lifecycle: create (branch from base), remove (incl. detached/locked handling), pin, prune
-- [ ] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
-- [ ] `syncWorktrees` equivalent: reconcile DB against `git worktree list` on a tick, updating `branch` / `head` / `has_origin`
-- [ ] Branch status poller: dirty/conflict/ahead/behind, throttled
+- [x] Project registry: add/remove, `git` vs `plain` kind detection, default-branch probe
+- [ ] Project rename, labels, reordering
+- [x] Worktree lifecycle: create (branch from base), remove (force for dirty), pin
+- [ ] Prune, and the locked-worktree cases `git worktree remove` refuses
+- [x] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
+- [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
+- [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
 - [ ] Virtualize the session list; animate the reorder on the 260 ms curve
-- [x] `ginka project add|list` and `ginka workspace list|new|remove`
-- [ ] Command palette + global keymap infrastructure
-- [ ] Workspace picker / quick switcher
+- [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
+- [x] Command palette + global keymap infrastructure
+- [x] Workspace picker / quick switcher (in the palette)
 
 **Exit criteria:** create and delete 20 worktrees across 3 projects; state survives restart; sync self-heals after manual `git worktree add` outside the app.
 
@@ -309,6 +311,21 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 
 Goal: a real agent runs in a worktree and its transcript renders.
 
+- [x] Extract the daemon: WS RPC server, bearer token, `~/.ginka/daemon.json` discovery, auto-spawn, refusal to start on top of a live daemon
+- [ ] Graceful takeover of a running daemon by a newer build
+- [x] Request/response + server-push event streams with sequence numbers, a bounded replay window, and an explicit `gap` frame when a cursor falls out of it
+- [x] `AgentDriver` trait + `claude` driver (stream-json over stdio), process supervision, cancellation by process group
+- [x] Session persistence: sessions and transcripts as normalized events; resume from the vendor session id
+- [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, paged from a cursor and followed live off the daemon's push stream
+- [ ] Virtualize the transcript list (§6.2's budget is lost here first)
+- [x] Message queueing while the agent is busy
+- [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
+- [x] Agent and model pickers in the composer, and a new-session toggle
+- [x] Composer: `@file` mentions, slash commands from `.claude/commands`, drafts persisted per workspace
+- [x] Plan approval and ask-user-question cards: the events, the `respond_to_agent` request, and the transcript cards that answer them. No shipped driver can interrupt a turn to raise one yet, so the loop is only closed once ACP lands (M5)
+- [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
+- [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
+- [x] `codex` driver (both generations of its JSONL)
 - [ ] Extract the daemon: WS RPC server, auto-spawn + health check + graceful takeover (discovery, the bearer token and the handshake gate are done)
 - [x] Sequence numbers, replay cursors and the epoch that invalidates them, so a reconnecting UI never misses an event and never renders a hole — the policy, tested without a socket
 - [ ] Request/response types and the WebSocket transport that carries them
@@ -325,12 +342,10 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] `codex` driver
 - [ ] **Steering (N1):** inject a follow-up into the running turn where the transport supports it, with the queue as the declared fallback and the outcome surfaced in the transcript
 - [ ] **Session options (N2, N3):** model / reasoning effort / service tier / access mode picker, catalogue discovered from each CLI with a static fallback, and an `apply_options` path that restarts only when the transport cannot absorb the change
-- [ ] **Composer completion (N4):** provider-reported slash commands merged with the on-disk scan; `@file` index bounded
-- [ ] **Session titles (N5):** provider `auto_title` vs user `title`, first-prompt placeholder, replaced silently when the provider's own title lands
 - [ ] **Attachments (N6):** paste/drag images and files into the composer, stored by the daemon and referenced by URI; provider-emitted images externalised to the blob store
-- [ ] **Provider settings (N14):** disable a provider, override its binary path, from `~/.ginka/settings.json` and the settings UI
 - [ ] Protocol handshake carries a version and a wire-size bound (§4.1); daemon-host path rule honoured by every client path
 
+> **The domain layer beneath this landed separately** (`docs/roadmap.md` §3.3): the steer-or-queue policy and the in-session-vs-restart rule (`ginka-core::driver`), the model/effort/tier vocabulary (`ginka-protocol::provider`), the two title fields (`::session`), attachments and the blob store, the bounded event window and the client cursor that refuses to render a hole (`ginka-core::events`, `ginka-client::cursor`). What is left is wiring those into the daemon and the drivers that now exist.
 > **Landed already (domain layer, ahead of the milestone):** N1 steering policy and the driver/session traits (`ginka-core::driver`), N2 the in-session-vs-restart rule, N3 the model/effort/tier vocabulary (`ginka-protocol::provider`), N4 completion triggers, command merge and the bounded file index (`ginka-core::composer`), N5 titles (`ginka-protocol::session`), N6 attachments and the blob store, N14 provider settings.
 >
 > **The driver layer is landed:** the normalized event stream and the one activity shape (`ginka-core::driver::event`, `::activity`), Claude's stream-json parsed into it and the session that speaks it (`::claude`), process supervision with cancellation and a fake agent to test it against (`::process`, `ginka-fake-agent`), and provider detection with the settings override (`::probe`).
@@ -345,6 +360,20 @@ Goal: a real agent runs in a worktree and its transcript renders.
 
 Goal: the loop that makes the app useful daily — read the diff, comment, send back.
 
+- [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
+- [x] Terminal tabs; reattach with replay
+- [ ] Terminal splits, scrollback search
+- [ ] File-path detection in terminal and chat output → click opens the file
+- [ ] Selection → "add to chat" / "add to terminal"
+- [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
+- [x] Intra-line word diff
+- [ ] Split diff
+- [x] Commit: message box under the reviewed files, `ginka commit` / `push`
+- [x] Stage/unstage per file, revert a file; agent-generated commit message still open
+- [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
+- [x] Checkpoints: snapshot the worktree per turn, rewind to any of them
+- [x] Rewinding from the transcript in the UI, confirmed in two steps
+- [x] Pruning old checkpoint refs
 - [ ] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`)
 - [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay + width sync
 - [ ] File-path detection in terminal and chat output → click opens the file
@@ -366,12 +395,18 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 
 Goal: stop context-switching to an editor for reads, and make the app scriptable.
 
-- [ ] File tree, quick open (nucleo), content search (ripgrep-as-library), cross-worktree search
+- [x] File listing with `nucleo` matching, behind `@` in the composer and `ginka files`
+- [x] Content search in a workspace, behind the same box as the file finder and `ginka search`
+- [ ] File tree, quick open, cross-worktree search
+- [x] A files surface: find a file in the worktree and read it (read-only)
 - [ ] Integrate `gpui-component`'s `CodeEditor`: file tabs, editor history (go back/forward), markdown + image preview
 - [ ] LSP wiring through `CodeEditor`: go-to-definition, hover, diagnostics
 - [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea`, per-workspace persistence, panel visibility rules, `docs/ui.md` §3.4 empty state
 - [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron
 - [ ] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`)
+- [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
+- [x] **Fan-out (Orca):** one prompt → N worktrees, from `ginka fan-out` and over MCP
+- [ ] Fan-out's side-by-side comparison view, and merging the winner
 - [ ] MCP server on the daemon exposing the same operations to agents
 - [ ] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
 - [ ] **Transcript search (N10):** daemon-side search across a session's messages, with in-transcript jump
@@ -386,13 +421,15 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 ### M5 — Depth (target: 4 weeks)
 
 - [ ] Cronjobs: scheduler, project/workspace scope, `via: chat | terminal`, overlap-skip, run history
+- [x] Reports: usage events from drivers, cost aggregation by day and agent, retention sweep
+- [ ] On-disk session scanner with watermarks, and aggregation by project/model
 - [ ] Reports: usage events from drivers + on-disk session scanner with watermarks, cost aggregation by day/project/model, retention sweep
 - [ ] **Plan usage meter (N12):** subscription rate-limit windows — percent used and reset time — beside the token and cost totals
 - [ ] **Pricing (N13):** cost from a public rate table, fetched at most daily and cached beside the database; the page states its cost quality rather than guessing silently
 - [ ] Embedded browser surface via `gpui-component`'s `webview` crate: address bar with history autocomplete, find-in-page, per-workspace history with frecency
 - [ ] Design mode: click an element → send HTML/CSS/screenshot to the agent
 - [ ] Notifications + sounds on agent completion / attention needed
-- [ ] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts
+- [x] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts, and plain folders as workspaces
 - [ ] Remaining drivers: `acp`, `opencode`, `gemini`, `cursor`, `amp`
 
 > **Landed already (domain layer):** N12 plan windows and N13 the rate table, pricing and cost quality (`ginka-core::usage`). What remains is collecting the events and drawing the page.
@@ -454,7 +491,7 @@ Budgets alone do not hold, so the mechanism is written down with them. GPUI rebu
 
 ### 6.4 i18n / a11y
 
-`rust-i18n` with `en` and `ja` (retrofitting localization is expensive — this was scheduled for M0 and has not landed; it is now an explicit M0 checkbox).
+`rust-i18n` with `en` and `ja` from M0 (retrofitting localization is expensive). **Done:** every user-visible string in the window and the CLI resolves through `locales/app.yml`, which keeps both languages side by side so a gap is visible in review; the language follows `app.json`, then `LC_ALL`/`LC_MESSAGES`/`LANG`, then English. Keyboard-first navigation for every action; no action reachable only by mouse.
 
 Accessibility is a product requirement, not a pass at the end. GPUI exposes no screen-reader tree yet, so here it means the three things that do not depend on that API and that regress silently when unchecked:
 
@@ -498,6 +535,31 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-01 | Git goes through the `git` binary, not `gix` | Worktree plumbing has to use the binary anyway — it is the only implementation that agrees with the user's own `git worktree list`, hooks and config. Splitting reads into a second implementation would put the truth in two places to save a subprocess. Revisit only if a read shows up in a profile. |
 | 2026-09-01 | The CLI's development binary is `ginka-cli`, installed as `ginka` at packaging time | The app crate at the workspace root already produces a `ginka` binary; two targets with one name silently overwrite each other in `target/debug`, which is how the app binary went missing until the sizes were compared. |
 | 2026-08-31 | Testable UI code lives in `ginka-ui`; the binary crate holds views only | `rustc` overflows its stack expanding `#[test]` in a crate that also contains the toolkit's deeply nested builder chains — raising `recursion_limit` turns the error into a SIGBUS rather than fixing it. The split is forced by the compiler, and happens to be the structure rule 2 wanted anyway. |
+| 2026-09-02 | The domain objects live in `ginka-protocol`, not `ginka-core` | A wire copy and a domain copy of "what a project is" drift, and the CLI and the app both have to name one without linking the daemon's git and SQLite code. `ginka-core` persists them; nothing in the protocol crate knows what a database is. |
+| 2026-09-02 | Requests are a typed enum and failures are their own frame | A `serde_json::Value` payload hides the capability list rule 3 depends on, and a serialized `Result` would make `{"Ok":…}` part of the contract every future client reads. |
+| 2026-09-02 | The transport is `async-tungstenite` over `async-net`, driven by smol | It works over any futures stream, so no runtime feature and no second reactor comes in behind it. Requests run on smol's blocking pool because git shells out and SQLite is synchronous; the connection's writer keeps draining pushes meanwhile. |
+| 2026-09-02 | Server pushes carry a sequence number, with a bounded replay window and an explicit `gap` frame | A short replay would leave a reconnecting client believing it was caught up. Told about the gap, it re-reads what it cares about instead of patching. |
+| 2026-09-02 | Drivers are pure: a command description and a line parser | Vendor formats are then testable against recorded fixtures rather than against a live CLI, which is the mitigation R6 asks for, and process supervision is written once above them. |
+| 2026-09-02 | A turn is one process; a follow-up is a resume | The vendors' non-interactive modes exit when a turn ends, so there is no stdin to write to. This is why the vendor session id is persisted: without it a conversation can be replayed but not continued. |
+| 2026-09-02 | An agent that exits zero having said nothing the driver could read is reported as failed | That is exactly what a vendor changing its output format looks like, and reporting it as a finished session with an empty transcript hides it. |
+| 2026-09-02 | Agent processes start in their own process group and are stopped through the `kill` binary | Signalling the group is what makes a cancel reach the tools the agent started. The binary rather than `libc` keeps the workspace's `unsafe_code = "deny"` intact, on the same reasoning that sends git through its own binary. |
+| 2026-09-02 | Checkpoints are commits on no branch, held by refs under `refs/ginka/checkpoints/` | A ref keeps them from being garbage-collected while keeping them out of `git log` and `git branch`. Restoring snapshots the state it is about to replace, because a rewind must never be the thing that loses work. |
+| 2026-09-03 | Checkpoints are committed as Ginka, not as the configured user | `git commit-tree` needs an identity, and taking the user's put the app's bookkeeping in their history — and made a checkpoint impossible on a machine that has never run `git config user.email`, which is every container and CI runner. |
+| 2026-09-03 | A cancel signals the agent's process group only after confirming the agent leads it | A child that did not get its own group is in ours, and signalling a group by its pid then hits something unrelated — on CI, the job. An agent that leads no group is stopped alone. |
+| 2026-09-03 | Only the reader closes a connection's write queue | Two writers into one queue meant whichever stopped first closed it, and on a shutdown the event pump stops first — which dropped the answer to the request that asked for the shutdown. |
+| 2026-09-02 | The CLI and the app both go through the daemon; `doctor` is the exception | Rule 3 is a structure rather than a promise only if there is one way in. `doctor` reads state directly because a daemon that will not start is exactly what it has to be able to report. |
+| 2026-09-04 | Review comments are held by the daemon and sent as one message | A comment is worth writing before the reader has finished reading, and worth keeping if the window closes; sending each one as it is written interrupts the agent mid-turn and costs a round trip per line. The batch clears only once the agent has it. |
+| 2026-09-04 | Staging is per file, and the commit box follows what is staged | Reading an agent's work usually ends in "these are right, that one is not", and a commit box that took everything anyway would make staging decorative. Nothing staged still means commit everything, which is the common case. |
+| 2026-09-04 | The daemon keeps a bounded scrollback per terminal, and a window replays it on reattach | The pty outlives the window, so a window that comes back has missed whatever was printed meanwhile and would reattach to a blank screen. 256 KiB per shell is several screens of a build and small enough to hold; the newest is what is kept. |
+| 2026-09-04 | The daemon resolves a file read inside the worktree and bounds it | A client does not choose which of the user's files the daemon opens, so `../` is refused rather than followed, and half a megabyte is the most a side panel is given: a minified bundle laid out as text is how a window stops responding. |
+| 2026-09-04 | Word-level marks are computed in `ginka-core`, not asked of git | `--word-diff` returns a different text format to parse, and the pairing rule and the "too different to mark" threshold are judgement calls worth testing. One line against one line is short enough for a plain LCS. |
+| 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |
+| 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |
+| 2026-09-04 | MCP is served by `ginka mcp` over stdio, not by a socket on the daemon | An agent spawns its MCP servers as processes and talks to them on stdin; a server it has to find a port for is one it cannot start. The bridge holds no state — every tool is one daemon request — so this is still the daemon's surface, and the tool catalogue lives in `ginka-core` where it can be tested without a socket. |
+| 2026-09-04 | A failing setup does not undo the worktree it ran in | The worktree exists by then, and removing it because an install failed throws away the branch the user asked for. What went wrong is logged; a copy path that climbs out of the project is refused, because that file arrives in pull requests. |
+| 2026-09-04 | Whether a question has been answered is a property of the transcript, not of the window | A transcript re-read after a restart has to know as much as one that was watched, and what it knows is that the reader said something afterwards. The card stops offering buttons on that alone. |
+| 2026-09-04 | The daemon polls git on its own clock, and pushes only differences | A worktree added with the user's own git is news for every window, and having each window poll for it is the same work done once per window. A status that has not changed is not news: a push per workspace per minute is one clients learn to ignore. |
+| 2026-09-04 | A fan-out is the same requests a person would send, sent in a loop | Each arm gets the project's setup, its own checkpoint and its own worktree because it went through `create_workspace` and `start_session` rather than around them. An arm that fails is reported and the rest carry on: two answers are worth having when the third never started. |
 | 2026-09-04 | Sixteen interface-shaping requirements written down as N1–N16 (§3.3) and scheduled into §5 | They were missing from the plan or present only as a weaker version of themselves. None is a feature to bolt on later: steering, absorbable option changes, three-ref checkpoints, externalised attachments and the daemon-host path rule each change an interface, and interfaces are what a plan is for. |
 | 2026-09-04 | Ginka contains no code copied or ported from another project; equivalent functionality is written from the requirement | Licence is the obvious half — most prior art here is GPL-3.0, and copying would settle Q3 by accident the way linking Zed's `editor` would (§4.6). Ownership is the other half: an implementation we did not write is one we cannot debug, upgrade or explain. This holds for permissively licensed references too, which is why bezel's role changed with it. |
 | 2026-09-04 | Daemon paths are daemon-host paths, and clients say so explicitly (§4.1) | Costs nothing while the daemon is a local child process, and is the difference between remote access (Q1) being additive and being a rewrite. |

@@ -1,0 +1,1160 @@
+//! Folding an event stream into something a window can draw.
+//!
+//! The daemon stores and streams normalized events — a text delta, a tool
+//! call, a turn boundary — because that is what survives being replayed. A
+//! reader wants paragraphs and tool cards. This is where one becomes the
+//! other, and it is here rather than in the views because it is the part with
+//! rules worth testing.
+//!
+//! Entries arrive twice by design: once as the page fetched when a session is
+//! opened, and again as pushes from the daemon. Every entry carries its
+//! position, so applying one is idempotent and a missing position is
+//! detectable rather than silently swallowed.
+
+use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
+use ginka_protocol::{AgentEvent, Usage};
+use std::time::{Duration, Instant};
+
+/// One drawable piece of a transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Block {
+    /// Something the user sent.
+    User { text: String },
+    /// Assistant prose, with its deltas already folded together.
+    Assistant { text: String },
+    /// The agent's reasoning, where the vendor exposes it.
+    Reasoning { text: String },
+    /// A tool call and, once it arrives, its result.
+    Tool {
+        /// Correlates the call with its result.
+        id: String,
+        name: String,
+        input: String,
+        /// `None` while the tool is still running.
+        output: Option<String>,
+        is_error: bool,
+    },
+    /// The agent is blocked on the user.
+    Question {
+        /// What an answer is sent against.
+        id: String,
+        question: String,
+        options: Vec<String>,
+        /// Whether the reader has already replied to it.
+        ///
+        /// Kept on the block rather than in the view: a transcript re-read
+        /// after a restart has to know as much as one that was watched, and
+        /// what it knows is that the reader said something afterwards.
+        answered: bool,
+    },
+    /// A plan the agent wants approved before acting.
+    Plan {
+        id: String,
+        plan: String,
+        answered: bool,
+    },
+    /// A turn boundary. A checkpoint was taken here.
+    TurnEnd { turn: u32 },
+    /// How the session ended.
+    Outcome {
+        state: SessionState,
+        summary: Option<String>,
+    },
+}
+
+/// What applying an entry did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    /// It was folded in.
+    Added,
+    /// It had already been applied; the same event arrives by push and in the
+    /// fetched page, and folding it twice would double the text.
+    AlreadySeen,
+    /// Its position is beyond the next one expected, so something in between
+    /// was missed. The caller has to re-read rather than carry on: a
+    /// transcript with a hole in it is worse than one that is refetched.
+    Gap { expected: u64 },
+}
+
+/// A session's transcript, folded.
+#[derive(Debug, Clone, Default)]
+pub struct Transcript {
+    blocks: Vec<Block>,
+    cursor: u64,
+    usage: Usage,
+}
+
+impl Transcript {
+    /// An empty transcript, positioned before the first entry.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The highest position folded in. This is the cursor to page from.
+    pub fn cursor(&self) -> u64 {
+        self.cursor
+    }
+
+    /// What the window draws.
+    pub fn blocks(&self) -> &[Block] {
+        &self.blocks
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// The assistant text still being written, if that is what the last block
+    /// is. This is the only part of a transcript that is revealed gradually.
+    pub fn tail(&self) -> Option<&str> {
+        match self.blocks.last() {
+            Some(Block::Assistant { text }) => Some(text),
+            _ => None,
+        }
+    }
+
+    /// What the agent appears to be doing, for the line under the transcript.
+    ///
+    /// Read from the end of the transcript rather than from the session's
+    /// state, because the session is `running` for the whole turn and the
+    /// interesting question is what it is running *on*.
+    pub fn activity(&self) -> Activity {
+        match self.blocks.last() {
+            Some(Block::Assistant { .. }) => Activity::Writing,
+            // The title, not the kind: "cargo test" says what the agent is
+            // doing where "run" only says what sort of thing it is.
+            Some(Block::Tool {
+                input,
+                output: None,
+                ..
+            }) => Activity::Running {
+                tool: input.clone(),
+            },
+            _ => Activity::Thinking,
+        }
+    }
+
+    /// The session's accounting so far, as the last `Usage` event reported it.
+    ///
+    /// Kept off the block list: it belongs in the context bar, not in the
+    /// middle of the conversation.
+    pub fn usage(&self) -> Usage {
+        self.usage
+    }
+
+    /// Fold one entry in.
+    pub fn apply(&mut self, entry: &TranscriptEntry) -> Applied {
+        if entry.seq <= self.cursor {
+            return Applied::AlreadySeen;
+        }
+        if entry.seq > self.cursor + 1 {
+            return Applied::Gap {
+                expected: self.cursor + 1,
+            };
+        }
+        self.cursor = entry.seq;
+
+        match &entry.payload {
+            TranscriptPayload::User { text } => {
+                // Anything the reader says answers whatever they were being
+                // asked: the agent is not going to ask twice and wait for the
+                // second answer first.
+                self.answer_everything_open();
+                self.blocks.push(Block::User { text: text.clone() })
+            }
+            TranscriptPayload::Agent { event } => self.fold(event),
+        }
+        Applied::Added
+    }
+
+    /// Fold a page in, stopping at the first gap.
+    ///
+    /// Returns what the last entry did, so a caller can tell a page that
+    /// applied cleanly from one that revealed a hole.
+    pub fn extend<'a>(
+        &mut self,
+        entries: impl IntoIterator<Item = &'a TranscriptEntry>,
+    ) -> Applied {
+        let mut last = Applied::AlreadySeen;
+        for entry in entries {
+            last = self.apply(entry);
+            if matches!(last, Applied::Gap { .. }) {
+                return last;
+            }
+        }
+        last
+    }
+
+    fn fold(&mut self, event: &AgentEvent) {
+        match event {
+            AgentEvent::TextDelta { text } => self.append_text(text),
+            AgentEvent::Reasoning { text } => self.append_reasoning(text),
+            // The driver already normalized the call into one shape; the block
+            // keeps the kind as its label and the title as the line the reader
+            // scans.
+            AgentEvent::ToolCall { activity } => self.blocks.push(Block::Tool {
+                id: activity.id.clone().unwrap_or_default(),
+                name: activity.kind_str().to_string(),
+                input: activity.title.clone(),
+                output: None,
+                is_error: false,
+            }),
+            AgentEvent::ToolResult { activity } => self.attach_result(
+                activity.id.as_deref().unwrap_or_default(),
+                activity.detail.as_deref().unwrap_or_default(),
+                activity.failed,
+            ),
+            AgentEvent::AskUser {
+                id,
+                question,
+                options,
+            } => self.blocks.push(Block::Question {
+                id: id.clone(),
+                question: question.clone(),
+                options: options.clone(),
+                answered: false,
+            }),
+            AgentEvent::PlanProposal { id, plan } => self.blocks.push(Block::Plan {
+                id: id.clone(),
+                plan: plan.clone(),
+                answered: false,
+            }),
+            // Accounting belongs in the context bar, not in the conversation.
+            AgentEvent::Usage { usage } => self.usage = *usage,
+            AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn }),
+            AgentEvent::SessionResult { state, summary } => self.blocks.push(Block::Outcome {
+                state: *state,
+                summary: summary.clone(),
+            }),
+            // A shape this build does not understand is shown, not dropped: it
+            // is how a vendor's format change first reaches a reader (R6).
+            AgentEvent::Unsupported { shape } => {
+                self.append_text(&format!("(not understood: {shape})"))
+            }
+            // Session bookkeeping the conversation does not render.
+            AgentEvent::Connected { .. }
+            | AgentEvent::Commands { .. }
+            | AgentEvent::TurnStarted
+            | AgentEvent::Permission { .. }
+            | AgentEvent::SteerAccepted
+            | AgentEvent::SteerRejected { .. }
+            | AgentEvent::AgentTitle { .. }
+            | AgentEvent::ProcessExited { .. } => {}
+        }
+    }
+
+    /// Mark one question or plan answered, before the daemon says so.
+    ///
+    /// A card that stays clickable after it has been clicked invites a second
+    /// answer to a question that has one.
+    pub fn answer(&mut self, id: &str) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question {
+                    id: asked,
+                    answered,
+                    ..
+                }
+                | Block::Plan {
+                    id: asked,
+                    answered,
+                    ..
+                } if asked == id => *answered = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Mark every question and plan still waiting as answered.
+    fn answer_everything_open(&mut self) {
+        for block in &mut self.blocks {
+            match block {
+                Block::Question { answered, .. } | Block::Plan { answered, .. } => *answered = true,
+                _ => {}
+            }
+        }
+    }
+
+    /// Grow the open assistant paragraph, or start one.
+    fn append_text(&mut self, text: &str) {
+        match self.blocks.last_mut() {
+            Some(Block::Assistant { text: existing }) => existing.push_str(text),
+            _ => self.blocks.push(Block::Assistant {
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    fn append_reasoning(&mut self, text: &str) {
+        match self.blocks.last_mut() {
+            Some(Block::Reasoning { text: existing }) => existing.push_str(text),
+            _ => self.blocks.push(Block::Reasoning {
+                text: text.to_string(),
+            }),
+        }
+    }
+
+    /// Attach a result to the call that asked for it.
+    ///
+    /// Searched from the end because a result belongs to the most recent call
+    /// with that id, and an id a driver had to synthesise may repeat across a
+    /// long session. A result with no call is still shown: losing output
+    /// because the call was in a page we have not fetched would be worse than
+    /// an unattached card.
+    fn attach_result(&mut self, id: &str, output: &str, is_error: bool) {
+        let matching = self.blocks.iter_mut().rev().find(
+            |block| matches!(block, Block::Tool { id: call, output: None, .. } if call == id),
+        );
+        match matching {
+            Some(Block::Tool {
+                output: slot,
+                is_error: failed,
+                ..
+            }) => {
+                *slot = Some(output.to_string());
+                *failed = is_error;
+            }
+            _ => self.blocks.push(Block::Tool {
+                id: id.to_string(),
+                name: String::new(),
+                input: String::new(),
+                output: Some(output.to_string()),
+                is_error,
+            }),
+        }
+    }
+}
+
+/// What the agent is doing, for the line under the transcript.
+///
+/// An agent between tokens looks identical to an agent that has died. Saying
+/// which is which is the difference between waiting and wondering.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Activity {
+    /// Nothing has arrived for this turn yet.
+    Thinking,
+    /// A tool is running and has not answered.
+    Running { tool: String },
+    /// Text is arriving; the words themselves are the indicator.
+    Writing,
+}
+
+// Every constant below is per second rather than per frame, because the frame
+// is not a fixed length: the writing is driven by the display, and the same
+// answer has to be written at the same speed on a 60Hz screen and a 120Hz one.
+//
+// The mechanism — and these numbers — are ported from bokuweb/pedro's chat
+// reveal, which solved the same problem: an agent does not produce text evenly,
+// and drawing exactly what has arrived puts its burstiness on the screen.
+
+/// The slowest the text is ever written, in characters per second: the pace of
+/// the trickle between bursts.
+const SLOWEST: f32 = 90.;
+
+/// The fastest. Well above what any CLI produces, so the writing can always
+/// catch up in the end; it is the easing, not this ceiling, that keeps a burst
+/// from landing as a block.
+const FASTEST: f32 = 1200.;
+
+/// How long the writing aims to take to drain what is waiting, in seconds.
+/// Also how far behind the agent the text settles while a stream runs steadily.
+const CATCH_UP: f32 = 0.6;
+
+/// How quickly the rate moves towards that aim, as a time constant in seconds.
+///
+/// Easing the *rate* rather than the step is what stops a burst landing as a
+/// block: stepping by a fraction of what is waiting puts the biggest jump on
+/// the frame the chunk arrived, which is the chunk, redrawn.
+const EASE: f32 = 0.25;
+
+/// A frame is never treated as longer than this. A window that was occluded
+/// should not dump a second of text in one step.
+const LONGEST_FRAME: Duration = Duration::from_millis(100);
+
+/// What the first frame is assumed to have taken.
+const A_FRAME: Duration = Duration::from_millis(8);
+
+/// Walks arrived text onto the screen at a pace a person can read.
+///
+/// The transcript already holds everything the agent has said; this decides
+/// how much of the tail is on screen. History is shown whole — nobody wants to
+/// watch a transcript they have already read being typed — and only text that
+/// arrives while the window is watching is written out.
+#[derive(Debug)]
+pub struct Reveal {
+    revealed: usize,
+    rate: f32,
+    carry: f32,
+    last_frame: Option<Instant>,
+}
+
+impl Default for Reveal {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Reveal {
+    /// Nothing revealed, at the resting pace.
+    pub fn new() -> Self {
+        Self {
+            revealed: 0,
+            rate: SLOWEST,
+            carry: 0.,
+            last_frame: None,
+        }
+    }
+
+    /// How many characters are on screen.
+    pub fn revealed(&self) -> usize {
+        self.revealed
+    }
+
+    /// Start again from nothing: a different session is a different answer.
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    /// Show everything at once.
+    ///
+    /// For a transcript that was read from storage rather than watched as it
+    /// arrived: typing out a conversation the user has already had would be a
+    /// pointless wait.
+    pub fn show_all(&mut self, arrived: usize) {
+        self.revealed = arrived;
+        self.rate = SLOWEST;
+        self.carry = 0.;
+        self.last_frame = None;
+    }
+
+    /// Show a little more, and say whether anything is still hidden.
+    ///
+    /// Driven from the window's draw rather than a timer: at a fixed beat each
+    /// step carries whatever arrived in that beat, which is a chunk however
+    /// smoothly the rate was eased into it. The display is the clock that
+    /// divides the same text into the most steps a reader can see.
+    pub fn advance(&mut self, arrived: usize) -> bool {
+        let now = Instant::now();
+        let since = self
+            .last_frame
+            .replace(now)
+            .map_or(A_FRAME, |last| now.saturating_duration_since(last))
+            .min(LONGEST_FRAME);
+        self.advance_over(arrived, since)
+    }
+
+    /// The same, over a frame of a stated length, which is what a test can
+    /// hold still.
+    fn advance_over(&mut self, arrived: usize, frame: Duration) -> bool {
+        let waiting = arrived.saturating_sub(self.revealed);
+        if waiting == 0 {
+            // Come back at the resting pace rather than at whatever speed the
+            // last burst worked it up to.
+            self.rate = SLOWEST;
+            self.carry = 0.;
+            self.revealed = self.revealed.min(arrived);
+            return false;
+        }
+
+        let seconds = frame.as_secs_f32();
+        let aim = (waiting as f32 / CATCH_UP).clamp(SLOWEST, FASTEST);
+        self.rate += (aim - self.rate) * (seconds / EASE).min(1.);
+
+        self.carry += self.rate * seconds;
+        let whole = self.carry.floor();
+        self.carry -= whole;
+
+        self.revealed = (self.revealed + whole as usize).min(arrived);
+        self.revealed < arrived
+    }
+
+    /// The part of `text` that is on screen, cut on a character boundary.
+    pub fn shown<'a>(&self, text: &'a str) -> &'a str {
+        match text.char_indices().nth(self.revealed) {
+            Some((at, _)) => &text[..at],
+            None => text,
+        }
+    }
+}
+
+/// Split assistant text into the part that is safe to format and the part
+/// that is not.
+///
+/// Markdown of half a document is not markdown of anything: a heading with no
+/// line after it, a fence with no closing fence. So the text is cut at the
+/// last blank line — the end of the last block that is definitely finished —
+/// and only what precedes it is formatted. The tail is drawn as the plain text
+/// it still is, and moves across as soon as its block is done.
+///
+/// The cut never lands inside a fenced block, which a blank line does not end.
+/// Ported from bokuweb/pedro, which hit the same problem: a markdown view
+/// re-parsing text that changes every frame makes a streaming answer land in
+/// slabs.
+pub fn settled(text: &str) -> (&str, &str) {
+    let mut cut = 0;
+    let mut fences = 0;
+    let mut at = 0;
+
+    for line in text.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fences += 1;
+        }
+        at += line.len();
+        if line.trim().is_empty() && fences % 2 == 0 {
+            cut = at;
+        }
+    }
+
+    text.split_at(cut)
+}
+
+/// Whether to pull the transcript to its foot, and whether it is still
+/// following.
+///
+/// Told by the reader's gesture rather than worked out from where the view
+/// ends up: an answer that grows moves the foot away from the reader too, and a
+/// rule that could not tell those apart would either stop following on its own
+/// or drag the reader back from a paragraph they had gone to read. Ported from
+/// bokuweb/pedro.
+pub fn following(working: bool, follows: bool, at_foot: bool) -> (bool, bool) {
+    let follows = follows || at_foot;
+    (working && follows, follows)
+}
+
+/// The first `limit` lines of `text`, with a note when there were more.
+///
+/// A tool that printed a megabyte must not push the conversation off the
+/// screen. The whole output is still in the transcript, and `ginka session log`
+/// prints it.
+pub fn head_of(text: &str, limit: usize) -> String {
+    let mut lines = text.lines();
+    let head: Vec<&str> = lines.by_ref().take(limit).collect();
+    let rest = lines.count();
+    if rest == 0 {
+        return head.join("\n");
+    }
+    format!(
+        "{}\n{}",
+        head.join("\n"),
+        rust_i18n::t!("transcript.truncated", count = rest)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ginka_protocol::event::ActivityItem;
+    use serde_json::json;
+
+    fn user(seq: u64, text: &str) -> TranscriptEntry {
+        TranscriptEntry {
+            seq,
+            at: 0,
+            payload: TranscriptPayload::User { text: text.into() },
+        }
+    }
+
+    /// A tool call that already produced its result.
+    fn completed(id: &str, output: &str, failed: bool) -> ActivityItem {
+        let mut activity = ActivityItem::from_tool(Some(id.into()), "tool", &json!({}));
+        activity.complete_with(output, failed);
+        activity
+    }
+
+    fn agent(seq: u64, event: AgentEvent) -> TranscriptEntry {
+        TranscriptEntry {
+            seq,
+            at: 0,
+            payload: TranscriptPayload::Agent { event },
+        }
+    }
+
+    fn text(seq: u64, text: &str) -> TranscriptEntry {
+        agent(seq, AgentEvent::TextDelta { text: text.into() })
+    }
+
+    #[test]
+    fn deltas_fold_into_one_paragraph() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            user(1, "hello"),
+            text(2, "Hel"),
+            text(3, "lo "),
+            text(4, "back"),
+        ]);
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::User {
+                    text: "hello".into()
+                },
+                Block::Assistant {
+                    text: "Hello back".into()
+                },
+            ]
+        );
+        assert_eq!(transcript.cursor(), 4);
+    }
+
+    #[test]
+    fn a_new_prompt_closes_the_paragraph_before_it() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[text(1, "done"), user(2, "again"), text(3, "done")]);
+        assert_eq!(transcript.blocks().len(), 3);
+        assert!(matches!(transcript.blocks()[2], Block::Assistant { .. }));
+    }
+
+    #[test]
+    fn reasoning_and_prose_are_separate_blocks() {
+        // They are drawn differently; folding them together would put the
+        // agent's private thinking into what it said.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::Reasoning {
+                    text: "weighing ".into(),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::Reasoning {
+                    text: "it up".into(),
+                },
+            ),
+            text(3, "Here is why."),
+        ]);
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::Reasoning {
+                    text: "weighing it up".into()
+                },
+                Block::Assistant {
+                    text: "Here is why.".into()
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_tool_result_lands_on_the_call_that_asked_for_it() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::ToolCall {
+                    activity: ActivityItem::from_tool(
+                        Some("t1".into()),
+                        "Read",
+                        &json!({ "file_path": "a.rs" }),
+                    ),
+                },
+            ),
+            text(2, "reading"),
+            agent(
+                3,
+                AgentEvent::ToolResult {
+                    activity: completed("t1", "fn main() {}", false),
+                },
+            ),
+        ]);
+        assert_eq!(
+            transcript.blocks()[0],
+            Block::Tool {
+                id: "t1".into(),
+                name: "tool".into(),
+                input: "a.rs".into(),
+                output: Some("fn main() {}".into()),
+                is_error: false,
+            }
+        );
+    }
+
+    #[test]
+    fn a_result_with_no_call_is_still_shown() {
+        // The call may be in a page that has not been fetched; dropping the
+        // output would lose it for good.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[agent(
+            1,
+            AgentEvent::ToolResult {
+                activity: completed("orphan", "surprise", true),
+            },
+        )]);
+        assert!(matches!(
+            &transcript.blocks()[0],
+            Block::Tool {
+                output: Some(_),
+                is_error: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_second_call_with_the_same_id_gets_its_own_result() {
+        let mut transcript = Transcript::new();
+        let call = |seq| {
+            agent(
+                seq,
+                AgentEvent::ToolCall {
+                    activity: ActivityItem::from_tool(Some("t".into()), "Bash", &json!({})),
+                },
+            )
+        };
+        let result = |seq, output: &str| {
+            agent(
+                seq,
+                AgentEvent::ToolResult {
+                    activity: completed("t", output, false),
+                },
+            )
+        };
+        transcript.extend(&[call(1), result(2, "first"), call(3), result(4, "second")]);
+
+        let outputs: Vec<Option<&str>> = transcript
+            .blocks()
+            .iter()
+            .filter_map(|block| match block {
+                Block::Tool { output, .. } => Some(output.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, vec![Some("first"), Some("second")]);
+    }
+
+    #[test]
+    fn the_same_entry_arriving_twice_is_folded_once() {
+        // Every event reaches a client both in the page it fetched and as a
+        // push; folding both would double every reply.
+        let mut transcript = Transcript::new();
+        assert_eq!(transcript.apply(&text(1, "hello")), Applied::Added);
+        assert_eq!(transcript.apply(&text(1, "hello")), Applied::AlreadySeen);
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::Assistant {
+                text: "hello".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn an_entry_from_beyond_the_next_position_reports_the_hole() {
+        let mut transcript = Transcript::new();
+        transcript.apply(&text(1, "one"));
+        assert_eq!(
+            transcript.apply(&text(3, "three")),
+            Applied::Gap { expected: 2 },
+            "a transcript with a hole in it is worse than one that is refetched"
+        );
+        assert_eq!(transcript.cursor(), 1, "the gap is not swallowed");
+        assert_eq!(transcript.blocks().len(), 1);
+    }
+
+    #[test]
+    fn a_page_stops_at_the_first_hole_rather_than_folding_past_it() {
+        let mut transcript = Transcript::new();
+        let applied = transcript.extend(&[text(1, "one"), text(3, "three"), text(4, "four")]);
+        assert_eq!(applied, Applied::Gap { expected: 2 });
+        assert_eq!(transcript.cursor(), 1);
+    }
+
+    #[test]
+    fn accounting_stays_out_of_the_conversation() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            text(1, "done"),
+            agent(
+                2,
+                AgentEvent::Usage {
+                    usage: Usage {
+                        input_tokens: 10,
+                        output_tokens: 3,
+                        ..Usage::default()
+                    },
+                },
+            ),
+        ]);
+        assert_eq!(transcript.blocks().len(), 1);
+        assert_eq!(transcript.usage().input_tokens, 10);
+    }
+
+    #[test]
+    fn turn_boundaries_and_outcomes_are_drawn() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(1, AgentEvent::TurnEnd { turn: 1 }),
+            agent(
+                2,
+                AgentEvent::SessionResult {
+                    state: SessionState::Finished,
+                    summary: Some("done".into()),
+                },
+            ),
+        ]);
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::TurnEnd { turn: 1 },
+                Block::Outcome {
+                    state: SessionState::Finished,
+                    summary: Some("done".into()),
+                },
+            ]
+        );
+    }
+
+    /// A frame at 120Hz, which is what the reveal is driven by.
+    const FRAME: Duration = Duration::from_millis(8);
+
+    #[test]
+    fn a_burst_is_written_out_rather_than_landing_whole() {
+        // An agent produces a hundred characters at once and then nothing for
+        // a second; drawing exactly what arrived puts that on the screen.
+        let mut reveal = Reveal::new();
+        let arrived = 400;
+        assert!(reveal.advance_over(arrived, FRAME));
+        let after_one_frame = reveal.revealed();
+        assert!(
+            after_one_frame < arrived,
+            "the whole burst landed in one frame: {after_one_frame}"
+        );
+
+        let mut frames = 1;
+        while reveal.advance_over(arrived, FRAME) {
+            frames += 1;
+            assert!(frames < 10_000, "the writing never finished");
+        }
+        assert_eq!(reveal.revealed(), arrived);
+        assert!(
+            frames > 8,
+            "it was written in {frames} frames, which is a jump"
+        );
+    }
+
+    #[test]
+    fn the_writing_never_runs_past_what_has_arrived() {
+        let mut reveal = Reveal::new();
+        while reveal.advance_over(20, FRAME) {}
+        assert_eq!(reveal.revealed(), 20);
+        assert!(
+            !reveal.advance_over(20, FRAME),
+            "it kept going after the end"
+        );
+    }
+
+    #[test]
+    fn it_comes_back_to_the_resting_pace_between_bursts() {
+        // Otherwise the next burst starts at the speed the last one ended at,
+        // and a one-word reply appears instantly.
+        let mut reveal = Reveal::new();
+        while reveal.advance_over(2_000, FRAME) {}
+        let before = reveal.revealed();
+
+        reveal.advance_over(before, FRAME);
+        reveal.advance_over(before + 4, FRAME);
+        assert!(
+            reveal.revealed() - before <= 2,
+            "the next burst started at the last one's speed"
+        );
+    }
+
+    #[test]
+    fn history_is_shown_whole_rather_than_typed_out() {
+        // Reopening a workspace must not replay a conversation the user has
+        // already read.
+        let mut reveal = Reveal::new();
+        reveal.show_all(500);
+        assert_eq!(reveal.revealed(), 500);
+        assert!(!reveal.advance_over(500, FRAME));
+    }
+
+    #[test]
+    fn what_is_shown_is_cut_on_a_character_not_a_byte() {
+        let mut reveal = Reveal::new();
+        reveal.show_all(3);
+        assert_eq!(reveal.shown("日本語です"), "日本語");
+        reveal.show_all(99);
+        assert_eq!(reveal.shown("日本語です"), "日本語です");
+    }
+
+    #[test]
+    fn the_tail_is_the_only_thing_still_being_written() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[user(1, "hello"), text(2, "on it")]);
+        assert_eq!(transcript.tail(), Some("on it"));
+
+        // A finished turn has nothing left to write.
+        transcript.apply(&agent(3, AgentEvent::TurnEnd { turn: 1 }));
+        assert_eq!(transcript.tail(), None);
+    }
+
+    #[test]
+    fn the_activity_says_what_the_agent_is_doing() {
+        // An agent between tokens looks exactly like one that has died.
+        let mut transcript = Transcript::new();
+        transcript.apply(&user(1, "go"));
+        assert_eq!(transcript.activity(), Activity::Thinking);
+
+        transcript.apply(&agent(
+            2,
+            AgentEvent::ToolCall {
+                activity: ActivityItem::from_tool(Some("t".into()), "Bash", &json!({})),
+            },
+        ));
+        assert_eq!(
+            transcript.activity(),
+            Activity::Running {
+                tool: "Bash".into()
+            }
+        );
+
+        transcript.apply(&agent(
+            3,
+            AgentEvent::ToolResult {
+                activity: completed("t", "done", false),
+            },
+        ));
+        assert_eq!(
+            transcript.activity(),
+            Activity::Thinking,
+            "a finished tool is not still running"
+        );
+
+        transcript.apply(&text(4, "here is what I found"));
+        assert_eq!(transcript.activity(), Activity::Writing);
+    }
+
+    #[test]
+    fn only_finished_blocks_are_handed_to_the_formatter() {
+        // Half a markdown document is not a markdown document: formatting a
+        // heading with no line after it re-flows the text under the reader.
+        let (formatted, writing) = settled("# Title\n\nA finished paragraph.\n\n## Half a hea");
+        assert_eq!(formatted, "# Title\n\nA finished paragraph.\n\n");
+        assert_eq!(writing, "## Half a hea");
+    }
+
+    #[test]
+    fn the_cut_never_lands_inside_a_fence() {
+        // A blank line does not end a fenced block, and formatting one that is
+        // still open turns the rest of the answer into code.
+        let text = "Here:\n\n```rust\nfn main() {\n\n    println!(\"hi\");\n";
+        let (formatted, writing) = settled(text);
+        assert_eq!(formatted, "Here:\n\n");
+        assert!(writing.starts_with("```rust"));
+    }
+
+    #[test]
+    fn text_with_nothing_finished_is_all_still_being_written() {
+        let (formatted, writing) = settled("just started");
+        assert_eq!(formatted, "");
+        assert_eq!(writing, "just started");
+    }
+
+    #[test]
+    fn a_reader_who_scrolled_away_is_not_dragged_back() {
+        // The answer growing moves the foot away from them too; a rule that
+        // could not tell that apart would pull them off the paragraph they
+        // went to read.
+        assert_eq!(following(true, false, false), (false, false));
+        // Until they come back to the foot themselves.
+        assert_eq!(following(true, false, true), (true, true));
+    }
+
+    #[test]
+    fn a_reader_at_the_foot_is_kept_there_while_the_agent_writes() {
+        assert_eq!(following(true, true, false), (true, true));
+        // Nothing is being written, so nothing needs pulling.
+        assert_eq!(following(false, true, true), (false, true));
+    }
+
+    #[test]
+    fn long_tool_output_is_cut_with_a_note_rather_than_silently() {
+        let output = (1..=30)
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let shown = head_of(&output, 4);
+        assert!(shown.starts_with("1\n2\n3\n4"));
+        assert!(
+            shown.ends_with("26 more lines"),
+            "a reader has to know something was left out: {shown}"
+        );
+        assert_eq!(
+            head_of("one\ntwo", 4),
+            "one\ntwo",
+            "short output is untouched"
+        );
+    }
+
+    #[test]
+    fn a_question_carries_what_an_answer_is_sent_against() {
+        // Without the id there is nothing to answer to, and the card is a
+        // paragraph with buttons that do nothing.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[agent(
+            1,
+            AgentEvent::AskUser {
+                id: "ask-1".into(),
+                question: "Which one?".into(),
+                options: vec!["this".into(), "that".into()],
+            },
+        )]);
+        match transcript.blocks().last().unwrap() {
+            Block::Question {
+                id,
+                options,
+                answered,
+                ..
+            } => {
+                assert_eq!(id, "ask-1");
+                assert_eq!(options.len(), 2);
+                assert!(!answered, "nobody has said anything yet");
+            }
+            other => panic!("expected a question, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn saying_anything_answers_what_was_being_asked() {
+        // A transcript re-read after a restart has to know as much as one that
+        // was watched, and what it knows is that the reader replied.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::PlanProposal {
+                    id: "plan-1".into(),
+                    plan: "do the thing".into(),
+                },
+            ),
+            user(2, "go ahead"),
+        ]);
+        let answered = transcript
+            .blocks()
+            .iter()
+            .any(|block| matches!(block, Block::Plan { answered: true, .. }));
+        assert!(answered, "{:?}", transcript.blocks());
+    }
+}
+
+/// What the composer is completing, read from the text before the caret.
+///
+/// A mention is `@` followed by anything that is not a space, and it only
+/// counts at the end of what has been typed: `@src/main.rs and now what?` is a
+/// finished mention in a sentence, not a picker that should still be open.
+pub fn mention_being_typed(text: &str) -> Option<&str> {
+    let last_line = text.rsplit('\n').next()?;
+    let at = last_line.rfind('@')?;
+    // `foo@bar` is an address, not a mention: one has to start a word.
+    let starts_a_word = at == 0
+        || last_line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_whitespace);
+    if !starts_a_word {
+        return None;
+    }
+    let query = &last_line[at + 1..];
+    (!query.contains(char::is_whitespace)).then_some(query)
+}
+
+/// What command is being typed, if the prompt is one.
+///
+/// Only at the very start: `/review` is a command, and "see /usr/bin for the
+/// path" is a sentence about a directory. A command takes the whole prompt, so
+/// there is nothing before it to check.
+pub fn command_being_typed(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    (!rest.contains(char::is_whitespace)).then_some(rest)
+}
+
+/// Replace the command being typed with `name`.
+pub fn complete_command(text: &str, name: &str) -> String {
+    if command_being_typed(text).is_none() {
+        return text.to_string();
+    }
+    format!("/{name} ")
+}
+
+/// Replace the mention being typed with `path`, and say what the text becomes.
+///
+/// The trailing space is deliberate: a mention is finished once it is chosen,
+/// and the next thing typed is a sentence rather than more of the path.
+pub fn complete_mention(text: &str, path: &str) -> String {
+    let Some(query) = mention_being_typed(text) else {
+        return text.to_string();
+    };
+    let cut = text.len() - query.len();
+    format!("{}{path} ", &text[..cut])
+}
+
+#[cfg(test)]
+mod mentions {
+    use super::*;
+
+    #[test]
+    fn an_at_sign_starts_a_mention() {
+        assert_eq!(mention_being_typed("look at @src/ma"), Some("src/ma"));
+        assert_eq!(mention_being_typed("@"), Some(""));
+    }
+
+    #[test]
+    fn a_finished_mention_is_not_still_being_typed() {
+        // Otherwise the picker stays open over the rest of the sentence.
+        assert_eq!(mention_being_typed("@src/main.rs and then"), None);
+    }
+
+    #[test]
+    fn an_address_is_not_a_mention() {
+        assert_eq!(mention_being_typed("mail me at bob@example"), None);
+    }
+
+    #[test]
+    fn nothing_typed_is_not_a_mention() {
+        assert_eq!(mention_being_typed(""), None);
+        assert_eq!(mention_being_typed("no at sign here"), None);
+    }
+
+    #[test]
+    fn only_the_line_being_typed_counts() {
+        assert_eq!(mention_being_typed("@old/path\nand now"), None);
+        assert_eq!(mention_being_typed("first line\n@sec"), Some("sec"));
+    }
+
+    #[test]
+    fn choosing_a_file_finishes_the_mention() {
+        assert_eq!(
+            complete_mention("look at @src/ma", "src/main.rs"),
+            "look at @src/main.rs ",
+            "a chosen mention is finished, and what follows is a sentence"
+        );
+        assert_eq!(complete_mention("@", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn a_slash_at_the_start_is_a_command() {
+        assert_eq!(command_being_typed("/rev"), Some("rev"));
+        assert_eq!(command_being_typed("/"), Some(""));
+    }
+
+    #[test]
+    fn a_slash_anywhere_else_is_a_path() {
+        // "see /usr/bin for the path" is a sentence, not a command.
+        assert_eq!(command_being_typed("see /usr/bin"), None);
+        // And a command with an argument is no longer being chosen.
+        assert_eq!(command_being_typed("/review src/main.rs"), None);
+    }
+
+    #[test]
+    fn choosing_a_command_replaces_what_was_typed() {
+        assert_eq!(complete_command("/rev", "review"), "/review ");
+        assert_eq!(complete_command("not a command", "review"), "not a command");
+    }
+
+    #[test]
+    fn completing_when_nothing_is_being_typed_changes_nothing() {
+        assert_eq!(complete_mention("plain text", "x.rs"), "plain text");
+    }
+}

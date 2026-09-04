@@ -48,8 +48,8 @@ Defined once in `assets/themes/*.json`, installed into GPUI's global context at 
 | --- | --- | --- |
 | `bg.window` | `#0E0A14` @ 82 % + blur | window base, translucent |
 | `bg.sidebar` | `#120D19` @ 70 % | left column |
-| `bg.surface` | `#17121F` | cards, composer, right-panel buttons |
-| `bg.raised` | `#1E1829` | popovers, menus, hover |
+| `bg.surface` | `#1B1426` @ 66 % | cards, composer, fields |
+| `bg.raised` | `#241A33` @ 72 % | popovers, menus |
 | `bg.terminal` | `#0A0710` | terminal pane |
 | `border.subtle` | `#FFFFFF` @ 6 % | panel separators |
 | `border.strong` | `#FFFFFF` @ 12 % | focused input, selected row |
@@ -62,6 +62,19 @@ Defined once in `assets/themes/*.json`, installed into GPUI's global context at 
 | `status.done` | `#4ADE80` | completed |
 | `status.error` | `#F87171` | failed |
 | `code.bg` | `#A78BFA` @ 10 % | inline code |
+
+Two derived tints, computed from `accent` rather than stored: `row.hover` (14 %)
+and `row.active` (22 %). Rows are otherwise transparent — they are told apart by
+the space between them, and a grey fill over a translucent window is what turns
+glass into cardboard.
+
+**Every surface carries alpha**, not only the window: a fully opaque panel over
+a blurred window looks like a mistake rather than a choice. What keeps them from
+stacking into an opaque sheet is that **exactly one surface paints each pixel** —
+the toolkit's own background is clear, `Root` paints the window once, and the
+sidebar, the centre column and each card paint themselves once. Three coats of
+70 % is 97 %, which is no longer glass. (Both rules are pedro's, whose palette
+solved the same problem.)
 
 A light theme ships with the same token names and WCAG AA contrast pairs. Every colour is referenced by token; adding a theme must never require touching a view.
 
@@ -76,7 +89,12 @@ A light theme ships with the same token names and WCAG AA contrast pairs. Every 
 
 ### Geometry
 
-4 px spacing grid. Radii: window 12, panel 10, row 8, chip/pill full. Sidebar default 250 px (resizable 200–400). Right panel default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre column height.
+4 px spacing grid. Radii: window 12, **card 16** (the composer and anything else
+holding a group of controls — a card is an object on the surface and the corner
+is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
+radius, 12 px type. Sidebar default 250 px (resizable 200–400). Right panel
+default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
+column height.
 
 ## 3. Regions
 
@@ -86,25 +104,64 @@ Custom, `platform_title_bar` style. Left: traffic lights, sidebar toggle, back/f
 
 ### 3.2 Left sidebar
 
-- **Header** — folder icon, project name (bold) + `@ device` (muted), workspace-switcher chevron, `+` new session.
-- **Session row** (three lines, 8 px radius, selected = `bg.raised` fill):
-  1. `org @ device` muted, right-aligned status: relative time (`now`, `46m`, `4h`) **or** a status pill (animated dot + `Working`).
-  2. Session title.
-  3. Agent glyph (one per provider) + git-branch icon + worktree/branch name, truncated from the left.
-- **Archived section** — collapsible header, one-line rows (glyph, title, age), `Show N more` footer.
+A tree: workspaces under the project they belong to, the way files sit under a
+folder. The project was a line on every row until 2026-09-03, which spent a line
+per row repeating what a heading says once, and left a reader scanning for
+"which project is this" with nowhere single to look.
+
+- **Header** — app name (bold) + chevron, then search and `+` new session.
+- **Section label** — `Projects`, small and muted, over the run of groups.
+- **Project heading** — folder icon + project name, muted.
+- **Workspace row**, indented under its project (8 px radius, selected =
+  `bg.raised` fill):
+  1. Agent glyph, session title, right-aligned status: relative time (`now`,
+     `46m`, `4h`) **or** a status pill (animated dot + `Working`).
+  2. *Only when it says something the title does not:* git-branch icon +
+     branch name (truncated from the left), the dirty dot, and the divergence.
+     A workspace is named after the branch it was cut on, so this line appears
+     when an agent has checked out something else inside the worktree — which
+     is exactly when it matters.
+- **Archived section** — collapsible header, one-line rows (glyph, title, age),
+  `Show N more` footer.
 - **Footer** — avatar, user name, plan/channel label.
-- Rows reorder on an attention sort (working → needs-attention → recent) with the 260 ms curve. Reordering must never move the row under the cursor mid-click.
+- Rows reorder on an attention sort (working → needs-attention → recent) with
+  the 260 ms curve, and a project is ordered by the most urgent row in it, so a
+  project with an agent working in it rises the way a row does. Reordering must
+  never move the row under the cursor mid-click.
 
 ### 3.3 Centre column
 
-- **Transcript** — virtualized markdown: paragraphs, inline code chips, fenced code with tree-sitter highlighting, tool-call cards (collapsed by default, expandable), reasoning blocks (dimmed, collapsible), diff sidecars, plan-approval and ask-user cards with inline buttons.
-- **Composer** — multi-line auto-growing input, `Do anything…` placeholder, `@` file mentions and `/` slash commands with an inline filtered menu, attachment button, model chip, mode chip (`Agent` / `Plan` / `Chat`), circular send button. `⌘↩` sends; sending while busy enqueues and shows a queue badge.
+- **Transcript** — one centred column at the measure (780 px), with the composer
+  under it at the same width: a conversation stranded against one edge of a wide
+  window reads as a mistake rather than as a measure. Virtualized markdown:
+  paragraphs, inline code chips, fenced code with tree-sitter highlighting,
+  tool-call cards, reasoning blocks (dimmed), diff sidecars, plan-approval and
+  ask-user cards with inline buttons. The reader's own words are a tinted
+  bubble, right-aligned within the column. A finished answer carries a copy
+  action; a turn that succeeded prints no outcome of its own, because being
+  answered is how a turn says it worked.
+- **Activity line** — under the transcript while an agent works: a breathing dot
+  and what it is doing (thinking, or the tool it is waiting on). Hidden while
+  text is arriving, when the words are the indicator.
+- **Composer** — one card: a multi-line auto-growing input with the
+  `Do anything…` placeholder, and beneath it the attachment button on the left,
+  then the agent chip (which says when the agent is missing or signed out), the
+  mode chip, and the circular send button — which becomes a stop button while a
+  session is working. `@` file mentions and `/` slash commands with an inline
+  filtered menu. `↩` sends, `⇧↩` is a newline; sending while busy enqueues.
+  Focus is carried by the card's border at the accent's 55%, never by a hard
+  ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: worktree label on the left, branch on the right. Click either to switch.
-- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace.
+- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
+
+> **Defaults.** The right panel and the terminal dock start closed. Their
+> surfaces land in M3, and two empty panels either side of the conversation is
+> a worse first impression than a window that is only what works. Their sizes
+> are remembered while they are closed.
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit), **Files**, **Editor**, **Browser** (M5), **Reports**. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file and read it; editing is M4), **Editor**, **Browser** (M5), **Reports**. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
 
 ## 4. Component mapping
 

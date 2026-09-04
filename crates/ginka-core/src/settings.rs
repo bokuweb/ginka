@@ -32,9 +32,13 @@ impl Default for AppSettings {
             // The defaults in docs/ui.md §2.
             sidebar_open: true,
             sidebar_width: 250.0,
-            right_panel_open: true,
+            // Closed until they have something in them: the right panel's
+            // surfaces and the terminal both land in M3, and two empty panels
+            // either side of the conversation is a worse first impression than
+            // a window that is only what works.
+            right_panel_open: false,
             right_panel_width: 420.0,
-            terminal_dock_open: true,
+            terminal_dock_open: false,
             terminal_dock_height: 220.0,
             last_workspace: None,
             locale: None,
@@ -64,28 +68,22 @@ pub struct DaemonSettings {
     pub status_poll_secs: u64,
     /// Days of task and usage history to keep.
     pub retention_days: u32,
+    /// How many checkpoints a workspace keeps.
+    ///
+    /// Each one holds a commit alive, so an old workspace accumulates objects
+    /// git would otherwise collect. Rewinding is a thing done to recent work:
+    /// past this many turns the reader is reading history, not undoing it.
+    pub checkpoint_limit: u32,
     /// Providers the user has switched off. Absent means enabled, so the file
     /// stays empty until someone actually turns something off.
     pub disabled_providers: Vec<ProviderKind>,
-    /// Where a provider's CLI actually is, when autodetection cannot find it.
+    /// Per-agent overrides, keyed by driver id (`claude`, `codex`, …).
     ///
-    /// Agent CLIs are installed through version managers, nix profiles and
-    /// plain checkouts; without this, a failed probe is a dead end with no way
-    /// out from inside the app. See `docs/roadmap.md` §3.3 N14.
-    pub provider_binaries: BTreeMap<ProviderKind, PathBuf>,
-}
-
-impl Default for DaemonSettings {
-    fn default() -> Self {
-        Self {
-            port: 0,
-            sync_interval_secs: 15,
-            status_poll_secs: 60,
-            retention_days: 30,
-            disabled_providers: Vec::new(),
-            provider_binaries: BTreeMap::new(),
-        }
-    }
+    /// A user whose agent CLI is version-managed, behind a wrapper script or
+    /// pointed at a gateway configures it here; an id this build has no driver
+    /// for is ignored rather than refused, so a settings file can outlive the
+    /// build that reads it.
+    pub agents: BTreeMap<String, AgentSettings>,
 }
 
 impl DaemonSettings {
@@ -103,19 +101,51 @@ impl DaemonSettings {
         }
     }
 
+    /// Where a provider's CLI actually is, when autodetection cannot find it.
+    ///
+    /// Agent CLIs are installed through version managers, nix profiles and
+    /// plain checkouts; without this, a failed probe is a dead end with no way
+    /// out from inside the app (`docs/roadmap.md` §3.3 N14).
     pub fn binary_override(&self, provider: ProviderKind) -> Option<&Path> {
-        self.provider_binaries.get(&provider).map(PathBuf::as_path)
+        self.agents
+            .get(provider.as_str())
+            .and_then(|agent| agent.program.as_deref())
+            .map(Path::new)
     }
 
     /// `None` clears the override and returns the provider to autodetection.
     pub fn set_binary_override(&mut self, provider: ProviderKind, path: Option<PathBuf>) {
-        match path {
-            Some(path) => {
-                self.provider_binaries.insert(provider, path);
-            }
-            None => {
-                self.provider_binaries.remove(&provider);
-            }
+        let entry = self
+            .agents
+            .entry(provider.as_str().to_string())
+            .or_default();
+        entry.program = path.map(|path| path.to_string_lossy().into_owned());
+        if entry.program.is_none() && entry.env.is_empty() {
+            self.agents.remove(provider.as_str());
+        }
+    }
+}
+
+/// How to run one agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AgentSettings {
+    /// The binary to run instead of the driver's default.
+    pub program: Option<String>,
+    /// Environment for the agent's process, on top of the inherited one.
+    pub env: BTreeMap<String, String>,
+}
+
+impl Default for DaemonSettings {
+    fn default() -> Self {
+        Self {
+            port: 0,
+            sync_interval_secs: 15,
+            status_poll_secs: 60,
+            retention_days: 30,
+            checkpoint_limit: 200,
+            disabled_providers: Vec::new(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -164,6 +194,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_panels_that_have_nothing_in_them_start_closed() {
+        let settings = AppSettings::default();
+        assert!(settings.sidebar_open, "the workspace list is the way in");
+        assert!(!settings.right_panel_open);
+        assert!(!settings.terminal_dock_open);
+        // Their sizes are remembered even while they are closed, so opening
+        // one does not start from a default width.
+        assert!(settings.right_panel_width > 0.);
+        assert!(settings.terminal_dock_height > 0.);
+    }
+
+    #[test]
     fn missing_file_yields_defaults() {
         let tmp = tempfile::tempdir().unwrap();
         let loaded: AppSettings = load(&tmp.path().join("absent.json"));
@@ -191,6 +233,27 @@ mod tests {
         assert_eq!(load::<AppSettings>(&path), AppSettings::default());
         // The user's file is still theirs to fix.
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    }
+
+    #[test]
+    fn an_agent_can_be_pointed_at_another_binary() {
+        let settings: DaemonSettings = serde_json::from_str(
+            r#"{"agents":{"claude":{"program":"/opt/homebrew/bin/claude",
+                 "env":{"ANTHROPIC_BASE_URL":"http://localhost:8080"}}}}"#,
+        )
+        .expect("agent overrides parse");
+        let claude = &settings.agents["claude"];
+        assert_eq!(claude.program.as_deref(), Some("/opt/homebrew/bin/claude"));
+        assert_eq!(
+            claude.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("http://localhost:8080")
+        );
+    }
+
+    #[test]
+    fn a_settings_file_with_no_agents_still_loads() {
+        let settings: DaemonSettings = serde_json::from_str("{}").unwrap();
+        assert!(settings.agents.is_empty());
     }
 
     #[test]

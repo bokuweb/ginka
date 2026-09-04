@@ -18,13 +18,25 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 ## Current state
 
-**Milestone 0 is largely landed** (see `docs/roadmap.md` §5 for what remains: the glass window layer, motion helpers, type export, settings hot-reload, crash handler). What works today:
+**M0 and M1 are largely landed, and M2's process split is in.** See `docs/roadmap.md` §5 for what each milestone still owes. What works today:
 
-- The three-column shell renders with resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser — all against sample data. **Not yet visually signed off** (see roadmap M0).
-- Design tokens load from `assets/themes/` and are bridged onto the toolkit's theme; the appearance follows the system unless overridden.
-- Storage boots: SQLite migrations, settings, logging. `ginka doctor` verifies it.
+- A **daemon** owns the state: SQLite, git and agent processes. It binds loopback, publishes its port and a bearer token to `~/.ginka/daemon.json`, and pushes every mutation to connected clients with a sequence number and a bounded replay window.
+- The **CLI and the app are both clients of it.** `ginka` registers projects, creates and removes worktrees, starts agents, reads transcripts, lists and restores checkpoints — and starts the daemon when there is none.
+- **Agents run.** `claude` and `codex` drivers normalize their output into one `AgentEvent` stream; a turn is one process, follow-ups resume the vendor's session, and cancelling signals the process group. Transcripts are persisted as events.
+- **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
+- The three-column shell renders with a resizable sidebar and right panel, a composer, a context bar, a terminal dock and the surface chooser. **Not yet visually signed off** (see roadmap M0).
 
-Everything in the sidebar and the transcript is **placeholder content** (`src/workspace.rs::SessionRow::samples`). M1 replaces it with real projects and worktrees.
+- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; the composer starts an agent or sends a follow-up, picks which agent and model answer, and stops one that is working. A turn boundary is where a checkpoint was taken, so it is also the way back to it.
+- **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
+
+- **English and Japanese.** Every user-visible string is in `locales/app.yml` in both; the language follows `app.json`, then the environment, then English.
+
+- **The review loop.** The right panel draws the workspace's diff, marked word by word where a line was replaced, with per-file staging, a revert, and comments anchored to lines that go back to the agent as one message. `ginka review`, `stage`, `revert`, `commit`, `push`.
+- **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
+- **Finding things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, and reads what it opens. ⌘K reaches every action, panel, surface and workspace by name.
+- **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
+
+What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
 
 **The domain layer for N1–N14 has landed ahead of its milestones** (roadmap §3.3), test-first and with no UI on top of it yet:
 
@@ -45,11 +57,23 @@ Everything in the sidebar and the transcript is **placeholder content** (`src/wo
 ## Commands
 
 ```bash
-cargo run                  # the desktop app
-cargo run -p ginka-cli -- doctor   # where state lives and whether it is healthy
-cargo test --workspace
+cargo run                                   # the desktop app
+cargo test --workspace                      # run this rather than `-p`: the CLI's
+                                            # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
+
+cargo run -p ginka-cli -- doctor            # where state lives and whether it is healthy
+cargo run -p ginka-cli -- daemon status
+cargo run -p ginka-cli -- project add .
+cargo run -p ginka-cli -- workspace new <project> <branch>
+cargo run -p ginka-cli -- session start <workspace> "<prompt>"
+cargo run -p ginka-cli -- session log <session>
+cargo run -p ginka-cli -- checkpoint list <workspace>
+cargo run -p ginka-cli -- --json project list   # the protocol's own shapes, for agents
+cargo run -p ginka-cli -- mcp                   # serve those shapes to an agent over MCP
+
+cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```
 
 `cargo clippy`/`cargo test` on the whole workspace also builds the GPUI app; the domain crates alone are
@@ -65,12 +89,13 @@ ginka/
 ├─ src/                 # GPUI app: views only -- shell, sidebar, surfaces
 ├─ crates/
 │  ├─ ginka-protocol/   # serde wire types shared by every process; ts-rs export
-│  ├─ ginka-core/       # domain: projects, worktrees, sessions, drivers, git, cron
+│  ├─ ginka-core/       # domain: projects, worktrees, sessions, drivers, git,
+│  │                    # checkpoints, and the daemon's request handling
 │  ├─ ginka-daemon/     # binary: WebSocket RPC server, owns SQLite + processes
 │  ├─ ginka-client/     # async RPC client used by the app and the CLI
 │  └─ ginka-cli/        # binary: the `ginka` command
 ├─ db/migrations/       # SQL migrations, embedded at compile time
-├─ locales/             # rust-i18n yml (en, ja) -- planned; does not exist yet (M0)
+├─ locales/app.yml      # every user-visible string, en and ja side by side
 ├─ assets/themes/       # design tokens (dark.json, light.json)
 ├─ assets/icons/        # app-owned icons, layered over the toolkit's set
 └─ docs/
@@ -105,10 +130,11 @@ These are load-bearing. Violating them creates work that has to be undone.
 - **Errors:** `anyhow` at binary boundaries, typed errors (`thiserror`) inside `ginka-core` and `ginka-protocol`.
 - **Async:** `smol` and GPUI's executor. Do not introduce a second reactor without a note in the roadmap's decision log.
 - **Tests:** test-first for anything with a decision in it — the test says what the rule is, and the awkward cases (a refused steer, a hand edit between turns, an unpriced model) are the point. Every bug fix lands with a regression test. Agent-session behaviour is tested against `ScriptedSession`, never a live vendor CLI; git behaviour against a real repository in a temp directory (`crates/ginka-core/tests/support`).
-- **i18n:** user-visible strings go through `rust-i18n`, with `en` and `ja` both maintained. **Not wired up yet** — it is an open M0 item, and every string added before it lands is one to retrofit.
+- **i18n:** user-visible strings go through `rust-i18n`. `en` and `ja` are both maintained.
 - **a11y is a rule, not a polish pass.** Every control reachable by mouse is reachable by keyboard with visible focus; decorative animation honours the system reduce-motion setting; nothing encodes meaning in colour, hover or motion alone. Roadmap §6.4.
-- **Commits:** imperative subject, explain *why* in the body. Reference the roadmap milestone when the change advances one.
-- **Comments:** explain non-obvious constraints (why the workspace id is derived from `name`, why a poll is throttled), not what the code plainly says.
+- **English in the repository.** Code, comments, docs, commit messages and pull requests are written in English, no matter what language the conversation that produced them was in.
+- **Commits and pull requests:** imperative subject, explain *why* in the body. Reference the roadmap milestone when the change advances one. A PR description says what changed and what it is for, in the same voice as the commit.
+- **Comments are rustdoc.** Every public item — module, type, trait, function, field, variant — carries a `///` comment; every crate and module root carries a `//!` header saying what lives there and what it owns. Document what a caller must know: invariants, panics, errors, units, and the constraint that made the code look the way it does (why the workspace id is derived from `name`, why a poll is throttled). Do not restate what the signature already says, and do not leave a public item undocumented because it looks obvious.
 
 ## Working agreements for agents
 

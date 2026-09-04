@@ -8,13 +8,21 @@
 use serde_json::Value;
 use std::collections::HashMap;
 
-use crate::driver::{ActivityItem, AgentEvent, DriverError, TurnOutcome};
-use crate::usage::TokenTotals;
+use crate::driver::{ActivityItem, AgentEvent, DriverError};
+use ginka_protocol::event::Usage;
+use ginka_protocol::model::SessionState;
 
 /// Reads a session's lines, holding the little state pairing needs.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct ClaudeStream {
     session_id: Option<String>,
+    /// Turns completed on this stream, which is what a checkpoint is filed
+    /// against.
+    turn: u32,
+    /// Set once a partial text delta has arrived. The CLI sends the same text
+    /// again in the completed message, so after this the whole-message text is
+    /// dropped — otherwise every reply would be recorded twice.
+    streaming: bool,
     /// Calls waiting for their result, so a result can be rendered as the row
     /// it belongs to rather than as an orphan with no title.
     pending: HashMap<String, ActivityItem>,
@@ -61,13 +69,13 @@ impl ClaudeStream {
             model: string_at(message, "model"),
         }];
         if let Some(commands) = message.get("slash_commands").and_then(Value::as_array) {
-            events.push(AgentEvent::Commands(
-                commands
+            events.push(AgentEvent::Commands {
+                commands: commands
                     .iter()
                     .filter_map(Value::as_str)
                     .map(str::to_string)
                     .collect(),
-            ));
+            });
         }
         events
     }
@@ -89,19 +97,28 @@ impl ClaudeStream {
                 .and_then(Value::as_str)
                 .unwrap_or_default();
             match kind {
+                // Already delivered as deltas; the completed message repeats
+                // it verbatim.
+                "text" if self.streaming => {}
                 "text" => {
                     if let Some(text) = block.get("text").and_then(Value::as_str) {
-                        events.push(AgentEvent::TextDelta(text.to_string()));
+                        events.push(AgentEvent::TextDelta {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 "thinking" => {
                     if let Some(text) = block.get("thinking").and_then(Value::as_str) {
-                        events.push(AgentEvent::Reasoning(text.to_string()));
+                        events.push(AgentEvent::Reasoning {
+                            text: text.to_string(),
+                        });
                     }
                 }
                 // Encrypted reasoning: the agent thought, and we are told only
                 // that. Showing nothing at all would misrepresent the turn.
-                "redacted_thinking" => events.push(AgentEvent::Reasoning(String::new())),
+                "redacted_thinking" => events.push(AgentEvent::Reasoning {
+                    text: String::new(),
+                }),
                 "tool_use" => {
                     let id = string_at(block, "id");
                     let activity = ActivityItem::from_tool(
@@ -115,7 +132,7 @@ impl ClaudeStream {
                     if let Some(id) = id {
                         self.pending.insert(id, activity.clone());
                     }
-                    events.push(AgentEvent::ToolCall(activity));
+                    events.push(AgentEvent::ToolCall { activity });
                 }
                 other => events.push(AgentEvent::Unsupported {
                     shape: format!("assistant.{other}"),
@@ -124,7 +141,7 @@ impl ClaudeStream {
         }
 
         if let Some(usage) = usage_of(body) {
-            events.push(AgentEvent::Usage(usage));
+            events.push(AgentEvent::Usage { usage });
         }
         Ok(events)
     }
@@ -159,7 +176,7 @@ impl ClaudeStream {
                     .and_then(Value::as_bool)
                     .unwrap_or(false),
             );
-            events.push(AgentEvent::ToolResult(activity));
+            events.push(AgentEvent::ToolResult { activity });
         }
         Ok(events)
     }
@@ -170,7 +187,7 @@ impl ClaudeStream {
 
         let mut events = Vec::new();
         if let Some(usage) = usage_of(message) {
-            events.push(AgentEvent::Usage(usage));
+            events.push(AgentEvent::Usage { usage });
         }
 
         let failed = message
@@ -178,24 +195,28 @@ impl ClaudeStream {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let text = string_at(message, "result");
-        events.push(AgentEvent::SessionResult {
-            text: text.clone(),
-            failed,
-        });
-
         let subtype = string_at(message, "subtype").unwrap_or_default();
-        let outcome = if !failed && subtype != "error" {
-            TurnOutcome::Completed
-        } else {
+
+        // A result line is the end of a turn, and the turn number is what a
+        // checkpoint is filed against.
+        self.turn += 1;
+        events.push(AgentEvent::TurnEnd { turn: self.turn });
+        events.push(AgentEvent::SessionResult {
+            // A result line is the end of the CLI's run, not just of a turn:
+            // the whole task it was given is done.
+            state: if failed || subtype == "error" {
+                SessionState::Failed
+            } else {
+                SessionState::Finished
+            },
             // The subtype is the machine-readable half and the text the
-            // human-readable one; a report needs both to be useful.
-            let reason = match text {
-                Some(text) if !text.is_empty() => format!("{subtype}: {text}"),
-                _ => subtype,
-            };
-            TurnOutcome::Failed { reason }
-        };
-        events.push(AgentEvent::TurnEnd { outcome });
+            // human-readable one; a summary is more useful with both.
+            summary: match (text, subtype.as_str()) {
+                (Some(text), _) if !text.is_empty() => Some(text),
+                (_, "") => None,
+                (_, subtype) => Some(subtype.to_string()),
+            },
+        });
         events
     }
 
@@ -217,12 +238,15 @@ impl ClaudeStream {
                     .and_then(Value::as_str)
                     .unwrap_or_default()
                 {
-                    "text_delta" => string_at(delta, "text")
-                        .map(AgentEvent::TextDelta)
-                        .into_iter()
-                        .collect(),
+                    "text_delta" => {
+                        self.streaming = true;
+                        string_at(delta, "text")
+                            .map(|text| AgentEvent::TextDelta { text })
+                            .into_iter()
+                            .collect()
+                    }
                     "thinking_delta" => string_at(delta, "thinking")
-                        .map(AgentEvent::Reasoning)
+                        .map(|text| AgentEvent::Reasoning { text })
                         .into_iter()
                         .collect(),
                     // Tool arguments stream in as fragments; the call is
@@ -239,14 +263,18 @@ fn string_at(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
 
-fn usage_of(value: &Value) -> Option<TokenTotals> {
+fn usage_of(value: &Value) -> Option<Usage> {
     let usage = value.get("usage")?;
     let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-    Some(TokenTotals {
-        input: count("input_tokens"),
-        output: count("output_tokens"),
-        cache_read: count("cache_read_input_tokens"),
-        cache_write: count("cache_creation_input_tokens"),
+    Some(Usage {
+        input_tokens: count("input_tokens"),
+        output_tokens: count("output_tokens"),
+        // Cache writes are input the vendor charged differently, and the wire
+        // shape keeps one cache figure; folding them in reports what was read
+        // rather than dropping it.
+        cache_read_tokens: count("cache_read_input_tokens") + count("cache_creation_input_tokens"),
+        reasoning_tokens: 0,
+        cost_usd: value.get("total_cost_usd").and_then(Value::as_f64),
     })
 }
 

@@ -1,10 +1,14 @@
+//! Stable identifiers, and the slug rule every one of them is built with.
+
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A project's stable key. Projects are keyed by name rather than by path so a
 /// repository can be moved on disk without orphaning its workspaces.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct ProjectName(pub String);
 
 /// Identifies one workspace (one git worktree).
@@ -12,8 +16,10 @@ pub struct ProjectName(pub String);
 /// Derived from the worktree's immutable `name`, **never** from the live branch
 /// — an agent switching branches inside a worktree must not re-key everything
 /// that hangs off this id. See `docs/roadmap.md` §4.4.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
 pub struct WorkspaceId(pub String);
 
 impl WorkspaceId {
@@ -21,8 +27,50 @@ impl WorkspaceId {
     pub fn new(project: &ProjectName, worktree_name: &str) -> Self {
         Self(format!("{}/{}", project.0, slugify(worktree_name)))
     }
+
+    /// Split the id back into the project name and the worktree name.
+    ///
+    /// Returns `None` for a string that was not produced by [`WorkspaceId::new`],
+    /// which is how a request naming a workspace that cannot exist is rejected
+    /// before it reaches the database.
+    pub fn parts(&self) -> Option<(ProjectName, &str)> {
+        let (project, name) = self.0.split_once('/')?;
+        if project.is_empty() || name.is_empty() {
+            return None;
+        }
+        Some((ProjectName(project.to_string()), name))
+    }
 }
 
+/// Identifies one agent session — a single conversation with one driver in one
+/// workspace. Opaque, assigned by the daemon; clients never construct one.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
+pub struct SessionId(pub String);
+
+/// Identifies one terminal: a shell running in a workspace.
+///
+/// Opaque, assigned by the daemon, which is what owns the pty.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[cfg_attr(feature = "export", ts(type = "string"))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TerminalId(pub String);
+
+impl fmt::Display for TerminalId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Identifies one checkpoint: a workspace state snapshotted at a turn boundary.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
+pub struct CheckpointId(pub String);
 impl From<&str> for WorkspaceId {
     /// Adopt an id that was already built — read back from the database or
     /// received over the wire. Ids are *created* with [`WorkspaceId::new`];
@@ -70,6 +118,12 @@ impl fmt::Display for WorkspaceId {
     }
 }
 
+impl fmt::Display for SessionId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,5 +144,20 @@ mod tests {
         let project = ProjectName("comet".into());
         let id = WorkspaceId::new(&project, "bright-harbor");
         assert_eq!(id.0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn a_workspace_id_splits_back_into_its_parts() {
+        let id = WorkspaceId::new(&ProjectName("comet".into()), "bright-harbor");
+        let (project, name) = id.parts().expect("a well-formed id splits");
+        assert_eq!(project.0, "comet");
+        assert_eq!(name, "bright-harbor");
+    }
+
+    #[test]
+    fn a_malformed_workspace_id_has_no_parts() {
+        assert!(WorkspaceId("comet".into()).parts().is_none());
+        assert!(WorkspaceId("/harbor".into()).parts().is_none());
+        assert!(WorkspaceId("comet/".into()).parts().is_none());
     }
 }

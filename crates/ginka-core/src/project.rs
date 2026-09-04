@@ -1,67 +1,20 @@
+//! Persistence for projects and worktrees.
+//!
+//! The rows themselves are `ginka-protocol` types: the CLI and the app read
+//! them straight off the wire, so there is one definition of what a project is
+//! rather than a domain copy and a wire copy that drift.
+
 use anyhow::Result;
 use ginka_protocol::{ProjectName, WorkspaceId};
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-/// A registered repository or folder.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Project {
-    pub name: ProjectName,
-    pub path: PathBuf,
-    pub default_branch: String,
-    pub label: Option<String>,
-    pub sort_order: i64,
-    pub kind: ProjectKind,
-    /// `None` means "not probed yet", and is treated as `true` so the first CI
-    /// poll after a cold boot still runs.
-    pub has_origin: Option<bool>,
-}
+pub use ginka_protocol::model::{Project, ProjectKind, Worktree};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ProjectKind {
-    /// Worktree per workspace, branches, PR/CI features.
-    Git,
-    /// A plain folder: one implicit workspace, git features off.
-    Plain,
-}
-
-impl ProjectKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Git => "git",
-            Self::Plain => "plain",
-        }
-    }
-
-    fn parse(value: &str) -> Self {
-        match value {
-            "plain" => Self::Plain,
-            _ => Self::Git,
-        }
-    }
-}
-
-/// One git worktree; the unit of isolation a workspace is scoped to.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Worktree {
-    pub project: ProjectName,
-    /// Immutable identity, assigned once at creation. See `WorkspaceId`.
-    pub name: String,
-    /// The live branch, reconciled against git on each sync tick.
-    pub branch: String,
-    pub path: PathBuf,
-    pub head: Option<String>,
-    pub pinned: bool,
-}
-
-impl Worktree {
-    pub fn workspace_id(&self) -> WorkspaceId {
-        WorkspaceId::new(&self.project, &self.name)
-    }
-}
-
+/// Insert a project, or update the one already stored under its name.
+///
+/// Upsert rather than insert because registering an existing project is how a
+/// user tells Ginka the repository moved on disk.
 pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     conn.execute(
         "INSERT INTO projects (name, path, default_branch, label, sort_order, kind, has_origin)
@@ -86,6 +39,7 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Every project, in sidebar order.
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(
         "SELECT name, path, default_branch, label, sort_order, kind, has_origin
@@ -105,6 +59,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
+/// Every worktree stored for `project`, pinned ones first.
 pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Worktree>> {
     let mut statement = conn.prepare(
         "SELECT project_name, name, branch, path, head, pinned
@@ -121,6 +76,40 @@ pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Wo
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
+}
+
+/// Forget a project. Cascades to its worktrees; leaves the user's code alone.
+pub fn remove_project(conn: &Connection, project: &ProjectName) -> Result<bool> {
+    let removed = conn.execute("DELETE FROM projects WHERE name = ?1", [&project.0])?;
+    Ok(removed > 0)
+}
+
+/// The worktree a workspace id names, if it is still stored.
+///
+/// The id carries the project and the immutable worktree name, which is why
+/// this lookup keeps working after an agent switches branches inside it.
+pub fn find_worktree(conn: &Connection, workspace: &WorkspaceId) -> Result<Option<Worktree>> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(None);
+    };
+    Ok(list_worktrees(conn, &project)?
+        .into_iter()
+        .find(|worktree| worktree.name == name))
+}
+
+/// Pin or unpin a workspace. Returns whether a row was affected.
+///
+/// Pinning is ours rather than git's, so it lives only here and reconciliation
+/// must never write over it.
+pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> Result<bool> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    let updated = conn.execute(
+        "UPDATE worktrees SET pinned = ?1 WHERE project_name = ?2 AND name = ?3",
+        rusqlite::params![pinned, project.0, name],
+    )?;
+    Ok(updated > 0)
 }
 
 #[cfg(test)]
@@ -159,21 +148,5 @@ mod tests {
         let listed = list_projects(&conn).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, PathBuf::from("/elsewhere/comet"));
-    }
-
-    #[test]
-    fn workspace_id_survives_a_branch_switch() {
-        let mut worktree = Worktree {
-            project: ProjectName("comet".into()),
-            name: "bright-harbor".into(),
-            branch: "bright-harbor".into(),
-            path: PathBuf::from("/tmp/wt"),
-            head: None,
-            pinned: false,
-        };
-        let before = worktree.workspace_id();
-        // An agent checks out a different branch inside the worktree.
-        worktree.branch = "some/other-branch".into();
-        assert_eq!(worktree.workspace_id(), before);
     }
 }

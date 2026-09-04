@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use ginka_protocol::envelope::{
     ClientMessage, HandshakeRejection, PROTOCOL_VERSION, ServerMessage,
 };
-use ginka_protocol::handshake::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonHandshake};
+use ginka_protocol::handshake::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, Handshake};
 use uuid::Uuid;
 
 use crate::Paths;
@@ -20,12 +20,13 @@ use crate::Paths;
 /// process would authenticate a client to a daemon that no longer exists, and
 /// an epoch that repeated would let a stale cursor resume into a fresh event
 /// stream.
-pub fn publish(paths: &Paths, port: u16) -> Result<DaemonHandshake> {
-    let handshake = DaemonHandshake {
+pub fn publish(paths: &Paths, port: u16) -> Result<Handshake> {
+    let handshake = Handshake {
         protocol_version: PROTOCOL_VERSION,
         port,
         token: generate_token(),
         pid: std::process::id(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
         epoch: new_epoch(),
     };
     write(paths, &handshake)?;
@@ -37,7 +38,7 @@ pub fn publish(paths: &Paths, port: u16) -> Result<DaemonHandshake> {
 /// A missing file is the normal "no daemon running" answer. A corrupt one is
 /// treated the same way: a daemon killed mid-write must not stop the next one
 /// from starting.
-pub fn read(paths: &Paths) -> Result<Option<DaemonHandshake>> {
+pub fn read(paths: &Paths) -> Result<Option<Handshake>> {
     let path = paths.daemon_handshake();
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -99,11 +100,14 @@ fn generate_token() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
 }
 
-fn new_epoch() -> u64 {
+/// A fresh identifier for this daemon run. Event sequence numbers restart per
+/// run, so a client that reconnects across a restart must resync rather than
+/// resume — the epoch is how it can tell.
+pub fn new_epoch() -> u64 {
     chrono::Utc::now().timestamp_micros().max(0) as u64
 }
 
-fn write(paths: &Paths, handshake: &DaemonHandshake) -> Result<()> {
+fn write(paths: &Paths, handshake: &Handshake) -> Result<()> {
     let path = paths.daemon_handshake();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -131,7 +135,13 @@ fn write(paths: &Paths, handshake: &DaemonHandshake) -> Result<()> {
 /// that rather than sent chasing a token problem it does not have. Nothing at
 /// all is served before the hello — a connection that has not identified
 /// itself has no business asking questions.
-pub fn greet(expected_token: &str, epoch: u64, first: &ClientMessage) -> ServerMessage {
+pub fn greet(
+    expected_token: &str,
+    epoch: u64,
+    seq: u64,
+    version: &str,
+    first: &ClientMessage,
+) -> ServerMessage {
     let ClientMessage::Hello {
         protocol_version,
         token,
@@ -157,6 +167,8 @@ pub fn greet(expected_token: &str, epoch: u64, first: &ClientMessage) -> ServerM
 
     ServerMessage::Welcome {
         protocol_version: PROTOCOL_VERSION,
+        version: version.to_string(),
         epoch,
+        seq,
     }
 }

@@ -2,7 +2,8 @@
 //! stopped.
 
 use ginka_core::driver::{
-    AgentEvent, AgentSession, ClaudeDriver, SessionSpec, claude::PromptMessage,
+    AgentEvent, AgentSession, ClaudeDriver, ProcessSessionSpec as SessionSpec,
+    claude::PromptMessage,
 };
 use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
 use std::path::PathBuf;
@@ -163,7 +164,7 @@ fn a_prompt_reaches_the_running_agent() {
 
     let events = collect_until_exit(receiver);
     let echoed = events.iter().any(
-        |event| matches!(event, AgentEvent::TextDelta(text) if text.contains("review the diff")),
+        |event| matches!(event, AgentEvent::TextDelta { text } if text.contains("review the diff")),
     );
     assert!(echoed, "{events:?}");
 }
@@ -180,7 +181,7 @@ fn this_transport_can_steer_a_running_turn() {
     assert!(
         events.iter().any(|event| matches!(
             event,
-            AgentEvent::TextDelta(text) if text.contains("actually, use serde_json")
+            AgentEvent::TextDelta { text } if text.contains("actually, use serde_json")
         )),
         "{events:?}"
     );

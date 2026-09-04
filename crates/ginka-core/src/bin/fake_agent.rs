@@ -11,6 +11,18 @@
 use std::io::{BufRead, Write};
 
 fn main() {
+    // Two ways to script this, because two suites do. A script file exercises
+    // the daemon's supervisor with directives it can pause and block on; the
+    // flags exercise the driver's own reading of a stream. Neither knows about
+    // the other, so the file wins when it is set.
+    if std::env::var_os("GINKA_FAKE_AGENT_SCRIPT").is_some() {
+        return scripted();
+    }
+    flags();
+}
+
+/// Flag-driven: what the driver tests script.
+fn flags() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut exit_code = 0;
     let mut hang = false;
@@ -72,4 +84,73 @@ fn main() {
         }
     }
     std::process::exit(exit_code);
+}
+
+/// File-driven: what the daemon's session tests script.
+fn scripted() {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let prompt = arguments.last().cloned().unwrap_or_default();
+    let joined = arguments.join(" ");
+    let session =
+        std::env::var("GINKA_FAKE_AGENT_SESSION").unwrap_or_else(|_| "fake-session".to_string());
+
+    let script = match std::env::var("GINKA_FAKE_AGENT_SCRIPT") {
+        Ok(path) => std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("reading the script at {path}: {error}")),
+        // With no script, behave like a well-behaved agent that answers once.
+        Err(_) => default_script(),
+    };
+
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut stdin = std::io::stdin().lock();
+
+    for line in script.lines() {
+        let line = line
+            .replace("{prompt}", &prompt)
+            .replace("{session}", &session)
+            .replace("{args}", &joined);
+        if let Some(rest) = line.strip_prefix("#sleep ") {
+            let millis: u64 = rest.trim().parse().unwrap_or(0);
+            std::thread::sleep(std::time::Duration::from_millis(millis));
+        } else if line.trim() == "#read" {
+            let mut buffer = String::new();
+            // End of input means the parent gave up on us; stop rather than
+            // spinning on a closed pipe.
+            if stdin.read_line(&mut buffer).unwrap_or(0) == 0 {
+                return;
+            }
+        } else if let Some(rest) = line.strip_prefix("#spawn ") {
+            // A stand-in for the compiler or test runner a real agent starts.
+            // Deliberately not waited on: the point is that it outlives this
+            // process unless something kills the whole group.
+            #[allow(clippy::zombie_processes)]
+            let child = std::process::Command::new("sleep")
+                .arg("300")
+                .spawn()
+                .expect("sleep is on PATH");
+            std::fs::write(rest.trim(), child.id().to_string()).expect("the pid file is writable");
+        } else if let Some(rest) = line.strip_prefix("#stderr ") {
+            eprintln!("{rest}");
+        } else if let Some(rest) = line.strip_prefix("#exit ") {
+            let code: i32 = rest.trim().parse().unwrap_or(0);
+            out.flush().ok();
+            std::process::exit(code);
+        } else {
+            writeln!(out, "{line}").expect("stdout is open");
+            // Flushed per line: a test that waits for an event must not be
+            // held up by a buffer that only empties at exit.
+            out.flush().expect("stdout is open");
+        }
+    }
+}
+
+/// One system line, one answer, one result — the shape of a short session.
+fn default_script() -> String {
+    [
+        r#"{"type":"system","subtype":"init","session_id":"{session}","model":"fake"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"answering: {prompt}"}]},"session_id":"{session}"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"answering: {prompt}","session_id":"{session}","usage":{"input_tokens":1,"output_tokens":1}}"#,
+    ]
+    .join("\n")
 }

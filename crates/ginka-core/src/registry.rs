@@ -46,7 +46,69 @@ pub fn register_project(conn: &Connection, path: &Path) -> Result<Project> {
     };
 
     insert_project(conn, &project)?;
+    if project.kind == ProjectKind::Plain {
+        adopt_plain_folder(conn, &project)?;
+    }
     Ok(project)
+}
+
+/// Give a plain folder the one workspace it has.
+///
+/// A folder that is not a repository has nothing to branch, but an agent still
+/// has to be able to run somewhere, and everything above this — sessions,
+/// transcripts, the sidebar — is addressed by workspace id. So the folder is
+/// its own workspace, recorded once at registration rather than synthesised on
+/// every read.
+fn adopt_plain_folder(conn: &Connection, project: &Project) -> Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO worktrees (project_name, name, branch, path) \
+         VALUES (?1, ?2, '', ?3)",
+        rusqlite::params![
+            project.name.0,
+            project.name.0,
+            project.path.to_string_lossy(),
+        ],
+    )?;
+    Ok(())
+}
+
+/// Create a dated scratch directory and register it as a plain project.
+///
+/// `~/.ginka/projects/<date>/<slug>`, as waku does it: dated so a week of
+/// scratch work is still findable, and slugged so the name is safe in a path
+/// and as a project key. A name already taken today gets a numeric suffix
+/// rather than landing an agent in the previous one's files.
+pub fn create_scratch_workspace(
+    conn: &Connection,
+    paths: &crate::Paths,
+    name: Option<&str>,
+    today: &str,
+) -> Result<Project> {
+    let requested = name.map(slugify).filter(|slug| !slug.is_empty());
+    let base = requested.unwrap_or_else(|| "scratch".to_string());
+    let dated = paths.scratch_projects().join(today);
+
+    let mut candidate = base.clone();
+    for suffix in 2.. {
+        if !dated.join(&candidate).exists() && !project_exists(conn, &candidate)? {
+            break;
+        }
+        candidate = format!("{base}-{suffix}");
+    }
+
+    let path = dated.join(&candidate);
+    std::fs::create_dir_all(&path).with_context(|| format!("creating {}", path.display()))?;
+    register_project(conn, &path)
+}
+
+/// Whether a project is already registered under this name.
+fn project_exists(conn: &Connection, name: &str) -> Result<bool> {
+    let count: i64 = conn.query_row(
+        "SELECT count(*) FROM projects WHERE name = ?1",
+        [name],
+        |row| row.get(0),
+    )?;
+    Ok(count > 0)
 }
 
 /// Derive a project's key from its directory name.
@@ -371,6 +433,60 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|w| w.branch == "harbor")
+        );
+    }
+
+    #[test]
+    fn a_plain_folder_becomes_its_own_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("notes");
+        std::fs::create_dir_all(&root).unwrap();
+        let conn = db::open_in_memory().unwrap();
+        let project = register_project(&conn, &root).unwrap();
+
+        let worktrees = crate::project::list_worktrees(&conn, &project.name).unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert_eq!(worktrees[0].path, project.path);
+        assert!(worktrees[0].branch.is_empty(), "there is nothing to branch");
+
+        // Registering again must not produce a second one.
+        register_project(&conn, &root).unwrap();
+        assert_eq!(
+            crate::project::list_worktrees(&conn, &project.name)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_scratch_workspace_is_dated_and_never_reuses_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::Paths::with_root(dir.path().join("state"));
+        paths.ensure().unwrap();
+        let conn = db::open_in_memory().unwrap();
+
+        let first = create_scratch_workspace(&conn, &paths, Some("Try it"), "2026-09-02").unwrap();
+        assert!(first.path.ends_with("try-it"));
+        assert!(first.path.parent().unwrap().ends_with("2026-09-02"));
+
+        let second = create_scratch_workspace(&conn, &paths, Some("Try it"), "2026-09-02").unwrap();
+        assert_ne!(first.path, second.path);
+        assert_ne!(first.name, second.name);
+    }
+
+    #[test]
+    fn a_scratch_workspace_with_an_unusable_name_still_gets_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::Paths::with_root(dir.path().join("state"));
+        paths.ensure().unwrap();
+        let conn = db::open_in_memory().unwrap();
+        let project =
+            create_scratch_workspace(&conn, &paths, Some("日本語"), "2026-09-02").unwrap();
+        assert!(
+            project.path.ends_with("scratch"),
+            "{}",
+            project.path.display()
         );
     }
 

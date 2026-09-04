@@ -8,7 +8,13 @@ description = "RPC client for the Ginka daemon, shared by the app and the CLI"
 [dependencies]
 ginka-protocol.workspace = true
 anyhow.workspace = true
+async-channel.workspace = true
+async-net.workspace = true
+async-tungstenite.workspace = true
+futures-lite.workspace = true
+futures-util.workspace = true
 serde.workspace = true
+smol.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

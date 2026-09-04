@@ -4,7 +4,8 @@
 //! notice, and a fixture is the only thing that tells us *which* line stopped
 //! being understood (roadmap R6).
 
-use ginka_core::driver::{ActivityKind, AgentEvent, ClaudeStream, DriverError, TurnOutcome};
+use ginka_core::driver::{ActivityKind, AgentEvent, ClaudeStream, DriverError};
+use ginka_protocol::model::SessionState;
 
 fn events(lines: &[&str]) -> Vec<AgentEvent> {
     let mut stream = ClaudeStream::default();
@@ -27,7 +28,7 @@ fn the_init_line_connects_the_session_and_reports_its_commands() {
         }
     );
     match &events[1] {
-        AgentEvent::Commands(commands) => assert_eq!(commands, &["compact", "review"]),
+        AgentEvent::Commands { commands } => assert_eq!(commands, &["compact", "review"]),
         other => panic!("{other:?}"),
     }
 }
@@ -46,7 +47,9 @@ fn assistant_text_becomes_a_delta() {
     ]);
     assert_eq!(
         events,
-        [AgentEvent::TextDelta("Looking at the diff.".into())]
+        [AgentEvent::TextDelta {
+            text: "Looking at the diff.".into()
+        }]
     );
 }
 
@@ -57,7 +60,9 @@ fn thinking_is_reasoning_and_never_text() {
     ]);
     assert_eq!(
         events,
-        [AgentEvent::Reasoning("weighing two options".into())]
+        [AgentEvent::Reasoning {
+            text: "weighing two options".into()
+        }]
     );
 }
 
@@ -67,7 +72,7 @@ fn a_tool_use_becomes_a_normalized_call() {
         r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"cargo test"}}]}}"#,
     ]);
     match &events[0] {
-        AgentEvent::ToolCall(activity) => {
+        AgentEvent::ToolCall { activity } => {
             assert_eq!(activity.kind, ActivityKind::Command);
             assert_eq!(activity.title, "cargo test");
             assert_eq!(activity.id.as_deref(), Some("t1"));
@@ -83,7 +88,7 @@ fn a_result_completes_the_call_it_names_and_keeps_that_calls_title() {
         r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"ok. 220 passed","is_error":false}]}}"#,
     ]);
     match &events[1] {
-        AgentEvent::ToolResult(activity) => {
+        AgentEvent::ToolResult { activity } => {
             assert_eq!(activity.title, "cargo test", "the row keeps its identity");
             assert_eq!(activity.kind, ActivityKind::Command);
             assert_eq!(activity.detail.as_deref(), Some("ok. 220 passed"));
@@ -101,7 +106,7 @@ fn a_failed_tool_result_says_so() {
         r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"exit 1","is_error":true}]}}"#,
     ]);
     match &events[1] {
-        AgentEvent::ToolResult(activity) => assert!(activity.failed),
+        AgentEvent::ToolResult { activity } => assert!(activity.failed),
         other => panic!("{other:?}"),
     }
 }
@@ -114,7 +119,7 @@ fn a_result_for_a_call_we_never_saw_is_still_shown() {
         r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"orphan","content":"done"}]}}"#,
     ]);
     match &events[0] {
-        AgentEvent::ToolResult(activity) => {
+        AgentEvent::ToolResult { activity } => {
             assert_eq!(activity.id.as_deref(), Some("orphan"));
             assert!(activity.complete);
         }
@@ -128,7 +133,7 @@ fn structured_tool_output_is_flattened_into_readable_text() {
         r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"text","text":"line one"},{"type":"text","text":"line two"}]}]}}"#,
     ]);
     match &events[0] {
-        AgentEvent::ToolResult(activity) => {
+        AgentEvent::ToolResult { activity } => {
             assert_eq!(activity.detail.as_deref(), Some("line one\nline two"))
         }
         other => panic!("{other:?}"),
@@ -141,11 +146,12 @@ fn usage_is_reported_with_its_cache_split_intact() {
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}}"#,
     ]);
     match events.last().unwrap() {
-        AgentEvent::Usage(tokens) => {
-            assert_eq!(tokens.input, 10);
-            assert_eq!(tokens.output, 20);
-            assert_eq!(tokens.cache_read, 5);
-            assert_eq!(tokens.cache_write, 7);
+        AgentEvent::Usage { usage } => {
+            assert_eq!(usage.input_tokens, 10);
+            assert_eq!(usage.output_tokens, 20);
+            // One cache figure on the wire: what was read and what was written
+            // are both input the vendor charged differently.
+            assert_eq!(usage.cache_read_tokens, 12);
         }
         other => panic!("{other:?}"),
     }
@@ -159,14 +165,14 @@ fn the_result_line_ends_the_turn() {
     assert!(
         events
             .iter()
-            .any(|event| matches!(event, AgentEvent::Usage(_)))
+            .any(|event| matches!(event, AgentEvent::Usage { .. }))
     );
-    assert_eq!(
+    // The turn ends, and the session's own result follows it.
+    assert!(events.contains(&AgentEvent::TurnEnd { turn: 1 }));
+    assert!(matches!(
         events.last().unwrap(),
-        &AgentEvent::TurnEnd {
-            outcome: TurnOutcome::Completed
-        }
-    );
+        AgentEvent::SessionResult { .. }
+    ));
 }
 
 #[test]
@@ -175,12 +181,14 @@ fn a_failed_turn_carries_the_reason_the_agent_gave() {
         r#"{"type":"result","subtype":"error_max_turns","is_error":true,"result":"hit the turn limit"}"#,
     ]);
     match events.last().unwrap() {
-        AgentEvent::TurnEnd {
-            outcome: TurnOutcome::Failed { reason },
-        } => assert!(
-            reason.contains("max_turns") || reason.contains("turn limit"),
-            "{reason}"
-        ),
+        AgentEvent::SessionResult { state, summary } => {
+            assert_eq!(*state, SessionState::Failed);
+            let summary = summary.clone().unwrap_or_default();
+            assert!(
+                summary.contains("max_turns") || summary.contains("turn limit"),
+                "{summary}"
+            );
+        }
         other => panic!("{other:?}"),
     }
 }
@@ -196,8 +204,8 @@ fn partial_deltas_stream_before_the_message_is_complete() {
         events,
         [
             AgentEvent::TurnStarted,
-            AgentEvent::TextDelta("par".into()),
-            AgentEvent::Reasoning("hmm".into()),
+            AgentEvent::TextDelta { text: "par".into() },
+            AgentEvent::Reasoning { text: "hmm".into() },
         ]
     );
 }

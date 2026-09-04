@@ -5,6 +5,9 @@ edition.workspace = true
 publish.workspace = true
 description = "Ginka domain logic: paths, settings, storage, projects and worktrees"
 
+# A scripted stand-in for a vendor CLI, so session behaviour is testable
+# without a network or a token budget. It lives in this package because
+# `CARGO_BIN_EXE_` is only set for binaries of the package under test.
 # A stand-in agent CLI for the process-supervision tests. It is a normal
 # binary so integration tests can find it through CARGO_BIN_EXE_*; it is tiny
 # and this crate is never published.
@@ -14,14 +17,18 @@ path = "src/bin/fake_agent.rs"
 
 [dependencies]
 ginka-protocol.workspace = true
+nucleo-matcher.workspace = true
+portable-pty.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 chrono.workspace = true
+futures-lite.workspace = true
 dirs.workspace = true
-nucleo-matcher.workspace = true
 rusqlite.workspace = true
+rust-i18n.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smol.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

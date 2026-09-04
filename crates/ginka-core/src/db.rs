@@ -16,6 +16,22 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0002_sessions_and_messages",
         include_str!("../../../db/migrations/0002_sessions_and_messages.sql"),
     ),
+    (
+        "0003_agent_sessions",
+        include_str!("../../../db/migrations/0003_agent_sessions.sql"),
+    ),
+    (
+        "0004_composer_drafts",
+        include_str!("../../../db/migrations/0004_composer_drafts.sql"),
+    ),
+    (
+        "0005_usage",
+        include_str!("../../../db/migrations/0005_usage.sql"),
+    ),
+    (
+        "0006_review_comments",
+        include_str!("../../../db/migrations/0006_review_comments.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.
@@ -86,6 +102,9 @@ mod tests {
             .unwrap();
         assert!(tables.contains(&"projects".to_string()));
         assert!(tables.contains(&"worktrees".to_string()));
+        assert!(tables.contains(&"sessions".to_string()));
+        assert!(tables.contains(&"session_events".to_string()));
+        assert!(tables.contains(&"checkpoints".to_string()));
     }
 
     #[test]

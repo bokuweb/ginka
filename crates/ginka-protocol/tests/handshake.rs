@@ -4,7 +4,7 @@
 use ginka_protocol::envelope::{
     ClientMessage, HandshakeRejection, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, ServerMessage,
 };
-use ginka_protocol::handshake::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, DaemonHandshake};
+use ginka_protocol::handshake::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV, Handshake};
 
 #[test]
 fn a_hello_carries_the_version_and_the_token() {
@@ -41,7 +41,9 @@ fn a_version_mismatch_is_refused_by_name_rather_than_half_working() {
 fn a_welcome_names_the_daemon_run() {
     let welcome = ServerMessage::Welcome {
         protocol_version: PROTOCOL_VERSION,
+        version: "0.0.0".into(),
         epoch: 7,
+        seq: 12,
     };
     let json = serde_json::to_string(&welcome).unwrap();
     assert!(json.contains("\"epoch\":7"), "{json}");
@@ -59,28 +61,26 @@ fn the_wire_cap_leaves_room_for_an_attachment() {
 
 #[test]
 fn a_handshake_file_round_trips_and_addresses_loopback() {
-    let handshake = DaemonHandshake {
+    let handshake = Handshake {
         protocol_version: PROTOCOL_VERSION,
         port: 8123,
         token: "t".into(),
         pid: 42,
+        version: "0.0.0".into(),
         epoch: 1_788_480_000,
     };
     assert_eq!(handshake.endpoint(), "ws://127.0.0.1:8123/rpc");
 
     let json = serde_json::to_string(&handshake).unwrap();
-    assert_eq!(
-        serde_json::from_str::<DaemonHandshake>(&json).unwrap(),
-        handshake
-    );
+    assert_eq!(serde_json::from_str::<Handshake>(&json).unwrap(), handshake);
 }
 
 #[test]
 fn a_handshake_from_a_newer_daemon_is_readable_enough_to_report_the_mismatch() {
     // The version has to survive a field this build has never heard of, or a
     // client cannot even tell the user *why* it cannot connect.
-    let json = r#"{"protocol_version":99,"port":1,"token":"t","pid":2,"epoch":3,"future":true}"#;
-    let handshake: DaemonHandshake = serde_json::from_str(json).unwrap();
+    let json = r#"{"protocol_version":99,"port":1,"token":"t","pid":2,"version":"9.9.9","epoch":3,"future":true}"#;
+    let handshake: Handshake = serde_json::from_str(json).unwrap();
     assert_eq!(handshake.protocol_version, 99);
     assert!(!handshake.speaks_our_protocol());
 }

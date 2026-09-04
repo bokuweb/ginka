@@ -1,11 +1,12 @@
-//! The Ginka daemon.
+//! The `ginka-daemon` binary.
 //!
-//! Owns SQLite, agent processes, PTYs and git, and outlives the UI so agents
-//! keep running when the window closes. The RPC server lands in M2; today this
-//! binary proves the storage and settings layers boot headless.
+//! One daemon per user, started by whichever of the app or the CLI notices
+//! there is none. It outlives them both: agents keep running when the window
+//! closes, which is the whole reason the process boundary exists.
 
 use anyhow::Result;
-use ginka_core::{Paths, db, logging, settings};
+use ginka_core::{Paths, logging, settings};
+use ginka_daemon::Daemon;
 
 fn main() -> Result<()> {
     let paths = Paths::from_env()?;
@@ -13,12 +14,12 @@ fn main() -> Result<()> {
     let _log_guard = logging::init(&paths, "daemon")?;
 
     let config: settings::DaemonSettings = settings::load(&paths.daemon_settings());
-    let _conn = db::open(&paths.database())?;
+    let daemon = Daemon::bind(paths, config)?;
+    let handshake = daemon.handshake();
+    tracing::info!(port = handshake.port, pid = handshake.pid, "daemon ready");
+    // Print the port on stdout so a parent that spawned us can wait for it
+    // without polling the handshake file.
+    println!("listening on 127.0.0.1:{}", handshake.port);
 
-    tracing::info!(
-        root = %paths.root().display(),
-        sync_interval_secs = config.sync_interval_secs,
-        "daemon storage ready (RPC server lands in M2)"
-    );
-    Ok(())
+    smol::block_on(daemon.serve())
 }

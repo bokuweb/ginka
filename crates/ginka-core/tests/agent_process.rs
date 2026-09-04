@@ -1,7 +1,7 @@
 //! Supervising a real agent process: what reaches the transcript, and what
 //! happens when it is stopped.
 
-use ginka_core::driver::{AgentEvent, AgentProcess, TurnOutcome};
+use ginka_core::driver::{AgentEvent, AgentProcess};
 use std::io::Write;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -52,10 +52,10 @@ fn a_session_streams_its_output_and_then_reports_its_exit() {
     let events = collect(receiver);
 
     assert!(matches!(events[0], AgentEvent::Connected { .. }));
-    assert!(events.contains(&AgentEvent::TextDelta("hello".into())));
-    assert!(events.contains(&AgentEvent::TurnEnd {
-        outcome: TurnOutcome::Completed
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "hello".into()
     }));
+    assert!(events.contains(&AgentEvent::TurnEnd { turn: 1 }));
     assert_eq!(
         events.last(),
         Some(&AgentEvent::ProcessExited { code: Some(0) })
@@ -102,7 +102,9 @@ fn a_line_that_is_not_a_message_does_not_derail_the_session() {
     // The handle has to outlive the reading: dropping it cancels the agent.
     let _process = AgentProcess::spawn(command, sender).unwrap();
     let events = collect(receiver);
-    assert!(events.contains(&AgentEvent::TextDelta("after".into())));
+    assert!(events.contains(&AgentEvent::TextDelta {
+        text: "after".into()
+    }));
 }
 
 #[test]
@@ -137,9 +139,9 @@ fn what_is_written_to_the_agent_reaches_it() {
 
     let events = collect(receiver);
     assert!(
-        events.contains(&AgentEvent::TextDelta(
-            r#"{"prompt":"do the thing"}"#.into()
-        )),
+        events.contains(&AgentEvent::TextDelta {
+            text: r#"{"prompt":"do the thing"}"#.into()
+        }),
         "{events:?}"
     );
 }

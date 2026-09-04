@@ -1,0 +1,282 @@
+# Every user-visible string in Ginka, in both languages it ships with.
+#
+# `_version: 2` keeps the languages side by side so a missing translation is
+# visible in review rather than in a running window. Keys are namespaced by the
+# region of the UI they belong to; the CLI's own output is under `cli`.
+_version: 2
+
+sidebar.projects:
+  en: Projects
+  ja: プロジェクト
+sidebar.archived:
+  en: Archived
+  ja: アーカイブ
+sidebar.empty.title:
+  en: No projects yet
+  ja: プロジェクトがありません
+sidebar.empty.hint:
+  en: ginka project add .
+  ja: ginka project add .
+sidebar.show_more:
+  en: "Show %{count} more"
+  ja: "他 %{count} 件を表示"
+sidebar.footer.device:
+  en: Local
+  ja: ローカル
+
+status.working:
+  en: Working
+  ja: 実行中
+status.attention:
+  en: Needs you
+  ja: 要対応
+
+composer.placeholder:
+  en: Do anything…
+  ja: なんでもどうぞ…
+composer.no_agent:
+  en: No agent
+  ja: エージェントなし
+composer.agent:
+  en: Agent
+  ja: エージェント
+composer.agent.pick:
+  en: Choose which agent runs this
+  ja: 実行するエージェントを選ぶ
+composer.model.default:
+  en: Model
+  ja: モデル
+composer.new_session:
+  en: New session
+  ja: 新しいセッション
+composer.agent.signed_out:
+  en: not signed in
+  ja: 未ログイン
+composer.agent.missing:
+  en: not installed
+  ja: 未インストール
+composer.stop:
+  en: Stop the agent
+  ja: エージェントを停止
+composer.context.worktree:
+  en: Worktree
+  ja: ワークツリー
+
+transcript.empty.ready:
+  en: "%{title} is checked out on %{branch}. Say what you want done."
+  ja: "%{title} は %{branch} にチェックアウトされています。やりたいことを書いてください。"
+transcript.empty.no_project:
+  en: No project is registered yet. Run `ginka project add .` in a repository, then reopen this window.
+  ja: プロジェクトがまだ登録されていません。リポジトリで `ginka project add .` を実行してから、このウィンドウを開き直してください。
+transcript.rewind.hint:
+  en: Put the worktree back to how it was at this turn
+  ja: このターン時点のワークツリーに戻す
+transcript.rewind.confirm:
+  en: Rewind to here?
+  ja: ここまで巻き戻しますか？
+transcript.rewind.yes:
+  en: Rewind
+  ja: 巻き戻す
+transcript.rewind.no:
+  en: Keep
+  ja: やめる
+transcript.plan.approve:
+  en: Approve
+  ja: 承認する
+transcript.plan.reject:
+  en: Not this
+  ja: 却下する
+transcript.copy:
+  en: Copy the answer
+  ja: 返答をコピー
+transcript.thinking:
+  en: Thinking…
+  ja: 考えています…
+transcript.working:
+  en: Working…
+  ja: 実行中…
+transcript.running:
+  en: "Running %{tool}…"
+  ja: "%{tool} を実行中…"
+transcript.turn:
+  en: "turn %{turn}"
+  ja: "ターン %{turn}"
+transcript.tool:
+  en: tool
+  ja: ツール
+transcript.truncated:
+  en: "… %{count} more lines"
+  ja: "… 他 %{count} 行"
+
+surface.terminal.pending:
+  en: The terminal surface lands in M3.
+  ja: ターミナルサーフェスは M3 で実装されます。
+surface.files.pending:
+  en: The files surface lands in M4.
+  ja: ファイルサーフェスは M4 で実装されます。
+surface.files.search:
+  en: Find a file, or a line in one
+  ja: ファイル名または内容を検索
+surface.files.binary:
+  en: This file is not text.
+  ja: このファイルはテキストではありません。
+surface.files.truncated:
+  en: Only the beginning is shown.
+  ja: 先頭部分のみ表示しています。
+palette.panel.open:
+  en: "Open the %{panel}"
+  ja: "%{panel} を開く"
+palette.panel.close:
+  en: "Close the %{panel}"
+  ja: "%{panel} を閉じる"
+palette.surface:
+  en: "Show %{surface}"
+  ja: "%{surface} を表示"
+palette.terminal.new:
+  en: New terminal
+  ja: 新しいターミナル
+palette.switch:
+  en: "Go to %{workspace}"
+  ja: "%{workspace} に移動"
+palette.placeholder:
+  en: Type a command
+  ja: コマンドを入力
+palette.empty:
+  en: Nothing matches
+  ja: 一致するものはありません
+surface.files.matches:
+  en: In these files
+  ja: ファイル内の一致
+surface.files.back:
+  en: Back
+  ja: 戻る
+surface.files.empty:
+  en: Nothing matches
+  ja: 一致するものはありません
+surface.git.pending:
+  en: The git surface lands in M3.
+  ja: git サーフェスは M3 で実装されます。
+terminal.open:
+  en: Open a terminal here
+  ja: ここでターミナルを開く
+surface.git.reading:
+  en: Reading the worktree…
+  ja: ワークツリーを読んでいます…
+surface.git.clean:
+  en: Nothing has changed
+  ja: 変更はありません
+surface.git.summary:
+  en: "%{files} changed"
+  ja: "%{files} ファイルが変更"
+surface.git.binary:
+  en: A binary file. There is nothing to read.
+  ja: バイナリファイルです。表示できる内容はありません。
+surface.git.stage:
+  en: Stage
+  ja: ステージ
+surface.git.staged:
+  en: Staged
+  ja: ステージ済み
+surface.git.revert:
+  en: Undo
+  ja: 取り消す
+surface.git.revert.yes:
+  en: Throw away
+  ja: 破棄する
+surface.git.revert.no:
+  en: Keep
+  ja: やめる
+surface.git.comment:
+  en: What is wrong with this line?
+  ja: この行の何が問題ですか？
+surface.git.review.waiting:
+  en: "%{count} comment(s) waiting"
+  ja: "%{count} 件のコメントが保留中"
+surface.git.review.send:
+  en: Send to the agent
+  ja: エージェントに送る
+surface.git.write_commit:
+  en: Write a commit message…
+  ja: コミットメッセージを書く…
+surface.git.message:
+  en: What this change is for
+  ja: この変更の目的
+surface.git.commit:
+  en: Commit
+  ja: コミット
+surface.git.cancel:
+  en: Cancel
+  ja: やめる
+surface.git.needs_message:
+  en: A commit needs a message.
+  ja: コミットにはメッセージが必要です。
+surface.empty.title:
+  en: Open a surface
+  ja: サーフェスを開く
+surface.empty.hint:
+  en: Choose what to show in the right panel.
+  ja: 右パネルに表示するものを選んでください。
+
+cli.agent.ready:
+  en: ready
+  ja: 利用可能
+cli.agent.signed_out:
+  en: not signed in
+  ja: 未ログイン
+cli.agent.missing:
+  en: not installed
+  ja: 未インストール
+cli.projects.empty:
+  en: "no projects registered; try `ginka project add <path>`"
+  ja: "登録されたプロジェクトはありません。`ginka project add <path>` を試してください"
+cli.workspaces.empty:
+  en: "no workspaces; try `ginka workspace new <project> <branch>`"
+  ja: "ワークスペースがありません。`ginka workspace new <project> <branch>` を試してください"
+cli.sessions.empty:
+  en: "no sessions yet; try `ginka session start <workspace> <prompt>`"
+  ja: "セッションはまだありません。`ginka session start <workspace> <prompt>` を試してください"
+cli.changes.empty:
+  en: nothing has changed
+  ja: 変更はありません
+cli.changes.total:
+  en: "%{files} file(s), +%{added} -%{removed}"
+  ja: "%{files} ファイル, +%{added} -%{removed}"
+cli.committed:
+  en: "committed %{commit}"
+  ja: "%{commit} をコミットしました"
+cli.search.empty:
+  en: nothing said that
+  ja: 一致するものはありません
+cli.review.empty:
+  en: no comments are waiting
+  ja: 保留中のコメントはありません
+cli.commands.empty:
+  en: "this workspace defines no commands; they live in .claude/commands"
+  ja: "このワークスペースにコマンドはありません（.claude/commands に置きます）"
+cli.usage.empty:
+  en: no agent has run yet
+  ja: まだエージェントは実行されていません
+cli.checkpoints.empty:
+  en: "no checkpoints yet; they are taken as an agent works"
+  ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"
+cli.transcript.empty:
+  en: no transcript yet
+  ja: トランスクリプトはまだありません
+cli.done:
+  en: done
+  ja: 完了
+cli.daemon.running:
+  en: "running (pid %{pid}, port %{port}, version %{version})"
+  ja: "実行中 (pid %{pid}, ポート %{port}, バージョン %{version})"
+cli.daemon.stopped:
+  en: not running
+  ja: 停止中
+cli.daemon.listening:
+  en: "daemon %{version} is listening"
+  ja: "デーモン %{version} が待ち受けています"
+cli.daemon.stopping:
+  en: asked the daemon to stop
+  ja: デーモンに停止を要求しました
+cli.daemon.none:
+  en: no daemon is running
+  ja: デーモンは実行されていません

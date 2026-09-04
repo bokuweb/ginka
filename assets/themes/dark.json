@@ -4,8 +4,8 @@
   "colors": {
     "bg.window": "#0E0A14D1",
     "bg.sidebar": "#120D19B3",
-    "bg.surface": "#17121F",
-    "bg.raised": "#1E1829",
+    "bg.surface": "#1B1426A8",
+    "bg.raised": "#241A33B8",
     "bg.terminal": "#0A0710",
     "border.subtle": "#FFFFFF0F",
     "border.strong": "#FFFFFF1F",
@@ -19,6 +19,6 @@
     "status.error": "#F87171",
     "code.bg": "#A78BFA1A"
   },
-  "radius": { "window": 12.0, "panel": 10.0, "row": 8.0 },
+  "radius": { "window": 12.0, "card": 16.0, "panel": 10.0, "row": 9.0 },
   "duration_ms": { "quick": 120, "standard": 260 }
 }

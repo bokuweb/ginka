@@ -4,15 +4,37 @@
 //! it is linked by the app, the daemon and the CLI alike, and it is the source
 //! the TypeScript exporter reads. Anything that needs the filesystem, git or a
 //! database belongs in `ginka-core`.
+//!
+//! The four layers, innermost first:
+//!
+//! - [`ids`] — the stable keys everything else is addressed by.
+//! - [`model`] — the domain objects as they appear on the wire.
+//! - [`event`] — the normalized agent stream and the daemon's pushes.
+//! - [`handshake`] — how a client finds the daemon in the first place.
+//! - [`rpc`] and [`envelope`] — the request surface and the frames carrying it.
 
 pub mod envelope;
+pub mod event;
 pub mod handshake;
 pub mod ids;
+pub mod model;
 pub mod provider;
+pub mod rpc;
 pub mod session;
 
-pub use envelope::{ClientMessage, RpcError, ServerMessage};
-pub use handshake::DaemonHandshake;
-pub use ids::{ProjectName, WorkspaceId};
+pub use envelope::{
+    ClientMessage, HandshakeRejection, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, RequestId,
+    RpcError, Seq, ServerMessage,
+};
+pub use event::{AgentEvent, DaemonEvent, Usage};
+pub use handshake::Handshake;
+pub use ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+pub use model::{
+    AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint, CommandScope,
+    DiffLine, DiffSide, FileChange, FileEntry, Hunk, LineKind, Project, ProjectKind, ReviewComment,
+    Session, SessionMatch, SessionState, SlashCommand, TranscriptEntry, TranscriptPayload,
+    UsageRow, UsageTotals, WorkspaceSummary, Worktree,
+};
 pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
+pub use rpc::{Request, Response};
 pub use session::SessionTitle;

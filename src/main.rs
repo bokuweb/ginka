@@ -1,10 +1,15 @@
 //! The Ginka desktop app.
 //!
-//! A viewport onto `ginka-core` and, from M2, onto the daemon. It holds view
-//! state and nothing authoritative: closing this window must never lose work
-//! (`AGENTS.md` rule 1).
+//! A viewport onto the daemon. It holds view state and nothing authoritative:
+//! closing this window must never lose work, and the agents it was watching
+//! keep running without it (`AGENTS.md` rule 1).
 
-mod sessions;
+// The window's strings come from the workspace's `locales/`; `ginka-core`
+// decides which language, because the CLI has to make the same choice without
+// linking a UI toolkit.
+rust_i18n::i18n!("locales", fallback = "en");
+
+mod daemon;
 mod shell;
 mod sidebar;
 mod surfaces;
@@ -21,7 +26,8 @@ fn main() -> Result<()> {
     paths.ensure()?;
     let _log_guard = ginka_core::logging::init(&paths, "app")?;
     let app_settings: settings::AppSettings = settings::load(&paths.app_settings());
-    let rows = sessions::load(&paths);
+    let locale = ginka_core::i18n::init(app_settings.locale.as_deref());
+    tracing::info!(%locale, "language");
     let shell_paths = paths.clone();
 
     let application = gpui_platform::application().with_assets(ginka_ui::Assets);
@@ -43,8 +49,10 @@ fn main() -> Result<()> {
             }));
 
             cx.open_window(options, |window, cx| {
-                let shell =
-                    cx.new(|cx| shell::Shell::new(shell_paths, app_settings, rows, window, cx));
+                // The window opens with no rows and fills in as soon as the
+                // daemon answers: starting one takes long enough that waiting
+                // for it here would show a blank screen instead of a window.
+                let shell = cx.new(|cx| shell::Shell::new(shell_paths, app_settings, window, cx));
                 cx.new(|cx| Root::new(shell, window, cx))
             })
             .expect("failed to open the main window");
