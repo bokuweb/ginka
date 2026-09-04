@@ -13,7 +13,8 @@
 use ginka_client::{Client, Discovery, Event};
 use ginka_core::Paths;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Session, TranscriptEntry,
+    AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Session, SlashCommand,
+    TranscriptEntry,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, WorkspaceId};
@@ -191,6 +192,20 @@ impl DaemonLink {
             .await
         {
             Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The commands this workspace offers after `/`.
+    pub async fn commands(&self, workspace: &WorkspaceId, query: &str) -> Vec<SlashCommand> {
+        match self
+            .ask(Request::SlashCommands {
+                workspace: workspace.clone(),
+                query: Some(query.to_string()),
+            })
+            .await
+        {
+            Some(Response::Commands { commands }) => commands,
             _ => Vec::new(),
         }
     }

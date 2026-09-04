@@ -8,7 +8,7 @@
 use crate::ids::{CheckpointId, ProjectName, SessionId, WorkspaceId};
 use crate::model::{
     AgentStatus, ChangeSource, Changes, Checkpoint, FileEntry, Project, Session, SessionMatch,
-    TranscriptEntry, UsageRow, WorkspaceSummary,
+    SlashCommand, TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -138,6 +138,11 @@ pub enum Request {
         query: Option<String>,
         limit: Option<u32>,
     },
+    /// The commands a workspace offers after `/`.
+    SlashCommands {
+        workspace: WorkspaceId,
+        query: Option<String>,
+    },
     /// What the user was in the middle of typing in a workspace.
     ComposerDraft { workspace: WorkspaceId },
     /// Keep what they are typing. An empty draft forgets it.
@@ -204,6 +209,9 @@ pub enum Response {
     },
     Files {
         files: Vec<FileEntry>,
+    },
+    Commands {
+        commands: Vec<SlashCommand>,
     },
     Draft {
         text: String,

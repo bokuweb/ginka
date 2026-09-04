@@ -172,6 +172,9 @@ cli.committed:
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
+cli.commands.empty:
+  en: "this workspace defines no commands; they live in .claude/commands"
+  ja: "このワークスペースにコマンドはありません（.claude/commands に置きます）"
 cli.usage.empty:
   en: no agent has run yet
   ja: まだエージェントは実行されていません

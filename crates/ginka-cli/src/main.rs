@@ -64,6 +64,11 @@ enum Command {
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
     },
+    /// List the commands a workspace offers after `/`.
+    Commands {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Report what the work has cost.
     Usage {
         /// How many days back to look.
@@ -315,6 +320,10 @@ fn request_for(command: Command) -> Result<Request> {
 
         Command::Agents => Request::ListAgents,
         Command::Usage { days } => Request::Usage { days: Some(days) },
+        Command::Commands { workspace } => Request::SlashCommands {
+            workspace: WorkspaceId(workspace),
+            query: None,
+        },
         Command::Files { workspace, query } => Request::WorkspaceFiles {
             workspace: WorkspaceId(workspace),
             query,
@@ -511,6 +520,22 @@ fn print(response: Response, patch: bool) {
         }
         Response::Draft { text } => println!("{text}"),
         Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
+        Response::Commands { commands } => {
+            if commands.is_empty() {
+                println!("{}", rust_i18n::t!("cli.commands.empty"));
+            }
+            for command in commands {
+                println!(
+                    "/{:<24} {:<8} {}",
+                    command.name,
+                    match command.scope {
+                        ginka_protocol::CommandScope::Project => "project",
+                        ginka_protocol::CommandScope::User => "user",
+                    },
+                    command.description
+                );
+            }
+        }
         Response::Committed { commit } => println!(
             "{}",
             rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])

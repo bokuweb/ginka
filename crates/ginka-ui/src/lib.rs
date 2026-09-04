@@ -21,5 +21,6 @@ pub use assets::Assets;
 pub use layout::{Layout, Panel};
 pub use theme::{Mode, Tokens};
 pub use transcript::{
-    Activity, Block, Reveal, Transcript, complete_mention, following, mention_being_typed, settled,
+    Activity, Block, Reveal, Transcript, command_being_typed, complete_command, complete_mention,
+    following, mention_being_typed, settled,
 };

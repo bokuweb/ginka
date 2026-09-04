@@ -279,6 +279,34 @@ pub struct UsageRow {
     pub totals: UsageTotals,
 }
 
+/// Where a slash command came from.
+///
+/// The scope is shown beside the name because two commands can share one: a
+/// project's `/review` and the user's own `/review` are different commands, and
+/// which one runs is decided by this.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandScope {
+    /// Defined in the workspace, so it travels with the code.
+    Project,
+    /// Defined in the user's own home, so it travels with them.
+    User,
+}
+
+/// A command the composer offers after `/`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlashCommand {
+    /// Without the slash: `review`, `test`, `frontend/fix`.
+    pub name: String,
+    /// One line, from the file's frontmatter or its first heading.
+    pub description: String,
+    pub scope: CommandScope,
+    /// What the command expects after its name, when it says.
+    pub argument_hint: Option<String>,
+}
+
 /// Where a search found something.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

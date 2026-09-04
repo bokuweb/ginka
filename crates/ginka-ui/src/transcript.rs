@@ -966,6 +966,24 @@ pub fn mention_being_typed(text: &str) -> Option<&str> {
     (!query.contains(char::is_whitespace)).then_some(query)
 }
 
+/// What command is being typed, if the prompt is one.
+///
+/// Only at the very start: `/review` is a command, and "see /usr/bin for the
+/// path" is a sentence about a directory. A command takes the whole prompt, so
+/// there is nothing before it to check.
+pub fn command_being_typed(text: &str) -> Option<&str> {
+    let rest = text.strip_prefix('/')?;
+    (!rest.contains(char::is_whitespace)).then_some(rest)
+}
+
+/// Replace the command being typed with `name`.
+pub fn complete_command(text: &str, name: &str) -> String {
+    if command_being_typed(text).is_none() {
+        return text.to_string();
+    }
+    format!("/{name} ")
+}
+
 /// Replace the mention being typed with `path`, and say what the text becomes.
 ///
 /// The trailing space is deliberate: a mention is finished once it is chosen,
@@ -1019,6 +1037,26 @@ mod mentions {
             "a chosen mention is finished, and what follows is a sentence"
         );
         assert_eq!(complete_mention("@", "README.md"), "@README.md ");
+    }
+
+    #[test]
+    fn a_slash_at_the_start_is_a_command() {
+        assert_eq!(command_being_typed("/rev"), Some("rev"));
+        assert_eq!(command_being_typed("/"), Some(""));
+    }
+
+    #[test]
+    fn a_slash_anywhere_else_is_a_path() {
+        // "see /usr/bin for the path" is a sentence, not a command.
+        assert_eq!(command_being_typed("see /usr/bin"), None);
+        // And a command with an argument is no longer being chosen.
+        assert_eq!(command_being_typed("/review src/main.rs"), None);
+    }
+
+    #[test]
+    fn choosing_a_command_replaces_what_was_typed() {
+        assert_eq!(complete_command("/rev", "review"), "/review ");
+        assert_eq!(complete_command("not a command", "review"), "not a command");
     }
 
     #[test]

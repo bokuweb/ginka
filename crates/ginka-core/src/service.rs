@@ -436,6 +436,15 @@ impl Service {
                     ),
                 })
             }
+            Request::SlashCommands { workspace, query } => {
+                let worktree = self.worktree(&workspace)?;
+                // The user's own commands live in their home, which is theirs
+                // rather than Ginka's `GINKA_HOME`.
+                let found = crate::commands::discover(&worktree.path, dirs::home_dir().as_deref());
+                Ok(Response::Commands {
+                    commands: crate::commands::search(&found, query.as_deref().unwrap_or_default()),
+                })
+            }
             Request::ComposerDraft { workspace } => Ok(Response::Draft {
                 text: session::draft(&self.conn(), &workspace).map_err(failed)?,
             }),

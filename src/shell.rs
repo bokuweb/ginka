@@ -48,6 +48,8 @@ enum Picker {
     Model,
     /// Which file the `@` being typed means.
     Mention,
+    /// Which command the `/` being typed means.
+    Command,
 }
 
 const CONTEXT: &str = "Shell";
@@ -131,6 +133,8 @@ pub struct Shell {
     picker: Option<Picker>,
     /// The files offered for the mention being typed, if one is.
     mentions: Vec<ginka_protocol::model::FileEntry>,
+    /// The commands offered for the `/` being typed, if one is.
+    commands: Vec<ginka_protocol::model::SlashCommand>,
     /// The agent the user chose, which beats whatever would have been picked
     /// for them. `None` until they choose one.
     chosen_agent: Option<String>,
@@ -237,10 +241,11 @@ impl Shell {
             |this, _, event: &InputEvent, window, cx| match event {
                 InputEvent::PressEnter { shift: false, .. } => {
                     // A mention being chosen is not a message being sent.
-                    if this.picker == Some(Picker::Mention) {
-                        this.take_first_mention(window, cx);
-                    } else {
-                        this.submit(window, cx);
+                    // Something being chosen is not a message being sent.
+                    match this.picker {
+                        Some(Picker::Mention) => this.take_first_mention(window, cx),
+                        Some(Picker::Command) => this.take_first_command(window, cx),
+                        _ => this.submit(window, cx),
                     }
                 }
                 InputEvent::Change => this.composer_changed(window, cx),
@@ -380,6 +385,7 @@ impl Shell {
             composer_focused: false,
             picker: None,
             mentions: Vec::new(),
+            commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
             start_fresh: false,
@@ -1422,6 +1428,26 @@ impl Shell {
                     )
                 })
                 .collect(),
+            Picker::Command => self
+                .commands
+                .iter()
+                .map(|command| {
+                    let name = command.name.clone();
+                    self.picker_row(
+                        SharedString::from(format!("command:{}", command.name)),
+                        format!("/{}", command.name),
+                        Some(match &command.argument_hint {
+                            Some(hint) => format!("{hint} · {}", command.description),
+                            None => command.description.clone(),
+                        }),
+                        false,
+                        cx.listener(move |this, _, window, cx| {
+                            this.choose_command(&name.clone(), window, cx)
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
             Picker::Mention => self
                 .mentions
                 .iter()
@@ -1584,6 +1610,33 @@ impl Shell {
         cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
             .detach();
 
+        // A command takes the whole prompt, so it is asked about first.
+        if let Some(query) = ginka_ui::transcript::command_being_typed(&text) {
+            let query = query.to_string();
+            let link = self.link.clone();
+            let for_commands = workspace.clone();
+            cx.spawn(async move |this, cx| {
+                let found = cx
+                    .background_spawn(async move { link.commands(&for_commands, &query).await })
+                    .await;
+                this.update(cx, |this, cx| {
+                    let still =
+                        ginka_ui::transcript::command_being_typed(&this.composer.read(cx).value())
+                            .is_some();
+                    this.commands = found;
+                    this.picker = (still && !this.commands.is_empty()).then_some(Picker::Command);
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+            return;
+        }
+        if self.picker == Some(Picker::Command) {
+            self.picker = None;
+            self.commands.clear();
+        }
+
         match ginka_ui::transcript::mention_being_typed(&text) {
             Some(query) => {
                 let query = query.to_string();
@@ -1620,6 +1673,25 @@ impl Shell {
                 }
             }
         }
+    }
+
+    /// Put a chosen command into the prompt in place of what was typed.
+    fn choose_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let text = self.composer.read(cx).value().to_string();
+        let completed = ginka_ui::transcript::complete_command(&text, name);
+        self.composer
+            .update(cx, |state, cx| state.set_value(completed, window, cx));
+        self.picker = None;
+        self.commands.clear();
+        cx.notify();
+    }
+
+    /// Enter with the command picker open takes the best match.
+    fn take_first_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(best) = self.commands.first().map(|command| command.name.clone()) else {
+            return;
+        };
+        self.choose_command(&best, window, cx);
     }
 
     /// Put a chosen file into the prompt in place of what was typed.

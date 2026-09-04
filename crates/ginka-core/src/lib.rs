@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod checkpoint;
+pub mod commands;
 pub mod db;
 pub mod diff;
 pub mod driver;
