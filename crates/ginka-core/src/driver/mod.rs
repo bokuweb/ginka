@@ -19,11 +19,13 @@
 pub mod activity;
 pub mod claude;
 pub mod event;
+pub mod process;
 pub mod testing;
 
 pub use activity::{ActivityItem, ActivityKind};
 pub use claude::ClaudeStream;
 pub use event::{AgentEvent, DriverError, TurnOutcome};
+pub use process::AgentProcess;
 
 use anyhow::Result;
 use ginka_protocol::provider::{OptionOutcome, SessionOptions};
