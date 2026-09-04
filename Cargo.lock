@@ -2469,6 +2469,7 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "nucleo-matcher",
  "rust-i18n",
  "serde",
  "serde_json",

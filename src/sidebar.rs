@@ -9,6 +9,7 @@
 //! second line when it says something the title does not — which is when an
 //! agent has checked out something else inside the worktree.
 
+use ginka_protocol::WorkspaceId;
 use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, SessionRow, group_by_project};
 use gpui::prelude::FluentBuilder as _;
@@ -65,6 +66,18 @@ impl SessionSidebar {
 
     pub fn selected_row(&self) -> Option<&SessionRow> {
         self.rows.get(self.selected)
+    }
+
+    /// The rows as they stand, for the palette to offer.
+    pub fn rows(&self) -> &[SessionRow] {
+        &self.rows
+    }
+
+    /// Select a workspace by name, which is how the palette switches to one.
+    pub fn select_workspace(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
+        if let Some(index) = self.rows.iter().position(|row| &row.workspace == workspace) {
+            self.select(index, cx);
+        }
     }
 
     fn select(&mut self, index: usize, cx: &mut Context<Self>) {

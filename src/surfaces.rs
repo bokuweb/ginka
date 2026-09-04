@@ -169,6 +169,19 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Show a surface, which is what the palette does when it is asked for
+    /// one.
+    pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        self.open = Some(surface);
+        // A finder that opens empty is one the user has to type into before it
+        // says anything; the start of the list is what a picker shows before
+        // anything is typed.
+        if surface == Surface::Files && self.files.is_empty() {
+            cx.emit(SurfaceEvent::FindFiles(String::new()));
+        }
+        cx.notify();
+    }
+
     /// Which surface is showing, so the shell knows what to keep fetching.
     pub fn open_surface(&self) -> Option<Surface> {
         self.open
@@ -245,16 +258,7 @@ impl SurfacePanel {
                     .text_color(tokens.colors().text_primary)
                     .child(surface.label()),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.open = Some(surface);
-                // A finder that opens empty is a finder the user has to type
-                // into before it says anything; the start of the list is what
-                // a picker shows before anything is typed.
-                if surface == Surface::Files && this.files.is_empty() {
-                    cx.emit(SurfaceEvent::FindFiles(String::new()));
-                }
-                cx.notify();
-            }))
+            .on_click(cx.listener(move |this, _, _, cx| this.show(surface, cx)))
     }
 
     fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {

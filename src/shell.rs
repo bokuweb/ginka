@@ -27,14 +27,22 @@ use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     Icon, IconName, StyledExt as _, TitleBar, h_flex,
-    input::{InputEvent, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
 };
 use std::sync::Arc;
 use std::time::Duration;
 
-actions!(shell, [ToggleSidebar, ToggleRightPanel, ToggleTerminalDock]);
+actions!(
+    shell,
+    [
+        ToggleSidebar,
+        ToggleRightPanel,
+        ToggleTerminalDock,
+        TogglePalette
+    ]
+);
 
 /// What the composer is offering a choice of.
 ///
@@ -72,6 +80,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-j", ToggleTerminalDock, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-j", ToggleTerminalDock, Some(CONTEXT)),
+        // `docs/ui.md` §6: every action is reachable from here, so this is the
+        // one chord that has to work wherever the focus happens to be.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
     ]);
 }
 
@@ -163,6 +177,9 @@ pub struct Shell {
     rewinding: Option<u32>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
+    /// The command palette, while it is open: what is typed into it, the
+    /// entries that match, and which one Return would run.
+    palette: Option<Palette>,
     /// The shells in the dock, and what each has printed.
     ///
     /// The daemon owns the ptys; these are the screens they are drawn on,
@@ -442,6 +459,7 @@ impl Shell {
             transcript_of: None,
             agents: Vec::new(),
             reveal: Reveal::new(),
+            palette: None,
             terminal_focus: cx.focus_handle(),
             terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
@@ -1088,6 +1106,119 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.toggle(Panel::RightPanel, cx);
+    }
+
+    /// Open the palette, or close it if it is already open.
+    fn on_toggle_palette(
+        &mut self,
+        _: &TogglePalette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.palette.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("palette.placeholder").to_string())
+        });
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let typed = query.read(cx).value().to_string();
+                if let Some(palette) = this.palette.as_mut() {
+                    palette.typed = typed;
+                    // The list moved under the cursor, so the cursor goes back
+                    // to the top: Return must never run something the reader
+                    // has not looked at.
+                    palette.chosen = 0;
+                }
+                cx.notify();
+            }
+        })
+        .detach();
+        self.palette = Some(Palette {
+            query,
+            typed: String::new(),
+            chosen: 0,
+        });
+        cx.notify();
+    }
+
+    /// The entries the palette is offering, in the order it offers them.
+    fn palette_entries(&self, cx: &App) -> Vec<ginka_ui::palette::Entry> {
+        let Some(palette) = self.palette.as_ref() else {
+            return Vec::new();
+        };
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        ginka_ui::palette::filter(
+            ginka_ui::palette::entries(&self.layout, &rows),
+            &palette.typed,
+        )
+    }
+
+    /// Move the cursor through the palette without leaving the keyboard.
+    fn palette_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let found = self.palette_entries(cx);
+        let Some(palette) = self.palette.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.palette = None;
+                cx.notify();
+            }
+            "down" => {
+                palette.chosen = (palette.chosen + 1).min(found.len().saturating_sub(1));
+                cx.notify();
+            }
+            "up" => {
+                palette.chosen = palette.chosen.saturating_sub(1);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(entry) = found.get(palette.chosen) {
+                    let command = entry.command.clone();
+                    self.palette = None;
+                    self.run_command(command, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Do what a palette entry says.
+    fn run_command(
+        &mut self,
+        command: ginka_ui::palette::Command,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::Command;
+        match command {
+            Command::TogglePanel(panel) => self.toggle(panel, cx),
+            Command::ShowSurface(surface) => {
+                // A surface nobody can see is not shown: opening the panel is
+                // part of showing what is in it.
+                if !self.layout.is_open(Panel::RightPanel) {
+                    self.toggle(Panel::RightPanel, cx);
+                }
+                self.surfaces
+                    .update(cx, |surfaces, cx| surfaces.show(surface, cx));
+            }
+            Command::NewTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.open_terminal(window, cx);
+            }
+            Command::Switch(workspace) => {
+                self.sidebar
+                    .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+            }
+        }
+        cx.notify();
     }
 
     fn on_toggle_terminal_dock(
@@ -2708,6 +2839,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
+            .on_action(cx.listener(Self::on_toggle_palette))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
@@ -2744,5 +2876,113 @@ impl Render for Shell {
                         }),
                 ),
             )
+            .children(self.palette_view(cx))
     }
+}
+
+impl Shell {
+    /// The palette itself: a box over the window with what matches under it.
+    ///
+    /// Over everything rather than in a column: it is the one control that is
+    /// about the window rather than about what is in it.
+    fn palette_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let palette = self.palette.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let found = self.palette_entries(cx);
+        let chosen = palette.chosen;
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .id("palette")
+                        .mt(px(120.))
+                        .w(px(560.))
+                        .max_h(px(420.))
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.palette_key(event, window, cx)
+                        }))
+                        .child(
+                            div()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(Input::new(&palette.query)),
+                        )
+                        .child(
+                            v_flex()
+                                .id("palette-entries")
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_y_scroll()
+                                .py_1()
+                                .children(found.iter().enumerate().map(|(index, entry)| {
+                                    let command = entry.command.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!("palette:{}", entry.id)))
+                                        .w_full()
+                                        .px_3()
+                                        .py_1p5()
+                                        .gap_2()
+                                        .items_center()
+                                        .when(index == chosen, |this| {
+                                            this.bg(tokens.colors().row_active())
+                                        })
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.palette = None;
+                                            this.run_command(command.clone(), window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .text_sm()
+                                                .text_color(tokens.colors().text_primary)
+                                                .truncate()
+                                                .child(entry.label.clone()),
+                                        )
+                                        .children(entry.hint.clone().map(|hint| {
+                                            div()
+                                                .text_xs()
+                                                .text_color(tokens.colors().text_muted)
+                                                .child(hint)
+                                        }))
+                                }))
+                                .children(found.is_empty().then(|| {
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(rust_i18n::t!("palette.empty").to_string())
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// The palette's own state while it is open.
+struct Palette {
+    query: Entity<InputState>,
+    /// What has been typed, kept here so the filter is not a read of the input
+    /// on every frame.
+    typed: String,
+    /// Which entry Return would run.
+    chosen: usize,
 }

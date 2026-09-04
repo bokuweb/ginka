@@ -260,8 +260,8 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [x] Sidebar per `docs/ui.md` §3.2: three-line rows, status pills, archived section, attention sort, user footer — now fed by real projects and worktrees, with a first-run empty state that names the command to fix it
 - [ ] Virtualize the session list; animate the reorder on the 260 ms curve
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
-- [ ] Command palette + global keymap infrastructure
-- [ ] Workspace picker / quick switcher
+- [x] Command palette + global keymap infrastructure
+- [x] Workspace picker / quick switcher (in the palette)
 
 **Exit criteria:** create and delete 20 worktrees across 3 projects; state survives restart; sync self-heals after manual `git worktree add` outside the app.
 
@@ -443,3 +443,4 @@ Streaming transcripts and terminal output are the two places this will be lost; 
 | 2026-09-04 | The daemon resolves a file read inside the worktree and bounds it | A client does not choose which of the user's files the daemon opens, so `../` is refused rather than followed, and half a megabyte is the most a side panel is given: a minified bundle laid out as text is how a window stops responding. |
 | 2026-09-04 | Word-level marks are computed in `ginka-core`, not asked of git | `--word-diff` returns a different text format to parse, and the pairing rule and the "too different to mark" threshold are judgement calls worth testing. One line against one line is short enough for a plain LCS. |
 | 2026-09-04 | Content search is `git grep`, not ripgrep-as-library | It searches exactly the set the file finder offers — tracked plus untracked, ignore rules honoured, binaries skipped — with no second index and no new dependency. If it becomes the bottleneck, the call site is one function. |
+| 2026-09-04 | The palette's entries are built from the window's current state, in `ginka-ui` | An entry that would do nothing — close a panel that is already closed — is worse than no entry, because the reader has to try it to find out. Building the list from the layout makes that a property a test can hold, rather than a rule each view remembers. |

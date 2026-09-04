@@ -117,6 +117,27 @@ surface.files.binary:
 surface.files.truncated:
   en: Only the beginning is shown.
   ja: 先頭部分のみ表示しています。
+palette.panel.open:
+  en: "Open the %{panel}"
+  ja: "%{panel} を開く"
+palette.panel.close:
+  en: "Close the %{panel}"
+  ja: "%{panel} を閉じる"
+palette.surface:
+  en: "Show %{surface}"
+  ja: "%{surface} を表示"
+palette.terminal.new:
+  en: New terminal
+  ja: 新しいターミナル
+palette.switch:
+  en: "Go to %{workspace}"
+  ja: "%{workspace} に移動"
+palette.placeholder:
+  en: Type a command
+  ja: コマンドを入力
+palette.empty:
+  en: Nothing matches
+  ja: 一致するものはありません
 surface.files.matches:
   en: In these files
   ja: ファイル内の一致
