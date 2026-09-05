@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-**This project's agent instructions live in [`AGENTS.md`](AGENTS.md). Read it first, then [`docs/roadmap.md`](docs/roadmap.md) — and [`docs/ui.md`](docs/ui.md) for anything that renders.**
+**This project's agent instructions live in [`AGENTS.md`](AGENTS.md). Read it first, then [`docs/roadmap.md`](docs/roadmap.md) — [`docs/ui.md`](docs/ui.md) for anything that renders, and [`docs/connectors.md`](docs/connectors.md) for anything that talks to Slack.**
 
 Quick orientation:
 

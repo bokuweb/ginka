@@ -96,8 +96,9 @@ Sixteen requirements that are cheap to design in and expensive to add afterwards
 │  - view state only          │  RPC   │  - agent process supervision         │
 └─────────────────────────────┘        │  - PTY pool                          │
 ┌─────────────────────────────┐        │  - git / worktree ops                │
-│  ginka (CLI)                │◄──────►│  - watchers, pollers, cron, MCP      │
-└─────────────────────────────┘        └──────────────────────────────────────┘
+│  ginka (CLI)                │◄──────►│  - watchers, pollers, cron, MCP,     │
+└─────────────────────────────┘        │    chat connectors (Slack)           │
+                                       └──────────────────────────────────────┘
 ```
 
 - One daemon per user, auto-spawned by the app or the CLI, discovered via `~/.ginka/daemon.json` (port + token). Loopback only, bearer-token authenticated.
@@ -164,6 +165,8 @@ SQLite, migrations under `db/migrations/`. Tables (Band's schema is a good start
 - `browser_history` — (workspace, url) unique, `visit_count` / `last_visited_at` for frecency. M5.
 - `attachments` — daemon-owned uploads referenced from a message by a `ginka-attachment:` URI, bounded per file and per directory upload. The daemon stores the bytes; the transcript stores the reference.
 - Provider-emitted images (`data:` URLs from screenshots and tool output) never land in the transcript inline. Above a small size threshold they are externalised into a content-addressed blob directory and referenced as `ginka-blob:`. Inline base64 inflates the payload by a third and is re-decoded on every render — this is the single change that keeps a computer-use-style session's state readable.
+- Sessions carry an optional **origin** — `origin_connector`, `origin_channel`, `origin_thread`, unique together — when a chat platform started them. It is the thread-to-session map for connectors (`docs/connectors.md` §7) and the sidebar's origin chip.
+- `connector_deliveries` / `connector_seen` — the outbound delivery ledger and the bounded inbound dedup set for chat connectors, so a daemon restart neither loses a reply nor answers a redelivered message twice.
 - Sessions carry **two title fields**: a user-set `title` and a provider-set `auto_title`, resolved title → auto-title → default, so a provider's title can never overwrite a name the user typed. The first prompt's opening words fill `auto_title` as a placeholder until the provider's own title arrives.
 
 ### 4.5 Agent driver abstraction
@@ -433,6 +436,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Notifications + sounds on agent completion / attention needed
 - [x] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts, and plain folders as workspaces
 - [ ] Remaining drivers: `acp`, `opencode`, `gemini`, `cursor`, `amp`
+- [ ] **Slack connector** (`docs/connectors.md`): a bound channel starts or continues a turn on the user's machine over Socket Mode and gets the answer back in the thread — `ginka-core::connector` first, test-first, then the adapter in the daemon; questions and permissions relayed once the drivers surface them
 
 > **Landed already (domain layer):** N12 plan windows and N13 the rate table, pricing and cost quality (`ginka-core::usage`). What remains is collecting the events and drawing the page.
 
@@ -490,6 +494,7 @@ Budgets alone do not hold, so the mechanism is written down with them. GPUI rebu
 - Agent processes inherit a sanitized environment; secrets are never written to logs or the DB.
 - The setup runner copies untracked files (`.env`) between worktrees — this is a deliberate, documented, per-project opt-in.
 - Embedded browser: no shared cookie jar with the user's real browser; certificate errors surface, never auto-accept.
+- Chat connectors deny every sender not on an allowlist, treat the room as never a grant, cap access mode per binding in a file the user edits by hand, keep tokens out of the database and the logs, and dial out only (`docs/connectors.md` §8).
 
 ### 6.4 i18n / a11y
 
@@ -520,6 +525,7 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | **Q5** | Computer use — letting an agent drive other macOS apps through the accessibility API, off by default and granted per application — in or out? | Out for now, and noted rather than forgotten. It overlaps Orca's design mode (M5) in intent but is a much larger surface: a permission model, a reverse-engineered platform API, and a per-app grant UI. Revisit only after M5 ships the browser pane. |
 | **Q6** | An embedded JavaScript kernel exposed to agents over MCP — a persistent in-process REPL they can call as a tool — in or out? | Out for v1. Our MCP server exposes *app control* (M4); an execution sandbox is a different product with its own security surface, and agents already have a shell. |
 | **Q7** | Do we publish telemetry at all? | Default no, and the answer has to be recorded either way. "Local-first" (§1) does not by itself forbid anonymous aggregate counts that carry no prompts, paths or agent output — but shipping any telemetry without a decision recorded here would contradict how the project describes itself, and adding it quietly later is worse. |
+| **Q8** | Chat connectors: direct messages, mirroring window-typed messages into the thread, more than one Slack workspace, streaming replies | Each is answered with a leaning in `docs/connectors.md` §10 (C1–C4); none blocks the first version. |
 
 ## 8. Decision log
 
@@ -569,3 +575,4 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-04 | The driver traits are synchronous | A driver owns a child process and a reader thread; the trait calls are short and the waiting already happens off the caller's thread. `async` would add a reactor to a daemon that is otherwise synchronous (Q2) and buy nothing measurable. |
 | 2026-09-04 | N1–N14 are implemented in `ginka-core` / `ginka-protocol` ahead of the milestones that consume them, test-first | Each is an interface the daemon, the CLI and the views all sit on. Landing them as tested domain code first means M2–M5 wire up an interface that already exists rather than inventing one under UI deadline pressure — and the awkward cases (a refused steer, a hand edit between turns, an unpriced model) are pinned by tests rather than discovered later. |
 | 2026-09-05 | A turn is one process, but a follow-up written while it runs reaches *that* turn | The earlier reading — a follow-up is always a resume — came from running the vendor's non-interactive mode, which takes its prompt on the command line and exits. Asking for streamed input instead keeps the agent reading while it works, so the message the user typed mid-turn arrives where they meant it. The process still ends with the turn: its input is closed when the turn does, which is what lets it exit. A transport with no such mode keeps the queue, and the two are one policy with two answers (§3.3 N1). |
+| 2026-09-05 | A chat platform reaches an agent through a *connector* hosted in the daemon as an optional module — a fourth client of the protocol, not a private path — with Slack first over Socket Mode (`docs/connectors.md`) | A generic MCP server cannot start a turn (it is pull-shaped), Claude Code's channels are Claude-only and single-session, and Claude in Slack runs in the cloud against a GitHub clone; none of them runs `codex` in a local worktree. Hermes Agent's messaging gateway is the shape that works — a long-lived process keyed by chat origin, gated on the sender — and Ginka's long-lived process is the daemon: the thread-to-session map and the delivery ledger are state, the event stream is already there, and a bot that stopped answering when the window closed would be the failure the daemon split exists to prevent. Socket Mode keeps the daemon dialling out and binding loopback only. |

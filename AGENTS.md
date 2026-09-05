@@ -16,6 +16,8 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 **For anything that renders, read [`docs/ui.md`](docs/ui.md) too.** It holds the layout spec, the design tokens, the region-by-region breakdown, and the mapping from each region to the component that draws it.
 
+**For anything that talks to a chat platform, read [`docs/connectors.md`](docs/connectors.md).** It is the design for the Slack connector — where it lives, what a message becomes, what the thread sees, and the security rules — and it is not implemented yet.
+
 ## Current state
 
 **M0 and M1 are largely landed, and M2's process split is in.** See `docs/roadmap.md` §5 for what each milestone still owes. What works today:
