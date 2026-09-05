@@ -291,6 +291,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 Goal: the workspace list from Band's dashboard, fully working, with no agents yet.
 
 - [x] Project registry: add/remove, `git` vs `plain` kind detection, default-branch probe
+- [x] Add a project from the window: the empty state opens a folder picker, and the command it also shows still works
 - [ ] Project rename, labels, reordering
 - [x] Worktree lifecycle: create (branch from base), remove (force for dirty), pin
 - [ ] Prune, and the locked-worktree cases `git worktree remove` refuses

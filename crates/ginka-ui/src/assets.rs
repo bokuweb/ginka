@@ -2,8 +2,9 @@
 //!
 //! Ours first, the toolkit's second. `gpui-component`'s icon set is broad but
 //! not exhaustive — it has no git branch and no paperclip, both of which the
-//! design in `docs/ui.md` leans on — so app-specific icons live here and take
-//! precedence over a same-named toolkit asset.
+//! design in `docs/ui.md` leans on, and no compose mark for "new chat" — so
+//! app-specific icons live here and take precedence over a same-named toolkit
+//! asset.
 
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
@@ -19,6 +20,10 @@ const ICONS: &[(&str, &str)] = &[
     (
         "icons/paperclip.svg",
         include_str!("../../../assets/icons/paperclip.svg"),
+    ),
+    (
+        "icons/square-pen.svg",
+        include_str!("../../../assets/icons/square-pen.svg"),
     ),
     (
         "icons/agent-cube.svg",
@@ -38,6 +43,9 @@ const ICONS: &[(&str, &str)] = &[
 pub mod icon {
     pub const GIT_BRANCH: &str = "icons/git-branch.svg";
     pub const PAPERCLIP: &str = "icons/paperclip.svg";
+    /// The compose mark on "new chat": a page with a pen on it, which is what
+    /// every other agent client uses for the same thing.
+    pub const SQUARE_PEN: &str = "icons/square-pen.svg";
     pub const AGENT_CUBE: &str = "icons/agent-cube.svg";
     pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
     pub const AGENT_SPARK: &str = "icons/agent-spark.svg";

@@ -24,6 +24,13 @@ use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
 /// the sidebar is drawn.
 pub enum SidebarEvent {
     Selected,
+    /// The reader asked for a project to be registered. The sidebar does not
+    /// know how to pick a folder or how to reach the daemon; the shell does.
+    AddProjectRequested,
+    /// The reader asked to start a new conversation in the selected
+    /// workspace. What that costs — clearing the pane, aiming the next
+    /// message at a new session — is the shell's to decide.
+    NewChatRequested,
 }
 
 impl EventEmitter<SidebarEvent> for SessionSidebar {}
@@ -91,7 +98,40 @@ impl SessionSidebar {
 
     /// The app's own header: what this is, and the two things a header is
     /// for — finding a workspace, and making one.
-    fn header(&self, cx: &App) -> impl IntoElement {
+    /// The front door for a conversation.
+    ///
+    /// Above the list rather than beside the composer: starting a new one is
+    /// the first thing a reader does with this window, and a control they have
+    /// to find inside the last conversation is a control they do not find.
+    fn new_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .id("new-chat")
+            .w_full()
+            .px_3()
+            .py_1p5()
+            .gap_2()
+            .items_center()
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .child(
+                Icon::empty()
+                    .path(ginka_ui::assets::icon::SQUARE_PEN)
+                    .size_4()
+                    .text_color(tokens.colors().text_secondary),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(tokens.colors().text_primary)
+                    .child(rust_i18n::t!("sidebar.new_chat").to_string()),
+            )
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(SidebarEvent::NewChatRequested);
+            }))
+    }
+
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -118,9 +158,17 @@ impl SessionSidebar {
                     .text_color(tokens.colors().text_muted),
             )
             .child(
-                Icon::new(IconName::Plus)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
+                div()
+                    .id("header-new-chat")
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size_4()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::NewChatRequested);
+                    })),
             )
     }
 
@@ -361,7 +409,7 @@ impl SessionSidebar {
     ///
     /// Says how to fix it rather than only that the list is empty. The command
     /// is the real one, so it can be copied straight into a terminal.
-    fn empty_state(&self, cx: &App) -> impl IntoElement {
+    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         v_flex()
             .flex_1()
@@ -375,6 +423,23 @@ impl SessionSidebar {
                     .text_color(tokens.colors().text_secondary)
                     .child(rust_i18n::t!("sidebar.empty.title").to_string()),
             )
+            .child(
+                div()
+                    .id("add-project")
+                    .px_3()
+                    .py_1()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().accent)
+                    .text_xs()
+                    .text_color(tokens.colors().text_primary)
+                    .cursor_pointer()
+                    .child(rust_i18n::t!("sidebar.empty.add").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::AddProjectRequested);
+                    })),
+            )
+            // The command stays: a window is not the only way in, and a reader
+            // who prefers the terminal should not have to guess the name.
             .child(
                 div()
                     .px_2()
@@ -478,6 +543,7 @@ impl Render for SessionSidebar {
             .border_r_1()
             .border_color(border)
             .child(self.header(cx))
+            .child(self.new_chat(cx))
             .when(is_empty, |this| this.child(self.empty_state(cx)))
             .when(!is_empty, |this| {
                 this.child(

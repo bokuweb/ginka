@@ -249,6 +249,49 @@ impl Shell {
                 &sidebar,
                 window,
                 |this, sidebar, event, window, cx| match event {
+                    // The window's own way in. The command in the empty state
+                    // still works and is still shown, but a reader who has just
+                    // opened the app should not have to leave it to put
+                    // something in it.
+                    SidebarEvent::AddProjectRequested => {
+                        let link = this.link.clone();
+                        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+                            files: false,
+                            // A project is a directory: a repository, or a
+                            // folder to work in.
+                            directories: true,
+                            multiple: false,
+                            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
+                        });
+                        cx.spawn(async move |_, _| {
+                            // Cancelled, or the platform refused to ask: either
+                            // way there is nothing to register.
+                            if let Ok(Ok(Some(paths))) = chosen.await
+                                && let Some(path) = paths.into_iter().next()
+                            {
+                                // The daemon announces the change, and the
+                                // sidebar is filled from that announcement
+                                // rather than from here.
+                                link.add_project(path).await;
+                            }
+                        })
+                        .detach();
+                    }
+                    // A new conversation in the workspace already selected:
+                    // the pane clears, and the next message opens a session
+                    // rather than continuing the last one.
+                    SidebarEvent::NewChatRequested => {
+                        this.start_fresh = true;
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.session_state = None;
+                        this.submitted = false;
+                        this.transcript_follows = true;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.composer.focus_handle(cx).focus(window, cx);
+                        cx.notify();
+                    }
                     SidebarEvent::Selected => {
                         this.session = sidebar.read(cx).selected_row().cloned();
                         // A different workspace is a different conversation.
@@ -506,6 +549,9 @@ impl Shell {
         // A transcript read from storage is history, and history is shown
         // whole: watching a conversation you have already had being typed out
         // is a pointless wait.
+        if self.start_fresh {
+            return;
+        }
         let opening = self.transcript_of.as_ref() != Some(session);
         if opening {
             self.transcript = Transcript::new();
