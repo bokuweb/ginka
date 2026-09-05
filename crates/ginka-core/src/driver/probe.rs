@@ -6,7 +6,7 @@
 //! and it wins outright (`docs/roadmap.md` §3.3 N14).
 
 use super::{AgentDriver, CommandSpec};
-use ginka_protocol::model::AgentStatus;
+use ginka_protocol::model::{AgentStatus, PlanUsage};
 use ginka_protocol::provider::ProviderKind;
 use std::time::Duration;
 
@@ -144,7 +144,13 @@ fn is_executable(path: &Path) -> bool {
 // where its binary is: a CLI can be installed and not signed in.
 
 pub fn probe_driver(driver: &dyn AgentDriver) -> AgentStatus {
-    let version_output = run(&driver.probe_command());
+    probe_driver_with_env(driver, &[])
+}
+
+/// The same, under an account's environment (`docs/accounts.md` §4): what
+/// the CLI says about itself when pointed at that login's directory.
+pub fn probe_driver_with_env(driver: &dyn AgentDriver, env: &[(String, String)]) -> AgentStatus {
+    let version_output = run(&driver.probe_command(), env);
     let installed = version_output.is_some();
     let version = version_output
         .as_deref()
@@ -153,7 +159,7 @@ pub fn probe_driver(driver: &dyn AgentDriver) -> AgentStatus {
     // Only worth asking if the binary answered at all.
     let (authenticated, detail) = match (installed, driver.auth_command()) {
         (true, Some(command)) => {
-            match run(&command).and_then(|output| driver.parse_auth(&output)) {
+            match run(&command, env).and_then(|output| driver.parse_auth(&output)) {
                 Some((signed_in, detail)) => (Some(signed_in), detail),
                 None => (None, None),
             }
@@ -174,18 +180,103 @@ pub fn probe_driver(driver: &dyn AgentDriver) -> AgentStatus {
     }
 }
 
+/// Whether an account is signed in, asked of the vendor under the account's
+/// environment. `None` when the CLI cannot be asked or did not answer, which
+/// is not the same as signed out.
+pub fn probe_signed_in(driver: &dyn AgentDriver, env: &[(String, String)]) -> Option<bool> {
+    let command = driver.auth_command()?;
+    let (signed_in, _) = run(&command, env).and_then(|output| driver.parse_auth(&output))?;
+    Some(signed_in)
+}
+
+/// How long a provider is given to answer for an account's windows. Longer
+/// than a version probe: the app server has to start and ask the vendor.
+const PLAN_USAGE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Ask a provider for an account's rate-limit windows without running a
+/// turn (`docs/accounts.md` §6).
+///
+/// The probe's input is written once the process starts, and its output read
+/// line by line until the driver recognises the answer; the process is then
+/// stopped, because a server told to read one thing does not exit by itself.
+/// `None` when the provider cannot be asked, did not answer in time, or
+/// answered with nothing the driver could read — and none of those is a
+/// reading of zero.
+pub fn probe_plan_usage(driver: &dyn AgentDriver, env: &[(String, String)]) -> Option<PlanUsage> {
+    use std::io::{BufRead as _, Write as _};
+
+    let probe = driver.plan_usage_probe()?;
+    let mut process = std::process::Command::new(&probe.command.program);
+    process.args(&probe.command.args);
+    crate::agent::sanitize(&mut process);
+    for (key, value) in probe.command.env.iter().chain(env.iter()) {
+        process.env(key, value);
+    }
+    let mut child = process
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+
+    // Written on a thread of its own: a server that answers before it has
+    // read everything would block the writer against a full pipe.
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = probe.input.clone();
+        std::thread::spawn(move || {
+            for line in input {
+                if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
+                    break;
+                }
+            }
+            // Left open: closing it is how some servers are told to exit,
+            // and the answer may not have arrived yet.
+            std::thread::sleep(PLAN_USAGE_TIMEOUT);
+        });
+    }
+
+    let (sender, lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + PLAN_USAGE_TIMEOUT;
+    let mut answer = None;
+    while answer.is_none() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match lines.recv_timeout(deadline - now) {
+            Ok(line) => answer = driver.parse_plan_usage(&line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    answer
+}
+
 /// Run a probe command and return what it printed, or `None` if it could not
 /// be run or said nothing useful.
 ///
 /// Stderr is folded in because vendors report "not logged in" on either
 /// stream, and a probe that ignored one would call a signed-out CLI unknown.
-fn run(command: &CommandSpec) -> Option<String> {
+/// `env` is applied after the command's own, which is how an account's
+/// directory reaches the CLI being asked.
+fn run(command: &CommandSpec, env: &[(String, String)]) -> Option<String> {
     let mut process = std::process::Command::new(&command.program);
     process
         .args(&command.args)
         .stdin(std::process::Stdio::null());
     crate::agent::sanitize(&mut process);
-    for (key, value) in &command.env {
+    for (key, value) in command.env.iter().chain(env.iter()) {
         process.env(key, value);
     }
 

@@ -66,6 +66,15 @@ pub struct Service {
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
     /// tick; an installed CLI does not come and go between them.
     agents: Option<(std::time::Instant, Vec<AgentStatus>)>,
+    /// The daemon's settings as loaded at start and changed by requests
+    /// since. The accounts live here (`docs/accounts.md` §3), so a change is
+    /// written back to the file.
+    settings: crate::settings::DaemonSettings,
+    /// The last probe of every account's sign-in, and when it was taken.
+    accounts: Option<(std::time::Instant, Vec<ginka_protocol::model::Account>)>,
+    /// Set when a sign-in terminal closed: whatever the vendor said before,
+    /// the next `Accounts` asks again.
+    accounts_stale: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// How long a probe of the agent CLIs is trusted for.
@@ -93,6 +102,9 @@ impl Service {
             drivers: Arc::new(Registry::with_defaults()),
             statuses: std::collections::HashMap::new(),
             agents: None,
+            settings,
+            accounts: None,
+            accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -287,6 +299,53 @@ impl Service {
             Request::ListAgents => Ok(Response::Agents {
                 agents: self.agents(),
             }),
+            Request::Accounts => Ok(Response::Accounts {
+                accounts: self.accounts(),
+            }),
+            Request::AddAccount {
+                id,
+                provider,
+                label,
+            } => {
+                let driver = self.drivers.get(provider.as_str()).ok_or_else(|| {
+                    account_error(crate::account::AccountError::NoDriver(provider))
+                })?;
+                crate::account::add(
+                    &mut self.settings,
+                    &self.paths,
+                    id.clone(),
+                    provider,
+                    label,
+                    driver.home_variable(),
+                )
+                .map_err(account_error)?;
+                self.save_settings()?;
+                self.accounts = None;
+                self.events.emit(DaemonEvent::AccountsChanged);
+                // Listed rather than probed: the directory is empty until the
+                // user signs in, and asking the vendor about it now would only
+                // say so slowly.
+                let account = crate::account::list(&self.settings, &self.paths, &self.drivers)
+                    .into_iter()
+                    .find(|account| account.id == id)
+                    .ok_or_else(|| RpcError::failed("the account was added but is not listed"))?;
+                Ok(Response::Account { account })
+            }
+            Request::RemoveAccount { id, delete_home } => {
+                crate::account::remove(&mut self.settings, &self.paths, &id, delete_home)
+                    .map_err(account_error)?;
+                self.save_settings()?;
+                self.accounts = None;
+                self.events.emit(DaemonEvent::AccountsChanged);
+                Ok(Response::Ack)
+            }
+            Request::LoginAccount {
+                id,
+                workspace,
+                rows,
+                cols,
+            } => self.login_account(&id, &workspace, rows, cols),
+            Request::RefreshPlanUsage { account } => self.refresh_plan_usage(&account),
             Request::ListSessions { workspace } => Ok(Response::Sessions {
                 sessions: session::list(&self.conn(), workspace.as_ref()).map_err(failed)?,
             }),
@@ -295,7 +354,8 @@ impl Service {
                 agent,
                 prompt,
                 model,
-            } => self.start_session(workspace, &agent, prompt, model),
+                account,
+            } => self.start_session(workspace, &agent, prompt, model, account),
             Request::FanOut {
                 project,
                 branch_prefix,
@@ -343,6 +403,9 @@ impl Service {
                     id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
                     workspace: original.workspace.clone(),
                     agent: original.agent.clone(),
+                    // The vendor's thread it inherits lives in the account's
+                    // directory, so the fork runs on the same one.
+                    account: original.account.clone(),
                     model: original.model.clone(),
                     // A fork has not run anything yet, and inherits the
                     // vendor's own conversation so that continuing it
@@ -505,6 +568,8 @@ impl Service {
                 Ok(Response::Usage {
                     by_day: crate::usage::by_day(&conn, days).map_err(failed)?,
                     by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
+                    by_account: crate::usage::by_account(&conn, days).map_err(failed)?,
+                    plans: crate::usage::plans(&conn).map_err(failed)?,
                 })
             }
             Request::AddReviewComment {
@@ -660,6 +725,147 @@ impl Service {
             .unwrap_or_default()
     }
 
+    /// Every account, with what the vendor last said about each being signed
+    /// in — from the last probe, or a new one.
+    fn accounts(&mut self) -> Vec<ginka_protocol::model::Account> {
+        let stale = self
+            .accounts_stale
+            .swap(false, std::sync::atomic::Ordering::SeqCst);
+        let fresh = !stale
+            && self
+                .accounts
+                .as_ref()
+                .is_some_and(|(taken, _)| taken.elapsed() < AGENT_PROBE_TTL);
+        if !fresh {
+            let mut accounts = crate::account::list(&self.settings, &self.paths, &self.drivers);
+            for account in &mut accounts {
+                let Some(driver) = self.drivers.get(account.provider.as_str()) else {
+                    continue;
+                };
+                let env = crate::account::env_layer(
+                    &self.settings,
+                    &self.paths,
+                    &account.id,
+                    driver.home_variable(),
+                );
+                account.signed_in = crate::driver::probe::probe_signed_in(driver.as_ref(), &env);
+            }
+            self.accounts = Some((std::time::Instant::now(), accounts));
+        }
+        self.accounts
+            .as_ref()
+            .map(|(_, accounts)| accounts.clone())
+            .unwrap_or_default()
+    }
+
+    /// The driver an account runs on, and the environment that points the
+    /// driver's CLI at the account (`docs/accounts.md` §4).
+    fn account_env(&self, account: &ginka_protocol::AccountId) -> Result<AccountRuntime, RpcError> {
+        let provider =
+            crate::account::provider_of(&self.settings, account).map_err(account_error)?;
+        let driver = self.driver(&provider)?;
+        let env =
+            crate::account::env_layer(&self.settings, &self.paths, account, driver.home_variable());
+        Ok((driver, env))
+    }
+
+    /// Run the vendor's own sign-in for an account, in a terminal in the
+    /// workspace's dock.
+    ///
+    /// Ginka performs no login: the browser round-trip and the token are the
+    /// vendor's, written into the account's directory. When the command
+    /// exits, the next `Accounts` asks the vendor again.
+    fn login_account(
+        &mut self,
+        id: &ginka_protocol::AccountId,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(workspace)?;
+        let (driver, _) = self.account_env(id)?;
+        let command = driver.login_command().ok_or_else(|| {
+            RpcError::failed(format!(
+                "{} has no sign-in command; sign in with the CLI itself",
+                driver.display_name()
+            ))
+        })?;
+        // The directory and nothing else: a login does not need the account's
+        // own variables, and one of those may be a key.
+        let env = driver
+            .home_variable()
+            .filter(|_| !id.is_default())
+            .map(|variable| {
+                vec![(
+                    variable.to_string(),
+                    crate::account::home_dir(&self.paths, id)
+                        .to_string_lossy()
+                        .into_owned(),
+                )]
+            })
+            .unwrap_or_default();
+        let label = self
+            .settings
+            .accounts
+            .get(&id.0)
+            .map(|account| account.label.clone())
+            .unwrap_or_else(|| driver.display_name().to_string());
+        let stale = self.accounts_stale.clone();
+        let events = self.events.clone();
+        let terminal = self
+            .terminals
+            .open_command(
+                workspace,
+                &worktree.path,
+                crate::terminal::TerminalCommand {
+                    program: command.program,
+                    args: command.args,
+                    env,
+                    title: format!("sign in: {label}"),
+                    on_exit: Some(Box::new(move || {
+                        stale.store(true, std::sync::atomic::Ordering::SeqCst);
+                        events.emit(DaemonEvent::AccountsChanged);
+                    })),
+                },
+                rows,
+                cols,
+            )
+            .map_err(failed)?;
+        Ok(Response::Terminal { terminal })
+    }
+
+    /// Ask the provider for an account's rate-limit windows now, and keep the
+    /// answer (`docs/accounts.md` §6).
+    fn refresh_plan_usage(
+        &mut self,
+        account: &ginka_protocol::AccountId,
+    ) -> Result<Response, RpcError> {
+        let (driver, env) = self.account_env(account)?;
+        let Some(usage) = crate::driver::probe::probe_plan_usage(driver.as_ref(), &env) else {
+            return Ok(Response::PlanUsage { snapshot: None });
+        };
+        let snapshot = crate::usage::record_plan(
+            &self.conn(),
+            account,
+            &usage,
+            now(),
+            ginka_protocol::model::PlanSource::Fetched,
+        )
+        .map_err(failed)?;
+        self.events.emit(DaemonEvent::PlanUsageChanged {
+            snapshot: snapshot.clone(),
+        });
+        Ok(Response::PlanUsage {
+            snapshot: Some(snapshot),
+        })
+    }
+
+    /// Write the settings back, so a change made through a request survives
+    /// the daemon.
+    fn save_settings(&self) -> Result<(), RpcError> {
+        crate::settings::save(&self.paths.daemon_settings(), &self.settings).map_err(failed)
+    }
+
     /// Start an agent in a workspace.
     fn start_session(
         &mut self,
@@ -667,14 +873,18 @@ impl Service {
         agent: &str,
         prompt: String,
         model: Option<String>,
+        account: Option<ginka_protocol::AccountId>,
     ) -> Result<Response, RpcError> {
         let worktree = self.worktree(&workspace)?;
         let driver = self.driver(agent)?;
+        let account = crate::account::resolve(&self.settings, driver.id(), account.as_ref())
+            .map_err(account_error)?;
         let now = now();
         let session = Session {
             id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
             workspace,
             agent: driver.id().to_string(),
+            account: account.clone(),
             model: model.clone(),
             state: SessionState::Starting,
             // What this conversation is about, taken from what was asked. The
@@ -694,8 +904,16 @@ impl Service {
         // The agent reads files, not URIs: an attachment the user mentioned
         // reaches it as a path on this host (§3.3 N6). The transcript keeps
         // the reference, so the window can still draw the attachment.
-        let spec =
+        let mut spec =
             SessionSpec::new(worktree.path, self.expand_attachments(&prompt)).with_model(model);
+        for (key, value) in crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &account,
+            driver.home_variable(),
+        ) {
+            spec = spec.with_env(key, value);
+        }
         self.sessions
             .start(session.id.clone(), driver, spec)
             .map_err(failed)?;
@@ -707,8 +925,18 @@ impl Service {
         let stored = self.session(id)?;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
-        let spec = SessionSpec::new(worktree.path, self.expand_attachments(&text))
+        let mut spec = SessionSpec::new(worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone());
+        // The same login the conversation started on: the vendor's thread
+        // lives in its directory (`docs/accounts.md` §5).
+        for (key, value) in crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &stored.account,
+            driver.home_variable(),
+        ) {
+            spec = spec.with_env(key, value);
+        }
         self.sessions
             .send(id.clone(), driver, spec, stored.vendor_session_id)
             .map_err(failed)?;
@@ -903,6 +1131,7 @@ impl Service {
                 agent: attempt.agent.clone(),
                 prompt: prompt.to_string(),
                 model: attempt.model.clone(),
+                account: attempt.account.clone(),
             }) {
                 Ok(Response::Session { session }) => started.push(session),
                 Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
@@ -1008,6 +1237,19 @@ impl Service {
 }
 
 /// Turn a domain failure into the protocol's generic failure.
+/// What an account runs on: its provider's driver, and the environment that
+/// points that driver's CLI at the account's directory.
+type AccountRuntime = (Arc<dyn AgentDriver>, Vec<(String, String)>);
+
+/// An account error as a client sees it: a name that is not there is a
+/// not-found, and the rest are refusals with the reason in them.
+fn account_error(error: crate::account::AccountError) -> RpcError {
+    match error {
+        crate::account::AccountError::Unknown(_) => RpcError::not_found(error.to_string()),
+        other => RpcError::failed(other.to_string()),
+    }
+}
+
 fn failed(error: impl std::fmt::Display) -> RpcError {
     RpcError::failed(error.to_string())
 }

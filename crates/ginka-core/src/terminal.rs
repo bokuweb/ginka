@@ -51,6 +51,19 @@ struct Running {
     history: Arc<Mutex<String>>,
 }
 
+/// A command to run in a terminal instead of the user's shell.
+pub struct TerminalCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Applied on top of the sanitized environment, and kept even where the
+    /// sanitizing would have removed the variable: it was asked for.
+    pub env: Vec<(String, String)>,
+    /// What the tab is called.
+    pub title: String,
+    /// Run once the command has exited.
+    pub on_exit: Option<Box<dyn FnOnce() + Send>>,
+}
+
 /// Every terminal the daemon is running.
 pub struct Terminals {
     running: Mutex<HashMap<TerminalId, Running>>,
@@ -78,6 +91,64 @@ impl Terminals {
         rows: u16,
         cols: u16,
     ) -> Result<TerminalId> {
+        self.spawn(
+            workspace,
+            worktree,
+            CommandBuilder::new(shell()),
+            None,
+            rows,
+            cols,
+            None,
+        )
+    }
+
+    /// Run one command in a terminal in a workspace's dock, instead of the
+    /// user's shell: the vendor's own sign-in for an account, with the
+    /// account's directory in its environment (`docs/accounts.md` §4).
+    ///
+    /// The terminal closes when the command does, and `on_exit` runs then —
+    /// which is how the daemon learns a login may have changed without
+    /// reading the vendor's files.
+    pub fn open_command(
+        &self,
+        workspace: &WorkspaceId,
+        cwd: &Path,
+        command: TerminalCommand,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId> {
+        let mut builder = CommandBuilder::new(&command.program);
+        builder.args(&command.args);
+        for (key, value) in &command.env {
+            builder.env(key, value);
+        }
+        self.spawn(
+            workspace,
+            cwd,
+            builder,
+            Some(command.title),
+            rows,
+            cols,
+            command.on_exit,
+        )
+    }
+
+    /// Start a process on a pty and adopt it as a terminal.
+    ///
+    /// The environment the command was given wins over the sanitizing, which
+    /// is what lets an account's directory reach a sign-in while the
+    /// daemon's own inherited session state does not.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn(
+        &self,
+        workspace: &WorkspaceId,
+        worktree: &Path,
+        mut command: CommandBuilder,
+        title: Option<String>,
+        rows: u16,
+        cols: u16,
+        on_exit: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<TerminalId> {
         let system = NativePtySystem::default();
         let pair = system
             .openpty(PtySize {
@@ -88,13 +159,16 @@ impl Terminals {
             })
             .context("opening a pty")?;
 
-        let mut command = CommandBuilder::new(shell());
         command.cwd(worktree);
         // Announced as a terminal that understands colour, because that is
         // what the client renders.
         command.env("TERM", "xterm-256color");
+        let given: Vec<String> = command
+            .iter_extra_env_as_str()
+            .map(|(name, _)| name.to_string())
+            .collect();
         for (name, _) in std::env::vars() {
-            if crate::agent::is_inherited_session_state(&name) {
+            if crate::agent::is_inherited_session_state(&name) && !given.contains(&name) {
                 command.env_remove(&name);
             }
         }
@@ -112,7 +186,7 @@ impl Terminals {
         let id = TerminalId(uuid::Uuid::new_v4().simple().to_string());
         let history = Arc::new(Mutex::new(String::new()));
 
-        self.pump(id.clone(), reader, history.clone());
+        self.pump(id.clone(), reader, history.clone(), on_exit);
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
         // Numbered within the workspace, because that is the strip they appear
         // in: two shells in two workspaces are both the first one there.
@@ -128,7 +202,7 @@ impl Terminals {
                 master: pair.master,
                 child,
                 workspace: workspace.clone(),
-                title: format!("shell {ordinal}"),
+                title: title.unwrap_or_else(|| format!("shell {ordinal}")),
                 history,
             },
         );
@@ -177,6 +251,7 @@ impl Terminals {
         id: TerminalId,
         mut reader: Box<dyn std::io::Read + Send>,
         history: Arc<Mutex<String>>,
+        on_exit: Option<Box<dyn FnOnce() + Send>>,
     ) {
         let events = self.events.clone();
         std::thread::spawn(move || {
@@ -198,6 +273,9 @@ impl Terminals {
                 }
             }
             events.emit(DaemonEvent::TerminalClosed { terminal: id });
+            if let Some(on_exit) = on_exit {
+                on_exit();
+            }
         });
     }
 

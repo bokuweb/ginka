@@ -1,10 +1,11 @@
 # Accounts: several logins per provider, and the headroom on each
 
-**Status:** design, agreed 2026-09-05. Nothing in this document is implemented
-yet. It is the shape M5's "plan usage meter" (roadmap §3.3 N12) takes once a
-provider can have more than one login, and it adds one requirement of its own
-(N17). Read roadmap §4.4, §4.5 and §6.3 first; this document extends them and
-does not repeat them.
+**Status:** design, agreed 2026-09-05; steps 1–2 of §12 and the on-demand
+Codex refresh from step 3 landed 2026-09-06 (see the note in §6). It is the
+shape M5's "plan usage meter" (roadmap §3.3 N12) takes once a provider can
+have more than one login, and it adds one requirement of its own (N17). Read
+roadmap §4.4, §4.5 and §6.3 first; this document extends them and does not
+repeat them.
 
 ## 1. The problem
 
@@ -196,19 +197,28 @@ driver is where the difference stops (rule 6): both feed the same
 
 ### Codex
 
-Every `exec --json` turn already emits a `token_count` event, and beside the
-token counts that event carries the account's rate limits: a `primary` and a
-`secondary` window, each with `used_percent`, `window_minutes` and `resets_at`.
-The driver's parser reads the counts today and drops the rest; it will read the
-rest. The labels are derived from `window_minutes` (five hours, a week) rather
-than from the names `primary` and `secondary`, which say nothing to a reader.
+The older `exec --json` stream (the `msg` envelope) emits a `token_count`
+event, and beside the token counts that event carries the account's rate
+limits: a `primary` and a `secondary` window, each with `used_percent`,
+`window_minutes` and `resets_at`. The driver reads them when they are there,
+and that reading is free. The labels are derived from the window's length
+(`5h`, `week`) rather than from the names `primary` and `secondary`, which
+say nothing to a reader.
 
-So on Codex the gauge is free: it updates on every turn, with nothing fetched
-and no process started. For a reading *without* running a turn — the account
-that is not the one in use — `codex app-server` answers `account/rateLimits/read`
-and the daemon can ask it the way `probe` asks for a version: a short-lived
-process, under the account's environment. That is the on-demand refresh, and it
-is the second step, not the first.
+**Corrected 2026-09-06, from running 0.142.5:** the modern stream — the
+`thread.*` / `turn.*` vocabulary, which is what a current CLI emits — carries
+no rate limits at all. The way to a reading on a current Codex is therefore
+the one the design had as the second step: `codex app-server` answers
+`account/rateLimits/read` over stdio once it has been sent `initialize` and
+`initialized`, and the daemon asks it the way `probe` asks for a version — a
+short-lived process under the account's environment, stopped as soon as the
+answer line arrives, because a server told to read one thing does not exit on
+its own. The answer names the plan (`planType`) and the windows in camelCase
+(`usedPercent`, `windowDurationMins`, `resetsAt`); the driver reads both
+spellings. The exchange and the answer are pinned as fixtures in the driver's
+tests (R6). This is the on-demand refresh: run when the user asks, and when
+the account picker opens on an account whose reading is missing or older than
+the shortest window.
 
 ### Claude Code
 
@@ -377,6 +387,12 @@ Additions to `docs/ui.md`, recorded there too:
 ## 12. Order of work
 
 Each step is usable on its own and the earlier ones do not depend on Q9.
+Steps 1 and 2 landed 2026-09-06, with the on-demand Codex refresh from step 3;
+what remains of step 3 is Claude's refused-turn reading. The window's account
+chip and picker are in; the sidebar footer, the Reports section and an
+*Add account…* entry in the picker (which needs a text field the composer's
+pickers do not have yet) are not — accounts are added with `ginka account add`
+until then.
 
 1. **Accounts.** The settings block, `home_variable`, the spawn layer, `probe`
    per account, `AccountId` on sessions and usage events, the migration, the

@@ -17,11 +17,12 @@ use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, Project, Session, SessionMatch, UsageRow,
-    WorkspaceSummary,
+    Account, AgentStatus, ChangeSource, Changes, Checkpoint, PlanSnapshot, Project, Session,
+    SessionMatch, UsageRow, WorkspaceSummary,
 };
+use ginka_protocol::provider::ProviderKind;
 use ginka_protocol::rpc::{Attempt, Request, Response};
-use ginka_protocol::{CheckpointId, ProjectName, SessionId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, WorkspaceId};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -54,6 +55,12 @@ enum Command {
     Workspace(WorkspaceCommand),
     /// Report which agent CLIs this machine has, and whether they are usable.
     Agents,
+    /// Manage logins: several per provider, each in a directory of its own.
+    ///
+    /// A session runs on one of them, and the usage report says what each
+    /// one spent and how much of its rate-limit window is left.
+    #[command(subcommand)]
+    Account(AccountCommand),
     /// Start and steer agent sessions.
     #[command(subcommand)]
     Session(SessionCommand),
@@ -245,6 +252,39 @@ enum WorkspaceCommand {
 }
 
 #[derive(Subcommand)]
+enum AccountCommand {
+    /// List every login, with whether it is signed in and the latest reading
+    /// of its rate-limit windows.
+    List,
+    /// Add a login for a provider.
+    ///
+    /// Makes a private directory for the provider's CLI to sign into; nothing
+    /// is signed in until `account login`.
+    Add {
+        /// A slug, unique across providers: `claude-work`, `codex-personal`.
+        id: String,
+        /// Which provider's login this is: `claude`, `codex`.
+        #[arg(long)]
+        provider: String,
+        /// What the account is called in the window. The id otherwise.
+        #[arg(long)]
+        label: Option<String>,
+    },
+    /// Forget a login. Its directory — the vendor's sign-in — is kept unless
+    /// asked otherwise.
+    Remove {
+        id: String,
+        /// Delete the directory too, sign-in and all.
+        #[arg(long)]
+        delete_home: bool,
+    },
+    /// Run the vendor's own sign-in for a login, here in this terminal.
+    Login { id: String },
+    /// Ask the provider how much of a login's rate-limit windows is left.
+    Refresh { id: String },
+}
+
+#[derive(Subcommand)]
 enum SessionCommand {
     /// List sessions, most recently active first.
     List {
@@ -262,6 +302,9 @@ enum SessionCommand {
         agent: String,
         #[arg(long)]
         model: Option<String>,
+        /// Which login to run on, by id. The provider's default otherwise.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
@@ -337,6 +380,7 @@ fn main() -> Result<()> {
         Command::Doctor => doctor(&paths),
         Command::Mcp => mcp(&paths),
         Command::Daemon(command) => daemon(&paths, command, cli.json),
+        Command::Account(AccountCommand::Login { id }) => account_login(&paths, &id),
         command => {
             // Read before the command is consumed: how a diff is printed is
             // the one thing the response alone does not say.
@@ -511,6 +555,35 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Account(AccountCommand::List) => Request::Accounts,
+        Command::Account(AccountCommand::Add {
+            id,
+            provider,
+            label,
+        }) => Request::AddAccount {
+            provider: ProviderKind::parse(&provider).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no provider named {provider}; one of: {}",
+                    ProviderKind::ALL
+                        .iter()
+                        .map(|kind| kind.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })?,
+            label: label.unwrap_or_else(|| id.clone()),
+            id: AccountId(id),
+        },
+        Command::Account(AccountCommand::Remove { id, delete_home }) => Request::RemoveAccount {
+            id: AccountId(id),
+            delete_home,
+        },
+        Command::Account(AccountCommand::Refresh { id }) => Request::RefreshPlanUsage {
+            account: AccountId(id),
+        },
+        Command::Account(AccountCommand::Login { .. }) => {
+            unreachable!("a login is run here, not asked of the daemon")
+        }
         Command::Usage { days } => Request::Usage { days: Some(days) },
         Command::Commands { workspace } => Request::SlashCommands {
             workspace: WorkspaceId(workspace),
@@ -533,8 +606,13 @@ fn request_for(command: Command) -> Result<Request> {
                     Some((agent, model)) => Attempt {
                         agent: agent.to_string(),
                         model: Some(model.to_string()),
+                        account: None,
                     },
-                    None => Attempt { agent, model: None },
+                    None => Attempt {
+                        agent,
+                        model: None,
+                        account: None,
+                    },
                 })
                 .collect(),
         },
@@ -638,11 +716,13 @@ fn request_for(command: Command) -> Result<Request> {
             prompt,
             agent,
             model,
+            account,
         }) => Request::StartSession {
             workspace: WorkspaceId(workspace),
             agent,
             prompt,
             model,
+            account: account.map(AccountId),
         },
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
             session: SessionId(session),
@@ -783,6 +863,12 @@ fn print(response: Response, patch: bool) {
         Response::Workspaces { workspaces } => print_workspaces(&workspaces),
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
+        Response::Accounts { accounts } => print_accounts(&accounts, &[]),
+        Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
+        Response::PlanUsage { snapshot } => match snapshot {
+            Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),
+            None => println!("{}", rust_i18n::t!("cli.plan.unanswered")),
+        },
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::SessionMatches { matches } => print_matches(&matches),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
@@ -828,7 +914,12 @@ fn print(response: Response, patch: bool) {
         // something that renders a terminal, and rewriting it here would be
         // guessing at a screen this end does not have.
         Response::TerminalHistory { data } => print!("{data}"),
-        Response::Usage { by_day, by_agent } => print_usage(&by_day, &by_agent),
+        Response::Usage {
+            by_day,
+            by_agent,
+            by_account,
+            plans,
+        } => print_usage(&by_day, &by_agent, &by_account, &plans),
         Response::ReviewComments { comments } => {
             if comments.is_empty() {
                 println!("{}", rust_i18n::t!("cli.review.empty"));
@@ -1019,9 +1110,15 @@ fn print_matches(matches: &[SessionMatch]) {
 }
 
 /// What the work cost, by day and by agent.
-fn print_usage(by_day: &[UsageRow], by_agent: &[UsageRow]) {
+fn print_usage(
+    by_day: &[UsageRow],
+    by_agent: &[UsageRow],
+    by_account: &[UsageRow],
+    plans: &[PlanSnapshot],
+) {
     if by_day.is_empty() {
         println!("{}", rust_i18n::t!("cli.usage.empty"));
+        print_plans(plans);
         return;
     }
     let row = |row: &UsageRow| {
@@ -1047,6 +1144,150 @@ fn print_usage(by_day: &[UsageRow], by_agent: &[UsageRow]) {
     for entry in by_agent {
         row(entry);
     }
+    println!();
+    for entry in by_account {
+        row(entry);
+    }
+    if !plans.is_empty() {
+        println!();
+        print_plans(plans);
+    }
+}
+
+/// One line per login: id, provider, label, signed in, and either the
+/// tightest of its windows or where it lives.
+fn print_accounts(accounts: &[Account], plans: &[PlanSnapshot]) {
+    let now = now();
+    for account in accounts {
+        let state = match account.signed_in {
+            Some(true) => rust_i18n::t!("cli.agent.ready").to_string(),
+            Some(false) => rust_i18n::t!("cli.agent.signed_out").to_string(),
+            None => String::new(),
+        };
+        let plan = plans
+            .iter()
+            .find(|snapshot| snapshot.account == account.id)
+            .map(|snapshot| plan_line(snapshot, now))
+            .unwrap_or_default();
+        println!(
+            "{:<18} {:<8} {:<16} {:<12} {}",
+            account.id.0,
+            account.provider.as_str(),
+            account.label,
+            state,
+            if plan.is_empty() {
+                account
+                    .home
+                    .as_ref()
+                    .map(|home| home.display().to_string())
+                    .unwrap_or_default()
+            } else {
+                plan
+            }
+        );
+    }
+}
+
+/// Every window of every reading, with how old the reading is.
+fn print_plans(plans: &[PlanSnapshot]) {
+    let now = now();
+    for snapshot in plans {
+        println!("{:<18} {}", snapshot.account.0, plan_line(snapshot, now));
+    }
+}
+
+/// `pro · 5h 92% resets in 40m · week 40% resets in 3d 2h · 5m ago`
+fn plan_line(snapshot: &PlanSnapshot, now: i64) -> String {
+    let mut parts: Vec<String> = snapshot.usage.plan.iter().cloned().collect();
+    for window in &snapshot.usage.windows {
+        let reset = window.reset_label(now);
+        parts.push(if reset.is_empty() {
+            format!("{} {:.0}%", window.label, window.used_percent)
+        } else {
+            format!("{} {:.0}% {reset}", window.label, window.used_percent)
+        });
+    }
+    parts.push(
+        rust_i18n::t!("cli.plan.age", age = age_label(now - snapshot.observed_at)).to_string(),
+    );
+    parts.join(" · ")
+}
+
+/// How long ago, in the coarsest unit that is not zero.
+fn age_label(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    if seconds < 60 {
+        format!("{seconds}s")
+    } else if seconds < 3_600 {
+        format!("{}m", seconds / 60)
+    } else if seconds < 86_400 {
+        format!("{}h", seconds / 3_600)
+    } else {
+        format!("{}d", seconds / 86_400)
+    }
+}
+
+/// Unix seconds, for the ages the account list shows.
+fn now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Run the vendor's own sign-in for a login, in this terminal.
+///
+/// The daemon says what to run and which directory to point it at; the
+/// browser round-trip and the token are the vendor's, and this terminal is
+/// where the user already is. Afterwards the daemon is asked again whether
+/// the login worked, which is how the answer reaches every window too.
+fn account_login(paths: &Paths, id: &str) -> Result<()> {
+    let accounts = smol::block_on(async {
+        let client = connect(paths).await?;
+        match client.request(Request::Accounts).await {
+            Ok(Response::Accounts { accounts }) => Ok(accounts),
+            Ok(other) => anyhow::bail!("unexpected answer {other:?}"),
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    })?;
+    let account = accounts
+        .iter()
+        .find(|account| account.id.0 == id)
+        .ok_or_else(|| anyhow::anyhow!("no account named {id}; `ginka account list` names them"))?;
+    let login = account.login.as_ref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} has no sign-in command; sign in with the CLI itself",
+            account.provider
+        )
+    })?;
+    let status = std::process::Command::new(&login.program)
+        .args(&login.args)
+        .envs(login.env.iter().map(|(key, value)| (key, value)))
+        .status()
+        .with_context(|| format!("running {}", login.program))?;
+    if !status.success() {
+        anyhow::bail!("{} exited with {status}", login.program);
+    }
+    let signed_in = smol::block_on(async {
+        let client = connect(paths).await?;
+        match client.request(Request::Accounts).await {
+            Ok(Response::Accounts { accounts }) => Ok(accounts
+                .into_iter()
+                .find(|account| account.id.0 == id)
+                .and_then(|account| account.signed_in)),
+            Ok(other) => anyhow::bail!("unexpected answer {other:?}"),
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    })?;
+    println!(
+        "{}",
+        match signed_in {
+            Some(true) => rust_i18n::t!("cli.account.login.done"),
+            Some(false) => rust_i18n::t!("cli.account.login.still_out"),
+            None => rust_i18n::t!("cli.account.login.unknown"),
+        }
+    );
+    Ok(())
 }
 
 fn print_checkpoints(checkpoints: &[Checkpoint]) {
@@ -1123,6 +1364,10 @@ mod ginka_cli_format {
                 "usage: {} in, {} out",
                 usage.input_tokens, usage.output_tokens
             ),
+            AgentEvent::PlanUsage { usage } => match usage.tightest() {
+                Some(window) => format!("plan: {} {:.0}% used", window.label, window.used_percent),
+                None => String::new(),
+            },
             AgentEvent::TurnEnd { turn } => format!("-- end of turn {turn} --"),
             AgentEvent::SessionResult { state, summary } => format!(
                 "== {} {}",

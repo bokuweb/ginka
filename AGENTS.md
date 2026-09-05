@@ -39,6 +39,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
 - **Finding things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, and reads what it opens. ⌘K reaches every action, panel, surface and workspace by name.
 - **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
+- **Accounts.** Several logins per provider (`docs/accounts.md`, N17): `ginka account add|list|login|remove|refresh`, `session start --account`, and an account chip in the composer when a provider has more than one. A session records the login it ran on, usage is filed by it, and Codex's rate-limit windows are read on demand through its app server and shown beside the choice.
 
 What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
 
@@ -72,6 +73,9 @@ cargo run -p ginka-cli -- daemon status
 cargo run -p ginka-cli -- project add .
 cargo run -p ginka-cli -- workspace new <project> <branch>
 cargo run -p ginka-cli -- session start <workspace> "<prompt>"
+cargo run -p ginka-cli -- account add codex-work --provider codex --label Work
+cargo run -p ginka-cli -- account login codex-work   # the vendor's sign-in, here
+cargo run -p ginka-cli -- account list               # signed in, and headroom
 cargo run -p ginka-cli -- session log <session>
 cargo run -p ginka-cli -- checkpoint list <workspace>
 cargo run -p ginka-cli -- --json project list   # the protocol's own shapes, for agents

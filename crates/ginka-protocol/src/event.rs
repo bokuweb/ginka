@@ -6,7 +6,7 @@
 //! talking to (`AGENTS.md` rule 6).
 
 use crate::ids::{ProjectName, SessionId, TerminalId, WorkspaceId};
-use crate::model::{BranchStatus, Session, SessionState, TranscriptEntry};
+use crate::model::{BranchStatus, PlanSnapshot, PlanUsage, Session, SessionState, TranscriptEntry};
 use serde::{Deserialize, Serialize};
 
 /// One normalized thing an agent did.
@@ -55,6 +55,9 @@ pub enum AgentEvent {
     AgentTitle { title: String },
     /// Token and cost accounting for the turn so far.
     Usage { usage: Usage },
+    /// The account's rate-limit windows, where the vendor reports them as it
+    /// works (`docs/accounts.md` §6).
+    PlanUsage { usage: PlanUsage },
     /// A turn boundary. Checkpoints are taken here.
     TurnEnd { turn: u32 },
     /// The session reached a terminal state; no further events will arrive.
@@ -137,6 +140,10 @@ pub enum DaemonEvent {
     TerminalOutput { terminal: TerminalId, data: String },
     /// A terminal's shell exited, so there is nothing left to type into.
     TerminalClosed { terminal: TerminalId },
+    /// An account's rate-limit windows were read again.
+    PlanUsageChanged { snapshot: PlanSnapshot },
+    /// An account was added, removed, or signed in. Clients re-read the list.
+    AccountsChanged,
 
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,

@@ -110,7 +110,23 @@ fn options() -> SessionOptions {
         reasoning_effort: Some("medium".into()),
         service_tier: None,
         access_mode: AccessMode::Ask,
+        account: None,
     }
+}
+
+#[test]
+fn an_account_change_restarts_without_asking_the_driver() {
+    // The vendor's thread lives in the account's directory, and a resume
+    // cannot cross directories (`docs/accounts.md` §5).
+    let mut session = ScriptedSession::new().absorbs_options(true);
+    let mut current = options();
+    let next = SessionOptions {
+        account: Some(ginka_protocol::AccountId("claude-work".into())),
+        ..options()
+    };
+    let outcome = apply_session_options(&mut session, &mut current, next).unwrap();
+    assert_eq!(outcome, OptionOutcome::RestartRequired);
+    assert_eq!(session.applied(), Vec::<SessionOptions>::new());
 }
 
 #[test]

@@ -114,6 +114,7 @@ impl Fixture {
                 agent: agent.into(),
                 prompt: prompt.into(),
                 model: None,
+                account: None,
             })
             .unwrap()
         {
@@ -551,6 +552,7 @@ fn two_agents_run_in_two_workspaces_at_once() {
             agent: "claude".into(),
             prompt: "second workspace".into(),
             model: None,
+            account: None,
         })
         .unwrap()
     {
@@ -864,7 +866,12 @@ fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
     assert_eq!(fixture.settle(&session), SessionState::Finished);
 
     match fixture.ask(Request::Usage { days: Some(30) }) {
-        Response::Usage { by_day, by_agent } => {
+        Response::Usage {
+            by_day,
+            by_agent,
+            by_account,
+            plans,
+        } => {
             let day = by_day.first().expect("it happened today");
             assert_eq!(day.totals.input_tokens, 1200);
             assert_eq!(day.totals.output_tokens, 300);
@@ -876,6 +883,14 @@ fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
                 .find(|row| row.label == "claude")
                 .expect("filed against the agent that ran it");
             assert_eq!(agent.totals.input_tokens, 1200);
+
+            // Nothing chose a login, so the provider's default paid for it.
+            let account = by_account
+                .iter()
+                .find(|row| row.label == "claude")
+                .expect("filed against the login that paid for it");
+            assert_eq!(account.totals.input_tokens, 1200);
+            assert!(plans.is_empty(), "the fake agent reports no windows");
         }
         other => panic!("expected usage, got {other:?}"),
     }
@@ -980,6 +995,7 @@ fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
             agent: "claude".into(),
             prompt: "hello".into(),
             model: None,
+            account: None,
         })
         .expect_err("there is no such workspace");
     assert_eq!(error.code, "not_found");
@@ -995,6 +1011,7 @@ fn asking_for_an_agent_this_build_does_not_have_names_the_ones_it_does() {
             agent: "telepath".into(),
             prompt: "hello".into(),
             model: None,
+            account: None,
         })
         .expect_err("there is no such agent");
     assert_eq!(error.code, "not_found");
@@ -1116,16 +1133,19 @@ fn a_fan_out_asks_the_same_question_in_a_worktree_each() {
                 ginka_protocol::rpc::Attempt {
                     agent: "claude".into(),
                     model: None,
+                    account: None,
                 },
                 ginka_protocol::rpc::Attempt {
                     agent: "claude".into(),
                     model: None,
+                    account: None,
                 },
                 // A driver this build does not have: the arm fails and the
                 // others carry on.
                 ginka_protocol::rpc::Attempt {
                     agent: "no-such-agent".into(),
                     model: None,
+                    account: None,
                 },
             ],
         })
@@ -1278,4 +1298,260 @@ fn a_steered_message_is_in_the_transcript_like_any_other() {
         })
         .collect();
     assert_eq!(users, ["first", "and the changelog"]);
+}
+
+// ---------------------------------------------------------------------------
+// Accounts: several logins per provider (`docs/accounts.md`).
+
+impl Fixture {
+    /// Everything the agent said in a session, joined.
+    fn text_of(&mut self, id: &SessionId) -> String {
+        self.transcript(id)
+            .into_iter()
+            .filter_map(|payload| match payload {
+                TranscriptPayload::Agent {
+                    event: AgentEvent::TextDelta { text },
+                } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
+    }
+}
+
+fn accounts_of(fixture: &mut Fixture) -> Vec<ginka_protocol::model::Account> {
+    match fixture.ask(Request::Accounts) {
+        Response::Accounts { accounts } => accounts,
+        other => panic!("expected accounts, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
+    let mut fixture = Fixture::new();
+    let added = fixture.ask(Request::AddAccount {
+        id: ginka_protocol::AccountId("claude-work".into()),
+        provider: ginka_protocol::ProviderKind::Claude,
+        label: "Work".into(),
+    });
+    let Response::Account { account } = added else {
+        panic!("expected the account, got {added:?}");
+    };
+    let home = account
+        .home
+        .clone()
+        .expect("a named account has a directory");
+    assert!(home.is_dir(), "created for the vendor to sign into");
+    assert!(
+        fixture
+            .recorder
+            .all()
+            .contains(&DaemonEvent::AccountsChanged)
+    );
+
+    // The agent says what it was given; the script is the same for both.
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"v"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"home={env:CLAUDE_CONFIG_DIR}"}]},"session_id":"v"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v","usage":{"input_tokens":7,"output_tokens":1}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let on_work = match fixture.service.handle(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "claude".into(),
+        prompt: "where are you".into(),
+        model: None,
+        account: Some(ginka_protocol::AccountId("claude-work".into())),
+    }) {
+        Ok(Response::Session { session }) => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(on_work.account.0, "claude-work");
+    assert_eq!(fixture.settle(&on_work.id), SessionState::Finished);
+    let said = fixture.text_of(&on_work.id);
+    assert!(
+        said.contains(&format!("home={}", home.display())),
+        "the account's directory reached the agent: {said}"
+    );
+
+    // And the default account points the CLI nowhere in particular: the
+    // variable is not set at all.
+    let on_default = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"d"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"home=[{env:CLAUDE_CONFIG_DIR}]"}]},"session_id":"d"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"d","usage":{"input_tokens":3,"output_tokens":1}}"#,
+        ]
+        .join("\n"),
+        "where are you now",
+    );
+    assert_eq!(fixture.settle(&on_default), SessionState::Finished);
+    assert!(fixture.text_of(&on_default).contains("home=[]"));
+    let stored = match fixture.ask(Request::ListSessions { workspace: None }) {
+        Response::Sessions { sessions } => sessions,
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let default = stored
+        .iter()
+        .find(|session| session.id == on_default)
+        .unwrap();
+    assert_eq!(default.account.0, "claude", "the provider's own id");
+
+    // The cost is filed against the login that paid it.
+    match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage { by_account, .. } => {
+            let work = by_account
+                .iter()
+                .find(|row| row.label == "claude-work")
+                .expect("the work login paid for its turn");
+            assert_eq!(work.totals.input_tokens, 7);
+        }
+        other => panic!("expected usage, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_login_of_one_provider_cannot_run_another_providers_agent() {
+    let mut fixture = Fixture::new();
+    fixture.ask(Request::AddAccount {
+        id: ginka_protocol::AccountId("codex-work".into()),
+        provider: ginka_protocol::ProviderKind::Codex,
+        label: "Work".into(),
+    });
+    let refused = fixture.service.handle(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "claude".into(),
+        prompt: "hello".into(),
+        model: None,
+        account: Some(ginka_protocol::AccountId("codex-work".into())),
+    });
+    let error = refused.expect_err("a codex login is not a claude one");
+    assert!(error.message.contains("codex"), "{}", error.message);
+
+    let unknown = fixture.service.handle(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "claude".into(),
+        prompt: "hello".into(),
+        model: None,
+        account: Some(ginka_protocol::AccountId("nonesuch".into())),
+    });
+    assert!(unknown.is_err());
+    // Nothing was started for either.
+    match fixture.ask(Request::ListSessions { workspace: None }) {
+        Response::Sessions { sessions } => assert!(sessions.is_empty()),
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
+    let mut fixture = Fixture::new();
+    let ids = |accounts: &[ginka_protocol::model::Account]| {
+        accounts
+            .iter()
+            .map(|account| account.id.0.clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+
+    fixture.ask(Request::AddAccount {
+        id: ginka_protocol::AccountId("codex-work".into()),
+        provider: ginka_protocol::ProviderKind::Codex,
+        label: "Work".into(),
+    });
+    let accounts = accounts_of(&mut fixture);
+    assert_eq!(ids(&accounts), vec!["claude", "codex", "codex-work"]);
+    let work = &accounts[2];
+    assert_eq!(work.label, "Work");
+    assert!(!work.is_default);
+    let login = work.login.as_ref().expect("codex has a sign-in command");
+    assert_eq!(login.args, vec!["login"]);
+    assert_eq!(login.env[0].0, "CODEX_HOME");
+
+    // Ids are slugs and never a provider's own.
+    assert!(
+        fixture
+            .service
+            .handle(Request::AddAccount {
+                id: ginka_protocol::AccountId("claude".into()),
+                provider: ginka_protocol::ProviderKind::Claude,
+                label: "Again".into(),
+            })
+            .is_err()
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::RemoveAccount {
+                id: ginka_protocol::AccountId("claude".into()),
+                delete_home: false,
+            })
+            .is_err()
+    );
+
+    let home = work.home.clone().unwrap();
+    fixture.ask(Request::RemoveAccount {
+        id: ginka_protocol::AccountId("codex-work".into()),
+        delete_home: false,
+    });
+    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert!(home.is_dir(), "the vendor's login is kept unless asked");
+
+    // And what was written survives a daemon: it is in the settings file.
+    let settings: ginka_core::settings::DaemonSettings =
+        ginka_core::settings::load(&fixture.service.paths().daemon_settings());
+    assert!(settings.accounts.is_empty());
+}
+
+#[test]
+fn the_windows_a_turn_reports_are_kept_per_account_and_pushed() {
+    let mut fixture = Fixture::new();
+    // The older Codex stream, which carries the account's windows beside the
+    // token counts.
+    let session = fixture.start_with(
+        "codex",
+        &[
+            r#"{"id":"0","msg":{"type":"session_configured","session_id":"c1"}}"#,
+            r#"{"id":"1","msg":{"type":"agent_message","message":"Hello"}}"#,
+            r#"{"id":"2","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5,"output_tokens":1}},"rate_limits":{"primary":{"used_percent":92,"window_minutes":300,"resets_at":1900000000},"secondary":{"used_percent":40,"window_minutes":10080,"resets_at":1900600000}}}}"#,
+            r#"{"id":"3","msg":{"type":"task_complete","last_agent_message":"Hello"}}"#,
+        ]
+        .join("\n"),
+        "how much is left",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let pushed = fixture
+        .recorder
+        .all()
+        .into_iter()
+        .find_map(|event| match event {
+            DaemonEvent::PlanUsageChanged { snapshot } => Some(snapshot),
+            _ => None,
+        })
+        .expect("the gauge moved, and every client was told");
+    assert_eq!(pushed.account.0, "codex");
+    assert_eq!(pushed.source, ginka_protocol::model::PlanSource::Reported);
+    assert_eq!(
+        pushed.usage.tightest().map(|window| window.label.as_str()),
+        Some("5h")
+    );
+
+    match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage { plans, .. } => {
+            assert_eq!(plans, vec![pushed]);
+        }
+        other => panic!("expected usage, got {other:?}"),
+    }
+    // A gauge is not conversation: the transcript does not carry it.
+    assert!(!fixture.transcript(&session).iter().any(|payload| matches!(
+        payload,
+        TranscriptPayload::Agent {
+            event: AgentEvent::PlanUsage { .. }
+        }
+    )));
 }

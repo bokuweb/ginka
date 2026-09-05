@@ -11,6 +11,7 @@ fn base() -> SessionOptions {
         reasoning_effort: Some("medium".into()),
         service_tier: None,
         access_mode: AccessMode::Ask,
+        account: None,
     }
 }
 

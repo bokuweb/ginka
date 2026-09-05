@@ -16,14 +16,15 @@ use rusqlite::{Connection, OptionalExtension as _};
 pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions
-            (id, workspace_id, provider, model, state, agent_title,
+            (id, workspace_id, provider, account_id, model, state, agent_title,
              agent_title_is_placeholder, summary, vendor_session_id,
              created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, ?7, ?8, ?9, ?10)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11)",
         rusqlite::params![
             session.id.0,
             session.workspace.0,
             session.agent,
+            session.account.0,
             session.model,
             session.state.as_str(),
             session.title,
@@ -363,17 +364,18 @@ pub fn mark_orphans_failed(conn: &Connection, now: i64) -> Result<usize> {
 
 const SELECT_ALL: &str = "SELECT id, workspace_id, provider, model, state, \
      COALESCE(user_title, agent_title), summary, \
-     vendor_session_id, created_at, updated_at FROM sessions";
+     vendor_session_id, created_at, updated_at, account_id FROM sessions";
 const ORDER: &str = "ORDER BY updated_at DESC, created_at DESC";
 const SELECT: &str = "SELECT id, workspace_id, provider, model, state, \
      COALESCE(user_title, agent_title), summary, \
-     vendor_session_id, created_at, updated_at FROM sessions WHERE id = ?1";
+     vendor_session_id, created_at, updated_at, account_id FROM sessions WHERE id = ?1";
 
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
     Ok(Session {
         id: SessionId(row.get(0)?),
         workspace: WorkspaceId(row.get(1)?),
         agent: row.get(2)?,
+        account: ginka_protocol::AccountId(row.get(10)?),
         model: row.get(3)?,
         state: SessionState::parse(&row.get::<_, String>(4)?),
         title: row.get(5)?,
@@ -395,6 +397,7 @@ mod tests {
             id: SessionId(id.into()),
             workspace: WorkspaceId(workspace.into()),
             agent: "claude".into(),
+            account: ginka_protocol::AccountId("claude".into()),
             model: Some("opus".into()),
             state: SessionState::Starting,
             title: None,

@@ -32,6 +32,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0006_review_comments",
         include_str!("../../../db/migrations/0006_review_comments.sql"),
     ),
+    (
+        "0007_accounts",
+        include_str!("../../../db/migrations/0007_accounts.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.
@@ -137,6 +141,56 @@ mod tests {
         }
         let err = open(&path).unwrap_err();
         assert!(err.to_string().contains("newer Ginka"), "{err}");
+    }
+
+    #[test]
+    fn rows_from_before_accounts_are_attributed_to_the_providers_default() {
+        // A session that ran before there were accounts ran on the vendor's
+        // own home — which is what the provider's default account is — and
+        // the backfill has to say so rather than leave the column empty.
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        let before_accounts = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "0007_accounts")
+            .expect("the accounts migration is registered");
+        for (_, sql) in &MIGRATIONS[..before_accounts] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before_accounts)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO sessions (id, workspace_id, provider, created_at, updated_at)
+             VALUES ('s', 'comet/harbor', 'codex', 1, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO usage_events (session_id, turn, agent, input_tokens, output_tokens,
+                                       cache_read_tokens, reasoning_tokens, at)
+             VALUES ('s', 1, 'codex', 1, 1, 0, 0, 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let session: String = conn
+            .query_row(
+                "SELECT account_id FROM sessions WHERE id = 's'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(session, "codex");
+        let usage: String = conn
+            .query_row(
+                "SELECT account_id FROM usage_events WHERE session_id = 's'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(usage, "codex");
     }
 
     #[test]

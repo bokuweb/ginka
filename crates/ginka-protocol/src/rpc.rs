@@ -5,12 +5,13 @@
 //! command line and from the MCP server (`AGENTS.md` rule 3). Adding a private
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide,
-    FileContent, FileEntry, Project, ReviewComment, Session, SessionMatch, SlashCommand,
-    TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
+    Account, AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide,
+    FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch,
+    SlashCommand, TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
 };
+use crate::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -59,6 +60,35 @@ pub enum Request {
     /// Probing runs each vendor's CLI, so this is a request rather than
     /// something a client can work out for itself.
     ListAgents,
+    /// Every login of every provider, the defaults first, with what the last
+    /// probe said about each (`docs/accounts.md` §8).
+    Accounts,
+    /// Add a login: a directory for the provider's CLI to sign into.
+    ///
+    /// The directory is created empty; the vendor fills it through
+    /// [`Request::LoginAccount`]. Ginka never holds the credential.
+    AddAccount {
+        /// A slug, immutable once created, unique across providers.
+        id: AccountId,
+        provider: ProviderKind,
+        /// What the chip says.
+        label: String,
+    },
+    /// Forget a login. The directory holds the vendor's sign-in, which is the
+    /// thing a person least wants deleted by accident, so it stays unless
+    /// `delete_home` says otherwise.
+    RemoveAccount { id: AccountId, delete_home: bool },
+    /// Run the vendor's own sign-in for an account, in a terminal in
+    /// `workspace`'s dock, with the account's directory in its environment.
+    LoginAccount {
+        id: AccountId,
+        workspace: WorkspaceId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Ask the provider how much of an account's rate-limit windows is left,
+    /// without running a turn. Answers with the reading, and pushes it.
+    RefreshPlanUsage { account: AccountId },
     /// Sessions, newest first. `workspace` limits it.
     ListSessions { workspace: Option<WorkspaceId> },
     /// Start an agent in a workspace and send it `prompt`.
@@ -68,6 +98,8 @@ pub enum Request {
         agent: String,
         prompt: String,
         model: Option<String>,
+        /// Which login to run on; the provider's default when absent.
+        account: Option<AccountId>,
     },
     /// Ask the same question in several worktrees at once.
     ///
@@ -186,7 +218,8 @@ pub enum Request {
         text: String,
     },
 
-    /// What the work has cost, by day and by agent.
+    /// What the work has cost, by day, by agent and by account, with the
+    /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
     /// Leave a comment on a line of the diff.
@@ -286,6 +319,9 @@ pub struct Attempt {
     /// A driver id: `claude`, `codex`, …
     pub agent: String,
     pub model: Option<String>,
+    /// Which login to run on; the provider's default when absent.
+    #[serde(default)]
+    pub account: Option<AccountId>,
 }
 
 /// What the daemon answers with.
@@ -313,6 +349,17 @@ pub enum Response {
     },
     Agents {
         agents: Vec<AgentStatus>,
+    },
+    Accounts {
+        accounts: Vec<Account>,
+    },
+    Account {
+        account: Account,
+    },
+    /// A reading of an account's windows, or none when the provider could
+    /// not be asked.
+    PlanUsage {
+        snapshot: Option<PlanSnapshot>,
     },
     Sessions {
         sessions: Vec<Session>,
@@ -373,6 +420,9 @@ pub enum Response {
     Usage {
         by_day: Vec<UsageRow>,
         by_agent: Vec<UsageRow>,
+        by_account: Vec<UsageRow>,
+        /// The latest reading per account, for those that have one.
+        plans: Vec<PlanSnapshot>,
     },
     /// A commit was made, and this is what it is called.
     Committed {
@@ -415,6 +465,7 @@ mod tests {
                 agent: "claude".into(),
                 prompt: "write the test first".into(),
                 model: Some("opus".into()),
+                account: Some(AccountId("claude-work".into())),
             },
             Request::SessionTranscript {
                 session: SessionId("s-1".into()),

@@ -129,6 +129,9 @@ fn scripted() {
             .replace("{session}", &session)
             .replace("{stdin}", &last_read)
             .replace("{args}", &joined);
+        // `{env:NAME}` says what the agent was given, which is how a test
+        // sees that an account's directory reached it.
+        let line = substitute_env(&line);
         if let Some(rest) = line.strip_prefix("#sleep ") {
             let millis: u64 = rest.trim().parse().unwrap_or(0);
             std::thread::sleep(std::time::Duration::from_millis(millis));
@@ -163,6 +166,25 @@ fn scripted() {
             out.flush().expect("stdout is open");
         }
     }
+}
+
+/// Replace every `{env:NAME}` with the variable's value, or with nothing
+/// when it is not set: an unset variable is a fact a test may want to see.
+fn substitute_env(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(start) = rest.find("{env:") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + "{env:".len()..];
+        let Some(end) = after.find('}') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        out.push_str(&std::env::var(&after[..end]).unwrap_or_default());
+        rest = &after[end + 1..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// One system line, one answer, one result — the shape of a short session.

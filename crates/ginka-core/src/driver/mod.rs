@@ -30,9 +30,25 @@ pub use process::AgentProcess;
 pub use spec::SessionSpec as ProcessSessionSpec;
 
 use anyhow::Result;
+use ginka_protocol::model::PlanUsage;
 use ginka_protocol::provider::{OptionOutcome, SessionOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// A short-lived process that answers with an account's rate-limit windows
+/// (`docs/accounts.md` §6).
+///
+/// Described rather than run, like every other command a driver produces.
+/// `input` is written to the process line by line once it starts; the
+/// driver's [`AgentDriver::parse_plan_usage`] reads the lines it prints
+/// until one of them is the answer, and the process is stopped then rather
+/// than waited for — a server that was told to read one thing does not exit
+/// on its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanUsageProbe {
+    pub command: CommandSpec,
+    pub input: Vec<String>,
+}
 
 /// A model a driver can be asked for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +247,37 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// One user message, in whatever the transport reads from its input.
     /// `None` where there is no such thing.
     fn encode_user_message(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    /// The environment variable this provider's CLI reads its state directory
+    /// from, when it has one (`docs/accounts.md` §4).
+    ///
+    /// `None` means the CLI keeps one login per machine, and the provider
+    /// cannot have a second account. Nothing above the driver spells the
+    /// variable's name.
+    fn home_variable(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// The vendor's own sign-in, to be run in a terminal with the account's
+    /// environment. `None` for a CLI that has no such command.
+    ///
+    /// Ginka never performs a login itself: the browser round-trip and the
+    /// token file are the vendor's, written into the account's directory.
+    fn login_command(&self) -> Option<CommandSpec> {
+        None
+    }
+
+    /// How to ask the provider for an account's rate-limit windows without
+    /// running a turn. `None` for a provider that cannot be asked.
+    fn plan_usage_probe(&self) -> Option<PlanUsageProbe> {
+        None
+    }
+
+    /// Read the windows out of one line the probe printed, if this is the
+    /// line that carries them.
+    fn parse_plan_usage(&self, _line: &str) -> Option<PlanUsage> {
         None
     }
 }

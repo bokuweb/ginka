@@ -212,6 +212,7 @@ mod tests {
             id: SessionId("s-1".into()),
             workspace: WorkspaceId("comet/harbor".into()),
             agent: "claude".into(),
+            account: ginka_protocol::AccountId("claude".into()),
             model: None,
             state: SessionState::Running,
             title: None,

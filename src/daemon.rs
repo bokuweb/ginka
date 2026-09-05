@@ -15,11 +15,12 @@ use ginka_core::Paths;
 use std::path::PathBuf;
 
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry, Project,
-    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
+    Account, AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
+    PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
+    WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -133,6 +134,7 @@ impl DaemonLink {
         agent: &str,
         prompt: String,
         model: Option<String>,
+        account: Option<AccountId>,
     ) -> Option<Session> {
         match self
             .ask(Request::StartSession {
@@ -140,10 +142,69 @@ impl DaemonLink {
                 agent: agent.to_string(),
                 prompt,
                 model,
+                account,
             })
             .await
         {
             Some(Response::Session { session }) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Every login of every provider, with what the daemon last learned
+    /// about each being signed in.
+    pub async fn accounts(&self) -> Vec<Account> {
+        match self.ask(Request::Accounts).await {
+            Some(Response::Accounts { accounts }) => accounts,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The latest reading of every account's rate-limit windows.
+    ///
+    /// Comes with the usage report, of which the readings are the part the
+    /// composer wants; the totals are asked for a day so the rest stays
+    /// small.
+    pub async fn plans(&self) -> Vec<PlanSnapshot> {
+        match self.ask(Request::Usage { days: Some(1) }).await {
+            Some(Response::Usage { plans, .. }) => plans,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ask the provider for an account's windows now. The daemon pushes the
+    /// reading too, so every window sees it.
+    pub async fn refresh_plan(&self, account: &AccountId) -> Option<PlanSnapshot> {
+        match self
+            .ask(Request::RefreshPlanUsage {
+                account: account.clone(),
+            })
+            .await
+        {
+            Some(Response::PlanUsage { snapshot }) => snapshot,
+            _ => None,
+        }
+    }
+
+    /// Run the vendor's own sign-in for an account in a terminal in the
+    /// workspace's dock, and return the terminal.
+    pub async fn login_account(
+        &self,
+        account: &AccountId,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Option<TerminalId> {
+        match self
+            .ask(Request::LoginAccount {
+                id: account.clone(),
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await
+        {
+            Some(Response::Terminal { terminal }) => Some(terminal),
             _ => None,
         }
     }

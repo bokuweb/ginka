@@ -65,6 +65,41 @@ impl fmt::Display for TerminalId {
     }
 }
 
+/// Identifies one account: one login of one provider (`docs/accounts.md` §3).
+///
+/// A slug, immutable once created, and global across providers. The default
+/// account of a provider has the provider's own id — `claude`, `codex` — and
+/// never appears in the settings file, because it is the vendor's own home.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+#[cfg_attr(feature = "export", ts(type = "string"))]
+pub struct AccountId(pub String);
+
+impl AccountId {
+    /// The implicit account of a provider: its own home, as it is today.
+    pub fn default_for(provider: crate::provider::ProviderKind) -> Self {
+        Self(provider.as_str().to_string())
+    }
+
+    /// Whether this is some provider's implicit account.
+    pub fn is_default(&self) -> bool {
+        crate::provider::ProviderKind::parse(&self.0).is_some()
+    }
+}
+
+impl fmt::Display for AccountId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl From<&str> for AccountId {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 /// Identifies one checkpoint: a workspace state snapshotted at a turn boundary.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]

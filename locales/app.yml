@@ -64,6 +64,18 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.account.pick:
+  en: Choose which login runs this
+  ja: 実行するログイン（アカウント）を選ぶ
+composer.account.at_wall:
+  en: at the wall
+  ja: 上限到達
+composer.account.no_reading:
+  en: no reading yet
+  ja: 残量は未取得
+composer.account.age:
+  en: "read %{age} ago"
+  ja: "%{age}前に取得"
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー
@@ -308,6 +320,21 @@ cli.commands.empty:
 cli.usage.empty:
   en: no agent has run yet
   ja: まだエージェントは実行されていません
+cli.plan.age:
+  en: "%{age} ago"
+  ja: "%{age}前"
+cli.plan.unanswered:
+  en: "the provider did not answer; nothing is claimed"
+  ja: "プロバイダから応答がありませんでした。残量は不明です"
+cli.account.login.done:
+  en: signed in
+  ja: ログインしました
+cli.account.login.still_out:
+  en: "the sign-in ended, but the CLI still reports itself signed out"
+  ja: "サインインは終了しましたが、CLI はまだ未ログインと報告しています"
+cli.account.login.unknown:
+  en: "the sign-in ended; the CLI cannot say whether it worked"
+  ja: "サインインは終了しました。成否は CLI からは分かりません"
 cli.checkpoints.empty:
   en: "no checkpoints yet; they are taken as an agent works"
   ja: "チェックポイントはまだありません。エージェントの作業中に取得されます"

@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The agent CLIs Ginka knows how to drive.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
@@ -152,6 +153,9 @@ pub struct SessionOptions {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub access_mode: AccessMode,
+    /// Which login the session runs on; `None` is the provider's default
+    /// (`docs/accounts.md` §5).
+    pub account: Option<crate::ids::AccountId>,
 }
 
 impl SessionOptions {
@@ -165,8 +169,11 @@ impl SessionOptions {
     /// them on the next turn. Access mode is not — loosening or tightening
     /// what an agent that is *already running* may touch deserves a fresh
     /// session even where the transport would happily accept the change.
+    /// Neither is the account: the vendor's thread lives in the account's
+    /// directory, and a resume cannot cross directories (`docs/accounts.md`
+    /// §5).
     pub fn forces_restart(before: &Self, after: &Self) -> bool {
-        before.access_mode != after.access_mode
+        before.access_mode != after.access_mode || before.account != after.account
     }
 }
 

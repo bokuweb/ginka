@@ -5,7 +5,8 @@
 //! linking the daemon's domain logic. `ginka-core` persists them; nothing here
 //! knows what a database or a git repository is.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+use crate::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -133,6 +134,10 @@ pub struct Session {
     pub workspace: WorkspaceId,
     /// The driver's id: `claude`, `codex`, …
     pub agent: String,
+    /// The login it runs on (`docs/accounts.md` §5). Text rather than a
+    /// reference: a session outlives the account it ran on, and still says
+    /// which one that was.
+    pub account: AccountId,
     pub model: Option<String>,
     pub state: SessionState,
     /// What this conversation is about.
@@ -294,6 +299,135 @@ pub struct UsageRow {
     /// What this row is about: a date, an agent's id, or a session's title.
     pub label: String,
     pub totals: UsageTotals,
+}
+
+/// One login of one provider (`docs/accounts.md`).
+///
+/// Not a credential. An account is a directory the vendor's CLI keeps its own
+/// login in; Ginka points the CLI at it and never reads what is inside.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Account {
+    pub id: AccountId,
+    pub provider: ProviderKind,
+    /// What the chip says.
+    pub label: String,
+    /// The directory the provider's CLI keeps this login in. A daemon-host
+    /// path (`docs/roadmap.md` §4.1). `None` for the provider's default, which
+    /// is wherever the CLI keeps it when told nothing.
+    pub home: Option<PathBuf>,
+    /// The provider's own default, which cannot be removed.
+    pub is_default: bool,
+    /// The *names* of the variables the account's `env` sets. The values never
+    /// cross the wire (`docs/accounts.md` §10).
+    pub env_keys: Vec<String>,
+    /// What the last probe said, when there has been one. `None` when the
+    /// provider cannot be asked, which is not the same as signed out.
+    pub signed_in: Option<bool>,
+    /// The vendor's own sign-in, to run in a terminal with the account's
+    /// environment. `None` for a provider whose CLI has no such command.
+    pub login: Option<LoginCommand>,
+}
+
+/// A command a client runs on the user's behalf, in a terminal.
+///
+/// Carries the environment that names the account's directory and nothing
+/// else: a login does not need the account's own variables, and one of those
+/// may be a key.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+}
+
+/// A subscription's rate-limit window (`docs/roadmap.md` §3.3 N12).
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanWindow {
+    /// What the vendor calls it, or what its length says: `5h`, `week`.
+    pub label: String,
+    pub used_percent: f64,
+    /// Unix seconds, when the provider tells us.
+    pub resets_at: Option<i64>,
+}
+
+impl PlanWindow {
+    /// How much of the window is left, clamped to a percentage.
+    pub fn remaining_percent(&self) -> f64 {
+        (100.0 - self.used_percent.clamp(0.0, 100.0)).clamp(0.0, 100.0)
+    }
+
+    /// Whether the wall has been hit.
+    pub fn is_exhausted(&self) -> bool {
+        self.used_percent >= 100.0
+    }
+
+    /// "resets in 2h 15m", or nothing at all when the provider did not say.
+    /// A guess here would be worse than silence: the user plans around it.
+    pub fn reset_label(&self, now: i64) -> String {
+        let Some(resets_at) = self.resets_at else {
+            return String::new();
+        };
+        let remaining = resets_at - now;
+        if remaining <= 0 {
+            return "resets now".to_string();
+        }
+        let hours = remaining / 3_600;
+        let minutes = (remaining % 3_600) / 60;
+        match (hours, minutes) {
+            (0, 0) => "resets in under a minute".to_string(),
+            (0, minutes) => format!("resets in {minutes}m"),
+            (hours, 0) => format!("resets in {hours}h"),
+            (hours, minutes) => format!("resets in {hours}h {minutes}m"),
+        }
+    }
+}
+
+/// Every rate-limit window an account has, as last reported.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PlanUsage {
+    /// The vendor's name for the plan, when it says: `pro`, `max`.
+    pub plan: Option<String>,
+    pub windows: Vec<PlanWindow>,
+}
+
+impl PlanUsage {
+    /// The window closest to its ceiling — the one worth the space in the UI.
+    pub fn tightest(&self) -> Option<&PlanWindow> {
+        self.windows.iter().max_by(|left, right| {
+            left.used_percent
+                .partial_cmp(&right.used_percent)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+    }
+}
+
+/// Where a reading of an account's windows came from.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanSource {
+    /// A turn carried it: the vendor reports its windows as it works.
+    Reported,
+    /// Asked for, with no turn run.
+    Fetched,
+}
+
+/// The latest reading of an account's rate-limit windows.
+///
+/// A gauge, not an event: what matters is the newest reading and when it was
+/// taken. A gauge without an age is a claim (`docs/accounts.md` §6).
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlanSnapshot {
+    pub account: AccountId,
+    pub usage: PlanUsage,
+    /// Unix seconds.
+    pub observed_at: i64,
+    pub source: PlanSource,
 }
 
 /// Which side of a diff a line number belongs to.
@@ -626,6 +760,7 @@ mod tests {
             id: SessionId("s-1".into()),
             workspace: WorkspaceId("comet/bright-harbor".into()),
             agent: "claude".into(),
+            account: AccountId("claude".into()),
             model: None,
             state,
             title: None,

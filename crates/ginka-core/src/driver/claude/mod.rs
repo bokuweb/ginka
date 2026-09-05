@@ -156,6 +156,18 @@ impl AgentDriver for ClaudeDriver {
         true
     }
 
+    /// Claude Code keeps its login, settings and sessions under one
+    /// directory, `~/.claude` unless this says otherwise.
+    fn home_variable(&self) -> Option<&'static str> {
+        Some("CLAUDE_CONFIG_DIR")
+    }
+
+    /// The CLI has no `login` subcommand: starting it interactively in a
+    /// directory with no login is what asks for one.
+    fn login_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec::new(&self.program))
+    }
+
     fn encode_user_message(&self, text: &str) -> Option<String> {
         Some(PromptMessage::user(text).to_line())
     }
