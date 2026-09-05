@@ -123,7 +123,9 @@ per row repeating what a heading says once, and left a reader scanning for
      is exactly when it matters.
 - **Archived section** — collapsible header, one-line rows (glyph, title, age),
   `Show N more` footer.
-- **Footer** — avatar, user name, plan/channel label.
+- **Footer** — avatar, user name, and the account in use with its headroom —
+  the plan label this line used to reserve, now attached to the login it
+  describes (`docs/accounts.md` §11).
 - Rows reorder on an attention sort (working → needs-attention → recent) with
   the 260 ms curve, and a project is ordered by the most urgent row in it, so a
   project with an agent working in it rises the way a row does. Reordering must
@@ -145,8 +147,11 @@ per row repeating what a heading says once, and left a reader scanning for
   text is arriving, when the words are the indicator.
 - **Composer** — one card: a multi-line auto-growing input with the
   `Do anything…` placeholder, and beneath it the attachment button on the left,
-  then the agent chip (which says when the agent is missing or signed out), the
-  mode chip, and the circular send button — which becomes a stop button while a
+  then the agent chip (which says when the agent is missing or signed out),
+  the account chip when that agent has more than one login — its label and
+  the tightest rate-limit window as *percent · reset*, the number printed and
+  *at the wall* a word beside it, never a colour alone (`docs/accounts.md`
+  §11) — the mode chip, and the circular send button — which becomes a stop button while a
   session is working. `@` file mentions and `/` slash commands with an inline
   filtered menu. `↩` sends, `⇧↩` is a newline; sending while busy enqueues.
   Focus is carried by the card's border at the accent's 55%, never by a hard
@@ -161,7 +166,7 @@ per row repeating what a heading says once, and left a reader scanning for
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file and read it; editing is M4), **Editor**, **Browser** (M5), **Reports**. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file and read it; editing is M4), **Editor**, **Browser** (M5), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading). Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
 
 ## 4. Component mapping
 
