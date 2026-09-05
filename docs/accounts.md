@@ -234,7 +234,7 @@ Two levels, and only the first is in this design:
    — and depending on an endpoint the vendor has not documented. That contradicts
    §3 (Ginka holds no credential) and roadmap R6 (formats change without
    notice) at once, so it is not built on this document's say-so. It is roadmap
-   **Q8**, and stays open until decided.
+   **Q9**, and stays open until decided.
 
 ### Refresh policy
 
@@ -251,7 +251,7 @@ Ginka does not route. The question was asked — "can it pick the login with the
 most left?" — and the answer is no, for three reasons that are each sufficient:
 
 - **The signal is not there.** On Claude the gauge is a status, not a number,
-  until Q8 is decided; on Codex it is a number only for the account that ran
+  until Q9 is decided; on Codex it is a number only for the account that ran
   the last turn. A router that guesses from a stale gauge is worse than a
   person reading the same gauge, because the person knows it is stale.
 - **A session cannot move.** The vendor's thread lives in the account's
@@ -376,7 +376,7 @@ Additions to `docs/ui.md`, recorded there too:
 
 ## 12. Order of work
 
-Each step is usable on its own and the earlier ones do not depend on Q8.
+Each step is usable on its own and the earlier ones do not depend on Q9.
 
 1. **Accounts.** The settings block, `home_variable`, the spawn layer, `probe`
    per account, `AccountId` on sessions and usage events, the migration, the
@@ -387,7 +387,7 @@ Each step is usable on its own and the earlier ones do not depend on Q8.
 3. **Claude headroom as the CLI reports it.** The refused-turn and warning
    paths into the same event. On-demand refresh for Codex through
    `app-server`.
-4. **Q8**, if decided in favour: a percentage for Claude, behind an explicit
+4. **Q9**, if decided in favour: a percentage for Claude, behind an explicit
    opt-in.
 
 Tests come first in each (AGENTS.md conventions), and the cases with a decision

@@ -16,6 +16,8 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 **For anything that renders, read [`docs/ui.md`](docs/ui.md) too.** It holds the layout spec, the design tokens, the region-by-region breakdown, and the mapping from each region to the component that draws it.
 
+**For anything that talks to a chat platform, read [`docs/connectors.md`](docs/connectors.md).** It is the design for the Slack connector — where it lives, what a message becomes, what the thread sees, and the security rules — and it is not implemented yet.
+
 **For anything touching logins, `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, or rate-limit headroom, read [`docs/accounts.md`](docs/accounts.md).** It is the design for several accounts per provider (N17), what each vendor can report about its windows, and why switching between accounts is manual.
 
 ## Current state
