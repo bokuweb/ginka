@@ -18,6 +18,8 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 **For anything that talks to a chat platform, read [`docs/connectors.md`](docs/connectors.md).** It is the design for the Slack connector — where it lives, what a message becomes, what the thread sees, and the security rules — and it is not implemented yet.
 
+**For anything touching logins, `CLAUDE_CONFIG_DIR` / `CODEX_HOME`, or rate-limit headroom, read [`docs/accounts.md`](docs/accounts.md).** It is the design for several accounts per provider (N17), what each vendor can report about its windows, and why switching between accounts is manual.
+
 ## Current state
 
 **M0 and M1 are largely landed, and M2's process split is in.** See `docs/roadmap.md` §5 for what each milestone still owes. What works today:
@@ -143,5 +145,5 @@ These are load-bearing. Violating them creates work that has to be undone.
 - When a change alters architecture, data model, or scope, **update `docs/roadmap.md` in the same change** — including the decision log at the bottom. When it alters layout, tokens or component choices, update `docs/ui.md`.
 - Do not silently expand scope. The roadmap's §3.2 non-goals and the milestone ordering are deliberate; if something seems missing, it is probably deferred on purpose.
 - Prefer reading prior art for behaviour before designing from scratch — Band and the other open agent clients have already hit the edge cases (worktree sync, terminal reattach, session resume). **Read them; write our own.** Take the requirement away from the reading and implement it here; do not copy, port or paraphrase a file with it open. Most of that prior art is GPL-3.0, so copying would settle the licence question (roadmap Q3) by accident — but the rule holds for permissively licensed code too, because an implementation we did not write is one we cannot debug.
-- The requirements that constrain interfaces live in roadmap §3.3 as N1–N16. If you are about to design something that sounds like one of them — steering, session options, checkpoints, attachments, titles, updates — read that row first.
+- The requirements that constrain interfaces live in roadmap §3.3 as N1–N17. If you are about to design something that sounds like one of them — steering, session options, checkpoints, attachments, titles, updates — read that row first.
 - Keep this file and `CLAUDE.md` truthful. If you add commands, add them here once they actually work.
