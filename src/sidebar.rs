@@ -8,10 +8,15 @@
 //! A row is its title and what is happening to it. Its branch only earns a
 //! second line when it says something the title does not — which is when an
 //! agent has checked out something else inside the worktree.
+//!
+//! The headings are themselves selectable, because a project is something the
+//! reader picks *before* there is a conversation: choosing one and then "new
+//! chat" is how a chat is started in it, and a heading that could only be read
+//! would leave that flow with no way in.
 
-use ginka_protocol::WorkspaceId;
+use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
-use ginka_ui::workspace::{AgentState, SessionRow, group_by_project};
+use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
@@ -24,55 +29,101 @@ use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
 /// the sidebar is drawn.
 pub enum SidebarEvent {
     Selected,
+    /// A project was picked, and no workspace under it. The centre column has
+    /// no conversation to show for that, which is exactly the point: it shows
+    /// the home screen, aimed at this project.
+    ProjectSelected,
     /// The reader asked for a project to be registered. The sidebar does not
     /// know how to pick a folder or how to reach the daemon; the shell does.
     AddProjectRequested,
-    /// The reader asked to start a new conversation in the selected
-    /// workspace. What that costs — clearing the pane, aiming the next
-    /// message at a new session — is the shell's to decide.
+    /// The reader asked to start a new conversation. Where it runs is whatever
+    /// is selected — a project, or the project of the selected workspace, or
+    /// nothing at all, which is a scratch worktree. What that costs is the
+    /// shell's to decide.
     NewChatRequested,
 }
 
 impl EventEmitter<SidebarEvent> for SessionSidebar {}
 
 pub struct SessionSidebar {
+    /// Every registered project, in the daemon's order.
+    projects: Vec<ProjectRow>,
     rows: Vec<SessionRow>,
-    selected: usize,
+    /// The workspace the centre column is showing, if it is showing one.
+    ///
+    /// By id rather than by index: rows are sorted by attention, so an index
+    /// means nothing across a reload and keeping one would move the user's
+    /// selection whenever an agent started somewhere else. By workspace rather
+    /// than by branch, because the branch is the live one — an agent that
+    /// checks out something else inside the worktree must not move the
+    /// selection out from under the reader mid-answer.
+    selected: Option<WorkspaceId>,
+    /// Which project the next chat belongs to. Set by picking a heading, and
+    /// by picking a row under one.
+    selected_project: Option<ProjectName>,
+    /// How many refreshes in a row have not listed the selected workspace.
+    /// See [`SessionSidebar::set_rows`].
+    unlisted: u8,
     archived_open: bool,
 }
 
 impl SessionSidebar {
     pub fn new(rows: Vec<SessionRow>) -> Self {
         Self {
+            projects: Vec::new(),
             rows,
-            selected: 0,
+            selected: None,
+            selected_project: None,
+            unlisted: 0,
             archived_open: true,
         }
     }
 
     /// Replace the rows after a refresh.
     ///
-    /// The selection follows the *workspace*, not the index: rows are sorted by
-    /// attention, so an index means nothing across a reload and keeping one
-    /// would move the user's selection whenever an agent started somewhere else.
-    ///
-    /// By workspace id rather than by branch, because the branch is the live
-    /// one: an agent that checks out something else inside the worktree would
-    /// otherwise move the selection out from under the user mid-answer.
+    /// A selection whose workspace is no longer listed is dropped, but only
+    /// once a second refresh agrees it is gone: a workspace this window has
+    /// just created is selected before the listing that first mentions it, and
+    /// dropping it there would take the reader out of the chat they just
+    /// started. Two refreshes in a row without it means the worktree was
+    /// removed, and the window falls back to the home screen rather than to
+    /// whatever row is now first — that would be a conversation nobody asked
+    /// for.
     pub fn set_rows(&mut self, rows: Vec<SessionRow>, cx: &mut Context<Self>) {
-        let selected = self
-            .rows
-            .get(self.selected)
-            .map(|row| row.workspace.clone());
-        self.selected = selected
-            .and_then(|workspace| rows.iter().position(|row| row.workspace == workspace))
-            .unwrap_or(0);
         self.rows = rows;
+        match &self.selected {
+            Some(selected) if !self.rows.iter().any(|row| &row.workspace == selected) => {
+                self.unlisted += 1;
+                if self.unlisted > 1 {
+                    self.selected = None;
+                    self.unlisted = 0;
+                }
+            }
+            _ => self.unlisted = 0,
+        }
+        cx.notify();
+    }
+
+    /// Replace the projects after a refresh.
+    pub fn set_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut Context<Self>) {
+        self.projects = projects;
         cx.notify();
     }
 
     pub fn selected_row(&self) -> Option<&SessionRow> {
-        self.rows.get(self.selected)
+        let selected = self.selected.as_ref()?;
+        self.rows.iter().find(|row| &row.workspace == selected)
+    }
+
+    /// The workspace the centre column is showing, whether or not a refresh
+    /// has listed it yet.
+    pub fn selection(&self) -> Option<&WorkspaceId> {
+        self.selected.as_ref()
+    }
+
+    /// Which project a new chat would belong to.
+    pub fn selected_project(&self) -> Option<&ProjectName> {
+        self.selected_project.as_ref()
     }
 
     /// The rows as they stand, for the palette to offer.
@@ -82,17 +133,51 @@ impl SessionSidebar {
 
     /// Select a workspace by name, which is how the palette switches to one.
     pub fn select_workspace(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
-        if let Some(index) = self.rows.iter().position(|row| &row.workspace == workspace) {
-            self.select(index, cx);
-        }
-    }
-
-    fn select(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.selected == index {
+        if self.selected.as_ref() == Some(workspace) {
             return;
         }
-        self.selected = index;
+        self.adopt_workspace(workspace.clone(), cx);
         cx.emit(SidebarEvent::Selected);
+    }
+
+    /// Move the selection without announcing it.
+    ///
+    /// For the shell adopting a workspace it has just started a chat in: the
+    /// announcement is what clears the transcript, and clearing the one that
+    /// was just created is not what "select this" meant here.
+    pub fn adopt_workspace(&mut self, workspace: WorkspaceId, cx: &mut Context<Self>) {
+        self.selected_project = self
+            .rows
+            .iter()
+            .find(|row| row.workspace == workspace)
+            .map(|row| ProjectName(row.origin.to_string()))
+            .or_else(|| {
+                // A workspace id is `<project>/<name>`, so the project is
+                // known even before the refresh that lists the row.
+                workspace
+                    .0
+                    .split_once('/')
+                    .map(|(project, _)| ProjectName(project.to_string()))
+            });
+        self.selected = Some(workspace);
+        self.unlisted = 0;
+        cx.notify();
+    }
+
+    /// Pick a project, and nothing in it.
+    pub fn select_project(&mut self, project: ProjectName, cx: &mut Context<Self>) {
+        self.aim_at(Some(project), cx);
+        cx.emit(SidebarEvent::ProjectSelected);
+    }
+
+    /// Aim the next chat at a project — or at none — without announcing it.
+    ///
+    /// For the shell, which is where the decision came from: announcing it
+    /// back would have the shell answer its own message.
+    pub fn aim_at(&mut self, project: Option<ProjectName>, cx: &mut Context<Self>) {
+        self.selected = None;
+        self.unlisted = 0;
+        self.selected_project = project;
         cx.notify();
     }
 
@@ -185,15 +270,64 @@ impl SessionSidebar {
             .child(label)
     }
 
-    /// The heading a project's workspaces hang under.
-    fn project_header(&self, project: SharedString, cx: &App) -> impl IntoElement {
+    /// The `Projects` label, with the way to add one beside it.
+    ///
+    /// Next to the heading rather than only in the empty state: a reader with
+    /// one project registered wants the second one added from the same place,
+    /// and an empty state is by definition not there any more once they do.
+    fn projects_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
+            .w_full()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .child(self.section(rust_i18n::t!("sidebar.projects").to_string(), cx)),
+            )
+            .child(
+                div()
+                    .id("add-project")
+                    .px_2()
+                    .pt_3()
+                    .pb_1()
+                    .cursor_pointer()
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size_3p5()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::AddProjectRequested);
+                    })),
+            )
+    }
+
+    /// The heading a project's workspaces hang under, and the way to aim a new
+    /// chat at it.
+    fn project_header(
+        &self,
+        project: ProjectName,
+        label: SharedString,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        // Only when the project itself is what the centre column is showing:
+        // a selected row already says which project it is in, and two things
+        // highlighted at once reads as two selections.
+        let selected = self.selected.is_none() && self.selected_project.as_ref() == Some(&project);
+        h_flex()
+            .id(SharedString::from(format!("project:{}", project.0)))
             .w_full()
             .px_2p5()
             .py_1p5()
             .gap_2()
             .items_center()
+            .rounded(px(tokens.radius.row))
+            .cursor_pointer()
+            .when(selected, |this| this.bg(tokens.colors().row_active()))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| this.select_project(project.clone(), cx)))
             .child(
                 Icon::new(IconName::Folder)
                     .size_3p5()
@@ -203,9 +337,13 @@ impl SessionSidebar {
                 div()
                     .flex_1()
                     .text_sm()
-                    .text_color(tokens.colors().text_secondary)
+                    .text_color(if selected {
+                        tokens.colors().text_primary
+                    } else {
+                        tokens.colors().text_secondary
+                    })
                     .truncate()
-                    .child(project),
+                    .child(label),
             )
     }
 
@@ -242,8 +380,9 @@ impl SessionSidebar {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        let selected = index == self.selected;
+        let selected = self.selected.as_ref() == Some(&row.workspace);
         let branch = row.branch_worth_showing();
+        let workspace = row.workspace.clone();
 
         v_flex()
             .id(("session", index))
@@ -257,7 +396,7 @@ impl SessionSidebar {
             .rounded(px(tokens.radius.row))
             .when(selected, |this| this.bg(tokens.colors().row_active()))
             .hover(|this| this.bg(tokens.colors().row_hover()))
-            .on_click(cx.listener(move |this, _, _, cx| this.select(index, cx)))
+            .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(&workspace, cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -407,29 +546,31 @@ impl SessionSidebar {
 
     /// First run: nothing is registered yet.
     ///
-    /// Says how to fix it rather than only that the list is empty. The command
-    /// is the real one, so it can be copied straight into a terminal.
-    fn empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// A line under the section heading rather than a takeover of the whole
+    /// sidebar: a window with no project is still a window you can talk to —
+    /// the chat above runs in a scratch worktree — so the list says what is
+    /// missing without implying nothing works until it is fixed.
+    fn no_projects(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         v_flex()
-            .flex_1()
-            .px_4()
+            .w_full()
+            .px_2p5()
+            .py_1p5()
             .gap_2()
-            .items_center()
-            .justify_center()
+            .items_start()
             .child(
                 div()
-                    .text_sm()
-                    .text_color(tokens.colors().text_secondary)
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
                     .child(rust_i18n::t!("sidebar.empty.title").to_string()),
             )
             .child(
                 div()
-                    .id("add-project")
-                    .px_3()
+                    .id("add-project-empty")
+                    .px_2()
                     .py_1()
                     .rounded(px(tokens.radius.row))
-                    .bg(tokens.colors().accent)
+                    .bg(tokens.colors().accent.opacity(0.22))
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
                     .cursor_pointer()
@@ -512,11 +653,11 @@ impl Render for SessionSidebar {
         // Grouped under their projects, which is also what orders the projects:
         // the one with an agent working in it rises the way a row does.
         let active_rows: Vec<SessionRow> = active.iter().map(|(_, row)| row.clone()).collect();
-        let groups = group_by_project(&active_rows)
+        let groups = tree(&self.projects, &active_rows)
             .into_iter()
             .map(|mut group| {
-                // `group_by_project` numbers rows within what it was given;
-                // selection is addressed by the index in `self.rows`.
+                // `tree` numbers rows within what it was given; a row element
+                // is keyed by the index it has in the flat list.
                 group.rows = group
                     .rows
                     .into_iter()
@@ -534,8 +675,7 @@ impl Render for SessionSidebar {
             .map(|(index, row)| (index, row.clone()))
             .collect();
         let archived_count = archived.len();
-
-        let is_empty = self.rows.is_empty();
+        let nothing_registered = groups.is_empty();
 
         v_flex()
             .size_full()
@@ -544,47 +684,48 @@ impl Render for SessionSidebar {
             .border_color(border)
             .child(self.header(cx))
             .child(self.new_chat(cx))
-            .when(is_empty, |this| this.child(self.empty_state(cx)))
-            .when(!is_empty, |this| {
-                this.child(
-                    v_flex()
-                        .id("session-list")
-                        .flex_1()
-                        .px_1p5()
-                        .gap_0p5()
-                        .overflow_y_scroll()
-                        .child(self.section(rust_i18n::t!("sidebar.projects").to_string(), cx))
-                        .children(groups.into_iter().flat_map(|group| {
-                            let mut elements =
-                                vec![self.project_header(group.project, cx).into_any_element()];
-                            elements.extend(group.rows.iter().map(|(index, row)| {
-                                self.session_row(*index, row, cx).into_any_element()
-                            }));
-                            elements
-                        }))
-                        .child(div().h_2())
-                        .child(self.archived_header(cx))
-                        .when(self.archived_open, |this| {
-                            this.children(archived.iter().map(|(index, row)| {
-                                self.archived_row(*index, row, cx).into_any_element()
-                            }))
-                        })
-                        .when(self.archived_open && archived_count > 0, |this| {
-                            this.child(
-                                div()
-                                    .px_2p5()
-                                    .py_1p5()
-                                    .text_xs()
-                                    .text_color(Tokens::global(cx).colors().text_muted)
-                                    // The count is a placeholder until the
-                                    // archived list is paged (M1).
-                                    .child(
-                                        rust_i18n::t!("sidebar.show_more", count = 25).to_string(),
-                                    ),
-                            )
-                        }),
-                )
-            })
+            .child(
+                v_flex()
+                    .id("session-list")
+                    .flex_1()
+                    .px_1p5()
+                    .gap_0p5()
+                    .overflow_y_scroll()
+                    .child(self.projects_section(cx))
+                    .when(nothing_registered, |this| this.child(self.no_projects(cx)))
+                    .children(groups.into_iter().flat_map(|group| {
+                        let mut elements = vec![
+                            self.project_header(group.name, group.project, cx)
+                                .into_any_element(),
+                        ];
+                        elements.extend(group.rows.iter().map(|(index, row)| {
+                            self.session_row(*index, row, cx).into_any_element()
+                        }));
+                        elements
+                    }))
+                    .when(archived_count > 0, |this| {
+                        this.child(div().h_2())
+                            .child(self.archived_header(cx))
+                            .when(self.archived_open, |this| {
+                                this.children(archived.iter().map(|(index, row)| {
+                                    self.archived_row(*index, row, cx).into_any_element()
+                                }))
+                                .child(
+                                    div()
+                                        .px_2p5()
+                                        .py_1p5()
+                                        .text_xs()
+                                        .text_color(Tokens::global(cx).colors().text_muted)
+                                        // The count is a placeholder until the
+                                        // archived list is paged (M1).
+                                        .child(
+                                            rust_i18n::t!("sidebar.show_more", count = 25)
+                                                .to_string(),
+                                        ),
+                                )
+                            })
+                    }),
+            )
             .child(self.footer(cx))
     }
 }

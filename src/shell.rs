@@ -12,21 +12,22 @@ use crate::sidebar::{SessionSidebar, SidebarEvent};
 use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
-use ginka_protocol::SessionId;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
+use ginka_protocol::{ProjectName, SessionId};
 use ginka_ui::Tokens;
-use ginka_ui::layout::{Layout, Panel};
+use ginka_ui::home;
+use ginka_ui::layout::{HEADER_HEIGHT, Layout, Panel, TRAFFIC_LIGHT_INSET};
 use ginka_ui::transcript::{
     Activity, Applied, Block as TranscriptBlock, Reveal, Transcript, head_of,
 };
-use ginka_ui::workspace::SessionRow;
+use ginka_ui::workspace::{ProjectRow, SessionRow, workspace_for_new_chat};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Icon, IconName, StyledExt as _, TitleBar, h_flex,
+    Icon, IconName, InteractiveElementExt as _, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     v_flex,
@@ -50,6 +51,8 @@ actions!(
 /// composer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Picker {
+    /// Which project — or none at all — the next chat runs in.
+    Project,
     /// Which agent runs the next prompt.
     Agent,
     /// Which of that agent's models it runs on.
@@ -119,17 +122,23 @@ const TERMINAL_COLUMNS: u16 = 100;
 /// as the reader scrolling away.
 const NEARLY_THE_FOOT: f32 = 24.;
 
-/// Width macOS reserves for the traffic lights before our own content starts.
-const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
-
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
     settings: AppSettings,
     layout: Layout,
-    /// The row the centre column is showing. `None` when nothing is
-    /// registered, which is the first-run state rather than an error.
+    /// The row the centre column is showing.
+    ///
+    /// `None` is the home screen: nothing registered yet, or a new chat that
+    /// has not been sent. Neither is an error — the window opens on it, and
+    /// the first prompt is what turns it into a conversation.
     session: Option<SessionRow>,
+    /// Every registered project, for the sidebar's headings and the
+    /// composer's project chip.
+    projects: Vec<ProjectRow>,
+    /// Where a chat that has no workspace yet would run. `None` means no
+    /// project, which is a scratch worktree rather than nowhere.
+    target_project: Option<ProjectName>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -153,6 +162,12 @@ pub struct Shell {
     submitted: bool,
     /// Whether the composer has the keyboard, so the card can show it.
     composer_focused: bool,
+    /// Whether a press landed on a header strip and has not been released.
+    ///
+    /// With no title bar the strips are what the window is dragged by, and a
+    /// drag is a press that then moved: acting on the press alone would move
+    /// the window whenever a control on the strip was clicked.
+    dragging: bool,
     /// Which picker is open above the composer, if any.
     picker: Option<Picker>,
     /// The files offered for the mention being typed, if one is.
@@ -249,51 +264,28 @@ impl Shell {
                 &sidebar,
                 window,
                 |this, sidebar, event, window, cx| match event {
-                    // The window's own way in. The command in the empty state
-                    // still works and is still shown, but a reader who has just
-                    // opened the app should not have to leave it to put
-                    // something in it.
-                    SidebarEvent::AddProjectRequested => {
-                        let link = this.link.clone();
-                        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
-                            files: false,
-                            // A project is a directory: a repository, or a
-                            // folder to work in.
-                            directories: true,
-                            multiple: false,
-                            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
-                        });
-                        cx.spawn(async move |_, _| {
-                            // Cancelled, or the platform refused to ask: either
-                            // way there is nothing to register.
-                            if let Ok(Ok(Some(paths))) = chosen.await
-                                && let Some(path) = paths.into_iter().next()
-                            {
-                                // The daemon announces the change, and the
-                                // sidebar is filled from that announcement
-                                // rather than from here.
-                                link.add_project(path).await;
-                            }
-                        })
-                        .detach();
-                    }
-                    // A new conversation in the workspace already selected:
-                    // the pane clears, and the next message opens a session
-                    // rather than continuing the last one.
+                    // The window's own way in; see `add_project`.
+                    SidebarEvent::AddProjectRequested => this.add_project(window, cx),
+                    // A new conversation in whatever is selected: the project
+                    // itself, the project of the selected workspace, or none
+                    // at all. The column clears and the next message opens a
+                    // session rather than continuing the last one.
                     SidebarEvent::NewChatRequested => {
-                        this.start_fresh = true;
-                        this.transcript = Transcript::new();
-                        this.transcript_of = None;
-                        this.session_state = None;
-                        this.submitted = false;
-                        this.transcript_follows = true;
-                        this.composer
-                            .update(cx, |state, cx| state.set_value("", window, cx));
-                        this.composer.focus_handle(cx).focus(window, cx);
-                        cx.notify();
+                        let project = sidebar.read(cx).selected_project().cloned();
+                        this.start_new_chat(project, window, cx);
+                    }
+                    // A project was picked and nothing under it. There is no
+                    // conversation to show for that, which is the point: the
+                    // home screen, aimed at this project.
+                    SidebarEvent::ProjectSelected => {
+                        let project = sidebar.read(cx).selected_project().cloned();
+                        this.start_new_chat(project, window, cx);
                     }
                     SidebarEvent::Selected => {
                         this.session = sidebar.read(cx).selected_row().cloned();
+                        // A row says which project it is in, and the composer's
+                        // chip and the next new chat both read that back.
+                        this.target_project = sidebar.read(cx).selected_project().cloned();
                         // A different workspace is a different conversation.
                         this.transcript = Transcript::new();
                         this.transcript_of = None;
@@ -508,11 +500,14 @@ impl Shell {
             session_state: None,
             submitted: false,
             composer_focused: false,
+            dragging: false,
             picker: None,
             mentions: Vec::new(),
             commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
+            projects: Vec::new(),
+            target_project: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -526,6 +521,133 @@ impl Shell {
             surfaces,
             _subscriptions: vec![appearance, selection, submitted, committing],
         }
+    }
+
+    /// Register a repository or a folder, and aim the next chat at it.
+    ///
+    /// The window's own way in. The command in the sidebar's empty state still
+    /// works and is still shown, but a reader who has just opened the app
+    /// should not have to leave it to put something in it. The path is one
+    /// this window picked, so it is a path on *this* machine — only the same
+    /// thing as a daemon-host path while the daemon is the local child process
+    /// (`docs/roadmap.md` §4.1), which is why the picker is offered only then.
+    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: false,
+            // A project is a directory: a repository, or a folder to work in.
+            directories: true,
+            multiple: false,
+            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            // Cancelled, or the platform refused to ask: either way there is
+            // nothing to register.
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            // The daemon announces the change and the sidebar is filled from
+            // that announcement rather than from here — but the reader went
+            // looking for a folder in order to work in it, so the next chat is
+            // aimed at what they picked.
+            let added = cx
+                .background_spawn(async move { link.add_project(path).await })
+                .await;
+            if let Some(project) = added {
+                this.update_in(cx, |this, window, cx| {
+                    this.start_new_chat(Some(project.name), window, cx)
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Clear the column for a new conversation, aimed at `project`.
+    ///
+    /// A chat is started before it has a workspace: the reader picks a project
+    /// (or none), says what they want, and only then is there a worktree and a
+    /// session to show. Everything a conversation carries — its transcript,
+    /// its checkpoints, its shells — belongs to the one being left, so all of
+    /// it goes.
+    fn start_new_chat(
+        &mut self,
+        project: Option<ProjectName>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.aim_at(project.clone(), cx));
+        self.target_project = project;
+        self.session = None;
+        self.transcript = Transcript::new();
+        self.transcript_of = None;
+        self.session_state = None;
+        self.submitted = false;
+        self.transcript_follows = true;
+        // The next prompt opens a session rather than continuing whichever one
+        // the workspace it lands in happens to hold: that is what "new" said.
+        self.start_fresh = true;
+        self.picker = None;
+        self.mentions.clear();
+        self.commands.clear();
+        self.checkpoints = Vec::new();
+        self.rewinding = None;
+        // The shells belong to the workspace that is no longer on screen.
+        self.terminals = ginka_ui::terminal::TerminalTabs::new();
+        self.composer
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Show a workspace this window has just decided on.
+    ///
+    /// Before any refresh has listed it, which is why the row is passed in
+    /// rather than looked up: a scratch worktree made half a second ago is
+    /// where the prompt is about to go, and waiting a tick to admit it exists
+    /// would leave the reader watching an empty window.
+    fn adopt(&mut self, row: SessionRow, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.adopt_workspace(row.workspace.clone(), cx)
+        });
+        self.target_project = Some(ProjectName(row.origin.to_string()));
+        self.session = Some(row);
+        cx.notify();
+    }
+
+    /// The project the next prompt would run in, as the window says it.
+    fn project_label(&self) -> Option<SharedString> {
+        self.session
+            .as_ref()
+            .map(|row| row.origin.clone())
+            .or_else(|| {
+                self.target_project
+                    .as_ref()
+                    .map(|project| SharedString::from(project.0.clone()))
+            })
+    }
+
+    /// Which agent the next prompt would start.
+    ///
+    /// A workspace decides for itself — it may already hold a conversation
+    /// with one — and a chat that has no workspace yet takes what the reader
+    /// picked, or the first agent on this machine that is actually usable.
+    fn agent_to_start(&self) -> Option<String> {
+        if let Some(row) = self.session.as_ref() {
+            return Some(row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
+        }
+        if let Some(chosen) = self.chosen_agent.clone() {
+            return Some(chosen);
+        }
+        self.agents
+            .iter()
+            .find(|agent| agent.is_ready())
+            .or_else(|| self.agents.first())
+            .map(|agent| agent.id.clone())
     }
 
     /// Where the folded transcript for `session` has reached.
@@ -987,19 +1109,94 @@ impl Shell {
 
     /// Send what is in the composer.
     ///
-    /// With a session already in the workspace this is a follow-up, queued by
-    /// the daemon if the agent is mid-turn. Without one it starts an agent.
-    /// Either way the box is cleared straight away: the prompt is the daemon's
-    /// now, and leaving it behind invites sending it twice.
+    /// A chat that has no workspace yet — the home screen — gets one first,
+    /// which is either the chosen project's checkout or a scratch worktree.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.composer.read(cx).value().trim().to_string();
         if text.is_empty() {
             return;
         }
-        let Some(row) = self.session.clone() else {
-            tracing::warn!("nothing to send to: no workspace is selected");
+        match self.session.clone() {
+            Some(row) => self.send(row, text, window, cx),
+            None => self.send_first(text, window, cx),
+        }
+    }
+
+    /// Give a chat that has no workspace yet somewhere to run, then send.
+    ///
+    /// With a project chosen the chat runs in its checkout: a session there is
+    /// what "a new chat in this project" is. With none it runs in a scratch
+    /// worktree the daemon makes — a question that needs somewhere to work
+    /// should not need a repository first.
+    ///
+    /// The composer is not cleared here. Nothing has been sent until there is
+    /// a workspace, and a prompt cleared out of a box that then failed to go
+    /// anywhere is a prompt the reader has to retype.
+    fn send_first(&mut self, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(name) = self.target_project.clone() {
+            let Some(project) = self
+                .projects
+                .iter()
+                .find(|project| project.name == name)
+                .cloned()
+            else {
+                tracing::warn!(project = %name.0, "the chosen project is no longer registered");
+                return;
+            };
+            let rows = self.sidebar.read(cx).rows().to_vec();
+            let landed = workspace_for_new_chat(&rows, &project)
+                .and_then(|workspace| rows.into_iter().find(|row| row.workspace == workspace));
+            let Some(row) = landed else {
+                // A project with no worktree at all. Cutting a branch behind a
+                // prompt is not what the reader asked for, so the composer
+                // keeps what they typed and the chip says why nothing moved.
+                tracing::warn!(project = %name.0, "no workspace to start a chat in");
+                return;
+            };
+            self.adopt(row.clone(), cx);
+            self.send(row, text, window, cx);
             return;
-        };
+        }
+
+        // Somewhere to work is made for it. Said before the daemon answers,
+        // because making a worktree is a round trip and a window that says
+        // nothing for one reads as a window that dropped the prompt.
+        self.submitted = true;
+        self.transcript_follows = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let made = cx
+                .background_spawn(async move { link.create_scratch().await })
+                .await;
+            let Some(summary) = made else {
+                // Nothing was made, so nothing was sent: stop claiming to be
+                // working and leave the prompt where the reader can send it
+                // again.
+                this.update(cx, |this, cx| {
+                    this.submitted = false;
+                    cx.notify();
+                })
+                .ok();
+                return;
+            };
+            let row = SessionRow::from_summary(&summary, crate::daemon::now());
+            this.update_in(cx, |this, window, cx| {
+                this.adopt(row.clone(), cx);
+                this.send(row, text, window, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Send `text` into a workspace.
+    ///
+    /// With a session already in it this is a follow-up, queued by the daemon
+    /// if the agent is mid-turn. Without one — or after "new chat" — it starts
+    /// an agent. Either way the box is cleared straight away: the prompt is
+    /// the daemon's now, and leaving it behind invites sending it twice.
+    fn send(&mut self, row: SessionRow, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         // The draft belonged to the prompt that has just been sent.
@@ -1017,7 +1214,9 @@ impl Shell {
         cx.notify();
 
         let link = self.link.clone();
-        let agent = row.agent_to_start(&self.agents, self.chosen_agent.as_deref());
+        let agent = self
+            .agent_to_start()
+            .unwrap_or_else(|| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
         let model = self.chosen_model.clone();
         let fresh = self.start_fresh;
         self.start_fresh = false;
@@ -1287,7 +1486,9 @@ impl Shell {
         open_icon: IconName,
         closed_icon: IconName,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+        // Nothing here borrows `cx`: without `use<>` the built control would,
+        // and a header that holds one could not bind the next one.
+    ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
         let open = self.layout.is_open(panel);
         let color = if open {
@@ -1311,51 +1512,131 @@ impl Shell {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(panel, cx)))
     }
 
-    /// Three regions, aligned to the columns beneath: window controls over the
-    /// sidebar, the session's identity over the transcript, surface controls
-    /// over the right panel. `docs/ui.md` §3.1.
-    fn title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// Make a strip the window can be dragged by.
+    ///
+    /// There is no title bar to do it (`docs/ui.md` §3.1), so each column's
+    /// header does. A drag is a press that then moved: acting on the press
+    /// alone would carry the window off whenever a control on the strip was
+    /// clicked.
+    fn draggable(&self, strip: Stateful<Div>, cx: &mut Context<Self>) -> Stateful<Div> {
+        strip
+            .on_double_click(|_, window, _| window.titlebar_double_click())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.dragging = true),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, _, _, _| this.dragging = false),
+            )
+            .on_mouse_down_out(cx.listener(|this, _, _, _| this.dragging = false))
+            .on_mouse_move(cx.listener(|this, _, window, _| {
+                if this.dragging {
+                    this.dragging = false;
+                    window.start_window_move();
+                }
+            }))
+    }
+
+    /// The window's own controls, across the top of the leading column.
+    ///
+    /// Room for the traffic lights, then the sidebar toggle and the history
+    /// arrows. It sits on the sidebar while there is one and moves onto the
+    /// centre column when the sidebar is closed, because the lights do not
+    /// move with it.
+    fn window_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
+        let muted = tokens.colors().text_muted;
+
+        let strip = h_flex()
+            .id("window-controls")
+            .flex_shrink_0()
+            .h(HEADER_HEIGHT)
+            .pl(TRAFFIC_LIGHT_INSET)
+            .gap_3()
+            .items_center()
+            .child(self.panel_toggle(
+                Panel::Sidebar,
+                IconName::PanelLeftClose,
+                IconName::PanelLeftOpen,
+                cx,
+            ))
+            .child(Icon::new(IconName::ArrowLeft).size_4().text_color(muted))
+            .child(Icon::new(IconName::ArrowRight).size_4().text_color(muted));
+
+        self.draggable(strip, cx)
+    }
+
+    /// The strip across the top of the centre column: what the conversation is,
+    /// and the controls for the panels either side of it. `docs/ui.md` §3.1.
+    ///
+    /// It carries the window controls too when the sidebar is closed, which is
+    /// the only arrangement where the centre column is the leading one.
+    fn column_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        // Copied out: the toggles below need `cx` mutably to bind their
+        // listeners, and a borrow of the theme held across that is a borrow
+        // held across the whole strip.
+        let tokens = Tokens::global(cx).clone();
         let muted = tokens.colors().text_muted;
         let secondary = tokens.colors().text_secondary;
         let primary = tokens.colors().text_primary;
+        let leading = !self.layout.is_open(Panel::Sidebar);
         let session = self.session.clone();
-        let title: SharedString = session
+        // The conversation names itself; without one the project it would run
+        // in does. With neither, nothing: an empty window is not an error, and
+        // a placeholder title would be the only thing claiming otherwise.
+        let title: Option<SharedString> = session
             .as_ref()
             .map(|session| session.title.clone())
-            .unwrap_or_else(|| "Ginka".into());
-        let origin: SharedString = session
-            .as_ref()
-            .map(|session| session.origin.clone())
-            .unwrap_or_else(|| "no project registered".into());
+            .or_else(|| self.project_label());
+        let origin: Option<SharedString> = session.as_ref().map(|session| session.origin.clone());
         let glyph = session.as_ref().map(|session| session.agent.glyph());
-        // Track the column beneath. macOS already reserves the leading inset for
-        // the traffic lights; with the sidebar closed there is no column to
-        // align to, so the controls sit directly after them.
-        let nav_width = if self.layout.is_open(Panel::Sidebar) {
-            self.layout.size(Panel::Sidebar) - TRAFFIC_LIGHT_INSET
-        } else {
-            px(0.)
-        };
+        // Only when the centre column is the leading one, which is the one
+        // arrangement where the traffic lights sit over it.
+        let sidebar_toggle = leading.then(|| {
+            self.panel_toggle(
+                Panel::Sidebar,
+                IconName::PanelLeftClose,
+                IconName::PanelLeftOpen,
+                cx,
+            )
+        });
+        let new_chat = div()
+            .id("header-new-chat")
+            .p_1()
+            .rounded(px(tokens.radius.row))
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().bg_raised))
+            .child(Icon::new(IconName::Plus).size_4().text_color(secondary))
+            .on_click(cx.listener(|this, _, window, cx| {
+                let project = this.target_project.clone();
+                this.start_new_chat(project, window, cx);
+            }));
+        let dock_toggle = self.panel_toggle(
+            Panel::TerminalDock,
+            IconName::PanelBottom,
+            IconName::PanelBottomOpen,
+            cx,
+        );
+        let right_toggle = self.panel_toggle(
+            Panel::RightPanel,
+            IconName::PanelRightClose,
+            IconName::PanelRightOpen,
+            cx,
+        );
 
-        TitleBar::new().child(
+        let strip =
             h_flex()
+                .id("column-header")
+                .flex_shrink_0()
                 .w_full()
+                .h(HEADER_HEIGHT)
                 .pr_3()
+                .gap_2()
                 .items_center()
-                .child(
-                    h_flex()
-                        .w(nav_width)
-                        .gap_3()
-                        .items_center()
-                        .child(
-                            Icon::new(IconName::PanelLeft)
-                                .size_4()
-                                .text_color(secondary),
-                        )
-                        .child(Icon::new(IconName::ArrowLeft).size_4().text_color(muted))
-                        .child(Icon::new(IconName::ArrowRight).size_4().text_color(muted)),
-                )
+                .when(leading, |this| this.pl(TRAFFIC_LIGHT_INSET))
+                .when(!leading, |this| this.pl_4())
+                .children(sidebar_toggle)
                 .child(
                     h_flex()
                         .flex_1()
@@ -1363,38 +1644,41 @@ impl Shell {
                         .items_center()
                         .overflow_hidden()
                         .children(glyph.map(|glyph| glyph.size_4().text_color(secondary)))
-                        .child(
+                        .children(title.map(|title| {
                             div()
                                 .text_sm()
                                 .font_medium()
                                 .text_color(primary)
-                                .child(title),
-                        )
-                        .child(div().text_xs().text_color(muted).truncate().child(origin)),
+                                .truncate()
+                                .child(title)
+                        }))
+                        .children(origin.map(|origin| {
+                            div().text_xs().text_color(muted).truncate().child(origin)
+                        })),
                 )
                 .child(
                     h_flex()
-                        .gap_3()
+                        .gap_1()
                         .items_center()
-                        .child(Icon::new(IconName::Plus).size_4().text_color(secondary))
-                        .child(self.panel_toggle(
-                            Panel::TerminalDock,
-                            IconName::PanelBottom,
-                            IconName::PanelBottomOpen,
-                            cx,
-                        ))
-                        .child(self.panel_toggle(
-                            Panel::RightPanel,
-                            IconName::PanelRightClose,
-                            IconName::PanelRightOpen,
-                            cx,
-                        )),
-                ),
-        )
+                        .child(new_chat)
+                        .child(dock_toggle)
+                        .child(right_toggle),
+                );
+
+        self.draggable(strip, cx)
     }
 
-    /// The conversation, folded from the daemon's event stream.
-    fn transcript(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    /// The conversation, folded from the daemon's event stream — or the home
+    /// screen, when there is not one yet.
+    ///
+    /// An empty column is the ordinary way this window opens, so it is a front
+    /// door rather than an apology. Once a prompt is away the scrolling column
+    /// takes over even before the first word arrives, because that is where
+    /// the activity line lives and "working" is what the reader needs to see.
+    fn transcript(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.transcript.is_empty() && !self.is_working() {
+            return self.home(cx);
+        }
         v_flex()
             .id("transcript")
             .flex_1()
@@ -1417,9 +1701,6 @@ impl Shell {
                     .max_w(px(TRANSCRIPT_MEASURE))
                     .mx_auto()
                     .gap_5()
-                    .when(self.transcript.is_empty(), |this| {
-                        this.child(self.transcript_empty_state(cx))
-                    })
                     .children({
                         let last = self.transcript.blocks().len().saturating_sub(1);
                         self.transcript
@@ -1442,6 +1723,92 @@ impl Shell {
                     })
                     .children(self.activity_line(cx)),
             )
+            .into_any_element()
+    }
+
+    /// The home screen: what the centre column asks before there is a
+    /// conversation in it. `docs/ui.md` §3.3.
+    ///
+    /// One question, naming the project the answer would run in, over four
+    /// starters. Choosing one fills the composer rather than sending it: the
+    /// starter is the first half of a sentence the reader finishes.
+    fn home(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let project = self.project_label();
+        let starters = home::starters();
+
+        v_flex()
+            .id("home")
+            .flex_1()
+            .px_8()
+            .py_6()
+            .gap(px(28.))
+            .items_center()
+            .justify_center()
+            .child(
+                div()
+                    .text_size(px(30.))
+                    .line_height(px(40.))
+                    .text_color(tokens.colors().text_primary)
+                    .child(home::greeting(project.as_deref())),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_MEASURE))
+                    // The composer's own padding, so the cards line up with
+                    // the box the reader types into rather than sitting a
+                    // hair wider than it.
+                    .px_4()
+                    .gap_3()
+                    .items_stretch()
+                    .children(starters.into_iter().map(|starter| {
+                        let prompt = starter.prompt.clone();
+                        v_flex()
+                            .id(SharedString::from(format!("starter:{}", starter.id)))
+                            .flex_1()
+                            // Without this the four labels' min-content widths
+                            // add up to more than the measure and push the row
+                            // wider than the composer under it. They wrap
+                            // instead.
+                            .min_w(px(0.))
+                            .h(px(104.))
+                            .p_3()
+                            .gap_2()
+                            .rounded(px(tokens.radius.card))
+                            .bg(tokens.colors().bg_surface)
+                            .border_1()
+                            .border_color(tokens.colors().border_subtle)
+                            .cursor_pointer()
+                            .hover(|this| this.border_color(tokens.colors().border_strong))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.use_starter(prompt.clone(), window, cx)
+                            }))
+                            .child(
+                                Icon::empty()
+                                    .path(starter.icon)
+                                    .size_4()
+                                    .text_color(tokens.colors().accent),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .line_height(px(18.))
+                                    .text_color(tokens.colors().text_secondary)
+                                    .child(starter.label),
+                            )
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// Put a starter in the composer, and leave the cursor in it.
+    fn use_starter(&mut self, prompt: SharedString, window: &mut Window, cx: &mut Context<Self>) {
+        self.composer
+            .update(cx, |state, cx| state.set_value(prompt, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
     }
 
     /// A question the agent is waiting on, with its answers as buttons.
@@ -1660,26 +2027,6 @@ impl Shell {
                 )
                 .into_any_element(),
         )
-    }
-
-    /// What the centre column says before there is a conversation in it.
-    fn transcript_empty_state(&self, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
-        let body = match &self.session {
-            Some(session) => rust_i18n::t!(
-                "transcript.empty.ready",
-                title = session.title,
-                branch = session.branch
-            )
-            .to_string(),
-            None => rust_i18n::t!("transcript.empty.no_project").to_string(),
-        };
-        div()
-            .w_full()
-            .text_size(px(15.))
-            .line_height(px(25.))
-            .text_color(tokens.colors().text_muted)
-            .child(body)
     }
 
     /// One folded block of the transcript.
@@ -2100,6 +2447,50 @@ impl Shell {
         let picker = self.picker?;
 
         let rows: Vec<AnyElement> = match picker {
+            // Every project, then the two things that are not one: registering
+            // another, and deciding to work without any. Both belong here
+            // rather than only in the sidebar — this is where the reader is
+            // when they notice the chat is aimed at the wrong place.
+            Picker::Project => {
+                let mut rows: Vec<AnyElement> = self
+                    .projects
+                    .iter()
+                    .map(|project| {
+                        let name = project.name.clone();
+                        let chosen = self.target_project.as_ref() == Some(&project.name);
+                        self.picker_row(
+                            SharedString::from(format!("project-option:{}", project.name.0)),
+                            project.label.to_string(),
+                            Some(project.path.to_string()),
+                            chosen,
+                            cx.listener(move |this, _, window, cx| {
+                                this.choose_project(Some(name.clone()), window, cx)
+                            }),
+                            cx,
+                        )
+                    })
+                    .collect();
+                rows.push(self.picker_row(
+                    SharedString::from("project-option:new"),
+                    rust_i18n::t!("composer.project.new").to_string(),
+                    None,
+                    false,
+                    cx.listener(|this, _, window, cx| {
+                        this.picker = None;
+                        this.add_project(window, cx);
+                    }),
+                    cx,
+                ));
+                rows.push(self.picker_row(
+                    SharedString::from("project-option:none"),
+                    rust_i18n::t!("composer.project.none").to_string(),
+                    Some(rust_i18n::t!("composer.project.none.note").to_string()),
+                    self.target_project.is_none(),
+                    cx.listener(|this, _, window, cx| this.choose_project(None, window, cx)),
+                    cx,
+                ));
+                rows
+            }
             Picker::Agent => self
                 .agents
                 .iter()
@@ -2253,11 +2644,7 @@ impl Shell {
 
     /// The models the chosen agent offers, if it offers a choice.
     fn models(&self) -> Vec<String> {
-        let chosen = self
-            .session
-            .as_ref()
-            .map(|row| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
-        chosen
+        self.agent_to_start()
             .and_then(|id| {
                 self.agents
                     .iter()
@@ -2415,6 +2802,21 @@ impl Shell {
         self.choose_mention(&best, window, cx);
     }
 
+    /// Aim the chat at a project — or at none — from the composer.
+    ///
+    /// It starts a new conversation rather than moving the one on screen: an
+    /// answer belongs to the worktree it was produced in, and a chat that
+    /// changed project under a finished transcript would be claiming otherwise.
+    fn choose_project(
+        &mut self,
+        project: Option<ProjectName>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.picker = None;
+        self.start_new_chat(project, window, cx);
+    }
+
     /// Open a picker, or close it if it is the one already open.
     fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
         self.picker = (self.picker != Some(picker)).then_some(picker);
@@ -2447,12 +2849,6 @@ impl Shell {
         let label = self
             .chosen_model
             .clone()
-            .or_else(|| {
-                self.session
-                    .as_ref()
-                    .and_then(|row| row.session.as_ref())
-                    .and(None)
-            })
             .unwrap_or_else(|| rust_i18n::t!("composer.model.default").to_string());
 
         Some(
@@ -2489,10 +2885,7 @@ impl Shell {
     /// and one that appears not to.
     fn agent_chip(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        let chosen = self
-            .session
-            .as_ref()
-            .map(|row| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
+        let chosen = self.agent_to_start();
         let status = chosen
             .as_ref()
             .and_then(|id| self.agents.iter().find(|agent| &agent.id == id));
@@ -2591,17 +2984,44 @@ impl Shell {
         )
     }
 
-    fn context_bar(&self, cx: &App) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
+    /// The hairline strip under the composer: where this runs on the left,
+    /// which branch on the right. `docs/ui.md` §3.3.
+    ///
+    /// The project is a chip rather than a label because it is a choice: it is
+    /// how a chat is aimed at a project without going to the sidebar, and how
+    /// a project is registered from the middle of the window where the reader
+    /// already is.
+    fn context_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let tokens = Tokens::global(cx).clone();
+        let label = self
+            .project_label()
+            .unwrap_or_else(|| rust_i18n::t!("composer.context.project").to_string().into());
+        let chosen = self.project_label().is_some();
+
         h_flex()
             .w_full()
             .px(px(6.))
+            .gap_2()
             .justify_between()
             .items_center()
             .child(
                 h_flex()
-                    .gap_1p5()
+                    .id("project-chip")
+                    .h(px(22.))
+                    .px(px(6.))
+                    .gap(px(5.))
                     .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .cursor_pointer()
+                    .when(self.picker == Some(Picker::Project), |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .tooltip(|window, cx| {
+                        Tooltip::new(rust_i18n::t!("composer.project.pick").to_string())
+                            .build(window, cx)
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Project, cx)))
                     .child(
                         Icon::new(IconName::Folder)
                             .size_3()
@@ -2610,8 +3030,18 @@ impl Shell {
                     .child(
                         div()
                             .text_size(px(11.))
-                            .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("composer.context.worktree").to_string()),
+                            .text_color(if chosen {
+                                tokens.colors().text_secondary
+                            } else {
+                                tokens.colors().text_muted
+                            })
+                            .truncate()
+                            .child(label),
+                    )
+                    .child(
+                        Icon::new(IconName::ChevronDown)
+                            .size(px(11.))
+                            .text_color(tokens.colors().text_muted),
                     ),
             )
             .child(
@@ -2946,9 +3376,12 @@ async fn pull_rows(
             )
         })
         .map_err(|_| ())?;
-    let (rows, agents, checkpoints, changes, staged, comments) = cx
+    let (rows, projects, agents, checkpoints, changes, staged, comments) = cx
         .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
+            // Separately from the workspaces: a project with no worktree is
+            // still a heading a chat can be started under.
+            let projects = listing.projects().await;
             // Cached by the daemon, so this is a request rather than two
             // subprocesses per agent every tick.
             let agents = listing.agents().await;
@@ -2966,7 +3399,15 @@ async fn pull_rows(
                 ),
                 _ => (None, Vec::new(), Vec::new()),
             };
-            (rows, agents, checkpoints, changes, staged, comments)
+            (
+                rows,
+                projects,
+                agents,
+                checkpoints,
+                changes,
+                staged,
+                comments,
+            )
         })
         .await;
     tracing::debug!(
@@ -2977,6 +3418,10 @@ async fn pull_rows(
     this.update(cx, |this, cx| {
         this.agents = agents;
         this.checkpoints = checkpoints;
+        this.projects = projects.iter().map(ProjectRow::from_project).collect();
+        let listed = this.projects.clone();
+        this.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_projects(listed, cx));
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_changes(changes, cx);
@@ -2986,7 +3431,18 @@ async fn pull_rows(
         }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
-        this.session = this.sidebar.read(cx).selected_row().cloned();
+        match this.sidebar.read(cx).selected_row().cloned() {
+            Some(row) => {
+                this.target_project = Some(ProjectName(row.origin.to_string()));
+                this.session = Some(row);
+            }
+            // Nothing selected is the home screen, which is where a window
+            // opens and where "new chat" leaves it.
+            None if this.sidebar.read(cx).selection().is_none() => this.session = None,
+            // Selected but not listed yet: a workspace this window has just
+            // made, which the next refresh will name.
+            None => {}
+        }
         cx.notify();
         this.session.as_ref().and_then(|row| row.session.clone())
     })
@@ -3028,11 +3484,27 @@ impl Render for Shell {
         // Before anything is measured: the tail on screen is whatever the
         // reveal has walked out so far.
         self.write_a_little_more(window);
-        let tokens = Tokens::global(cx);
+        // Copied out: the headers below bind listeners through `cx`, and a
+        // borrow of the theme held across that is a borrow held across the
+        // whole window.
+        let tokens = Tokens::global(cx).clone();
         let sidebar_open = self.layout.is_open(Panel::Sidebar);
         let right_open = self.layout.is_open(Panel::RightPanel);
         let sidebar_width = self.layout.size(Panel::Sidebar);
         let right_width = self.layout.size(Panel::RightPanel);
+        // Built before the column chain: both headers bind listeners, and the
+        // chain's own closures hold `self` while they run.
+        let window_controls = sidebar_open.then(|| {
+            div()
+                .w_full()
+                .bg(tokens.colors().bg_sidebar)
+                .border_r_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(self.window_controls(cx))
+                .into_any_element()
+        });
+        let column_header = self.column_header(cx).into_any_element();
+        let centre = self.center(cx).into_any_element();
 
         v_flex()
             .key_context(CONTEXT)
@@ -3044,7 +3516,6 @@ impl Render for Shell {
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
             .text_color(tokens.colors().text_primary)
-            .child(self.title_bar(cx))
             .child(
                 div().flex_1().w_full().overflow_hidden().child(
                     h_resizable("shell-columns")
@@ -3062,10 +3533,30 @@ impl Render for Shell {
                                 resizable_panel()
                                     .size(sidebar_width)
                                     .size_range(px(200.)..px(400.))
-                                    .child(self.sidebar.clone()),
+                                    .child(
+                                        // The column runs to the top of the
+                                        // window and carries the window's own
+                                        // controls; the strip paints the
+                                        // sidebar's background and border so
+                                        // the two read as one surface, and
+                                        // neither paints over the other.
+                                        v_flex()
+                                            .size_full()
+                                            .children(window_controls)
+                                            .child(self.sidebar.clone())
+                                            .into_any_element(),
+                                    ),
                             )
                         })
-                        .child(resizable_panel().child(self.center(cx).into_any_element()))
+                        .child(
+                            resizable_panel().child(
+                                v_flex()
+                                    .size_full()
+                                    .child(column_header)
+                                    .child(centre)
+                                    .into_any_element(),
+                            ),
+                        )
                         .when(right_open, |this| {
                             this.child(
                                 resizable_panel()

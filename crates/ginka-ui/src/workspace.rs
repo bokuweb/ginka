@@ -7,8 +7,10 @@
 
 use crate::assets::icon;
 use ginka_protocol::ids::slugify;
-use ginka_protocol::model::{AgentStatus, BranchStatus, SessionState, WorkspaceSummary};
-use ginka_protocol::{SessionId, WorkspaceId};
+use ginka_protocol::model::{
+    AgentStatus, BranchStatus, Project, ProjectKind, SessionState, WorkspaceSummary,
+};
+use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
 use std::path::PathBuf;
@@ -20,6 +22,10 @@ use std::path::PathBuf;
 /// this" wants one place to look.
 #[derive(Debug, Clone)]
 pub struct ProjectGroup {
+    /// What the daemon calls it, which is what every request naming a project
+    /// carries.
+    pub name: ProjectName,
+    /// What the heading says.
     pub project: SharedString,
     /// The rows, each with the index it had in the flat list — which is what
     /// selection is addressed by.
@@ -37,24 +43,96 @@ impl ProjectGroup {
     }
 }
 
-/// Group rows under their projects, keeping each project's own order.
+/// A registered project, as the sidebar's headings and the composer's project
+/// chip show it.
 ///
-/// Projects are ordered by the most urgent row in them, so a project with an
-/// agent working in it rises the way a row does. Within a project the order
-/// the caller gave is kept: it is already the attention order.
-pub fn group_by_project(rows: &[SessionRow]) -> Vec<ProjectGroup> {
-    let mut groups: Vec<ProjectGroup> = Vec::new();
+/// The daemon's [`Project`] carries more than a row needs — a sort order, an
+/// origin probe — and a view that read the wire type would be re-deciding what
+/// to show every time one grew a field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRow {
+    /// What every request naming this project carries.
+    pub name: ProjectName,
+    /// What the row says. The daemon's own name for it: it is already a slug
+    /// of the directory the user pointed at, and a second display name would
+    /// be one more thing to keep in step with it.
+    pub label: SharedString,
+    /// Where it is *on the daemon's host* (`docs/roadmap.md` §4.1), shown
+    /// under the label so two checkouts of one repository can be told apart.
+    pub path: SharedString,
+    /// What a new worktree here would be cut from. Empty for a plain folder,
+    /// which has no branches at all.
+    pub default_branch: SharedString,
+    pub kind: ProjectKind,
+}
+
+impl ProjectRow {
+    /// Build a row from the daemon's answer.
+    pub fn from_project(project: &Project) -> Self {
+        Self {
+            name: project.name.clone(),
+            label: project.name.0.clone().into(),
+            path: project.path.to_string_lossy().to_string().into(),
+            default_branch: project.default_branch.clone().into(),
+            kind: project.kind,
+        }
+    }
+}
+
+/// The sidebar's tree: every registered project, with the workspaces in it.
+///
+/// Built from the projects rather than from the rows, so a project with no
+/// workspace yet is still a heading the reader can select and start a chat
+/// under — a list assembled from workspaces alone can only show the projects
+/// that already have one, which is the wrong way round for a window whose
+/// front door is "pick a project and say something".
+///
+/// A row whose project is not in `projects` still gets a group of its own: the
+/// two lists come from two requests, and a workspace with nowhere to hang is
+/// better shown under a heading of its own name than dropped.
+pub fn tree(projects: &[ProjectRow], rows: &[SessionRow]) -> Vec<ProjectGroup> {
+    let mut groups: Vec<ProjectGroup> = projects
+        .iter()
+        .map(|project| ProjectGroup {
+            name: project.name.clone(),
+            project: project.label.clone(),
+            rows: Vec::new(),
+        })
+        .collect();
+
     for (index, row) in rows.iter().enumerate() {
-        match groups.iter_mut().find(|group| group.project == row.origin) {
+        match groups.iter_mut().find(|group| group.name.0 == row.origin) {
             Some(group) => group.rows.push((index, row.clone())),
             None => groups.push(ProjectGroup {
+                name: ProjectName(row.origin.to_string()),
                 project: row.origin.clone(),
                 rows: vec![(index, row.clone())],
             }),
         }
     }
+
+    // Stable, so projects the daemon ordered keep that order among equals.
     groups.sort_by_key(ProjectGroup::rank);
     groups
+}
+
+/// The workspace a new chat in `project` starts in.
+///
+/// The worktree on the project's default branch when there is one: that is the
+/// checkout a person means by "this project". Failing that, the first
+/// workspace listed. `None` when the project has none at all, and the caller
+/// says so rather than inventing a worktree behind a prompt — cutting a branch
+/// is not what "new chat" said.
+pub fn workspace_for_new_chat(rows: &[SessionRow], project: &ProjectRow) -> Option<WorkspaceId> {
+    let mut in_project = rows.iter().filter(|row| row.origin == project.name.0);
+    let first = in_project.next()?;
+    if project.default_branch.is_empty() {
+        return Some(first.workspace.clone());
+    }
+    let on_default = std::iter::once(first)
+        .chain(in_project)
+        .find(|row| row.branch == project.default_branch);
+    Some(on_default.unwrap_or(first).workspace.clone())
 }
 
 /// Turn a worktree's slug into something readable.
@@ -647,13 +725,44 @@ mod tests {
         );
     }
 
+    fn project_row(name: &str, default_branch: &str) -> ProjectRow {
+        ProjectRow {
+            name: ProjectName(name.into()),
+            label: name.into(),
+            path: format!("/tmp/{name}").into(),
+            default_branch: default_branch.into(),
+            kind: ProjectKind::Git,
+        }
+    }
+
     #[test]
     fn rows_are_grouped_under_their_project_in_the_order_they_came() {
         let rows = SessionRow::samples();
-        let groups = group_by_project(&rows);
+        let groups = tree(&[project_row("ginka @ personal-metal", "main")], &rows);
         assert_eq!(groups.len(), 1, "the samples are all one project");
         let indices: Vec<usize> = groups[0].rows.iter().map(|(index, _)| *index).collect();
         assert_eq!(indices, (0..rows.len()).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_project_with_no_workspace_yet_is_still_a_heading() {
+        // It is where "new chat in this project" is chosen from, and a tree
+        // built from workspaces alone could not show it at all.
+        let groups = tree(&[project_row("empty", "main")], &[]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name.0, "empty");
+        assert!(groups[0].rows.is_empty());
+    }
+
+    #[test]
+    fn a_workspace_whose_project_is_not_listed_still_appears() {
+        // Two requests answer at different moments; dropping the row would
+        // hide a running agent because a list arrived late.
+        let mut row = SessionRow::from_summary(&summary(None), 0);
+        row.origin = "unlisted".into();
+        let groups = tree(&[], &[row]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name.0, "unlisted");
     }
 
     #[test]
@@ -664,11 +773,66 @@ mod tests {
             SessionRow::from_summary(&summary(Some(session("claude", SessionState::Running))), 0);
         busy.origin = "busy".into();
 
-        let groups = group_by_project(&[quiet, busy]);
+        let groups = tree(
+            &[project_row("quiet", "main"), project_row("busy", "main")],
+            &[quiet, busy],
+        );
         assert_eq!(groups[0].project, "busy");
         assert_eq!(
             groups[0].rows[0].0, 1,
             "the row keeps the index selection is addressed by"
+        );
+    }
+
+    #[test]
+    fn a_new_chat_lands_on_the_project_s_default_branch() {
+        // "This project" means the checkout a person would open in an editor,
+        // not whichever worktree happens to be listed first.
+        let mut feature = SessionRow::from_summary(&summary(None), 0);
+        feature.origin = "comet".into();
+        feature.branch = "feature/one".into();
+        let mut main = SessionRow::from_summary(&summary(None), 0);
+        main.origin = "comet".into();
+        main.branch = "main".into();
+        main.workspace = WorkspaceId("comet/main".into());
+
+        let chosen = workspace_for_new_chat(&[feature, main], &project_row("comet", "main"));
+        assert_eq!(chosen, Some(WorkspaceId("comet/main".into())));
+    }
+
+    #[test]
+    fn a_project_without_that_branch_checked_out_still_takes_a_chat() {
+        let mut feature = SessionRow::from_summary(&summary(None), 0);
+        feature.origin = "comet".into();
+        feature.branch = "feature/one".into();
+        let id = feature.workspace.clone();
+
+        assert_eq!(
+            workspace_for_new_chat(&[feature], &project_row("comet", "main")),
+            Some(id),
+            "the reader asked for a chat, not for a branch to be cut"
+        );
+    }
+
+    #[test]
+    fn a_plain_folder_takes_its_one_workspace() {
+        // It has no default branch, so there is nothing to prefer.
+        let mut row = SessionRow::from_summary(&summary(None), 0);
+        row.origin = "notes".into();
+        let id = row.workspace.clone();
+        let folder = ProjectRow {
+            kind: ProjectKind::Plain,
+            ..project_row("notes", "")
+        };
+        assert_eq!(workspace_for_new_chat(&[row], &folder), Some(id));
+    }
+
+    #[test]
+    fn a_project_with_nothing_in_it_has_nowhere_to_start_a_chat() {
+        // The caller says so rather than cutting a branch behind a prompt.
+        assert_eq!(
+            workspace_for_new_chat(&[], &project_row("comet", "main")),
+            None
         );
     }
 

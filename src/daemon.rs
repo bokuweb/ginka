@@ -15,8 +15,8 @@ use ginka_core::Paths;
 use std::path::PathBuf;
 
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
-    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
+    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry, Project,
+    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
@@ -51,6 +51,33 @@ impl DaemonLink {
                 .map(|summary| SessionRow::from_summary(summary, now))
                 .collect(),
             _ => Vec::new(),
+        }
+    }
+
+    /// Every registered project, in the order the sidebar lists them.
+    ///
+    /// Asked for separately from the workspaces because a project with no
+    /// worktree yet is still a heading the reader can start a chat under, and
+    /// a list assembled from workspaces could not show it.
+    pub async fn projects(&self) -> Vec<Project> {
+        match self.ask(Request::ListProjects).await {
+            Some(Response::Projects { projects }) => projects,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Make somewhere to work with no project at all.
+    ///
+    /// What "work without a project" means: the daemon creates a dated
+    /// directory under its own state and registers it, so a question that
+    /// needs somewhere to run does not need a repository first.
+    pub async fn create_scratch(&self) -> Option<WorkspaceSummary> {
+        match self
+            .ask(Request::CreateScratchWorkspace { name: None })
+            .await
+        {
+            Some(Response::Workspace { workspace }) => Some(workspace),
+            _ => None,
         }
     }
 
@@ -195,11 +222,14 @@ impl DaemonLink {
     /// That is only the same thing as a daemon-host path while the daemon is
     /// the local child process, which is why the picker is offered only then
     /// (`docs/roadmap.md` §4.1).
-    pub async fn add_project(&self, path: PathBuf) -> bool {
-        matches!(
-            self.ask(Request::AddProject { path }).await,
-            Some(Response::Project { .. })
-        )
+    /// The registered project comes back so the caller can aim the next chat
+    /// at what the reader just added, rather than at whatever was selected
+    /// before they went looking for a folder.
+    pub async fn add_project(&self, path: PathBuf) -> Option<Project> {
+        match self.ask(Request::AddProject { path }).await {
+            Some(Response::Project { project }) => Some(project),
+            _ => None,
+        }
     }
 
     pub async fn stage(&self, workspace: &WorkspaceId, path: &str, staged: bool) {

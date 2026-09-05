@@ -37,6 +37,22 @@ const ICONS: &[(&str, &str)] = &[
         "icons/agent-spark.svg",
         include_str!("../../../assets/icons/agent-spark.svg"),
     ),
+    (
+        "icons/compass.svg",
+        include_str!("../../../assets/icons/compass.svg"),
+    ),
+    (
+        "icons/hammer.svg",
+        include_str!("../../../assets/icons/hammer.svg"),
+    ),
+    (
+        "icons/list-check.svg",
+        include_str!("../../../assets/icons/list-check.svg"),
+    ),
+    (
+        "icons/bug.svg",
+        include_str!("../../../assets/icons/bug.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -49,6 +65,12 @@ pub mod icon {
     pub const AGENT_CUBE: &str = "icons/agent-cube.svg";
     pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
     pub const AGENT_SPARK: &str = "icons/agent-spark.svg";
+    /// The four marks on the home screen's starters, one per kind of first
+    /// question: explore, build, review, fix.
+    pub const COMPASS: &str = "icons/compass.svg";
+    pub const HAMMER: &str = "icons/hammer.svg";
+    pub const LIST_CHECK: &str = "icons/list-check.svg";
+    pub const BUG: &str = "icons/bug.svg";
 }
 
 impl AssetSource for Assets {
@@ -97,6 +119,10 @@ mod tests {
             icon::AGENT_CUBE,
             icon::AGENT_ORBIT,
             icon::AGENT_SPARK,
+            icon::COMPASS,
+            icon::HAMMER,
+            icon::LIST_CHECK,
+            icon::BUG,
         ] {
             assert!(
                 ICONS.iter().any(|(name, _)| *name == path),
