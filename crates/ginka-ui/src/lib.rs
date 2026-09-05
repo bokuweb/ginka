@@ -11,6 +11,7 @@
 rust_i18n::i18n!("../../locales", fallback = "en");
 
 pub mod assets;
+pub mod home;
 pub mod layout;
 pub mod palette;
 pub mod surface;

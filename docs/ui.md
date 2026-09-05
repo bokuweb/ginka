@@ -1,7 +1,7 @@
 # Ginka UI Specification
 
 > Companion to [`roadmap.md`](roadmap.md). The roadmap says *what* we build and when; this document says *what it looks like* and *which components render it*.
-> Last updated: 2026-08-31
+> Last updated: 2026-09-05
 
 ## 1. Design direction
 
@@ -98,9 +98,28 @@ column height.
 
 ## 3. Regions
 
-### 3.1 Title bar
+### 3.1 Headers — there is no title bar
 
-Custom, `platform_title_bar` style. Left: traffic lights, sidebar toggle, back/forward history. Centre-left of the centre column: session icon + title + `org @ device` subtitle. Right of the right panel: new-surface `+`, expand, panel toggle. Drag anywhere empty moves the window.
+The window has no bar of its own. Each column paints itself to the top of the
+window and carries its own 44 px header, and the three sit on one line, so the
+window reads as one surface rather than as a bar laid over a layout. Nothing is
+left to the platform but the traffic lights, positioned (13, 15) to land on
+that line.
+
+- **Leading column** — room for the traffic lights, then the sidebar toggle and
+  the back/forward history. It is the sidebar's header while there is a
+  sidebar, and moves onto the centre column when the sidebar is closed, because
+  the lights do not move with it.
+- **Centre column** — the agent glyph, the conversation's title and its
+  `project` subtitle; on the right, new chat and the toggles for the terminal
+  dock and the right panel. Nothing on the left when there is no conversation
+  and no project: an empty window is not an error, and a placeholder title
+  would be the only thing claiming otherwise.
+- **Right panel** — the surfaces toolbar, at the same height.
+
+Dragging any header moves the window and a double click zooms it. A drag is a
+press that then moved, never the press alone, or every click on a control in
+the strip would carry the window off with it.
 
 ### 3.2 Left sidebar
 
@@ -110,8 +129,23 @@ per row repeating what a heading says once, and left a reader scanning for
 "which project is this" with nowhere single to look.
 
 - **Header** — app name (bold) + chevron, then search and `+` new session.
-- **Section label** — `Projects`, small and muted, over the run of groups.
-- **Project heading** — folder icon + project name, muted.
+- **New chat** — the first row under the header. It clears the centre column
+  for a conversation aimed at whatever is selected: a project, the project of
+  the selected workspace, or nothing at all.
+- **Section label** — `Projects`, small and muted, over the run of groups, with
+  a `+` beside it that registers another. The reader who has one project wants
+  the second added from the same place, and an empty state is by definition not
+  there any more once they do.
+- **Project heading** — folder icon + project name, muted, and **selectable**:
+  a project is something the reader picks *before* there is a conversation, and
+  picking one shows the home screen aimed at it. Selected only when the project
+  itself is what the centre column shows — a selected row already says which
+  project it is in, and two highlights read as two selections.
+- **Nothing registered** — a muted line under the section label, the way to add
+  one, and the `ginka project add .` command. Not a takeover of the sidebar: a
+  window with no project is still a window you can talk to (the chat runs in a
+  scratch worktree), so the list says what is missing without implying nothing
+  works until it is fixed.
 - **Workspace row**, indented under its project (8 px radius, selected =
   `bg.raised` fill):
   1. Agent glyph, session title, right-aligned status: relative time (`now`,
@@ -133,6 +167,15 @@ per row repeating what a heading says once, and left a reader scanning for
 
 ### 3.3 Centre column
 
+- **Home screen** — what the column is before there is a conversation in it,
+  which is how the window opens and where every "new chat" leaves it. One
+  question at 30px — *What shall we build?*, or *What shall we build in
+  `project`?* when one is chosen — over four starter cards (explore, build,
+  review, fix) at the measure. A card fills the composer rather than sending
+  it: a starter is the first half of a sentence the reader finishes, and a
+  prompt that sent itself would start an agent on a question nobody asked. The
+  scrolling transcript takes over the moment a prompt is away, before the first
+  word arrives, because that is where the activity line lives.
 - **Transcript** — one centred column at the measure (780 px), with the composer
   under it at the same width: a conversation stranded against one edge of a wide
   window reads as a mistake rather than as a measure. Virtualized markdown:
@@ -156,7 +199,14 @@ per row repeating what a heading says once, and left a reader scanning for
   filtered menu. `↩` sends, `⇧↩` is a newline; sending while busy enqueues.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
-- **Context bar** — a hairline strip under the composer: worktree label on the left, branch on the right. Click either to switch.
+- **Context bar** — a hairline strip under the composer: the project chip on
+  the left, branch on the right. The project is a chip rather than a label
+  because it is a choice — it opens the same list the sidebar offers, plus
+  *New project…* and *Work without a project*, so a chat can be aimed without
+  going to the sidebar and a project can be registered from the middle of the
+  window where the reader already is. Choosing one starts a new conversation
+  rather than moving the one on screen: an answer belongs to the worktree it
+  was produced in.
 - **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their

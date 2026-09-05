@@ -203,12 +203,18 @@ impl SurfacePanel {
         }
     }
 
+    /// The strip across the top of the panel.
+    ///
+    /// The window has no title bar (`docs/ui.md` §3.1), so this is the right
+    /// column's own header and it is the same height as the other two — three
+    /// strips at three heights would read as three windows.
     fn toolbar(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
+            .flex_shrink_0()
+            .h(ginka_ui::layout::HEADER_HEIGHT)
             .px_3()
-            .py_2()
             .justify_between()
             .items_center()
             .child(

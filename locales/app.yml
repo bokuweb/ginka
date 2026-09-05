@@ -13,7 +13,7 @@ sidebar.archived:
   ja: アーカイブ
 sidebar.empty.title:
   en: No projects yet
-  ja: プロジェクトがありません
+  ja: プロジェクトはありません
 sidebar.new_chat:
   en: New chat
   ja: 新しいチャット
@@ -67,13 +67,59 @@ composer.stop:
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー
+composer.context.project:
+  en: Select a project
+  ja: プロジェクトを選択
+composer.context.no_project:
+  en: No project
+  ja: プロジェクトなし
+composer.project.pick:
+  en: Choose where this runs
+  ja: 実行する場所を選ぶ
+composer.project.new:
+  en: New project…
+  ja: 新しいプロジェクト…
+composer.project.none:
+  en: Work without a project
+  ja: プロジェクトなしで作業
+composer.project.none.note:
+  en: in a scratch worktree
+  ja: スクラッチワークツリーで
+composer.project.empty:
+  en: No workspace to run in yet
+  ja: 実行できるワークスペースがありません
 
-transcript.empty.ready:
-  en: "%{title} is checked out on %{branch}. Say what you want done."
-  ja: "%{title} は %{branch} にチェックアウトされています。やりたいことを書いてください。"
-transcript.empty.no_project:
-  en: No project is registered yet. Run `ginka project add .` in a repository, then reopen this window.
-  ja: プロジェクトがまだ登録されていません。リポジトリで `ginka project add .` を実行してから、このウィンドウを開き直してください。
+home.greeting:
+  en: What shall we build?
+  ja: 何を作成しましょうか？
+home.greeting.project:
+  en: "What shall we build in %{project}?"
+  ja: "%{project} で何を作りますか？"
+home.starter.explore:
+  en: Explore and understand the code
+  ja: コードを探索して理解する
+home.starter.explore.prompt:
+  en: "Explore this codebase and explain how it is put together."
+  ja: "このコードベースを調べて、どう構成されているか説明して。"
+home.starter.build:
+  en: Build a feature, app or tool
+  ja: 新しい機能、アプリ、ツールを作成
+home.starter.build.prompt:
+  en: "Add this feature: "
+  ja: "次の機能を追加して: "
+home.starter.review:
+  en: Review the code and suggest changes
+  ja: コードをレビューして変更を提案
+home.starter.review.prompt:
+  en: "Review the changes in this worktree and suggest what to improve."
+  ja: "このワークツリーの変更をレビューして、改善点を提案して。"
+home.starter.fix:
+  en: Fix a problem or an error
+  ja: 問題やエラーを修正
+home.starter.fix.prompt:
+  en: "Fix this error: "
+  ja: "次のエラーを直して: "
+
 transcript.rewind.hint:
   en: Put the worktree back to how it was at this turn
   ja: このターン時点のワークツリーに戻す

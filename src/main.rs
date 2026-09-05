@@ -17,9 +17,10 @@ mod surfaces;
 use anyhow::Result;
 use ginka_core::{Paths, settings};
 use gpui::{
-    App, AppContext as _, Bounds, WindowBackgroundAppearance, WindowBounds, WindowOptions, px, size,
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
+    WindowOptions, point, px, size,
 };
-use gpui_component::{Root, TitleBar};
+use gpui_component::Root;
 
 fn main() -> Result<()> {
     let paths = Paths::from_env()?;
@@ -38,7 +39,23 @@ fn main() -> Result<()> {
         ginka_ui::theme::apply(ginka_ui::Mode::Dark, cx);
 
         cx.spawn(async move |cx| {
-            let mut options: WindowOptions = TitleBar::window_options();
+            // No title bar of any kind: the columns run to the top of the
+            // window and carry their own controls (`docs/ui.md` §3.1). What is
+            // left for the platform is the traffic lights, positioned to sit
+            // on the same line as those controls.
+            let mut options = WindowOptions {
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(13.), px(15.))),
+                }),
+                // Our own header strips move the window with
+                // `start_window_move`, so AppKit must not also treat them as a
+                // system drag region: it would handle double clicks itself and
+                // delay every click while it disambiguated them.
+                app_owns_titlebar_drag: true,
+                ..Default::default()
+            };
             options.window_min_size = Some(size(px(880.), px(560.)));
             // The glass surface of docs/ui.md §1: the window is translucent and
             // the desktop behind it is blurred. The theme's `bg.window` carries

@@ -8,6 +8,21 @@
 use ginka_core::settings::AppSettings;
 use gpui::{Pixels, px};
 
+/// How tall the strip across the top of each column is.
+///
+/// There is no window-wide title bar (`docs/ui.md` §3.1): each column paints
+/// itself to the top of the window and carries its own controls, which is what
+/// makes the window read as one surface rather than as a bar over a layout.
+/// The three strips share this height so their contents sit on one line.
+pub const HEADER_HEIGHT: Pixels = px(44.);
+
+/// What macOS reserves at the leading edge for the traffic lights.
+///
+/// Whichever column is leftmost has to leave this much room before its own
+/// controls start, so it moves from the sidebar to the centre column when the
+/// sidebar is closed.
+pub const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
+
 /// The panels the user can open and close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
