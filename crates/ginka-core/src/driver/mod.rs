@@ -31,7 +31,7 @@ pub use spec::SessionSpec as ProcessSessionSpec;
 
 use anyhow::Result;
 use ginka_protocol::model::PlanUsage;
-use ginka_protocol::provider::{OptionOutcome, SessionOptions};
+use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -112,6 +112,9 @@ pub struct SessionSpec {
     /// The opening prompt.
     pub prompt: String,
     pub model: Option<String>,
+    /// What the agent may do without asking. A launch argument on every
+    /// transport this build drives, so it is fixed for the process.
+    pub access_mode: AccessMode,
     /// Extra environment, used by tests to point a driver at a fake agent.
     pub env: Vec<(String, String)>,
 }
@@ -123,6 +126,7 @@ impl SessionSpec {
             workspace_path: workspace_path.into(),
             prompt: prompt.into(),
             model: None,
+            access_mode: AccessMode::default(),
             env: Vec::new(),
         }
     }
@@ -130,6 +134,12 @@ impl SessionSpec {
     /// Ask for a specific model.
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Fix what the agent may do without asking.
+    pub fn with_access_mode(mut self, access_mode: AccessMode) -> Self {
+        self.access_mode = access_mode;
         self
     }
 

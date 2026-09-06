@@ -7,8 +7,9 @@
 
 use anyhow::Result;
 use ginka_protocol::model::{
-    Session, SessionMatch, SessionState, TranscriptEntry, TranscriptPayload,
+    Session, SessionMatch, SessionOrigin, SessionState, TranscriptEntry, TranscriptPayload,
 };
+use ginka_protocol::provider::AccessMode;
 use ginka_protocol::{SessionId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension as _};
 
@@ -18,8 +19,9 @@ pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
         "INSERT INTO sessions
             (id, workspace_id, provider, account_id, model, state, agent_title,
              agent_title_is_placeholder, summary, vendor_session_id,
-             created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11)",
+             created_at, updated_at, access_mode,
+             origin_connector, origin_channel, origin_thread)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         rusqlite::params![
             session.id.0,
             session.workspace.0,
@@ -32,9 +34,63 @@ pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
             session.vendor_session_id,
             session.created_at,
             session.updated_at,
+            access_mode_str(session.access_mode),
+            session
+                .origin
+                .as_ref()
+                .map(|origin| origin.connector.clone()),
+            session.origin.as_ref().map(|origin| origin.channel.clone()),
+            session.origin.as_ref().map(|origin| origin.thread.clone()),
         ],
     )?;
     Ok(())
+}
+
+/// The session still answering a thread, if any.
+///
+/// Only an *active* origin counts: a thread told to start fresh keeps its
+/// old session, chip and all, but a reply there finds the new one.
+pub fn find_by_origin(conn: &Connection, origin: &SessionOrigin) -> Result<Option<Session>> {
+    let mut statement = conn.prepare(&format!(
+        "{SELECT_ALL} WHERE origin_connector = ?1 AND origin_channel = ?2
+                        AND origin_thread = ?3 AND origin_active = 1"
+    ))?;
+    let mut rows = statement.query_map(
+        rusqlite::params![origin.connector, origin.channel, origin.thread],
+        read,
+    )?;
+    Ok(rows.next().transpose()?)
+}
+
+/// Stop a session answering the thread that started it.
+///
+/// The origin stays on the record — it is where the conversation came from,
+/// and the sidebar still says so — but the next message in that thread
+/// starts a new session. Answers whether there was such a session.
+pub fn close_origin(conn: &Connection, id: &SessionId) -> Result<bool> {
+    let updated = conn.execute(
+        "UPDATE sessions SET origin_active = 0 WHERE id = ?1 AND origin_connector IS NOT NULL",
+        [&id.0],
+    )?;
+    Ok(updated > 0)
+}
+
+/// The access mode as it is stored.
+fn access_mode_str(mode: AccessMode) -> &'static str {
+    match mode {
+        AccessMode::ReadOnly => "read_only",
+        AccessMode::Ask => "ask",
+        AccessMode::Auto => "auto",
+    }
+}
+
+/// An access mode read back. Anything unrecognised is the safe default.
+fn parse_access_mode(text: &str) -> AccessMode {
+    match text {
+        "read_only" => AccessMode::ReadOnly,
+        "auto" => AccessMode::Auto,
+        _ => AccessMode::Ask,
+    }
 }
 
 /// One session by id.
@@ -364,13 +420,23 @@ pub fn mark_orphans_failed(conn: &Connection, now: i64) -> Result<usize> {
 
 const SELECT_ALL: &str = "SELECT id, workspace_id, provider, model, state, \
      COALESCE(user_title, agent_title), summary, \
-     vendor_session_id, created_at, updated_at, account_id FROM sessions";
+     vendor_session_id, created_at, updated_at, account_id, access_mode, \
+     origin_connector, origin_channel, origin_thread FROM sessions";
 const ORDER: &str = "ORDER BY updated_at DESC, created_at DESC";
 const SELECT: &str = "SELECT id, workspace_id, provider, model, state, \
      COALESCE(user_title, agent_title), summary, \
-     vendor_session_id, created_at, updated_at, account_id FROM sessions WHERE id = ?1";
+     vendor_session_id, created_at, updated_at, account_id, access_mode, \
+     origin_connector, origin_channel, origin_thread FROM sessions WHERE id = ?1";
 
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
+    let origin = match row.get::<_, Option<String>>(12)? {
+        Some(connector) => Some(SessionOrigin {
+            connector,
+            channel: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
+            thread: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+        }),
+        None => None,
+    };
     Ok(Session {
         id: SessionId(row.get(0)?),
         workspace: WorkspaceId(row.get(1)?),
@@ -381,6 +447,8 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         title: row.get(5)?,
         summary: row.get(6)?,
         vendor_session_id: row.get(7)?,
+        access_mode: parse_access_mode(&row.get::<_, String>(11)?),
+        origin,
         created_at: row.get(8)?,
         updated_at: row.get(9)?,
     })
@@ -403,9 +471,59 @@ mod tests {
             title: None,
             summary: None,
             vendor_session_id: None,
+            access_mode: AccessMode::Ask,
+            origin: None,
             created_at: at,
             updated_at: at,
         }
+    }
+
+    fn origin(thread: &str) -> SessionOrigin {
+        SessionOrigin {
+            connector: "slack".into(),
+            channel: "C1".into(),
+            thread: thread.into(),
+        }
+    }
+
+    #[test]
+    fn a_thread_finds_its_session_until_it_is_told_to_start_fresh() {
+        let conn = db::open_in_memory().unwrap();
+        let mut from_slack = session("s-1", "comet/harbor", 100);
+        from_slack.origin = Some(origin("1.0"));
+        from_slack.access_mode = AccessMode::Auto;
+        insert(&conn, &from_slack).unwrap();
+        insert(&conn, &session("s-2", "comet/harbor", 100)).unwrap();
+
+        let found = find_by_origin(&conn, &origin("1.0"))
+            .unwrap()
+            .expect("found");
+        assert_eq!(found.id.0, "s-1");
+        assert_eq!(found.access_mode, AccessMode::Auto);
+        assert_eq!(found.origin, Some(origin("1.0")));
+        assert!(find_by_origin(&conn, &origin("2.0")).unwrap().is_none());
+
+        // Two sessions cannot both answer one thread.
+        let mut twin = session("s-3", "comet/harbor", 100);
+        twin.origin = Some(origin("1.0"));
+        assert!(insert(&conn, &twin).is_err());
+
+        assert!(close_origin(&conn, &SessionId("s-1".into())).unwrap());
+        assert!(find_by_origin(&conn, &origin("1.0")).unwrap().is_none());
+        // The record still says where it came from.
+        assert_eq!(
+            get(&conn, &SessionId("s-1".into()))
+                .unwrap()
+                .unwrap()
+                .origin,
+            Some(origin("1.0"))
+        );
+        // And the thread can be answered by a new session now.
+        insert(&conn, &twin).unwrap();
+        assert!(
+            !close_origin(&conn, &SessionId("s-2".into())).unwrap(),
+            "a session with no origin has nothing to close"
+        );
     }
 
     #[test]

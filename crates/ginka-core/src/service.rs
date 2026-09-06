@@ -11,6 +11,7 @@
 
 use crate::agent::Supervisor;
 use crate::checkpoint;
+use crate::connector::{self, ConnectorControl};
 use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
@@ -18,9 +19,10 @@ use anyhow::Result;
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionState,
+    AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
 };
+use ginka_protocol::provider::AccessMode;
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
@@ -75,6 +77,10 @@ pub struct Service {
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
+    /// The chat connectors the daemon registered, for `ListConnectors` and
+    /// `TestConnector`. The service knows what they are called and nothing
+    /// about how they connect (`docs/connectors.md` §2).
+    connectors: Vec<Arc<dyn ConnectorControl>>,
 }
 
 /// How long a probe of the agent CLIs is trusted for.
@@ -105,7 +111,21 @@ impl Service {
             settings,
             accounts: None,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            connectors: Vec::new(),
         }
+    }
+
+    /// Let a hosted connector be asked about and tested through the
+    /// protocol. Registering the same id twice replaces the first.
+    pub fn register_connector(&mut self, connector: Arc<dyn ConnectorControl>) {
+        self.connectors
+            .retain(|existing| existing.id() != connector.id());
+        self.connectors.push(connector);
+    }
+
+    /// The daemon's settings as the service currently holds them.
+    pub fn settings(&self) -> &crate::settings::DaemonSettings {
+        &self.settings
     }
 
     /// Use these drivers rather than the ones this build ships.
@@ -346,8 +366,19 @@ impl Service {
                 cols,
             } => self.login_account(&id, &workspace, rows, cols),
             Request::RefreshPlanUsage { account } => self.refresh_plan_usage(&account),
-            Request::ListSessions { workspace } => Ok(Response::Sessions {
-                sessions: session::list(&self.conn(), workspace.as_ref()).map_err(failed)?,
+            Request::ListSessions { workspace, origin } => Ok(Response::Sessions {
+                sessions: match origin {
+                    Some(origin) => session::find_by_origin(&self.conn(), &origin)
+                        .map_err(failed)?
+                        .into_iter()
+                        .filter(|session| {
+                            workspace
+                                .as_ref()
+                                .is_none_or(|wanted| &session.workspace == wanted)
+                        })
+                        .collect(),
+                    None => session::list(&self.conn(), workspace.as_ref()).map_err(failed)?,
+                },
             }),
             Request::StartSession {
                 workspace,
@@ -355,7 +386,26 @@ impl Service {
                 prompt,
                 model,
                 account,
-            } => self.start_session(workspace, &agent, prompt, model, account),
+                access_mode,
+                origin,
+            } => self.start_session(
+                workspace,
+                &agent,
+                prompt,
+                model,
+                account,
+                access_mode.unwrap_or_default(),
+                origin,
+            ),
+            Request::CloseSessionOrigin { session } => {
+                self.session(&session)?;
+                if !session::close_origin(&self.conn(), &session).map_err(failed)? {
+                    return Err(RpcError::failed(format!(
+                        "session {session} did not come from a chat platform"
+                    )));
+                }
+                Ok(Response::Ack)
+            }
             Request::FanOut {
                 project,
                 branch_prefix,
@@ -407,6 +457,10 @@ impl Service {
                     // directory, so the fork runs on the same one.
                     account: original.account.clone(),
                     model: original.model.clone(),
+                    access_mode: original.access_mode,
+                    // A fork is a new conversation: the thread that started
+                    // the original keeps talking to the original.
+                    origin: None,
                     // A fork has not run anything yet, and inherits the
                     // vendor's own conversation so that continuing it
                     // continues where the original was.
@@ -700,6 +754,45 @@ impl Service {
                 Ok(Response::Ack)
             }
 
+            Request::ListConnectors => Ok(Response::Connectors {
+                connectors: self.connector_states(),
+            }),
+            Request::AllowConnectorSender { connector, sender } => {
+                if connector != connector::SLACK {
+                    return Err(RpcError::not_found(format!(
+                        "no connector named {connector}; this build has: {}",
+                        connector::SLACK
+                    )));
+                }
+                let sender = sender.trim().to_string();
+                if sender.is_empty() {
+                    return Err(RpcError::failed("a sender id is needed"));
+                }
+                let slack = self.settings.connectors.slack.get_or_insert_default();
+                if !slack.allowed_users.contains(&sender) {
+                    slack.allowed_users.push(sender);
+                }
+                self.save_settings()?;
+                for hosted in &self.connectors {
+                    hosted.reload(&self.settings.connectors);
+                    self.events.emit(DaemonEvent::ConnectorStateChanged {
+                        state: hosted.state(),
+                    });
+                }
+                Ok(Response::Ack)
+            }
+            Request::TestConnector { connector, channel } => {
+                let hosted = self
+                    .connectors
+                    .iter()
+                    .find(|hosted| hosted.id() == connector)
+                    .ok_or_else(|| {
+                        RpcError::not_found(format!("connector {connector} is not running"))
+                    })?;
+                hosted.test(&channel).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+
             Request::Shutdown => {
                 // The transport is listening for this: it is the one event a
                 // client cannot poll for after the fact.
@@ -707,6 +800,22 @@ impl Service {
                 Ok(Response::Ack)
             }
         }
+    }
+
+    /// Every connector this build knows, running or not.
+    fn connector_states(&self) -> Vec<ginka_protocol::model::ConnectorState> {
+        let mut states: Vec<ginka_protocol::model::ConnectorState> = self
+            .connectors
+            .iter()
+            .map(|hosted| hosted.state())
+            .collect();
+        if !states.iter().any(|state| state.id == connector::SLACK) {
+            states.push(connector::unconfigured_state(
+                connector::SLACK,
+                &self.settings.connectors,
+            ));
+        }
+        states
     }
 
     /// What each agent CLI says about itself, from the last probe or a new one.
@@ -867,6 +976,7 @@ impl Service {
     }
 
     /// Start an agent in a workspace.
+    #[allow(clippy::too_many_arguments)]
     fn start_session(
         &mut self,
         workspace: WorkspaceId,
@@ -874,11 +984,21 @@ impl Service {
         prompt: String,
         model: Option<String>,
         account: Option<ginka_protocol::AccountId>,
+        access_mode: AccessMode,
+        origin: Option<SessionOrigin>,
     ) -> Result<Response, RpcError> {
         let worktree = self.worktree(&workspace)?;
         let driver = self.driver(agent)?;
         let account = crate::account::resolve(&self.settings, driver.id(), account.as_ref())
             .map_err(account_error)?;
+        if let Some(origin) = &origin
+            && let Some(existing) = session::find_by_origin(&self.conn(), origin).map_err(failed)?
+        {
+            return Err(RpcError::failed(format!(
+                "session {} is already answering that thread; send to it, or close its origin first",
+                existing.id
+            )));
+        }
         let now = now();
         let session = Session {
             id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
@@ -893,6 +1013,8 @@ impl Service {
             title: Some(title_from(&prompt)),
             summary: None,
             vendor_session_id: None,
+            access_mode,
+            origin,
             created_at: now,
             updated_at: now,
         };
@@ -904,8 +1026,9 @@ impl Service {
         // The agent reads files, not URIs: an attachment the user mentioned
         // reaches it as a path on this host (§3.3 N6). The transcript keeps
         // the reference, so the window can still draw the attachment.
-        let mut spec =
-            SessionSpec::new(worktree.path, self.expand_attachments(&prompt)).with_model(model);
+        let mut spec = SessionSpec::new(worktree.path, self.expand_attachments(&prompt))
+            .with_model(model)
+            .with_access_mode(access_mode);
         for (key, value) in crate::account::env_layer(
             &self.settings,
             &self.paths,
@@ -926,7 +1049,8 @@ impl Service {
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
         let mut spec = SessionSpec::new(worktree.path, self.expand_attachments(&text))
-            .with_model(stored.model.clone());
+            .with_model(stored.model.clone())
+            .with_access_mode(stored.access_mode);
         // The same login the conversation started on: the vendor's thread
         // lives in its directory (`docs/accounts.md` §5).
         for (key, value) in crate::account::env_layer(
@@ -1132,6 +1256,8 @@ impl Service {
                 prompt: prompt.to_string(),
                 model: attempt.model.clone(),
                 account: attempt.account.clone(),
+                access_mode: None,
+                origin: None,
             }) {
                 Ok(Response::Session { session }) => started.push(session),
                 Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),

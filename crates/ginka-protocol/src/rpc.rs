@@ -7,11 +7,12 @@
 
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    Account, AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide,
-    FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch,
-    SlashCommand, TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
+    Account, AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ConnectorState,
+    ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session,
+    SessionMatch, SessionOrigin, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow,
+    WorkspaceSummary,
 };
-use crate::provider::ProviderKind;
+use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -89,8 +90,14 @@ pub enum Request {
     /// Ask the provider how much of an account's rate-limit windows is left,
     /// without running a turn. Answers with the reading, and pushes it.
     RefreshPlanUsage { account: AccountId },
-    /// Sessions, newest first. `workspace` limits it.
-    ListSessions { workspace: Option<WorkspaceId> },
+    /// Sessions, newest first. `workspace` limits it; `origin` limits it to
+    /// the session still answering that thread, which is how a connector
+    /// finds where a reply belongs.
+    ListSessions {
+        workspace: Option<WorkspaceId>,
+        #[serde(default)]
+        origin: Option<SessionOrigin>,
+    },
     /// Start an agent in a workspace and send it `prompt`.
     StartSession {
         workspace: WorkspaceId,
@@ -100,6 +107,13 @@ pub enum Request {
         model: Option<String>,
         /// Which login to run on; the provider's default when absent.
         account: Option<AccountId>,
+        /// What the agent may do without asking. `Ask` when absent.
+        #[serde(default)]
+        access_mode: Option<AccessMode>,
+        /// Where the conversation came from, when a chat platform is asking.
+        /// Recorded on the session and never changed.
+        #[serde(default)]
+        origin: Option<SessionOrigin>,
     },
     /// Ask the same question in several worktrees at once.
     ///
@@ -129,6 +143,9 @@ pub enum Request {
     },
     /// Rename a conversation. An empty title clears it back to none.
     RenameSession { session: SessionId, title: String },
+    /// Stop a session answering the thread that started it, so the next
+    /// message there starts a new one. The origin stays on the record.
+    CloseSessionOrigin { session: SessionId },
     /// Forget a session and its transcript and checkpoints.
     RemoveSession { session: SessionId },
     /// Take a copy of a conversation as it was, and carry on from there.
@@ -308,6 +325,28 @@ pub enum Request {
     /// Close a terminal and stop its shell.
     CloseTerminal { terminal: TerminalId },
 
+    /// Every chat connector this daemon hosts, and whether each is connected
+    /// (`docs/connectors.md` §3.3).
+    ListConnectors,
+    /// Let one more platform member speak to a connector.
+    ///
+    /// Written into the settings file, because the allowlist is
+    /// configuration; the connector picks the change up at once.
+    AllowConnectorSender {
+        /// `slack`.
+        connector: String,
+        /// The platform's own member id, `U01ABC2DEF3` on Slack.
+        sender: String,
+    },
+    /// Post one message into a channel and take it back, to prove the
+    /// tokens and the channel are right.
+    TestConnector {
+        /// `slack`.
+        connector: String,
+        /// The platform's conversation id.
+        channel: String,
+    },
+
     /// Ask the daemon to exit once it has flushed its state.
     Shutdown,
 }
@@ -428,6 +467,9 @@ pub enum Response {
     Committed {
         commit: String,
     },
+    Connectors {
+        connectors: Vec<ConnectorState>,
+    },
 }
 
 #[cfg(test)]
@@ -441,6 +483,21 @@ mod tests {
         let request: Request =
             serde_json::from_str(r#"{"method":"list_workspaces"}"#).expect("omitted option");
         assert_eq!(request, Request::ListWorkspaces { project: None });
+        // A field added after a client was written is one that client never
+        // sends, and it must still parse.
+        let request: Request = serde_json::from_str(
+            r#"{"method":"start_session","workspace":"comet/harbor","agent":"claude",
+                "prompt":"go","model":null,"account":null}"#,
+        )
+        .expect("a start with no origin and no access mode");
+        assert!(matches!(
+            request,
+            Request::StartSession {
+                origin: None,
+                access_mode: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -466,7 +523,14 @@ mod tests {
                 prompt: "write the test first".into(),
                 model: Some("opus".into()),
                 account: Some(AccountId("claude-work".into())),
+                access_mode: Some(AccessMode::Auto),
+                origin: Some(SessionOrigin {
+                    connector: "slack".into(),
+                    channel: "C1".into(),
+                    thread: "1725500000.000100".into(),
+                }),
             },
+            Request::ListConnectors,
             Request::SessionTranscript {
                 session: SessionId("s-1".into()),
                 after: Some(10),

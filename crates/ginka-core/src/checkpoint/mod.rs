@@ -218,6 +218,8 @@ mod tests {
             title: None,
             summary: None,
             vendor_session_id: None,
+            access_mode: Default::default(),
+            origin: None,
             created_at: 0,
             updated_at: 0,
         };

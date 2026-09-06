@@ -44,10 +44,21 @@ impl CodexDriver {
     }
 
     fn model_args(spec: &SessionSpec) -> Vec<String> {
-        match &spec.model {
+        let mut args = match &spec.model {
             Some(model) => vec!["--model".to_string(), model.clone()],
             None => Vec::new(),
+        };
+        // Our access modes in the vendor's vocabulary, only when they are
+        // not what `codex exec` does on its own.
+        match spec.access_mode {
+            ginka_protocol::provider::AccessMode::Ask => {}
+            ginka_protocol::provider::AccessMode::ReadOnly => {
+                args.push("--sandbox".to_string());
+                args.push("read-only".to_string());
+            }
+            ginka_protocol::provider::AccessMode::Auto => args.push("--full-auto".to_string()),
         }
+        args
     }
 }
 

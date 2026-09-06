@@ -392,6 +392,21 @@ cli.checkpoints.empty:
 cli.transcript.empty:
   en: no transcript yet
   ja: トランスクリプトはまだありません
+cli.connector.disabled:
+  en: disabled in settings.json
+  ja: settings.json で無効
+cli.connector.connected:
+  en: "connected, %{age} ago"
+  ja: "接続中（%{age} 前から）"
+cli.connector.disconnected:
+  en: not connected
+  ja: 未接続
+cli.connector.error:
+  en: "last error: %{error}"
+  ja: "直近のエラー: %{error}"
+cli.connector.bindings.empty:
+  en: no channels are bound; add one under connectors.slack.bindings in settings.json
+  ja: チャンネルが未設定です。settings.json の connectors.slack.bindings に追加してください
 cli.done:
   en: done
   ja: 完了

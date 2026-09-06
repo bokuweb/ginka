@@ -88,6 +88,10 @@ pub struct DaemonSettings {
     /// (`docs/accounts.md` §3). A provider's default account is never here:
     /// it is the vendor's own home, configured by `agents` above.
     pub accounts: BTreeMap<String, AccountSettings>,
+    /// Chat connectors: which platforms the daemon listens to, in which
+    /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
+    /// never here.
+    pub connectors: crate::connector::ConnectorsSettings,
 }
 
 impl DaemonSettings {
@@ -169,6 +173,7 @@ impl Default for DaemonSettings {
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),
+            connectors: crate::connector::ConnectorsSettings::default(),
         }
     }
 }
