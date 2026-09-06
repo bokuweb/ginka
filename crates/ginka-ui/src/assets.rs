@@ -53,6 +53,10 @@ const ICONS: &[(&str, &str)] = &[
         "icons/bug.svg",
         include_str!("../../../assets/icons/bug.svg"),
     ),
+    (
+        "icons/gauge.svg",
+        include_str!("../../../assets/icons/gauge.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -71,6 +75,8 @@ pub mod icon {
     pub const HAMMER: &str = "icons/hammer.svg";
     pub const LIST_CHECK: &str = "icons/list-check.svg";
     pub const BUG: &str = "icons/bug.svg";
+    /// The Reports surface: how close each login is to its wall.
+    pub const GAUGE: &str = "icons/gauge.svg";
 }
 
 impl AssetSource for Assets {
