@@ -111,12 +111,19 @@ pub struct SessionSpec {
     pub workspace_path: PathBuf,
     /// The opening prompt.
     pub prompt: String,
+    /// What the agent is told before the prompt, and the transcript is not:
+    /// the digest of a conversation moved here from another agent
+    /// (`crate::handoff`). Sent once, on the turn that carries it.
+    pub preamble: Option<String>,
     pub model: Option<String>,
     /// What the agent may do without asking. A launch argument on every
     /// transport this build drives, so it is fixed for the process.
     pub access_mode: AccessMode,
     /// Extra environment, used by tests to point a driver at a fake agent.
     pub env: Vec<(String, String)>,
+    /// The MCP servers the agent is told about (`crate::tools`). Each driver
+    /// puts them on the command line in its vendor's own way.
+    pub mcp_servers: Vec<crate::tools::McpServer>,
 }
 
 impl SessionSpec {
@@ -125,9 +132,33 @@ impl SessionSpec {
         Self {
             workspace_path: workspace_path.into(),
             prompt: prompt.into(),
+            preamble: None,
             model: None,
             access_mode: AccessMode::default(),
             env: Vec::new(),
+            mcp_servers: Vec::new(),
+        }
+    }
+
+    /// Tell the agent about these MCP servers.
+    pub fn with_mcp_servers(mut self, servers: Vec<crate::tools::McpServer>) -> Self {
+        self.mcp_servers = servers;
+        self
+    }
+
+    /// Put `preamble` in front of the prompt, for the agent's eyes only.
+    pub fn with_preamble(mut self, preamble: Option<String>) -> Self {
+        self.preamble = preamble.filter(|text| !text.trim().is_empty());
+        self
+    }
+
+    /// The message the agent is actually sent: the preamble, when there is
+    /// one, then the prompt. The transcript records only the prompt, because
+    /// the preamble is addressed to the agent and the reader has the original.
+    pub fn agent_prompt(&self) -> String {
+        match &self.preamble {
+            Some(preamble) => format!("{preamble}\n\n---\n\n{}", self.prompt),
+            None => self.prompt.clone(),
         }
     }
 

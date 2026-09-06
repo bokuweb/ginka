@@ -113,6 +113,9 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// The skills the agents can load, and whether each is on.
+    #[command(subcommand)]
+    Skills(SkillsCommand),
     /// List the commands a workspace offers after `/`.
     Commands {
         /// The workspace id, as shown by `workspace list`.
@@ -168,11 +171,19 @@ enum Command {
     Commit {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
-        /// The commit message.
-        message: String,
+        /// The commit message. Omit it with `--generate`.
+        message: Option<String>,
         /// Commit only what is already staged.
         #[arg(long)]
         staged: bool,
+        /// Have an agent write the message on its cheap tier, print it, and
+        /// commit with it.
+        #[arg(long)]
+        generate: bool,
+        /// Which agent writes it: claude, codex. The workspace's latest
+        /// session's agent otherwise.
+        #[arg(long, requires = "generate")]
+        agent: Option<String>,
     },
     /// Push a workspace's branch, setting an upstream if it has none.
     Push {
@@ -245,6 +256,26 @@ enum WorkspaceCommand {
         #[arg(long)]
         force: bool,
     },
+    /// List the repository's local branches, and where each is checked out.
+    Branches {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
+    /// Check a branch out in a workspace. The workspace keeps its id.
+    Checkout {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        branch: String,
+        /// Create the branch from HEAD first.
+        #[arg(long)]
+        create: bool,
+    },
+    /// Build zvec-grep's index for a workspace, here in this terminal, so
+    /// agents started in it get semantic search. Needs `zg` on PATH.
+    Index {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Pin a workspace so it sorts first.
     Pin {
         /// The workspace id, as shown by `workspace list`.
@@ -310,6 +341,29 @@ enum SlackCommand {
 }
 
 #[derive(Subcommand)]
+enum SkillsCommand {
+    /// List every skill, grouped across the places it was installed.
+    List {
+        /// Only this project's skills, plus the user's own.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Turn every copy of a skill on.
+    Enable {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Hide a skill from every agent by renaming its SKILL.md. Nothing is
+    /// deleted.
+    Disable {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum SessionCommand {
     /// List sessions, most recently active first.
     List {
@@ -330,6 +384,10 @@ enum SessionCommand {
         /// Which login to run on, by id. The provider's default otherwise.
         #[arg(long)]
         account: Option<String>,
+        /// What the agent may touch: read-only, ask (edit freely, commands
+        /// sandboxed or refused) or auto (edit and run). Defaults to ask.
+        #[arg(long, value_parser = parse_access)]
+        access: Option<ginka_protocol::AccessMode>,
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
@@ -340,11 +398,24 @@ enum SessionCommand {
     /// Forget a session, its transcript and its checkpoints.
     Remove { session: String },
     /// Take a copy of a conversation as it was, and carry on from there.
+    ///
+    /// With `--agent` or `--account` the conversation moves: the new agent
+    /// cannot continue the old one's thread, so it is handed a digest of the
+    /// transcript with its first prompt.
     Fork {
         session: String,
         /// The transcript position to fork at. Defaults to all of it.
         #[arg(long)]
         after: Option<u64>,
+        /// Carry the conversation over to another agent: claude, codex.
+        #[arg(long)]
+        agent: Option<String>,
+        /// The model for the fork. Defaults to the agent's own.
+        #[arg(long)]
+        model: Option<String>,
+        /// The login the fork runs on, by id.
+        #[arg(long)]
+        account: Option<String>,
     },
     /// Find what was said, across conversations.
     Search {
@@ -406,6 +477,16 @@ fn main() -> Result<()> {
         Command::Mcp => mcp(&paths),
         Command::Daemon(command) => daemon(&paths, command, cli.json),
         Command::Account(AccountCommand::Login { id }) => account_login(&paths, &id),
+        Command::Commit {
+            workspace,
+            generate: true,
+            staged,
+            agent,
+            ..
+        } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        Command::Workspace(WorkspaceCommand::Index { workspace }) => {
+            workspace_index(&paths, &workspace)
+        }
         command => {
             // Read before the command is consumed: how a diff is printed is
             // the one thing the response alone does not say.
@@ -621,6 +702,31 @@ fn request_for(command: Command) -> Result<Request> {
             unreachable!("a login is run here, not asked of the daemon")
         }
         Command::Usage { days } => Request::Usage { days: Some(days) },
+        Command::Workspace(WorkspaceCommand::Branches { workspace }) => Request::ListBranches {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Workspace(WorkspaceCommand::Checkout {
+            workspace,
+            branch,
+            create,
+        }) => Request::CheckoutBranch {
+            workspace: WorkspaceId(workspace),
+            branch,
+            create,
+        },
+        Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
+            project: project.map(ProjectName),
+        },
+        Command::Skills(SkillsCommand::Enable { name, project }) => Request::SetSkillEnabled {
+            name,
+            enabled: true,
+            project: project.map(ProjectName),
+        },
+        Command::Skills(SkillsCommand::Disable { name, project }) => Request::SetSkillEnabled {
+            name,
+            enabled: false,
+            project: project.map(ProjectName),
+        },
         Command::Commands { workspace } => Request::SlashCommands {
             workspace: WorkspaceId(workspace),
             query: None,
@@ -721,9 +827,10 @@ fn request_for(command: Command) -> Result<Request> {
             workspace,
             message,
             staged,
+            ..
         } => Request::Commit {
             workspace: WorkspaceId(workspace),
-            message,
+            message: message.context("a commit needs a message, or --generate")?,
             all: !staged,
         },
         Command::Push { workspace } => Request::Push {
@@ -754,13 +861,14 @@ fn request_for(command: Command) -> Result<Request> {
             agent,
             model,
             account,
+            access,
         }) => Request::StartSession {
             workspace: WorkspaceId(workspace),
             agent,
             prompt,
             model,
             account: account.map(AccountId),
-            access_mode: None,
+            access_mode: access,
             origin: None,
         },
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
@@ -777,9 +885,18 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Remove { session }) => Request::RemoveSession {
             session: SessionId(session),
         },
-        Command::Session(SessionCommand::Fork { session, after }) => Request::ForkSession {
+        Command::Session(SessionCommand::Fork {
+            session,
+            after,
+            agent,
+            model,
+            account,
+        }) => Request::ForkSession {
             session: SessionId(session),
             after,
+            agent,
+            model,
+            account: account.map(AccountId),
         },
         Command::Session(SessionCommand::Search { query, workspace }) => Request::SearchSessions {
             workspace: workspace.map(WorkspaceId),
@@ -803,8 +920,107 @@ fn request_for(command: Command) -> Result<Request> {
 
         // Handled before this point, without a daemon.
         // Not one request each: handled in `main` before this is reached.
-        Command::Doctor | Command::Daemon(_) | Command::Mcp => unreachable!("handled in main"),
+        Command::Doctor
+        | Command::Daemon(_)
+        | Command::Mcp
+        | Command::Workspace(WorkspaceCommand::Index { .. }) => unreachable!("handled in main"),
     })
+}
+
+/// Ask the daemon for a commit message, wait for it to arrive as an event,
+/// then commit with it.
+///
+/// The event stream is opened before the request is sent, so the answer
+/// cannot land in the gap between them.
+fn commit_generated(
+    paths: &Paths,
+    workspace: &str,
+    staged: bool,
+    agent: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let workspace = WorkspaceId(workspace.to_string());
+    let response = smol::block_on(async {
+        let client = connect(paths).await?;
+        let events = client.events();
+        client
+            .request(Request::GenerateCommitMessage {
+                workspace: workspace.clone(),
+                agent,
+                staged,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        let message = loop {
+            let event = events
+                .recv()
+                .await
+                .context("the daemon closed the connection before answering")?;
+            if let ginka_protocol::event::DaemonEvent::CommitMessageGenerated {
+                workspace: done,
+                message,
+                error,
+            } = event.payload
+                && done == workspace
+            {
+                break message.ok_or_else(|| {
+                    anyhow::anyhow!(error.unwrap_or_else(|| "no message was written".into()))
+                })?;
+            }
+        };
+        eprintln!("{}", message.trim_end());
+        client
+            .request(Request::Commit {
+                workspace,
+                message,
+                all: !staged,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        print(response, false);
+    }
+    Ok(())
+}
+
+/// Run `zg index` in a workspace, here, so the next agent started in it is
+/// handed zvec-grep's server (`ginka-core::tools`).
+fn workspace_index(paths: &Paths, workspace: &str) -> Result<()> {
+    let worktree = smol::block_on(async {
+        let client = connect(paths).await?;
+        match client
+            .request(Request::ListWorkspaces { project: None })
+            .await
+        {
+            Ok(Response::Workspaces { workspaces }) => workspaces
+                .into_iter()
+                .find(|summary| summary.id().0 == workspace)
+                .map(|summary| summary.worktree.path)
+                .ok_or_else(|| anyhow::anyhow!("no workspace named {workspace}")),
+            Ok(other) => anyhow::bail!("unexpected answer {other:?}"),
+            Err(error) => anyhow::bail!("{error}"),
+        }
+    })?;
+    let status = std::process::Command::new("zg")
+        .arg("index")
+        .current_dir(&worktree)
+        .status()
+        .context(rust_i18n::t!("cli.index.no_zg").to_string())?;
+    if !status.success() {
+        anyhow::bail!("zg index exited with {status}");
+    }
+    println!("{}", rust_i18n::t!("cli.index.done"));
+    Ok(())
+}
+
+/// `--access` as clap reads it: the three words, with the vendors' nearest
+/// spellings accepted and the rest named in the refusal.
+fn parse_access(text: &str) -> Result<ginka_protocol::AccessMode, String> {
+    ginka_protocol::AccessMode::parse(text)
+        .ok_or_else(|| format!("expected read-only, ask or auto, not {text:?}"))
 }
 
 /// Where state lives and whether it is healthy.
@@ -975,6 +1191,47 @@ fn print(response: Response, patch: bool) {
                         .unwrap_or_default(),
                     comment.text
                 );
+            }
+        }
+        Response::Branches { branches } => {
+            for branch in branches {
+                println!(
+                    "{} {:<40} {}",
+                    if branch.current { "*" } else { " " },
+                    branch.name,
+                    match (&branch.checked_out_at, branch.current) {
+                        (Some(path), false) => path.display().to_string(),
+                        _ => String::new(),
+                    }
+                );
+            }
+        }
+        Response::Skills { skills, truncated } => {
+            if skills.is_empty() {
+                println!("{}", rust_i18n::t!("cli.skills.empty"));
+            }
+            for skill in &skills {
+                println!(
+                    "{:<3} {:<28} {}",
+                    if skill.enabled { "on" } else { "off" },
+                    skill.name,
+                    skill.description.as_deref().unwrap_or_default()
+                );
+                for install in &skill.installs {
+                    println!(
+                        "    {:<8} {:<10} {}{}",
+                        match install.scope {
+                            ginka_protocol::model::SkillScope::Project => "project",
+                            ginka_protocol::model::SkillScope::User => "user",
+                        },
+                        install.root_label,
+                        install.directory.display(),
+                        if install.enabled { "" } else { " (off)" }
+                    );
+                }
+            }
+            if truncated {
+                eprintln!("{}", rust_i18n::t!("cli.skills.truncated"));
             }
         }
         Response::Commands { commands } => {

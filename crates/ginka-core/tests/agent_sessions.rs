@@ -233,6 +233,25 @@ impl Fixture {
             .unwrap_or_else(|error| panic!("request failed: {error}"))
     }
 
+    /// The transcript once the agent has said `needle`, or a panic after a
+    /// while: a turn started by a request lands asynchronously, so its state
+    /// alone cannot say whether it has begun.
+    fn wait_for_said(&mut self, id: &SessionId, needle: &str) -> Vec<TranscriptPayload> {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let transcript = self.transcript(id);
+            if spoken(&transcript).contains(needle) {
+                self.settle(id);
+                return self.transcript(id);
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the agent never said {needle:?}: {transcript:?}"
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
     /// The stored session, as the daemon has it.
     fn stored(&mut self, id: &SessionId) -> ginka_protocol::model::Session {
         match self
@@ -796,6 +815,9 @@ fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
     let forked = match fixture.ask(Request::ForkSession {
         session: session.clone(),
         after: Some(2),
+        agent: None,
+        model: None,
+        account: None,
     }) {
         Response::Session { session } => session,
         other => panic!("expected a session, got {other:?}"),
@@ -815,6 +837,406 @@ fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
 
     // The original is untouched.
     assert_eq!(fixture.transcript(&session).len(), original.len());
+}
+
+#[test]
+fn a_fork_onto_another_agent_is_handed_the_record_rather_than_the_thread() {
+    // The thread lives in the first vendor's store and cannot be resumed by
+    // the second; the daemon's own transcript can be read by anyone. So the
+    // fork gets a digest of it in front of its first prompt, once.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"I renamed the tokenizer"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "tidy the parser",
+    );
+    fixture.settle(&session);
+
+    let forked = match fixture.ask(Request::ForkSession {
+        session: session.clone(),
+        after: None,
+        agent: Some("codex".into()),
+        model: None,
+        account: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(forked.agent, "codex");
+    assert_eq!(
+        forked.vendor_session_id, None,
+        "another vendor cannot continue this one's thread"
+    );
+    assert_eq!(
+        forked.title.as_deref(),
+        Some("tidy the parser (codex fork)")
+    );
+    assert_eq!(forked.summary.as_deref(), Some("moved from claude"));
+    assert_eq!(
+        fixture.transcript(&forked.id).len(),
+        fixture.transcript(&session).len(),
+        "the record came across whole"
+    );
+
+    // The fake codex echoes its arguments, which is where the prompt goes.
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"vendor-2"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fixture.ask(Request::SendMessage {
+        session: forked.id.clone(),
+        text: "carry on".into(),
+    });
+    let transcript = fixture.wait_for_said(&forked.id, "carry on");
+    let told = spoken(&transcript);
+    assert!(
+        told.contains("moved to you from another agent (claude)"),
+        "the digest went to the agent: {told}"
+    );
+    assert!(told.contains("tidy the parser"), "{told}");
+    assert!(told.contains("claude: I renamed the tokenizer"), "{told}");
+    assert!(told.contains("carry on"), "{told}");
+    assert!(!told.contains("resume"), "nothing to resume: {told}");
+    // The reader's transcript shows what they typed, not what the agent was
+    // told in front of it.
+    let typed: Vec<&str> = transcript
+        .iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::User { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(typed.last().copied(), Some("carry on"));
+    assert!(typed.iter().all(|text| !text.contains("moved to you")));
+
+    // Once the agent has a thread of its own the digest is spent.
+    assert_eq!(
+        fixture.stored(&forked.id).vendor_session_id.as_deref(),
+        Some("vendor-2")
+    );
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"vendor-2"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fixture.ask(Request::SendMessage {
+        session: forked.id.clone(),
+        text: "and again".into(),
+    });
+    let again = spoken(&fixture.wait_for_said(&forked.id, "and again"));
+    let second = &again[again
+        .find("resume vendor-2")
+        .expect("the second turn resumed")..];
+    assert!(second.contains("and again"), "{second}");
+    assert!(!second.contains("moved to you"), "sent once: {second}");
+}
+
+#[test]
+fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
+    // N9: one read-only turn on the cheap tier, answered as an event rather
+    // than inline, because a model's thirty seconds must not hold every other
+    // client's next request.
+    let mut fixture = Fixture::new();
+    let worktree = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|summary| summary.id() == fixture.workspace)
+            .map(|summary| summary.worktree.path)
+            .unwrap(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    std::fs::write(worktree.join("parser.rs"), "fn parse() {}\n").unwrap();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"one-shot"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"\"Add a parser stub\"\n\nIt parses nothing yet."}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"one-shot"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    match fixture.ask(Request::GenerateCommitMessage {
+        workspace: fixture.workspace.clone(),
+        agent: Some("claude".into()),
+        staged: false,
+    }) {
+        Response::Ack => {}
+        other => panic!("expected an ack, got {other:?}"),
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let (message, error) = loop {
+        let found = fixture
+            .recorder
+            .all()
+            .into_iter()
+            .find_map(|event| match event {
+                DaemonEvent::CommitMessageGenerated { message, error, .. } => {
+                    Some((message, error))
+                }
+                _ => None,
+            });
+        if let Some(found) = found {
+            break found;
+        }
+        assert!(Instant::now() < deadline, "no message was ever pushed");
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert_eq!(error, None);
+    assert_eq!(
+        message.as_deref(),
+        Some("Add a parser stub\n\nIt parses nothing yet.\n"),
+        "unquoted, subject and body apart, as git takes it"
+    );
+    // No session was made for it: a one-shot is not a conversation.
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => assert!(sessions.is_empty()),
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_clean_worktree_has_no_commit_message_to_write() {
+    let mut fixture = Fixture::new();
+    fixture.ask(Request::GenerateCommitMessage {
+        workspace: fixture.workspace.clone(),
+        agent: Some("claude".into()),
+        staged: false,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(error) = fixture
+            .recorder
+            .all()
+            .into_iter()
+            .find_map(|event| match event {
+                DaemonEvent::CommitMessageGenerated { error, .. } => Some(error),
+                _ => None,
+            })
+        {
+            assert!(error.unwrap_or_default().contains("clean"));
+            return;
+        }
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_sessions_access_mode_is_kept_and_a_follow_up_runs_under_it() {
+    // N2: the mode is a launch argument on every transport, so a follow-up
+    // has to be started with the one the conversation was, not the default.
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-1"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "look only".into(),
+        model: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::ReadOnly),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(session.access_mode, ginka_protocol::AccessMode::ReadOnly);
+    let told = spoken(&fixture.wait_for_said(&session.id, "look only"));
+    assert!(told.contains("--sandbox read-only"), "{told}");
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "and again".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "and again"));
+    let second = &told[told.find("resume t-1").expect("resumed")..];
+    assert!(
+        second.contains("--sandbox read-only"),
+        "the same mode: {second}"
+    );
+    assert_eq!(
+        fixture.stored(&session.id).access_mode,
+        ginka_protocol::AccessMode::ReadOnly,
+        "and it is what the record says"
+    );
+
+    // Unnamed, the mode is `ask`, which on Codex is what `exec` does on its
+    // own: nothing is said about the sandbox.
+    let plain = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "just edit".into(),
+        model: None,
+        account: None,
+        access_mode: None,
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(plain.access_mode, ginka_protocol::AccessMode::Ask);
+    let told = spoken(&fixture.wait_for_said(&plain.id, "just edit"));
+    assert!(
+        !told.contains("--sandbox") && !told.contains("--full-auto"),
+        "{told}"
+    );
+}
+
+#[test]
+fn every_agent_is_handed_ginkas_bridge_and_the_servers_the_user_listed() {
+    // Rule 3's third client is only real if the agent is told about it.
+    // The settings file names one more server, and it arrives the same way.
+    let home = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let paths = Paths::with_root(home.path().join("state"));
+    paths.ensure().unwrap();
+    std::fs::write(
+        paths.daemon_settings(),
+        r#"{"tools": {"servers": {"docs": {"command": "npx", "args": ["-y", "docs-mcp"]}}}}"#,
+    )
+    .unwrap();
+    let script = work.path().join("agent-script.txt");
+    std::fs::write(
+        &script,
+        [
+            r#"{"type":"thread.started","thread_id":"t"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let mut drivers = Registry::empty();
+    drivers.insert(Arc::new(
+        ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
+            .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+    ));
+    let mut service = Service::new(
+        paths.clone(),
+        db::open_in_memory().unwrap(),
+        Arc::new(Recorder::default()),
+    )
+    .with_drivers(drivers)
+    .with_cli("/opt/ginka/bin/ginka");
+    let root = work.path().join("comet");
+    support::repository(&root);
+    service.handle(Request::AddProject { path: root }).unwrap();
+    let workspace = match service
+        .handle(Request::CreateWorkspace {
+            project: ProjectName("comet".into()),
+            branch: "harbor".into(),
+            base: None,
+        })
+        .unwrap()
+    {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let session = match service
+        .handle(Request::StartSession {
+            workspace,
+            agent: "codex".into(),
+            prompt: "hello".into(),
+            model: None,
+            account: None,
+            access_mode: None,
+            origin: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session } => session.id,
+        other => panic!("expected a session, got {other:?}"),
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let told = loop {
+        let transcript = match service
+            .handle(Request::SessionTranscript {
+                session: session.clone(),
+                after: None,
+                limit: None,
+            })
+            .unwrap()
+        {
+            Response::Transcript { entries } => entries
+                .into_iter()
+                .map(|entry| entry.payload)
+                .collect::<Vec<_>>(),
+            other => panic!("expected a transcript, got {other:?}"),
+        };
+        let told = spoken(&transcript);
+        if told.contains("hello") {
+            break told;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the agent never ran: {transcript:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(
+        told.contains(r#"mcp_servers.ginka.command="/opt/ginka/bin/ginka""#),
+        "{told}"
+    );
+    assert!(told.contains("mcp_servers.ginka.args=[\"mcp\"]"), "{told}");
+    assert!(
+        told.contains(&format!(
+            "mcp_servers.ginka.env={{GINKA_HOME=\"{}\"}}",
+            paths.root().display()
+        )),
+        "the bridge is pointed at this daemon's state: {told}"
+    );
+    assert!(told.contains(r#"mcp_servers.docs.command="npx""#), "{told}");
+}
+
+#[test]
+fn a_fork_onto_an_agent_this_build_does_not_have_is_refused() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "hello",
+    );
+    fixture.settle(&session);
+    let error = fixture
+        .service
+        .handle(Request::ForkSession {
+            session,
+            after: None,
+            agent: Some("hal".into()),
+            model: None,
+            account: None,
+        })
+        .unwrap_err();
+    assert!(error.message.contains("hal"), "{}", error.message);
 }
 
 #[test]

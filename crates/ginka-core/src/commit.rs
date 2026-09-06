@@ -9,10 +9,17 @@
 //! N9.
 
 use anyhow::{Context, Result, bail};
-use ginka_protocol::provider::{ProviderKind, SessionOptions};
+use ginka_protocol::provider::{AccessMode, ProviderKind, SessionOptions};
 use std::path::Path;
+use std::time::Duration;
 
+use crate::driver::{AgentDriver, ParseState, SessionSpec};
 use crate::git::Git;
+
+/// How long a model is given to write a subject line. Generous: a first
+/// turn on a cold CLI takes a while to start, and a subject that arrives late
+/// is still worth more than none.
+pub const GENERATE_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// How much diff goes into the prompt. A subject describes the shape of a
 /// change, and the shape is visible long before the last hunk.
@@ -44,6 +51,132 @@ pub fn message_model(provider: ProviderKind, _session: &SessionOptions) -> Messa
         model: model.map(str::to_string),
         reasoning_effort: effort.map(str::to_string),
     }
+}
+
+/// What is about to be committed: the paths, and the diff as text.
+///
+/// `staged` describes only what is staged, which is what `Commit { all:
+/// false }` will take; otherwise everything uncommitted, tracked or not. An
+/// untracked file is named in the list but has no diff against `HEAD`, and
+/// the list is what the prompt says is complete.
+pub fn describe(worktree: &Path, staged: bool) -> Result<(Vec<String>, String)> {
+    let git = Git::new(worktree);
+    let status = git.run(&["status", "--porcelain", "--untracked-files=all"])?;
+    let files: Vec<String> = status
+        .lines()
+        .filter(|line| line.len() > 3)
+        .filter(|line| !staged || !line.starts_with(' ') && !line.starts_with('?'))
+        .map(|line| line[3..].trim().to_string())
+        .collect();
+    if files.is_empty() {
+        bail!("nothing to describe: the worktree is clean");
+    }
+    let diff = if staged {
+        git.run(&["diff", "--cached"])?
+    } else {
+        git.run(&["diff", "HEAD"])?
+    };
+    Ok((files, diff))
+}
+
+/// Ask `driver` for a commit message over `files` and `diff`, and wait.
+///
+/// One turn on the provider's cheap tier, read-only, with no MCP servers
+/// and nothing to resume: the drivers' own command and parser are what run
+/// it, so a vendor's format change breaks this exactly where it breaks a
+/// session (R6). Blocks for up to [`GENERATE_TIMEOUT`], so it belongs on a
+/// thread of its own, not on the request path.
+pub fn generate(
+    driver: &dyn AgentDriver,
+    worktree: &Path,
+    env: &[(String, String)],
+    files: &[String],
+    diff: &str,
+) -> Result<CommitMessage> {
+    use std::io::{BufRead as _, Write as _};
+
+    let model = ProviderKind::parse(driver.id())
+        .map(|provider| message_model(provider, &SessionOptions::default()).model)
+        .unwrap_or_default();
+    let prompt = build_prompt(files, diff);
+    let spec = SessionSpec::new(worktree, prompt.clone())
+        .with_model(model)
+        .with_access_mode(AccessMode::ReadOnly);
+    let command = driver.start_command(&spec);
+
+    let mut process = std::process::Command::new(&command.program);
+    process.args(&command.args).current_dir(worktree);
+    crate::agent::sanitize(&mut process);
+    for (key, value) in command.env.iter().chain(env.iter()) {
+        process.env(key, value);
+    }
+    let streamed = driver.supports_steer();
+    let mut child = process
+        .stdin(if streamed {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::null()
+        })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting {}", command.program))?;
+
+    // The prompt, then a closed input: the one message this turn gets.
+    if streamed
+        && let Some(mut stdin) = child.stdin.take()
+        && let Some(line) = driver.encode_user_message(&prompt)
+    {
+        let _ = writeln!(stdin, "{line}");
+        let _ = stdin.flush();
+        drop(stdin);
+    }
+
+    let stdout = child.stdout.take().context("no stdout to read")?;
+    let (sender, lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + GENERATE_TIMEOUT;
+    let mut state = ParseState::default();
+    let mut said = String::new();
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            let _ = child.kill();
+            bail!(
+                "{} did not answer within {:?}",
+                driver.display_name(),
+                GENERATE_TIMEOUT
+            );
+        }
+        match lines.recv_timeout(deadline - now) {
+            Ok(line) => {
+                for event in driver.parse_line(&line, &mut state) {
+                    if let ginka_protocol::AgentEvent::TextDelta { text } = event {
+                        said.push_str(&text);
+                    }
+                }
+            }
+            // The pipe closed: the agent has said all it will.
+            Err(_) => break,
+        }
+    }
+    let _ = child.wait();
+    if said.trim().is_empty() {
+        bail!(
+            "{} said nothing this build could read ({} unrecognized lines)",
+            driver.display_name(),
+            state.unrecognized
+        );
+    }
+    CommitMessage::parse(&said)
 }
 
 /// The prompt a commit subject is generated from.

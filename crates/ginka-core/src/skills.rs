@@ -16,7 +16,6 @@
 //! mutations are one-shot user actions and are a rename per install.
 
 use anyhow::{Context, Result};
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -31,14 +30,7 @@ pub const DEFAULT_SCAN_CAP: usize = 500;
 /// Only the head of a skill file is read, for its front matter.
 const FRONT_MATTER_MAX_BYTES: usize = 8 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillScope {
-    /// Installed for the user, wherever an ecosystem keeps them.
-    User,
-    /// Checked into the project it belongs to.
-    Project,
-}
+pub use ginka_protocol::model::{Skill, SkillInstall, SkillScope};
 
 /// One directory that holds skills.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,34 +51,14 @@ impl SkillRoot {
     }
 }
 
-/// Where one copy of a skill lives.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SkillInstall {
-    pub root_label: String,
-    pub scope: SkillScope,
-    /// The skill's own directory, not the file inside it.
-    pub directory: PathBuf,
-    pub enabled: bool,
+/// Where an install's `SKILL.md` is while the skill is on.
+pub fn enabled_path(install: &SkillInstall) -> PathBuf {
+    install.directory.join(SKILL_FILE)
 }
 
-impl SkillInstall {
-    pub fn enabled_path(&self) -> PathBuf {
-        self.directory.join(SKILL_FILE)
-    }
-
-    pub fn disabled_path(&self) -> PathBuf {
-        self.directory.join(DISABLED_SKILL_FILE)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Skill {
-    pub name: String,
-    pub description: Option<String>,
-    /// True only when every copy is enabled: a skill half-hidden is a skill
-    /// the user cannot rely on, and the toggle should say so.
-    pub enabled: bool,
-    pub installs: Vec<SkillInstall>,
+/// Where it is while the skill is off.
+pub fn disabled_path(install: &SkillInstall) -> PathBuf {
+    install.directory.join(DISABLED_SKILL_FILE)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -94,6 +66,37 @@ pub struct SkillCatalog {
     /// Sorted by name, so the list does not reshuffle between scans.
     pub skills: Vec<Skill>,
     pub truncated: bool,
+}
+
+/// Every root the library reads by default.
+///
+/// The user's, under `home`, are the ecosystems' own directories — Claude
+/// Code's, Codex's, and the shared `~/.agents/skills` several tools read —
+/// and each project's are the same three under its checkout. A root that is
+/// not there is skipped when read, so listing every ecosystem costs nothing
+/// on a machine that has one.
+pub fn default_roots(home: Option<&Path>, projects: &[(String, PathBuf)]) -> Vec<SkillRoot> {
+    const ECOSYSTEMS: [(&str, &str); 3] = [
+        ("claude", ".claude/skills"),
+        ("codex", ".codex/skills"),
+        ("agents", ".agents/skills"),
+    ];
+    let mut roots = Vec::new();
+    if let Some(home) = home {
+        for (label, relative) in ECOSYSTEMS {
+            roots.push(SkillRoot::new(label, home.join(relative), SkillScope::User));
+        }
+    }
+    for (name, path) in projects {
+        for (_, relative) in ECOSYSTEMS {
+            roots.push(SkillRoot::new(
+                name.clone(),
+                path.join(relative),
+                SkillScope::Project,
+            ));
+        }
+    }
+    roots
 }
 
 pub fn discover(roots: &[SkillRoot]) -> Result<SkillCatalog> {
@@ -146,9 +149,9 @@ pub fn discover_with_cap(roots: &[SkillRoot], cap: usize) -> Result<SkillCatalog
 pub fn set_enabled(skill: &Skill, enabled: bool) -> Result<()> {
     for install in &skill.installs {
         let (from, to) = if enabled {
-            (install.disabled_path(), install.enabled_path())
+            (disabled_path(install), enabled_path(install))
         } else {
-            (install.enabled_path(), install.disabled_path())
+            (enabled_path(install), disabled_path(install))
         };
         if !from.exists() {
             // Already in the state that was asked for.

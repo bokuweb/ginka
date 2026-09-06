@@ -146,11 +146,38 @@ pub fn update_state(
 
 /// Record the vendor's own session id, which is what a resume is built from.
 pub fn set_vendor_session_id(conn: &Connection, id: &SessionId, vendor: &str) -> Result<()> {
+    // A thread of its own is what a handoff was for: once the agent has one,
+    // the digest has been read and is not sent again.
     conn.execute(
-        "UPDATE sessions SET vendor_session_id = ?1 WHERE id = ?2",
+        "UPDATE sessions SET vendor_session_id = ?1, handoff = NULL WHERE id = ?2",
         rusqlite::params![vendor, id.0],
     )?;
     Ok(())
+}
+
+/// Keep what a session moved from another agent has to be told first.
+///
+/// Read back by [`handoff`] when its first turn starts, and cleared by
+/// [`set_vendor_session_id`] once the agent has a thread of its own — so a
+/// first turn that failed before connecting is retried with the digest intact.
+pub fn set_handoff(conn: &Connection, id: &SessionId, digest: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET handoff = ?1 WHERE id = ?2",
+        rusqlite::params![digest, id.0],
+    )?;
+    Ok(())
+}
+
+/// The digest a session still owes its agent, if any.
+pub fn handoff(conn: &Connection, id: &SessionId) -> Result<Option<String>> {
+    Ok(conn
+        .query_row(
+            "SELECT handoff FROM sessions WHERE id = ?1",
+            [&id.0],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
 }
 
 /// Append to a transcript, returning the position it landed at.

@@ -43,6 +43,15 @@ impl CodexDriver {
         self
     }
 
+    /// `-c key=value` per MCP server field: how a server reaches one
+    /// session without touching the user's `config.toml`.
+    fn mcp_args(spec: &SessionSpec) -> Vec<String> {
+        crate::tools::codex_overrides(&spec.mcp_servers)
+            .into_iter()
+            .flat_map(|assignment| ["-c".to_string(), assignment])
+            .collect()
+    }
+
     fn model_args(spec: &SessionSpec) -> Vec<String> {
         let mut args = match &spec.model {
             Some(model) => vec!["--model".to_string(), model.clone()],
@@ -117,8 +126,9 @@ impl AgentDriver for CodexDriver {
         let mut command = CommandSpec::new(&self.program)
             .arg("exec")
             .arg("--json")
-            .args(Self::model_args(spec));
-        command.args.push(spec.prompt.clone());
+            .args(Self::model_args(spec))
+            .args(Self::mcp_args(spec));
+        command.args.push(spec.agent_prompt());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
@@ -131,8 +141,9 @@ impl AgentDriver for CodexDriver {
             .arg("resume")
             .arg(vendor_session_id)
             .arg("--json")
-            .args(Self::model_args(spec));
-        command.args.push(spec.prompt.clone());
+            .args(Self::model_args(spec))
+            .args(Self::mcp_args(spec));
+        command.args.push(spec.agent_prompt());
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
@@ -484,6 +495,7 @@ fn usage_from(usage: &Value) -> Usage {
 mod tests {
 
     use super::*;
+    use ginka_protocol::AccessMode;
 
     fn parse(lines: &[&str]) -> (Vec<AgentEvent>, ParseState) {
         let driver = CodexDriver::default();
@@ -505,6 +517,99 @@ mod tests {
         assert_eq!(
             command.args.last().map(String::as_str),
             Some("do the thing")
+        );
+    }
+
+    #[test]
+    fn each_access_mode_is_a_sandbox_the_vendor_names() {
+        let driver = CodexDriver::default();
+        let args_for = |access| {
+            driver
+                .start_command(&SessionSpec::new("/tmp/wt", "go").with_access_mode(access))
+                .args
+        };
+        let read_only = args_for(AccessMode::ReadOnly);
+        assert!(
+            read_only
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+        // `ask` is what `codex exec` does on its own, so nothing is said.
+        let ask = args_for(AccessMode::Ask);
+        assert!(
+            !ask.iter()
+                .any(|arg| arg == "--sandbox" || arg == "--full-auto")
+        );
+        let auto = args_for(AccessMode::Auto);
+        assert!(auto.contains(&"--full-auto".to_string()));
+        // Never the flag that drops the sandbox: that stays the user's call.
+        assert!(!auto.iter().any(|arg| arg.contains("dangerously")));
+        // And a resume runs under the same mode.
+        let resumed = driver.resume_command(
+            &SessionSpec::new("/tmp/wt", "go").with_access_mode(AccessMode::ReadOnly),
+            "01H",
+        );
+        assert!(
+            resumed
+                .args
+                .windows(2)
+                .any(|pair| pair == ["--sandbox", "read-only"])
+        );
+    }
+
+    #[test]
+    fn mcp_servers_become_config_overrides_before_the_prompt() {
+        let driver = CodexDriver::default();
+        let spec =
+            SessionSpec::new("/tmp/wt", "hello").with_mcp_servers(vec![crate::tools::McpServer {
+                name: "ginka".into(),
+                command: "/opt/ginka".into(),
+                args: vec!["mcp".into()],
+                env: vec![("GINKA_HOME".into(), "/h".into())],
+            }]);
+        let command = driver.start_command(&spec);
+        let overrides: Vec<&str> = command
+            .args
+            .windows(2)
+            .filter(|pair| pair[0] == "-c")
+            .map(|pair| pair[1].as_str())
+            .collect();
+        assert_eq!(
+            overrides,
+            [
+                r#"mcp_servers.ginka.command="/opt/ginka""#,
+                r#"mcp_servers.ginka.args=["mcp"]"#,
+                r#"mcp_servers.ginka.env={GINKA_HOME="/h"}"#,
+            ]
+        );
+        assert_eq!(command.args.last().map(String::as_str), Some("hello"));
+        let resumed = driver.resume_command(&spec, "01H");
+        assert!(
+            resumed
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("mcp_servers.ginka"))
+        );
+    }
+
+    #[test]
+    fn a_preamble_is_sent_in_front_of_the_prompt_and_nowhere_else() {
+        let driver = CodexDriver::default();
+        let spec = SessionSpec::new("/tmp/wt", "carry on")
+            .with_preamble(Some("what came before".to_string()));
+        let command = driver.start_command(&spec);
+        let sent = command.args.last().unwrap();
+        assert!(sent.starts_with("what came before"), "{sent}");
+        assert!(sent.ends_with("carry on"), "{sent}");
+        // Nothing is recorded under the preamble's name: the transcript
+        // keeps `prompt`, which is untouched.
+        assert_eq!(spec.prompt, "carry on");
+        assert_eq!(
+            SessionSpec::new("/tmp/wt", "x")
+                .with_preamble(Some("  ".to_string()))
+                .agent_prompt(),
+            "x",
+            "a blank preamble is no preamble"
         );
     }
 

@@ -21,6 +21,7 @@ pub mod driver;
 pub mod events;
 pub mod files;
 pub mod git;
+pub mod handoff;
 pub mod i18n;
 pub mod logging;
 pub mod mcp;
@@ -34,6 +35,7 @@ pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod terminal;
+pub mod tools;
 pub mod usage;
 
 pub use paths::Paths;

@@ -1,7 +1,7 @@
 # Ginka Roadmap
 
 > Status: **in progress**. M0 and M1 are largely landed and M2's daemon, drivers and sessions are in; the remaining gaps are marked below.
-> Last updated: 2026-09-04
+> Last updated: 2026-09-06
 
 ## 1. Vision
 
@@ -48,6 +48,37 @@ Orca is the sharpest expression of "the IDE is for agents, not for humans typing
 - **Design mode.** Click an element in the embedded browser to hand its HTML/CSS/screenshot to the agent. Deferred with the browser pane (M5).
 - **Split-pane arrangement that matches task complexity** and cross-worktree native search.
 - **Explicitly rejected for v1:** SSH worktrees and the mobile companion apps. Both are large surface areas that do not serve the core loop.
+
+### 2.3 [waku](https://github.com/egoist/waku) — prior art read for behaviour
+
+waku is a shipping Rust/GPUI agent client with the same client–daemon shape as Ginka, and the closest thing there is to a map of the edge cases this design will meet. It is read for behaviour under R9 — nothing from it is copied — and the comparison below is kept so "what is missing" is a list rather than a feeling. Read 2026-09-06 at waku 0.1.17.
+
+**What waku has that Ginka does not, and where each is scheduled:**
+
+| waku | Ginka | Where |
+| --- | --- | --- |
+| Seven transports behind eleven providers (Codex app-server, ACP for Cursor/Fx/Grok/Kimi, OpenCode's HTTP+SSE, Pi's NDJSON, Amp, DeepSeek) | `claude` and `codex` | M5 drivers; ACP first, since it covers four at once |
+| Permission requests answered from the transcript (once / session / always), and structured ask-user wizards | The events and cards exist; no shipped driver raises them mid-turn | M5, with ACP and Codex's app server |
+| Access modes chosen per session (supervised / accept edits / auto / full) | **Done 2026-09-06:** `--access` on the CLI and MCP, a chip in the composer, stored on the session; Claude's `--permission-mode`, Codex's `--sandbox` / `--full-auto` | — |
+| Model / effort / tier changed in session where the transport absorbs it | The policy (`apply_session_options`) with no picker wired to it | M2 leftover: N2/N3 |
+| Rewind to a prior user message and resubmit; provider-native rollback | Fork at a position, and git checkpoints; no "edit and resend" | M3 leftover |
+| Import a conversation started in the vendor's own CLI (`/resume`) | Nothing reads the vendors' session stores | M5, per driver |
+| Find-in-page over the open transcript (⌘F) | Daemon-side search across sessions, no in-transcript jump | M4 N10 |
+| An editor: save, find and replace, markdown preview, file tree | A read-only files surface | M4 |
+| Branch picker with checkout and create | **Done 2026-09-06** on the CLI and MCP (`workspace branches|checkout`); the picker in the window is M4 | M4 |
+| Agent-generated commit message on a cheap model | **Done 2026-09-06:** `ginka commit --generate`, pushed as `CommitMessageGenerated`, and *Write it for me* in the commit box | — |
+| Diff: expand context, filter, a specific past turn | Three sources, word marks, comments | M3 leftover |
+| Embedded browser (WKWebView / WebView2) and computer use through a QuickJS MCP kernel | Deferred | M5 browser; Q5 and Q6 say no to the rest |
+| Background-work panel: detached processes, monitors, subagents that outlive a turn | Nothing | Needs a driver that reports them (M5) |
+| Usage page by day / month / project, from the vendors' own on-disk transcripts, priced from LiteLLM | Reports by day, agent and account, from Ginka's own turns | M5: the scanner and N13 |
+| A percentage for Claude's headroom, read with the CLI's OAuth token | The wall and when it opens | Q9, open on purpose |
+| Settings pages: providers, appearance, daemon exposure, skills, usage | `app.json` and `settings.json` by hand; a Reports surface | M4 surfaces |
+| OS notifications when a turn ends and no window is active | Nothing | M5 |
+| Drag, drop and paste into the composer; image preview | `ginka attach` and a reference in the text | M2 leftover |
+| Ctrl-Tab task switcher; sidebar grouping, sorting and search | ⌘K reaches workspaces by name | M4 |
+| Signed updates on three platforms, a web client and a mobile client | Nothing | M6; Q1 says no to the clients |
+
+**What Ginka has that waku does not:** a general-purpose CLI (`ginka …`) and an MCP server that expose *every* request, so an agent can drive the app; fan-out across worktrees; the checkpoint's three refs (N8) and turn-scoped diffs (N7); diff-line comments batched back to the agent; several logins per provider (N17); a hand-off that moves a conversation to another agent (§4.4 `handoff`); MCP servers configured into every agent at spawn (`ginka-core::tools`); cron, connectors and a skills library on the plan. waku has no scheduler, no general MCP client, and — to answer the question it is often asked — **no mechanism for sharing context between agents of different vendors**: its SQLite holds five tables of task persistence, its search is a substring scan, a task's resume cursor is rejected at driver start if it names another provider, a fork is same-provider by construction, and the provider of a task can only be changed while its transcript is empty.
 
 ## 3. Scope
 
@@ -167,6 +198,7 @@ SQLite, migrations under `db/migrations/`. Tables (Band's schema is a good start
 - `browser_history` — (workspace, url) unique, `visit_count` / `last_visited_at` for frecency. M5.
 - `attachments` — daemon-owned uploads referenced from a message by a `ginka-attachment:` URI, bounded per file and per directory upload. The daemon stores the bytes; the transcript stores the reference.
 - Provider-emitted images (`data:` URLs from screenshots and tool output) never land in the transcript inline. Above a small size threshold they are externalised into a content-addressed blob directory and referenced as `ginka-blob:`. Inline base64 inflates the payload by a third and is re-decoded on every render — this is the single change that keeps a computer-use-style session's state readable.
+- `sessions.handoff` — the digest a conversation moved from another agent (or another login) still owes its new agent, written by `fork_session` and sent in front of the first prompt (`ginka-core::handoff`). Cleared when the vendor's own session id arrives, so a first turn that never connected is retried with it intact. It is not in the transcript: it is addressed to the agent, and the reader has the original.
 - Sessions carry an optional **origin** — `origin_connector`, `origin_channel`, `origin_thread`, unique together — when a chat platform started them. It is the thread-to-session map for connectors (`docs/connectors.md` §7) and the sidebar's origin chip.
 - `connector_deliveries` / `connector_seen` — the outbound delivery ledger and the bounded inbound dedup set for chat connectors, so a daemon restart neither loses a reply nor answers a redelivered message twice.
 - Sessions carry **two title fields**: a user-set `title` and a provider-set `auto_title`, resolved title → auto-title → default, so a provider's title can never overwrite a name the user typed. The first prompt's opening words fill `auto_title` as a placeholder until the provider's own title arrives.
@@ -351,7 +383,8 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [ ] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [ ] `codex` driver
 - [x] **Steering (N1):** a follow-up goes into the running turn on a transport that can take one — `claude` streams its input, so the prompt and everything after it are written to the agent as it works — and the queue is what happens where it cannot
-- [ ] **Session options (N2, N3):** model / reasoning effort / service tier / access mode picker, catalogue discovered from each CLI with a static fallback, and an `apply_options` path that restarts only when the transport cannot absorb the change
+- [x] **Access mode per session (N2, first half):** `session start --access read-only|ask|auto`, the `access` argument over MCP, and an access chip in the composer; stored on the session so every follow-up runs under the mode the conversation began in. Claude takes it as `--permission-mode plan|acceptEdits|bypassPermissions`, Codex as `--sandbox read-only` or `--full-auto`, with `ask` left to what `codex exec` does on its own
+- [ ] **Session options (N2 second half, N3):** model / reasoning effort / service tier changed in session, catalogue discovered from each CLI with a static fallback, and an `apply_options` path that restarts only when the transport cannot absorb the change
 - [x] **Attachments (N6):** the daemon stores an upload and answers with a reference; a message that mentions one reaches the agent as a path it can open. `ginka attach` is the CLI half
 - [ ] Paste and drag into the composer, and externalise provider-emitted images into the blob store
 - [ ] Protocol handshake carries a version and a wire-size bound (§4.1); daemon-host path rule honoured by every client path
@@ -380,7 +413,8 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] Intra-line word diff
 - [ ] Split diff
 - [x] Commit: message box under the reviewed files, `ginka commit` / `push`
-- [x] Stage/unstage per file, revert a file; agent-generated commit message still open
+- [x] Stage/unstage per file, revert a file
+- [x] **Commit messages (N9), wired:** `GenerateCommitMessage` runs one read-only turn on the provider's cheap tier through the driver's own command and parser, on a thread, and pushes `CommitMessageGenerated`; `ginka commit --generate [--agent]` waits for it and commits, and the commit box's *Write it for me* button puts it in the box
 - [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
 - [x] Checkpoints: snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
@@ -409,6 +443,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [x] File listing with `nucleo` matching, behind `@` in the composer and `ginka files`
 - [x] Content search in a workspace, behind the same box as the file finder and `ginka search`
 - [ ] File tree, quick open, cross-worktree search
+- [x] Branches: `ginka workspace branches|checkout [--create]`, `ginka_branches` / `ginka_checkout` over MCP — the list says which worktree holds each, and a checkout never re-keys the workspace (rule 4). The picker in the window is still to do
 - [x] A files surface: find a file in the worktree and read it (read-only)
 - [ ] Integrate `gpui-component`'s `CodeEditor`: file tabs, editor history (go back/forward), markdown + image preview
 - [ ] LSP wiring through `CodeEditor`: go-to-definition, hover, diagnostics
@@ -421,7 +456,10 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] MCP server on the daemon exposing the same operations to agents
 - [ ] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
 - [ ] **Transcript search (N10):** daemon-side search across a session's messages, with in-transcript jump
-- [ ] **Skills library (N11):** discover `SKILL.md` across every ecosystem's roots, group duplicate installs by name, enable/disable by renaming. Distinct from the Ginka-driving skills above — this manages the agents' own
+- [x] **Skills library (N11), over the protocol:** `ginka skills list|enable|disable`, `ginka_skills` / `ginka_skill_enable` over MCP — every ecosystem's roots under the home and under each project, duplicates grouped by name, enable/disable by renaming. Distinct from the Ginka-driving skills above — this manages the agents' own
+- [ ] The skills surface in the window, on the same two requests
+- [x] **Move a conversation to another agent:** `ginka session fork --agent codex` (and `--account`) copies the record and hands the new agent a bounded digest of it with its first prompt, since the vendor's thread cannot follow (`ginka-core::handoff`, §4.4)
+- [ ] The same from the window: a fork row in the transcript's turn menu that offers the other agents
 
 > **Landed already (domain layer):** N10 transcript storage and search (`ginka-core::transcript`), N11 skill discovery and enable/disable (`ginka-core::skills`).
 
@@ -442,8 +480,11 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Design mode: click an element → send HTML/CSS/screenshot to the agent
 - [ ] Notifications + sounds on agent completion / attention needed
 - [x] Scratch workspaces (`~/.ginka/projects/<date>/<slug>`) for projectless starts, and plain folders as workspaces
-- [ ] Remaining drivers: `acp`, `opencode`, `gemini`, `cursor`, `amp`
-- [x] **Slack connector** (`docs/connectors.md`): a bound channel starts or continues a turn on the user's machine over Socket Mode and gets the answer back in the thread — `ginka-core::connector` first, test-first, then the adapter in the daemon; questions and permissions relayed once the drivers surface them. Landed with `ginka slack status | bindings | allow | test`; what remains is the window drawing a connector's state and a session's origin chip
+- [ ] Remaining drivers: `acp` first (it covers Cursor, Grok, Kimi and Fx at once), then `opencode`, `gemini`, `amp`; each with its own out-of-band session reader for import
+- [x] **MCP servers handed to every agent at spawn** (`ginka-core::tools`, `settings.json` → `tools`): Ginka's own bridge (`ginka mcp`, found beside the daemon or on `PATH`, or named by `GINKA_CLI`), zvec-grep's server where `zg` is installed and the worktree carries a `.zvec-grep/` index, and the user's own `tools.servers` — as `--mcp-config` on Claude and `-c mcp_servers.*` on Codex, nothing written into the user's home
+- [x] `ginka workspace index` runs `zg index` in the user's terminal; `IndexWorkspace` runs it in a daemon terminal for the window
+- [ ] A palette entry for `IndexWorkspace`, and a word in the composer saying whether the workspace is indexed
+- [x] **Slack connector** (`docs/connectors.md`): a bound channel starts or continues a turn on the user's machine over Socket Mode and gets the answer back in the thread — `ginka-core::connector` first, test-first, then the adapter in the daemon; questions and permissions relayed once the drivers surface them
 
 > **Landed already (domain layer):** N12 plan windows and N13 the rate table, pricing and cost quality (`ginka-core::usage`). What remains is collecting the events and drawing the page.
 
@@ -598,6 +639,11 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-06 | The account is a layer of `SessionSpec::env`, between the provider's settings and the session's own | The supervisor's spawn already applies a driver's environment and then the session's; the account slots between them without a new mechanism, so a `CODEX_HOME` typed into the provider's settings cannot defeat the account a chat was aimed at, and a test can still override anything. The default account contributes nothing to the layer, which is what "one login changes nothing" means in code. |
 | 2026-09-06 | `ginka account login` runs the vendor's sign-in in the user's own terminal; the window runs it in a daemon terminal | A sign-in is interactive on a TTY, and the CLI is already on one. The daemon still says what to run and which directory to point it at (`Account.login`), so the knowledge is the daemon's and both clients speak the protocol (rule 3); only where the process draws differs. |
 | 2026-09-06 | A refused Claude turn is read as a window at 100 %, and its reset is kept only when given as a number | Headless, the refusal's text is all Claude Code 1.0.124 says about its windows (Q9 is the percentage). The older wording carries a unix timestamp after a `\|`, the newer one a time in prose; turning "3pm" into a timestamp would be a guess, and the user plans around it. The gauge says what it knows — the wall, and when it opens if the vendor said — and nothing more. |
+| 2026-09-06 | A generated commit message is a pushed event, not a response | The service serialises requests, which is right for SQLite and git and wrong for a model: a subject line takes a cheap model ten to thirty seconds, and a request that long holds every window's next tick. The generation is one read-only turn through the driver's own `start_command` and `parse_line` — no second code path for a vendor to break (R6) — on a thread, and the answer lands where every other asynchronous fact does, on the event stream. The CLI opens its event stream before it asks, so the answer cannot fall in the gap. |
+| 2026-09-06 | An access mode is a launch argument, stored on the session, and "ask" means "edit freely, commands sandboxed or refused" | The connector work gave the drivers a mode, but `ask` still ran Claude in the vendor's `default` — which, headless, refuses every edit — and nothing outside a connector could choose one. Headless is the point: nothing can answer a prompt mid-turn, so the mode is the whole of what the agent may do, and `ask` maps to the vendor's *accept edits* rather than its *ask*. Codex's `exec` never asks either, so there `ask` is what the CLI does on its own and `auto` is `--full-auto`, which keeps the sandbox: dropping it is `--dangerously-bypass-approvals-and-sandbox`, a choice the user's own config can make and a driver should not make for them. The mode is a column because a follow-up is a new process, and a resume that quietly widened it would be exactly the change N2 reserves for a fresh session. |
+| 2026-09-06 | A conversation moves between agents as a digest of the record, never as the vendor's thread | The thread is the vendor's and lives in its store, in the account's directory: `resume` cannot cross a provider or a login (N2, `docs/accounts.md` §5). The record is ours, in one normalized shape whatever produced it (rule 6), so it is the one thing that can be handed over. It goes in front of the first prompt rather than into the transcript because it is addressed to the agent and the reader already has the original; it is bounded, keeping the task and the latest turns and dropping the middle, because a long conversation would otherwise spend the new agent's window before it did anything; and the working tree is not described, because the agent can read it and it is the one thing already true. Kept in a column and cleared on connect, so a first turn that never connected is retried with it. |
+| 2026-09-06 | The daemon registers its own MCP bridge, and any other server the user lists, on the command line of every agent it starts | Rule 3's third client was real only for a user who had registered `ginka mcp` in each vendor's own config by hand, which is most sessions running without it. Every driver takes a server on the command line — Claude as `--mcp-config` JSON, Codex as `-c mcp_servers.*` — so nothing is written into the user's home for a session, and the bridge finds the daemon through `daemon.json` in `GINKA_HOME`, so the agent's argv carries a path and a directory and never the token. `tools.servers` rides the same path so one setting reaches every agent. |
+| 2026-09-06 | zvec-grep is integrated as a tool the agent is handed, not as a library Ginka links | `zg` gives an agent semantic, BM25 and hybrid search over a workspace with a local embedding model, and its stable surface is its MCP server (`zg server --stdio`) — its `--json` output was removed in favour of agent-facing markdown, so parsing its CLI would be R6 by another name. Linking `zvec-rust` instead would pull a prebuilt C++ dynamic library down at build time, which is a supply-chain question and a signing question (N16) for a feature the tool already answers as a process, the same way the agent CLIs do. So: when `zg` is on `PATH` and the worktree carries `.zvec-grep/`, the agent gets the server; Ginka's own search stays `git grep`, and a knowledge store of Ginka's own — summaries or embeddings of transcripts shared across agents — is not built until a use has been shown that the hand-off digest does not cover. |
 | 2026-09-06 | *Add a login…* sits in the agent picker as well as the account picker | The account chip exists only where there is a choice, so a provider's first second login has nothing to be added from; the agent picker is always there. The dialog is two fields and the daemon's own refusal, because the rules — a slug, not taken, not a provider's own — are the daemon's to apply and the window's to repeat. |
 | 2026-09-06 | A session's access mode is fixed when it starts, stored, and reaches the driver on every turn; `StartSession` takes it and a chat connector's binding is the first caller to set it | N2 said the mode is a launch argument and a change restarts the session, but nothing passed it: every session ran at the vendor's default. The connector needs a ceiling per channel that is true in fact, and a follow-up that ran at a different mode from the turn before it would be exactly the silent widening N2 exists to prevent. Stored on the session rather than looked up, because the binding can change under a running thread. |
 | 2026-09-06 | The Slack connector is hosted by the daemon behind `ConnectorControl`, and everything it does to a session is a `Request` on the same handler the CLI uses | `docs/connectors.md` §2 as built. The service knows a connector's id and state and nothing about Socket Mode; the runner knows the protocol and nothing about SQLite beyond the ledger tables it owns. `ListSessions` grew an `origin` filter and `CloseSessionOrigin` was added rather than giving the runner a private path, which is what keeps `ginka session` able to do what a thread can. |

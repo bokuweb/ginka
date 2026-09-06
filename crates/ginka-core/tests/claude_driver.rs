@@ -86,7 +86,9 @@ fn each_access_mode_maps_to_a_permission_mode() {
     };
     // Ours, mapped onto the vendor's vocabulary once, here.
     assert_eq!(mode_for(AccessMode::ReadOnly).as_deref(), Some("plan"));
-    assert_eq!(mode_for(AccessMode::Ask).as_deref(), Some("default"));
+    // "Edit freely" is the vendor's acceptEdits: its `default` would refuse
+    // the edits headless, along with the commands.
+    assert_eq!(mode_for(AccessMode::Ask).as_deref(), Some("acceptEdits"));
     assert_eq!(
         mode_for(AccessMode::Auto).as_deref(),
         Some("bypassPermissions")

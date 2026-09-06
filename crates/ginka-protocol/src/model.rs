@@ -536,6 +536,60 @@ pub enum CommandScope {
     User,
 }
 
+/// One local branch, as a picker lists it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BranchInfo {
+    pub name: String,
+    /// Checked out in the workspace that was asked.
+    pub current: bool,
+    /// The worktree that has it checked out, when one does — git refuses to
+    /// check a branch out twice, so a picker greys these. A daemon-host path.
+    pub checked_out_at: Option<PathBuf>,
+}
+
+/// Where a skill was installed from the user's point of view.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillScope {
+    /// Installed for the user, wherever an ecosystem keeps them.
+    User,
+    /// Checked into the project it belongs to.
+    Project,
+}
+
+/// One copy of a skill: a directory holding a `SKILL.md`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInstall {
+    /// The root it was found under, as the library names it: `claude`,
+    /// `codex`, `agents`, or a project's name.
+    pub root_label: String,
+    pub scope: SkillScope,
+    /// The skill's own directory, not the file inside it. A daemon-host path
+    /// (`docs/roadmap.md` §4.1).
+    pub directory: PathBuf,
+    pub enabled: bool,
+}
+
+/// A skill the agents can load, grouped across every place it was installed
+/// (`docs/roadmap.md` §3.3 N11).
+///
+/// Installers and dotfiles drop the same skill into several ecosystems'
+/// roots; one entry carries every copy, and a toggle applies to all of them.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Skill {
+    /// From the file's front matter, or the directory's name.
+    pub name: String,
+    pub description: Option<String>,
+    /// True only when every copy is enabled: a skill half-hidden is a skill
+    /// the user cannot rely on, and the toggle should say so.
+    pub enabled: bool,
+    pub installs: Vec<SkillInstall>,
+}
+
 /// A command the composer offers after `/`.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -78,12 +78,29 @@ impl ClaudeDriver {
             args.push("--model".to_string());
             args.push(model.clone());
         }
-        // The default is what the CLI does when told nothing, so it is only
-        // spelled out when it is not the default: the arguments a test reads
-        // stay what they were.
-        if spec.access_mode != AccessMode::Ask {
-            args.push("--permission-mode".to_string());
-            args.push(permission_mode(spec.access_mode).to_string());
+        // Headless, a tool the mode would ask about is refused rather than
+        // asked about, so the mode is the whole of what the agent may do
+        // (§3.3 N2) — passed always, because the vendor's own default is
+        // not ours.
+        args.push("--permission-mode".to_string());
+        args.push(permission_mode(spec.access_mode).to_string());
+        if !spec.mcp_servers.is_empty() {
+            // As a JSON string rather than a file: nothing is written into
+            // the user's home for one session. The user's own servers still
+            // load — this is not `--strict-mcp-config`.
+            args.push("--mcp-config".to_string());
+            args.push(crate::tools::claude_config(&spec.mcp_servers));
+            // Headless, a tool the mode would ask about is refused rather
+            // than asked about; the servers the daemon itself handed over
+            // are ones it means the agent to use.
+            args.push("--allowedTools".to_string());
+            args.push(
+                spec.mcp_servers
+                    .iter()
+                    .map(|server| format!("mcp__{}", server.name))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
         }
         args
     }
@@ -275,7 +292,10 @@ fn permission_mode(access: AccessMode) -> &'static str {
     match access {
         // Plan mode reads and proposes without touching anything.
         AccessMode::ReadOnly => "plan",
-        AccessMode::Ask => "default",
+        // "Edit freely inside the worktree; commands are approved" — and
+        // headless, a command that would be asked about is refused. The
+        // vendor's `default` mode would refuse the edits too.
+        AccessMode::Ask => "acceptEdits",
         AccessMode::Auto => "bypassPermissions",
     }
 }
@@ -425,6 +445,39 @@ mod tests {
                 .map(|line| line.contains("write the test first")),
             Some(true)
         );
+    }
+
+    #[test]
+    fn mcp_servers_ride_on_the_command_line_and_are_allowed() {
+        let driver = ClaudeDriver::default();
+        let spec =
+            SessionSpec::new("/tmp/wt", "hello").with_mcp_servers(vec![crate::tools::McpServer {
+                name: "ginka".into(),
+                command: "/opt/ginka".into(),
+                args: vec!["mcp".into()],
+                env: vec![],
+            }]);
+        let command = driver.start_command(&spec);
+        let config = command
+            .args
+            .windows(2)
+            .find(|pair| pair[0] == "--mcp-config")
+            .map(|pair| pair[1].clone())
+            .expect("an --mcp-config");
+        let parsed: serde_json::Value = serde_json::from_str(&config).unwrap();
+        assert_eq!(parsed["mcpServers"]["ginka"]["command"], "/opt/ginka");
+        assert_eq!(
+            command
+                .args
+                .windows(2)
+                .find(|pair| pair[0] == "--allowedTools"),
+            Some(["--allowedTools".to_string(), "mcp__ginka".to_string()].as_slice())
+        );
+        // The user's own servers still load: this is not strict.
+        assert!(!command.args.iter().any(|arg| arg == "--strict-mcp-config"));
+        // And with none there is nothing on the command line about it.
+        let bare = driver.start_command(&SessionSpec::new("/tmp/wt", "hello"));
+        assert!(!bare.args.iter().any(|arg| arg == "--mcp-config"));
     }
 
     #[test]

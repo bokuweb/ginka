@@ -385,7 +385,7 @@ impl Supervisor {
             && let Some(mut stdin) = child.stdin.take()
         {
             let (sender, lines) = async_channel::unbounded::<String>();
-            if let Some(first) = driver.encode_user_message(&spec.prompt) {
+            if let Some(first) = driver.encode_user_message(&spec.agent_prompt()) {
                 let _ = sender.try_send(first);
             }
             *steer.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
@@ -462,6 +462,9 @@ impl Supervisor {
                     };
                     let mut next_spec = spec.clone();
                     next_spec.prompt = prompt;
+                    // Whatever the first turn was told, this one was not
+                    // forked from anywhere.
+                    next_spec.preamble = None;
                     supervisor.run_turn(session, driver, next_spec, vendor);
                 }
             }
