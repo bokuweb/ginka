@@ -257,3 +257,95 @@ fn a_known_shape_missing_its_required_field_names_the_field() {
         .unwrap_err();
     assert!(error.to_string().contains("content"), "{error}");
 }
+
+// ---------------------------------------------------------------------------
+// A refused turn is the one thing the CLI says about its rate-limit windows
+// headless (`docs/accounts.md` §6).
+
+fn plan_events(events: &[AgentEvent]) -> Vec<ginka_protocol::model::PlanUsage> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AgentEvent::PlanUsage { usage } => Some(usage.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_refused_turn_is_a_window_at_the_wall_with_the_reset_it_named() {
+    let mut stream = ClaudeStream::default();
+    let events = stream
+        .push_line(r#"{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Claude AI usage limit reached|1700000000","session_id":"s"}"#)
+        .unwrap();
+    let plans = plan_events(&events);
+    assert_eq!(plans.len(), 1);
+    let window = &plans[0].windows[0];
+    assert_eq!(
+        window.label, "limit",
+        "the older wording does not say which"
+    );
+    assert_eq!(window.used_percent, 100.0);
+    assert_eq!(window.resets_at, Some(1_700_000_000));
+    // And the turn still failed, as it did.
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AgentEvent::SessionResult {
+            state: SessionState::Failed,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn the_newer_wording_names_the_window_and_gives_no_number_to_reset_by() {
+    let mut stream = ClaudeStream::default();
+    let events = stream
+        .push_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"5-hour limit reached ∙ resets 3pm","session_id":"s"}"#)
+        .unwrap();
+    let plans = plan_events(&events);
+    assert_eq!(plans[0].windows[0].label, "5h");
+    assert_eq!(
+        plans[0].windows[0].resets_at, None,
+        "3pm is prose, and a guessed timestamp would be worse than none"
+    );
+
+    let mut stream = ClaudeStream::default();
+    let events = stream
+        .push_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"Opus weekly limit reached","session_id":"s"}"#)
+        .unwrap();
+    assert_eq!(plan_events(&events)[0].windows[0].label, "opus week");
+}
+
+#[test]
+fn one_wall_said_twice_in_a_turn_is_one_reading() {
+    // The CLI puts the refusal in the assistant's text and in the result.
+    let mut stream = ClaudeStream::default();
+    let mut events = stream
+        .push_line(r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Claude AI usage limit reached|1700000000"}]},"session_id":"s"}"#)
+        .unwrap();
+    events.extend(
+        stream
+            .push_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"Claude AI usage limit reached|1700000000","session_id":"s"}"#)
+            .unwrap(),
+    );
+    assert_eq!(plan_events(&events).len(), 1);
+}
+
+#[test]
+fn an_ordinary_failure_claims_nothing_about_the_windows() {
+    let mut stream = ClaudeStream::default();
+    let events = stream
+        .push_line(r#"{"type":"result","subtype":"error","is_error":true,"result":"Invalid API key · Please run /login","session_id":"s"}"#)
+        .unwrap();
+    assert!(plan_events(&events).is_empty());
+    // Nor does an answer that happens to mention limits.
+    let mut stream = ClaudeStream::default();
+    let events = stream
+        .push_line(r#"{"type":"result","subtype":"success","is_error":false,"result":"Set a limit reached by the loop counter.","session_id":"s"}"#)
+        .unwrap();
+    assert!(
+        plan_events(&events).is_empty(),
+        "a successful turn hit no wall"
+    );
+}

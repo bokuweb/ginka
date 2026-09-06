@@ -76,6 +76,57 @@ composer.account.no_reading:
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"
+composer.account.add:
+  en: "Add a login for %{agent}…"
+  ja: "%{agent} のログインを追加…"
+composer.account.add.title:
+  en: "New login for %{agent}"
+  ja: "%{agent} の新しいログイン"
+composer.account.add.id:
+  en: "Id, like claude-work"
+  ja: "ID（例: claude-work）"
+composer.account.add.label:
+  en: "Label, like Work"
+  ja: "表示名（例: Work）"
+composer.account.add.hint:
+  en: "A private directory is made for the CLI to sign into. Sign in afterwards by choosing the login, or with `ginka account login <id>`."
+  ja: "CLI がサインインするための専用ディレクトリを作ります。作成後にそのログインを選ぶか、`ginka account login <id>` でサインインしてください。"
+composer.account.add.no_provider:
+  en: "This build cannot add a login for that agent."
+  ja: "このビルドではそのエージェントのログインを追加できません。"
+composer.account.add.submit:
+  en: Add
+  ja: 追加
+composer.account.add.cancel:
+  en: Cancel
+  ja: キャンセル
+daemon.unreachable:
+  en: "The daemon could not be reached."
+  ja: "デーモンに接続できません。"
+surface.reports.pending:
+  en: What the work cost, and how close each login is to its limit.
+  ja: 作業のコストと、各ログインの上限までの残り。
+surface.reports.reading:
+  en: Reading the report…
+  ja: レポートを読み込んでいます…
+surface.reports.empty:
+  en: No agent has run yet.
+  ja: まだエージェントは実行されていません。
+surface.reports.windows:
+  en: Rate-limit windows
+  ja: レート制限ウィンドウ
+surface.reports.no_reading:
+  en: No login has been read yet. Open the account picker to ask.
+  ja: まだ残量を取得したログインはありません。アカウントのピッカーを開くと取得します。
+surface.reports.by_account:
+  en: By login
+  ja: ログイン別
+surface.reports.by_agent:
+  en: By agent
+  ja: エージェント別
+surface.reports.by_day:
+  en: By day
+  ja: 日別
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー

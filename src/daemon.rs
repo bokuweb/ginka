@@ -151,6 +151,47 @@ impl DaemonLink {
         }
     }
 
+    /// What the work cost over `days`, and where each login stands.
+    pub async fn usage(&self, days: u32) -> Option<ginka_ui::reports::UsageReport> {
+        match self.ask(Request::Usage { days: Some(days) }).await {
+            Some(Response::Usage {
+                by_day,
+                by_agent,
+                by_account,
+                plans,
+            }) => Some(ginka_ui::reports::UsageReport {
+                by_day,
+                by_agent,
+                by_account,
+                plans,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Add a login for a provider: a directory for its CLI to sign into.
+    ///
+    /// The daemon's refusal — a bad id, a name already taken — comes back as
+    /// the sentence it gave, because the dialog shows it to the reader.
+    pub async fn add_account(
+        &self,
+        id: AccountId,
+        provider: ginka_protocol::ProviderKind,
+        label: String,
+    ) -> Result<Account, String> {
+        match self
+            .ask_result(Request::AddAccount {
+                id,
+                provider,
+                label,
+            })
+            .await?
+        {
+            Response::Account { account } => Ok(account),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Every login of every provider, with what the daemon last learned
     /// about each being signed in.
     pub async fn accounts(&self) -> Vec<Account> {
@@ -537,6 +578,20 @@ impl DaemonLink {
             text,
         })
         .await;
+    }
+
+    /// Ask the daemon one question and keep its refusal, for the callers
+    /// that show one: a refused request is an answer, not a lost connection.
+    async fn ask_result(&self, request: Request) -> Result<Response, String> {
+        let client = self
+            .client()
+            .await
+            .ok_or_else(|| rust_i18n::t!("daemon.unreachable").to_string())?;
+        client.request(request).await.map_err(|error| {
+            // The daemon answered — it just said no — so the connection is
+            // still good and is kept.
+            error.message
+        })
     }
 
     /// Ask the daemon one question, reconnecting next time if it fails.

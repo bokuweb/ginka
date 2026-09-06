@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::driver::{ActivityItem, AgentEvent, DriverError};
 use ginka_protocol::event::Usage;
-use ginka_protocol::model::SessionState;
+use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
 
 /// Reads a session's lines, holding the little state pairing needs.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -26,6 +26,10 @@ pub struct ClaudeStream {
     /// Calls waiting for their result, so a result can be rendered as the row
     /// it belongs to rather than as an orphan with no title.
     pending: HashMap<String, ActivityItem>,
+    /// Set once this turn has reported hitting a rate limit: the CLI says it
+    /// in the assistant's text and again in the result, and one wall is one
+    /// reading.
+    limit_reported: bool,
 }
 
 impl ClaudeStream {
@@ -105,6 +109,9 @@ impl ClaudeStream {
                         events.push(AgentEvent::TextDelta {
                             text: text.to_string(),
                         });
+                        if let Some(usage) = self.limit_in(text) {
+                            events.push(AgentEvent::PlanUsage { usage });
+                        }
                     }
                 }
                 "thinking" => {
@@ -197,6 +204,13 @@ impl ClaudeStream {
         let text = string_at(message, "result");
         let subtype = string_at(message, "subtype").unwrap_or_default();
 
+        // A refused turn is the one thing the CLI says about its windows
+        // headless (`docs/accounts.md` §6): the wall, and when it opens.
+        if failed && let Some(usage) = text.as_deref().and_then(|text| self.limit_in(text)) {
+            events.push(AgentEvent::PlanUsage { usage });
+        }
+        self.limit_reported = false;
+
         // A result line is the end of a turn, and the turn number is what a
         // checkpoint is filed against.
         self.turn += 1;
@@ -257,6 +271,55 @@ impl ClaudeStream {
             _ => Vec::new(),
         }
     }
+}
+
+impl ClaudeStream {
+    /// The reading a rate-limit refusal amounts to, once per turn.
+    fn limit_in(&mut self, text: &str) -> Option<PlanUsage> {
+        if self.limit_reported {
+            return None;
+        }
+        let usage = limit_reached(text)?;
+        self.limit_reported = true;
+        Some(usage)
+    }
+}
+
+/// What a refused turn says about the account's windows.
+///
+/// Claude Code 1.0.124 reports no percentage headless. What reaches a client
+/// is the refusal's text: `Claude AI usage limit reached|<unix seconds>` in
+/// the older wording, or a sentence naming the window — `5-hour limit
+/// reached`, `Weekly limit reached`, `Opus weekly limit reached` — with a
+/// reset time in prose the newer one. Either way the window is at the wall,
+/// which is a reading of 100 %, and the reset is kept only when it was given
+/// as a number: a guess would be worse than silence.
+fn limit_reached(text: &str) -> Option<PlanUsage> {
+    let lowered = text.to_ascii_lowercase();
+    if !(lowered.contains("limit reached") || lowered.contains("usage limit")) {
+        return None;
+    }
+    let label = if lowered.contains("opus") {
+        "opus week"
+    } else if lowered.contains("weekly") {
+        "week"
+    } else if lowered.contains("5-hour") {
+        "5h"
+    } else {
+        "limit"
+    };
+    let resets_at = text
+        .rsplit_once('|')
+        .and_then(|(_, tail)| tail.trim().parse::<i64>().ok())
+        .filter(|seconds| *seconds > 0);
+    Some(PlanUsage {
+        plan: None,
+        windows: vec![PlanWindow {
+            label: label.to_string(),
+            used_percent: 100.0,
+            resets_at,
+        }],
+    })
 }
 
 fn string_at(value: &Value, key: &str) -> Option<String> {

@@ -39,7 +39,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
 - **Finding things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, and reads what it opens. ⌘K reaches every action, panel, surface and workspace by name.
 - **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
-- **Accounts.** Several logins per provider (`docs/accounts.md`, N17): `ginka account add|list|login|remove|refresh`, `session start --account`, and an account chip in the composer when a provider has more than one. A session records the login it ran on, usage is filed by it, and Codex's rate-limit windows are read on demand through its app server and shown beside the choice.
+- **Accounts.** Several logins per provider (`docs/accounts.md`, N17): `ginka account add|list|login|remove|refresh`, `session start --account`, an *Add a login…* row in the pickers, and an account chip in the composer when a provider has more than one. A session records the login it ran on, usage is filed by it, and each login's rate-limit windows — Codex's through its app server, Claude's from a refused turn — are shown beside the choice, in the sidebar footer and on the **Reports** surface.
 
 What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
 
