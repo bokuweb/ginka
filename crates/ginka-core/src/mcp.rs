@@ -96,6 +96,7 @@ pub fn tools() -> Vec<Tool> {
                     "agent": {"type": "string", "description": "A driver id: claude, codex"},
                     "prompt": {"type": "string"},
                     "model": {"type": "string"},
+                    "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands sandboxed or refused) otherwise"},
                     "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's default otherwise"},
                 },
                 "required": ["workspace", "agent", "prompt"],
@@ -118,6 +119,21 @@ pub fn tools() -> Vec<Tool> {
                     "base": {"type": "string"},
                 },
                 "required": ["project", "prefix", "prompt", "agents"],
+            }),
+        },
+        Tool {
+            name: "ginka_session_fork",
+            description: "Copy a conversation up to a point and carry on from there. Naming another agent or account moves it: the new agent is handed a digest of the transcript with its first prompt, because it cannot continue the old one's thread.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "after": {"type": "integer", "description": "The transcript position to fork at; all of it otherwise"},
+                    "agent": {"type": "string", "description": "A driver id to move the conversation to: claude, codex"},
+                    "model": {"type": "string"},
+                    "account": {"type": "string", "description": "An account id from ginka_accounts"},
+                },
+                "required": ["session"],
             }),
         },
         Tool {
@@ -205,6 +221,49 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_branches",
+            description: "A workspace's local branches: which is checked out there, and which other worktrees hold.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_checkout",
+            description: "Check a branch out in a workspace, creating it from HEAD when `create` is set. The workspace keeps its id.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "branch": {"type": "string"},
+                    "create": {"type": "boolean"},
+                },
+                "required": ["workspace", "branch"],
+            }),
+        },
+        Tool {
+            name: "ginka_skills",
+            description: "The skills installed for the agents, grouped across every place each was installed, with whether each is enabled.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string", "description": "Only this project's skills, plus the user's"}},
+            }),
+        },
+        Tool {
+            name: "ginka_skill_enable",
+            description: "Enable or disable every copy of a skill by name. Disabling renames its SKILL.md; nothing is deleted.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "project": {"type": "string"},
+                },
+                "required": ["name", "enabled"],
+            }),
+        },
+        Tool {
             name: "ginka_checkpoints",
             description: "The points a workspace can be rewound to.",
             schema: json!({
@@ -269,7 +328,12 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             prompt: text("prompt")?,
             model: maybe("model"),
             account: maybe("account").map(ginka_protocol::AccountId),
-            access_mode: None,
+            access_mode: match maybe("access") {
+                Some(word) => Some(ginka_protocol::AccessMode::parse(&word).ok_or_else(|| {
+                    anyhow!("{tool}: access is read-only, ask or auto, not {word:?}")
+                })?),
+                None => None,
+            },
             origin: None,
         },
         "ginka_fan_out" => Request::FanOut {
@@ -300,6 +364,13 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 })
                 .filter(|attempts: &Vec<_>| !attempts.is_empty())
                 .ok_or_else(|| anyhow!("{tool} needs at least one entry in `agents`"))?,
+        },
+        "ginka_session_fork" => Request::ForkSession {
+            session: SessionId(text("session")?),
+            after: number("after"),
+            agent: maybe("agent"),
+            model: maybe("model"),
+            account: maybe("account").map(ginka_protocol::AccountId),
         },
         "ginka_session_send" => Request::SendMessage {
             session: SessionId(text("session")?),
@@ -341,6 +412,25 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_read_file" => Request::ReadFile {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
+        },
+        "ginka_branches" => Request::ListBranches {
+            workspace: WorkspaceId(text("workspace")?),
+        },
+        "ginka_checkout" => Request::CheckoutBranch {
+            workspace: WorkspaceId(text("workspace")?),
+            branch: text("branch")?,
+            create: flag("create"),
+        },
+        "ginka_skills" => Request::ListSkills {
+            project: maybe("project").map(ProjectName),
+        },
+        "ginka_skill_enable" => Request::SetSkillEnabled {
+            name: text("name")?,
+            enabled: arguments
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("{tool} needs `enabled`"))?,
+            project: maybe("project").map(ProjectName),
         },
         "ginka_checkpoints" => Request::ListCheckpoints {
             workspace: WorkspaceId(text("workspace")?),
@@ -431,6 +521,8 @@ mod tests {
                 "checkpoint": "c-1",
                 "prefix": "attempt",
                 "agents": ["claude", "codex:gpt-5"],
+                "name": "release-notes",
+                "enabled": false,
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));

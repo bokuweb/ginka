@@ -59,6 +59,8 @@ enum Picker {
     Model,
     /// Which of that agent's logins it runs on (`docs/accounts.md` §11).
     Account,
+    /// What the agent may touch (`docs/roadmap.md` §3.3 N2).
+    Access,
     /// Which file the `@` being typed means.
     Mention,
     /// Which command the `/` being typed means.
@@ -186,6 +188,10 @@ pub struct Shell {
     chosen_agent: Option<String>,
     /// The model the user chose for that agent.
     chosen_model: Option<String>,
+    /// What the next session's agent may touch. `None` is the daemon's
+    /// default, `ask`. Fixed for a conversation once it has started, so the
+    /// chip is only offered where a new session is about to be.
+    chosen_access: Option<ginka_protocol::AccessMode>,
     /// The login the user chose for that agent. `None` runs the provider's
     /// default, which is what one login per provider always is.
     chosen_account: Option<ginka_protocol::AccountId>,
@@ -263,6 +269,9 @@ impl Shell {
                 this.leave_comment(path.clone(), *line, text.clone(), cx)
             }
             crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+            crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
+                this.generate_commit_message(*only_staged, cx)
+            }
             crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                 this.stage(path.clone(), *staged, cx)
             }
@@ -480,6 +489,23 @@ impl Shell {
                         DaemonEvent::AccountsChanged => {
                             pull_rows(&this, &link, cx).await.map(|_| ())
                         }
+                        // The agent's commit message, for the box that asked
+                        // for it — if it is still the workspace on screen.
+                        DaemonEvent::CommitMessageGenerated {
+                            workspace,
+                            message,
+                            error,
+                        } => this
+                            .update(cx, |this, cx| {
+                                if this.session.as_ref().map(|row| &row.workspace)
+                                    == Some(&workspace)
+                                {
+                                    this.surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_generated(message, error, cx)
+                                    });
+                                }
+                            })
+                            .map_err(|_| ()),
                         // The shell printed something. Straight onto its
                         // screen: a terminal that lagged behind what was typed
                         // into it would be unusable for the thing terminals
@@ -541,6 +567,7 @@ impl Shell {
             commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
+            chosen_access: None,
             chosen_account: None,
             add_account: None,
             projects: Vec::new(),
@@ -844,6 +871,30 @@ impl Shell {
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_commit_result(outcome.err(), cx)
             });
+        })
+        .detach();
+    }
+
+    /// Ask the daemon for a commit message. The answer comes back as an
+    /// event, which is what keeps a model's thirty seconds off the request
+    /// path; only a refusal to *start* is reported here.
+    fn generate_commit_message(&mut self, only_staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    link.generate_commit_message(&workspace, only_staged).await
+                })
+                .await;
+            if let Err(error) = outcome {
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_generated(None, Some(error), cx)
+                });
+            }
         })
         .detach();
     }
@@ -1296,6 +1347,7 @@ impl Shell {
             .agent_to_start()
             .unwrap_or_else(|| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
         let model = self.chosen_model.clone();
+        let access = self.chosen_access;
         let account = self.account_to_start().map(|account| account.id.clone());
         let fresh = self.start_fresh;
         self.start_fresh = false;
@@ -1311,7 +1363,7 @@ impl Shell {
                     let workspace = row.workspace.clone();
                     let started = cx
                         .background_spawn(async move {
-                            link.start_session(&workspace, &agent, text, model, account)
+                            link.start_session(&workspace, &agent, text, model, access, account)
                                 .await
                         })
                         .await;
@@ -2412,6 +2464,7 @@ impl Shell {
         let working = self.is_working();
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
+        let access_chip = self.access_chip_button(cx);
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
         let new_session = self.new_session_button(cx);
@@ -2454,6 +2507,7 @@ impl Shell {
                             )
                             .child(div().flex_1())
                             .children(model_chip)
+                            .children(access_chip)
                             .child(agent_chip)
                             .children(account_chip)
                             .child(if working {
@@ -2578,6 +2632,24 @@ impl Shell {
             // the numbers beside the choice are what make a router
             // unnecessary (`docs/accounts.md` §7).
             Picker::Account => self.account_rows(cx),
+            Picker::Access => ginka_protocol::AccessMode::ALL
+                .into_iter()
+                .map(|mode| {
+                    let chosen = self.chosen_access.unwrap_or_default() == mode;
+                    self.picker_row(
+                        SharedString::from(format!("access-option:{}", mode.as_str())),
+                        access_label(mode),
+                        Some(access_note(mode)),
+                        chosen,
+                        cx.listener(move |this, _, _, cx| {
+                            this.chosen_access = Some(mode);
+                            this.picker = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    )
+                })
+                .collect(),
             Picker::Command => self
                 .commands
                 .iter()
@@ -2878,6 +2950,50 @@ impl Shell {
     fn toggle_picker(&mut self, picker: Picker, cx: &mut Context<Self>) {
         self.picker = (self.picker != Some(picker)).then_some(picker);
         cx.notify();
+    }
+
+    /// The access chip: what the next session's agent may touch, and the way
+    /// to change it. Only while a new session is what the composer would
+    /// start — a mode is fixed once a conversation has begun (§3.3 N2), and a
+    /// chip that could not be changed would read as one that could.
+    fn access_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let starting_fresh = match self.session.as_ref() {
+            Some(row) => row.session.is_none() || self.start_fresh,
+            None => true,
+        };
+        if !starting_fresh {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let mode = self.chosen_access.unwrap_or_default();
+        Some(
+            h_flex()
+                .id("access-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .tooltip(|window, cx| {
+                    Tooltip::new(rust_i18n::t!("composer.access.pick").to_string())
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Access, cx)))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(access_label(mode)),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(tokens.colors().text_muted),
+                ),
+        )
     }
 
     /// The agent chip, which is also how the agent is changed.
@@ -4242,4 +4358,24 @@ struct Palette {
     typed: String,
     /// Which entry Return would run.
     chosen: usize,
+}
+
+/// What the access chip and its rows call a mode.
+fn access_label(mode: ginka_protocol::AccessMode) -> String {
+    match mode {
+        ginka_protocol::AccessMode::ReadOnly => rust_i18n::t!("composer.access.read_only"),
+        ginka_protocol::AccessMode::Ask => rust_i18n::t!("composer.access.ask"),
+        ginka_protocol::AccessMode::Auto => rust_i18n::t!("composer.access.auto"),
+    }
+    .to_string()
+}
+
+/// What a mode lets the agent do, in a row's note.
+fn access_note(mode: ginka_protocol::AccessMode) -> String {
+    match mode {
+        ginka_protocol::AccessMode::ReadOnly => rust_i18n::t!("composer.access.read_only.note"),
+        ginka_protocol::AccessMode::Ask => rust_i18n::t!("composer.access.ask.note"),
+        ginka_protocol::AccessMode::Auto => rust_i18n::t!("composer.access.auto.note"),
+    }
+    .to_string()
 }

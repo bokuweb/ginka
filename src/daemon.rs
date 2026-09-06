@@ -134,6 +134,7 @@ impl DaemonLink {
         agent: &str,
         prompt: String,
         model: Option<String>,
+        access: Option<ginka_protocol::AccessMode>,
         account: Option<AccountId>,
     ) -> Option<Session> {
         match self
@@ -143,7 +144,7 @@ impl DaemonLink {
                 prompt,
                 model,
                 account,
-                access_mode: None,
+                access_mode: access,
                 origin: None,
             })
             .await
@@ -284,6 +285,25 @@ impl DaemonLink {
     /// The error is the message git gave, because that is the one the user can
     /// act on: an identity that is not configured, a hook that refused, or
     /// nothing to commit at all.
+    /// Have an agent write a commit message; it arrives later as
+    /// `DaemonEvent::CommitMessageGenerated`.
+    pub async fn generate_commit_message(
+        &self,
+        workspace: &WorkspaceId,
+        only_staged: bool,
+    ) -> Result<(), String> {
+        let client = self.client().await.ok_or("no daemon")?;
+        client
+            .request(Request::GenerateCommitMessage {
+                workspace: workspace.clone(),
+                agent: None,
+                staged: only_staged,
+            })
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message)
+    }
+
     pub async fn commit(
         &self,
         workspace: &WorkspaceId,

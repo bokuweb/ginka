@@ -7,10 +7,10 @@
 
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    Account, AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ConnectorState,
-    ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session,
-    SessionMatch, SessionOrigin, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow,
-    WorkspaceSummary,
+    Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint,
+    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project,
+    ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand, TerminalInfo,
+    TranscriptEntry, UsageRow, WorkspaceSummary,
 };
 use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -151,11 +151,23 @@ pub enum Request {
     /// Take a copy of a conversation as it was, and carry on from there.
     ///
     /// `after` is the transcript position to fork at; `None` forks the whole
-    /// thing. The fork inherits the vendor's session id, so continuing it
-    /// continues the same conversation with the agent.
+    /// thing. On the same agent and login the fork inherits the vendor's
+    /// session id, so continuing it continues the same conversation with the
+    /// agent. Naming another `agent`, or another `account`, moves the
+    /// conversation instead: the vendor's thread cannot follow, so the fork
+    /// is handed a digest of the transcript on its first turn
+    /// (`ginka-core::handoff`). `model` applies to the fork; when the agent
+    /// changes and no model is named, the new agent's default is used, because
+    /// a model id is the vendor's and does not carry across.
     ForkSession {
         session: SessionId,
         after: Option<u64>,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        model: Option<String>,
+        #[serde(default)]
+        account: Option<AccountId>,
     },
     /// Find transcript entries containing `query`.
     SearchSessions {
@@ -226,6 +238,53 @@ pub enum Request {
     SlashCommands {
         workspace: WorkspaceId,
         query: Option<String>,
+    },
+    /// Run `zg index` for a workspace in a daemon terminal, so agents started
+    /// there are handed zvec-grep's search (`ginka-core::tools`). Answers
+    /// the terminal; refused when `zg` is not installed.
+    IndexWorkspace {
+        workspace: WorkspaceId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Write a commit message for a workspace's changes on a cheap model
+    /// (`docs/roadmap.md` §3.3 N9). Answers `Ack` at once; the message
+    /// arrives as `DaemonEvent::CommitMessageGenerated`. `agent` names the
+    /// driver to run it on; the workspace's latest session's otherwise, and
+    /// `claude` failing that. `staged` describes only what is staged.
+    GenerateCommitMessage {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        staged: bool,
+    },
+    /// The local branches of a workspace's repository, with which is checked
+    /// out here and which are held by other worktrees.
+    ListBranches { workspace: WorkspaceId },
+    /// Check a branch out inside a workspace, creating it from HEAD with
+    /// `create`. The workspace keeps its name: its id never follows the branch
+    /// (`AGENTS.md` rule 4), so nothing is re-keyed.
+    CheckoutBranch {
+        workspace: WorkspaceId,
+        branch: String,
+        #[serde(default)]
+        create: bool,
+    },
+    /// The skills the agents can load, across every ecosystem's roots and
+    /// every registered project's — or one project's, when named
+    /// (`docs/roadmap.md` §3.3 N11).
+    ListSkills {
+        #[serde(default)]
+        project: Option<ProjectName>,
+    },
+    /// Enable or disable every copy of a skill, by renaming its `SKILL.md`.
+    /// Nothing is deleted; `project` narrows the search the same way.
+    SetSkillEnabled {
+        name: String,
+        enabled: bool,
+        #[serde(default)]
+        project: Option<ProjectName>,
     },
     /// What the user was in the middle of typing in a workspace.
     ComposerDraft { workspace: WorkspaceId },
@@ -424,6 +483,14 @@ pub enum Response {
     Commands {
         commands: Vec<SlashCommand>,
     },
+    Branches {
+        branches: Vec<BranchInfo>,
+    },
+    Skills {
+        skills: Vec<Skill>,
+        /// The scan stopped at its cap; the list is what fitted.
+        truncated: bool,
+    },
     ReviewComments {
         comments: Vec<ReviewComment>,
     },
@@ -501,6 +568,23 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_with_no_destination_stays_on_its_agent() {
+        // A client written before a fork could move a conversation still
+        // sends a valid fork.
+        let request: Request =
+            serde_json::from_str(r#"{"method":"fork_session","session":"s-1","after":null}"#)
+                .expect("a fork with no destination");
+        assert!(matches!(
+            request,
+            Request::ForkSession {
+                agent: None,
+                account: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn a_misspelled_field_is_refused_rather_than_dropped() {
         // Without `deny_unknown_fields` a typo'd `branch` would start a
         // workspace on an empty branch name instead of failing.
@@ -535,6 +619,18 @@ mod tests {
                 session: SessionId("s-1".into()),
                 after: Some(10),
                 limit: None,
+            },
+            Request::ForkSession {
+                session: SessionId("s-1".into()),
+                after: None,
+                agent: Some("codex".into()),
+                model: None,
+                account: None,
+            },
+            Request::SetSkillEnabled {
+                name: "docx".into(),
+                enabled: false,
+                project: None,
             },
         ];
         for request in cases {

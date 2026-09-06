@@ -64,6 +64,27 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.access.pick:
+  en: Choose what the agent may touch
+  ja: エージェントに許す操作を選ぶ
+composer.access.read_only:
+  en: Read-only
+  ja: 読み取りのみ
+composer.access.read_only.note:
+  en: reads and proposes; changes nothing
+  ja: 読んで提案するだけで、何も変更しない
+composer.access.ask:
+  en: Edit
+  ja: 編集
+composer.access.ask.note:
+  en: edits the worktree; commands are sandboxed or refused
+  ja: worktree を編集する。コマンドは sandbox 内か拒否
+composer.access.auto:
+  en: Full
+  ja: フル
+composer.access.auto.note:
+  en: edits and runs commands without asking
+  ja: 確認なしで編集もコマンド実行も行う
 composer.account.pick:
   en: Choose which login runs this
   ja: 実行するログイン（アカウント）を選ぶ
@@ -319,6 +340,12 @@ surface.git.message:
 surface.git.commit:
   en: Commit
   ja: コミット
+surface.git.generate:
+  en: Write it for me
+  ja: エージェントに書かせる
+surface.git.generating:
+  en: writing…
+  ja: 作成中…
 surface.git.cancel:
   en: Cancel
   ja: やめる
@@ -365,6 +392,18 @@ cli.search.empty:
 cli.review.empty:
   en: no comments are waiting
   ja: 保留中のコメントはありません
+cli.index.no_zg:
+  en: "zg is not installed; `npm install -g @zvec/zvec-grep` puts it on PATH"
+  ja: "zg がインストールされていません。`npm install -g @zvec/zvec-grep` で PATH に入ります"
+cli.index.done:
+  en: "indexed; agents started here now get zvec-grep's search"
+  ja: "索引を作成しました。以後ここで起動する agent は zvec-grep の検索を使えます"
+cli.skills.empty:
+  en: "no skills found; agents read them from ~/.claude/skills, ~/.codex/skills, ~/.agents/skills and the same under a project"
+  ja: "スキルが見つかりません。エージェントは ~/.claude/skills、~/.codex/skills、~/.agents/skills とプロジェクト配下の同じ場所から読みます"
+cli.skills.truncated:
+  en: "the scan stopped at its cap; not every skill is listed"
+  ja: "スキャンが上限に達したため、すべてのスキルは表示されていません"
 cli.commands.empty:
   en: "this workspace defines no commands; they live in .claude/commands"
   ja: "このワークスペースにコマンドはありません（.claude/commands に置きます）"

@@ -174,9 +174,11 @@ directory, and `resume` cannot cross directories. `apply_session_options`
 answers `OptionOutcome::Restart`, the Ginka session and its transcript
 continue, and the next turn starts a new vendor thread with no context of the
 old one. The composer says so before it happens, the way it does for a provider
-change. A hand-off — seeding the new thread with a summary of the old — is
-worth having and is not part of this design; it is the same feature for a
-provider change and belongs with it.
+change. The hand-off — seeding the new thread with a digest of the old — is
+`ginka session fork --account` (and `--agent`), which copies the record and
+sends the digest in front of the new thread's first prompt
+(`ginka-core::handoff`, roadmap §4.4). It is a fork rather than a switch of
+the running session, so the original stays where it was.
 
 Starting a chat is where the choice is normally made, and where it costs
 nothing.

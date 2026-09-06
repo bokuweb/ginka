@@ -271,6 +271,52 @@ pub fn branch_exists(repo: &Path, branch: &str) -> bool {
     .is_ok()
 }
 
+/// Every local branch, with where each is checked out.
+///
+/// Asked of git rather than kept, because a branch made in a terminal is as
+/// real as one made here. `%(worktreepath)` is what says a branch is held by
+/// another worktree, which is the one thing a picker has to grey out.
+pub fn list_branches(worktree: &Path) -> Result<Vec<ginka_protocol::model::BranchInfo>> {
+    let text = git(
+        worktree,
+        &[
+            "branch",
+            "--list",
+            "--format=%(refname:short)\t%(HEAD)\t%(worktreepath)",
+        ],
+    )?;
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split('\t');
+            let name = parts.next()?.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let head = parts.next().unwrap_or_default().trim();
+            let held = parts.next().unwrap_or_default().trim();
+            Some(ginka_protocol::model::BranchInfo {
+                name: name.to_string(),
+                current: head == "*",
+                checked_out_at: (!held.is_empty()).then(|| PathBuf::from(held)),
+            })
+        })
+        .collect())
+}
+
+/// Check `branch` out in `worktree`, cutting it from HEAD with `create`.
+///
+/// `switch` rather than `checkout`: it refuses to touch files, so a branch
+/// name that is also a path cannot turn into a restore.
+pub fn checkout(worktree: &Path, branch: &str, create: bool) -> Result<()> {
+    if create {
+        git(worktree, &["switch", "-c", branch])?;
+    } else {
+        git(worktree, &["switch", branch])?;
+    }
+    Ok(())
+}
+
 /// Create a worktree at `path` for `branch`, cutting it from `base` if it does
 /// not exist yet.
 ///

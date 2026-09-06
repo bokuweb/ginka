@@ -68,6 +68,32 @@ pub enum AccessMode {
     Auto,
 }
 
+impl AccessMode {
+    /// The stable word for each mode: what a column stores and a flag takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// Read [`AccessMode::as_str`] back, with the underscore spelling and the
+    /// vendors' nearest words accepted too: a flag typed by hand should not
+    /// fail on a hyphen.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "read-only" | "read_only" | "readonly" | "plan" => Some(Self::ReadOnly),
+            "ask" | "default" | "edit" => Some(Self::Ask),
+            "auto" | "full" | "bypass" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// Every mode, in the order a picker lists them: least to most.
+    pub const ALL: [AccessMode; 3] = [Self::ReadOnly, Self::Ask, Self::Auto];
+}
+
 /// One selectable value inside a model — an effort level, a service tier.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderOption {

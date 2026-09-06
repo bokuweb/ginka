@@ -124,7 +124,12 @@ fn scripted() {
     }
 
     for line in script.lines() {
+        // The `_json` forms are the same values as JSON strings, quotes
+        // included, for a script that has to carry a prompt with newlines in
+        // it through a JSONL line intact.
         let line = line
+            .replace("{prompt_json}", &json_string(&prompt))
+            .replace("{args_json}", &json_string(&joined))
             .replace("{prompt}", &prompt)
             .replace("{session}", &session)
             .replace("{stdin}", &last_read)
@@ -166,6 +171,11 @@ fn scripted() {
             out.flush().expect("stdout is open");
         }
     }
+}
+
+/// `text` as a JSON string literal, quotes and escapes included.
+fn json_string(text: &str) -> String {
+    serde_json::to_string(text).expect("a string always serializes")
 }
 
 /// Replace every `{env:NAME}` with the variable's value, or with nothing

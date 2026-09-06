@@ -602,6 +602,161 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
+fn a_branch_can_be_listed_and_checked_out_without_re_keying_the_workspace() {
+    // Rule 4: the id derives from the immutable name, so an agent — or a
+    // person — switching branches inside a worktree changes the branch
+    // column and nothing else.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "harbor".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let id = workspace.id();
+
+    let branches = match fixture.ask(Request::ListBranches {
+        workspace: id.clone(),
+    }) {
+        Response::Branches { branches } => branches,
+        other => panic!("expected branches, got {other:?}"),
+    };
+    let here = branches
+        .iter()
+        .find(|branch| branch.current)
+        .expect("one is current");
+    assert_eq!(here.name, "harbor");
+    let elsewhere = branches
+        .iter()
+        .find(|branch| !branch.current && branch.checked_out_at.is_some())
+        .expect("the project's own checkout holds its branch");
+
+    fixture.ask(Request::CheckoutBranch {
+        workspace: id.clone(),
+        branch: "harbor-v2".into(),
+        create: true,
+    });
+    let listed = match fixture.ask(Request::ListWorkspaces {
+        project: Some(project),
+    }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let same = listed
+        .iter()
+        .find(|summary| summary.id() == id)
+        .expect("the id did not move with the branch");
+    assert_eq!(same.worktree.branch, "harbor-v2");
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .iter()
+            .any(|event| matches!(event, DaemonEvent::WorkspacesChanged { .. })),
+        "other windows are told"
+    );
+
+    // A branch another worktree holds cannot be taken: git says so, and the
+    // refusal names it rather than leaving a half-switched tree.
+    let error = fixture
+        .service
+        .handle(Request::CheckoutBranch {
+            workspace: id,
+            branch: elsewhere.name.clone(),
+            create: false,
+        })
+        .unwrap_err();
+    assert!(error.message.contains(&elsewhere.name), "{}", error.message);
+}
+
+#[test]
+fn a_projects_skills_are_listed_and_switched_off_without_being_deleted() {
+    // N11: the agents' own skills, managed from here. A project's copy is
+    // found under its checkout; disabling renames the file every tool looks
+    // for, so all of them stop seeing it, and nothing is lost.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let skill = fixture.repo().join(".claude/skills/release-notes");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: release-notes\ndescription: Write the notes for a release\n---\n# Notes\n",
+    )
+    .unwrap();
+
+    let listed = match fixture.ask(Request::ListSkills {
+        project: Some(project.clone()),
+    }) {
+        Response::Skills { skills, truncated } => {
+            assert!(!truncated);
+            skills
+        }
+        other => panic!("expected skills, got {other:?}"),
+    };
+    let found = listed
+        .iter()
+        .find(|skill| skill.name == "release-notes")
+        .expect("the project's skill is in the library");
+    assert!(found.enabled);
+    assert_eq!(
+        found.description.as_deref(),
+        Some("Write the notes for a release")
+    );
+    let install = found
+        .installs
+        .iter()
+        .find(|install| install.scope == ginka_protocol::model::SkillScope::Project)
+        .expect("installed under the project");
+    assert_eq!(install.root_label, project.0);
+    // The project's path was canonicalized when it was registered, which on
+    // macOS resolves `/var` to `/private/var`.
+    assert_eq!(install.directory, skill.canonicalize().unwrap());
+
+    fixture.ask(Request::SetSkillEnabled {
+        name: "release-notes".into(),
+        enabled: false,
+        project: Some(project.clone()),
+    });
+    assert!(!skill.join("SKILL.md").exists());
+    assert!(
+        skill.join("SKILL.md.disabled").is_file(),
+        "renamed, not removed"
+    );
+    match fixture.ask(Request::ListSkills {
+        project: Some(project.clone()),
+    }) {
+        Response::Skills { skills, .. } => {
+            let found = skills
+                .iter()
+                .find(|skill| skill.name == "release-notes")
+                .unwrap();
+            assert!(!found.enabled, "and the library says so");
+        }
+        other => panic!("expected skills, got {other:?}"),
+    }
+
+    fixture.ask(Request::SetSkillEnabled {
+        name: "release-notes".into(),
+        enabled: true,
+        project: Some(project),
+    });
+    assert!(skill.join("SKILL.md").is_file());
+
+    let error = fixture
+        .service
+        .handle(Request::SetSkillEnabled {
+            name: "no-such-skill".into(),
+            enabled: false,
+            project: None,
+        })
+        .unwrap_err();
+    assert!(error.message.contains("no-such-skill"));
+}
+
+#[test]
 fn a_new_worktree_gets_what_the_project_said_it_needs() {
     // A fresh checkout has none of the files the repository deliberately does
     // not track, and an agent started there fails on its first command for a

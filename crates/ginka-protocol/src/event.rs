@@ -149,6 +149,17 @@ pub enum DaemonEvent {
     /// A chat connector connected, dropped, or failed. The whole state
     /// travels so a window shows the dot going red without asking.
     ConnectorStateChanged { state: ConnectorState },
+    /// A commit message asked for with `generate_commit_message` is ready, or
+    /// could not be written. Pushed rather than answered because generation
+    /// runs a model for tens of seconds, and a request that long would hold
+    /// every other client's turn.
+    CommitMessageGenerated {
+        workspace: WorkspaceId,
+        /// Subject, blank line, body — as git takes it. `None` when it
+        /// failed, and `error` says why.
+        message: Option<String>,
+        error: Option<String>,
+    },
 
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,

@@ -81,6 +81,10 @@ pub struct Service {
     /// `TestConnector`. The service knows what they are called and nothing
     /// about how they connect (`docs/connectors.md` §2).
     connectors: Vec<Arc<dyn ConnectorControl>>,
+    /// Where the `ginka` command is, for the MCP bridge every agent is
+    /// handed (`crate::tools`). Looked up once: it does not move while the
+    /// daemon runs, and the log says once when it is missing.
+    cli: Option<std::path::PathBuf>,
 }
 
 /// How long a probe of the agent CLIs is trusted for.
@@ -99,7 +103,16 @@ impl Service {
         // has to prune.
         let settings: crate::settings::DaemonSettings =
             crate::settings::load(&paths.daemon_settings());
+        let cli = crate::tools::locate_cli();
+        if cli.is_none() {
+            tracing::warn!(
+                "no `ginka` command found beside the daemon or on PATH; agents are started \
+                 without Ginka's MCP bridge (set {} to name one)",
+                crate::tools::CLI_ENV
+            );
+        }
         Self {
+            cli,
             sessions: Supervisor::new(conn.clone(), events.clone(), settings.checkpoint_limit),
             paths,
             terminals: crate::terminal::Terminals::new(events.clone()),
@@ -135,6 +148,30 @@ impl Service {
     pub fn with_drivers(mut self, drivers: Registry) -> Self {
         self.drivers = Arc::new(drivers);
         self
+    }
+
+    /// Hand agents this `ginka` command as their MCP bridge, rather than the
+    /// one found beside the daemon. How a test says where the CLI is.
+    pub fn with_cli(mut self, cli: impl Into<std::path::PathBuf>) -> Self {
+        self.cli = Some(cli.into());
+        self
+    }
+
+    /// The MCP servers an agent starting in `worktree` is told about.
+    fn mcp_servers(&self, worktree: &std::path::Path) -> Vec<crate::tools::McpServer> {
+        let zg = self
+            .settings
+            .tools
+            .zvec_grep
+            .then(|| crate::tools::on_path("zg"))
+            .flatten();
+        crate::tools::servers_for(
+            &self.settings.tools,
+            &self.paths,
+            worktree,
+            self.cli.as_deref(),
+            zg.as_deref(),
+        )
     }
 
     /// Open the database `paths` points at, running migrations, and build a
@@ -446,44 +483,13 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
-            Request::ForkSession { session, after } => {
-                let original = self.session(&session)?;
-                let now = now();
-                let fork = Session {
-                    id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
-                    workspace: original.workspace.clone(),
-                    agent: original.agent.clone(),
-                    // The vendor's thread it inherits lives in the account's
-                    // directory, so the fork runs on the same one.
-                    account: original.account.clone(),
-                    model: original.model.clone(),
-                    access_mode: original.access_mode,
-                    // A fork is a new conversation: the thread that started
-                    // the original keeps talking to the original.
-                    origin: None,
-                    // A fork has not run anything yet, and inherits the
-                    // vendor's own conversation so that continuing it
-                    // continues where the original was.
-                    state: SessionState::Idle,
-                    title: Some(match &original.title {
-                        Some(title) => format!("{title} (fork)"),
-                        None => "fork".to_string(),
-                    }),
-                    summary: None,
-                    vendor_session_id: original.vendor_session_id.clone(),
-                    created_at: now,
-                    updated_at: now,
-                };
-                {
-                    let conn = self.conn();
-                    session::insert(&conn, &fork).map_err(failed)?;
-                    session::copy_transcript(&conn, &session, &fork.id, after).map_err(failed)?;
-                }
-                self.events.emit(DaemonEvent::SessionStarted {
-                    session: fork.clone(),
-                });
-                Ok(Response::Session { session: fork })
-            }
+            Request::ForkSession {
+                session,
+                after,
+                agent,
+                model,
+                account,
+            } => self.fork_session(&session, after, agent.as_deref(), model, account),
             Request::SearchSessions {
                 workspace,
                 query,
@@ -608,6 +614,81 @@ impl Service {
                 Ok(Response::Commands {
                     commands: crate::commands::search(&found, query.as_deref().unwrap_or_default()),
                 })
+            }
+            Request::IndexWorkspace {
+                workspace,
+                rows,
+                cols,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let zg = crate::tools::on_path("zg").ok_or_else(|| {
+                    RpcError::failed(
+                        "zg is not installed; `npm install -g @zvec/zvec-grep` puts it on PATH",
+                    )
+                })?;
+                let terminal = self
+                    .terminals
+                    .open_command(
+                        &workspace,
+                        &worktree.path,
+                        crate::terminal::TerminalCommand {
+                            program: zg.to_string_lossy().into_owned(),
+                            args: vec!["index".to_string()],
+                            env: Vec::new(),
+                            title: "zg index".to_string(),
+                            on_exit: None,
+                        },
+                        rows,
+                        cols,
+                    )
+                    .map_err(failed)?;
+                Ok(Response::Terminal { terminal })
+            }
+            Request::GenerateCommitMessage {
+                workspace,
+                agent,
+                staged,
+            } => self.generate_commit_message(workspace, agent.as_deref(), staged),
+            Request::ListBranches { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::Branches {
+                    branches: git::list_branches(&worktree.path).map_err(failed)?,
+                })
+            }
+            Request::CheckoutBranch {
+                workspace,
+                branch,
+                create,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                git::checkout(&worktree.path, &branch, create).map_err(failed)?;
+                // The workspace keeps its id; only its live branch moved, and
+                // the next listing reconciles that against git.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
+            Request::ListSkills { project } => {
+                let catalog = self.skills(project.as_ref())?;
+                Ok(Response::Skills {
+                    skills: catalog.skills,
+                    truncated: catalog.truncated,
+                })
+            }
+            Request::SetSkillEnabled {
+                name,
+                enabled,
+                project,
+            } => {
+                let catalog = self.skills(project.as_ref())?;
+                let skill = catalog
+                    .skills
+                    .iter()
+                    .find(|skill| skill.name == name)
+                    .ok_or_else(|| RpcError::not_found(format!("no skill named {name}")))?;
+                crate::skills::set_enabled(skill, enabled).map_err(failed)?;
+                Ok(Response::Ack)
             }
             Request::ComposerDraft { workspace } => Ok(Response::Draft {
                 text: session::draft(&self.conn(), &workspace).map_err(failed)?,
@@ -1026,9 +1107,10 @@ impl Service {
         // The agent reads files, not URIs: an attachment the user mentioned
         // reaches it as a path on this host (§3.3 N6). The transcript keeps
         // the reference, so the window can still draw the attachment.
-        let mut spec = SessionSpec::new(worktree.path, self.expand_attachments(&prompt))
+        let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&prompt))
             .with_model(model)
-            .with_access_mode(access_mode);
+            .with_access_mode(access_mode)
+            .with_mcp_servers(self.mcp_servers(&worktree.path));
         for (key, value) in crate::account::env_layer(
             &self.settings,
             &self.paths,
@@ -1043,14 +1125,115 @@ impl Service {
         Ok(Response::Session { session })
     }
 
+    /// Copy a conversation up to a point, to carry on from there.
+    ///
+    /// On the same agent and login the copy inherits the vendor's thread and
+    /// continuing it continues the same conversation. Onto another agent or
+    /// another login it cannot — the thread lives in the other vendor's store,
+    /// in the other account's directory — so the copy is handed a digest of
+    /// the record instead, on its first turn (`crate::handoff`). The record
+    /// is the daemon's own, in one shape whatever wrote it, which is what
+    /// makes the move possible at all.
+    fn fork_session(
+        &mut self,
+        id: &SessionId,
+        after: Option<u64>,
+        agent: Option<&str>,
+        model: Option<String>,
+        account: Option<ginka_protocol::AccountId>,
+    ) -> Result<Response, RpcError> {
+        let original = self.session(id)?;
+        let driver = self.driver(agent.unwrap_or(&original.agent))?;
+        let same_agent = driver.id() == original.agent;
+        let account = match account {
+            Some(account) => crate::account::resolve(&self.settings, driver.id(), Some(&account))
+                .map_err(account_error)?,
+            // No login named: the original's where the agent is the same,
+            // the provider's default where it is not — the original's login
+            // belongs to another provider.
+            None if same_agent => original.account.clone(),
+            None => {
+                crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
+            }
+        };
+        let moved = !same_agent || account != original.account;
+
+        let now = now();
+        let fork = Session {
+            id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+            workspace: original.workspace.clone(),
+            agent: driver.id().to_string(),
+            account,
+            model: match model {
+                Some(model) => Some(model),
+                // A model id is the vendor's; it does not carry across.
+                None if same_agent => original.model.clone(),
+                None => None,
+            },
+            // What the agent may touch is a property of the conversation,
+            // and the fork is the same conversation. Where it came from is
+            // not: the thread that started the original keeps talking to
+            // the original.
+            access_mode: original.access_mode,
+            origin: None,
+            // A fork has not run anything yet.
+            state: SessionState::Idle,
+            title: Some(match (&original.title, moved) {
+                (Some(title), false) => format!("{title} (fork)"),
+                (Some(title), true) => format!("{title} ({} fork)", driver.id()),
+                (None, false) => "fork".to_string(),
+                (None, true) => format!("{} fork", driver.id()),
+            }),
+            summary: moved.then(|| format!("moved from {}", original.agent)),
+            // Inherited only where continuing it would continue the same
+            // conversation; elsewhere the digest stands in for it.
+            vendor_session_id: (!moved)
+                .then_some(original.vendor_session_id.clone())
+                .flatten(),
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let conn = self.conn();
+            session::insert(&conn, &fork).map_err(failed)?;
+            session::copy_transcript(&conn, id, &fork.id, after).map_err(failed)?;
+            if moved {
+                let carried = session::transcript(&conn, &fork.id, None, None).map_err(failed)?;
+                let digest = crate::handoff::digest(
+                    &carried,
+                    &original.agent,
+                    crate::handoff::DEFAULT_BUDGET,
+                );
+                if !digest.is_empty() {
+                    session::set_handoff(&conn, &fork.id, &digest).map_err(failed)?;
+                }
+            }
+        }
+        self.events.emit(DaemonEvent::SessionStarted {
+            session: fork.clone(),
+        });
+        Ok(Response::Session { session: fork })
+    }
+
     /// Send a follow-up to a session, queued if its agent is still working.
     fn send_message(&mut self, id: &SessionId, text: String) -> Result<Response, RpcError> {
         let stored = self.session(id)?;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
-        let mut spec = SessionSpec::new(worktree.path, self.expand_attachments(&text))
+        // What a conversation moved from another agent still owes it: the
+        // digest rides in front of the first prompt, once, and only while
+        // the agent has no thread of its own to have read it in.
+        let preamble = match stored.vendor_session_id {
+            None => session::handoff(&self.conn(), id).map_err(failed)?,
+            Some(_) => None,
+        };
+        let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone())
-            .with_access_mode(stored.access_mode);
+            // The mode the conversation was started in: a resume that
+            // widened it would be the change N2 reserves for a new session.
+            .with_access_mode(stored.access_mode)
+            .with_preamble(preamble)
+            .with_mcp_servers(self.mcp_servers(&worktree.path));
         // The same login the conversation started on: the vendor's thread
         // lives in its directory (`docs/accounts.md` §5).
         for (key, value) in crate::account::env_layer(
@@ -1106,6 +1289,86 @@ impl Service {
             project: worktree.project.clone(),
         });
         Ok(Response::Ack)
+    }
+
+    /// Write a commit message for a workspace on a thread of its own, and
+    /// push it when it lands (§3.3 N9).
+    ///
+    /// Not answered inline: the service serialises requests, and a model
+    /// that takes thirty seconds would hold every window's next tick for
+    /// as long. The driver is the one named, else the workspace's latest
+    /// session's — the agent that did the work is the natural one to
+    /// describe it — else `claude`; the login follows the same session
+    /// where it matches, because that is the one known to be signed in.
+    fn generate_commit_message(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: Option<&str>,
+        staged: bool,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(&workspace)?;
+        let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+        let agent = agent
+            .map(str::to_string)
+            .or_else(|| latest.as_ref().map(|session| session.agent.clone()))
+            .unwrap_or_else(|| "claude".to_string());
+        let driver = self.driver(&agent)?;
+        let account = match latest.filter(|session| session.agent == driver.id()) {
+            Some(session) => session.account,
+            None => {
+                crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
+            }
+        };
+        let env = crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &account,
+            driver.home_variable(),
+        );
+        let events = self.events.clone();
+        std::thread::spawn(move || {
+            let outcome =
+                crate::commit::describe(&worktree.path, staged).and_then(|(files, diff)| {
+                    crate::commit::generate(driver.as_ref(), &worktree.path, &env, &files, &diff)
+                });
+            let (message, error) = match outcome {
+                Ok(message) => (Some(message.to_git_message()), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            events.emit(DaemonEvent::CommitMessageGenerated {
+                workspace,
+                message,
+                error,
+            });
+        });
+        Ok(Response::Ack)
+    }
+
+    /// The skill library: the user's roots and every project's, or one
+    /// project's when named (`docs/roadmap.md` §3.3 N11).
+    fn skills(
+        &self,
+        project: Option<&ProjectName>,
+    ) -> Result<crate::skills::SkillCatalog, RpcError> {
+        let projects: Vec<(String, std::path::PathBuf)> = match project {
+            Some(name) => {
+                let found = self
+                    .projects()?
+                    .into_iter()
+                    .find(|project| &project.name == name)
+                    .ok_or_else(|| RpcError::not_found(format!("no project named {name}")))?;
+                vec![(found.name.0.clone(), found.path.clone())]
+            }
+            None => self
+                .projects()?
+                .into_iter()
+                .map(|project| (project.name.0.clone(), project.path.clone()))
+                .collect(),
+        };
+        // The user's skills live in their home, which is theirs rather than
+        // Ginka's `GINKA_HOME`.
+        let roots = crate::skills::default_roots(dirs::home_dir().as_deref(), &projects);
+        crate::skills::discover(&roots).map_err(failed)
     }
 
     /// Resolve a session, or say it is not there.

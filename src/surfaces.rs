@@ -42,6 +42,11 @@ pub struct SurfacePanel {
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
     complaint: Option<SharedString>,
+    /// An agent is writing the message; the button says so meanwhile.
+    generating: bool,
+    /// A message that arrived while the box was drawn: put into it on the
+    /// next render, which is the first place a window is to hand.
+    generated: Option<String>,
     /// What is typed into the file finder.
     finder: Entity<InputState>,
     /// The paths that match it, best first.
@@ -62,6 +67,9 @@ pub enum SurfaceEvent {
     /// `only_staged` when the reader has staged something: having said which
     /// files belong in the commit, they do not expect the rest to come along.
     Commit { message: String, only_staged: bool },
+    /// Have an agent write the message (§3.3 N9). It arrives later, as an
+    /// event the shell hands back through [`SurfacePanel::set_generated`].
+    GenerateCommitMessage { only_staged: bool },
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -111,6 +119,8 @@ impl SurfacePanel {
             staged: Vec::new(),
             reverting: None,
             message: None,
+            generating: false,
+            generated: None,
             complaint: None,
             usage: None,
         }
@@ -183,6 +193,23 @@ impl SurfacePanel {
     /// Whether the commit box would commit only part of what is on screen.
     fn only_staged(&self) -> bool {
         !self.staged.is_empty()
+    }
+
+    /// What the agent wrote, or why it could not (`CommitMessageGenerated`).
+    pub fn set_generated(
+        &mut self,
+        message: Option<String>,
+        error: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.generating = false;
+        match message {
+            Some(message) => self.generated = Some(message.trim_end().to_string()),
+            None => {
+                self.complaint = error.map(SharedString::from);
+            }
+        }
+        cx.notify();
     }
 
     /// Say why a commit did not happen, or clear it once one did.
@@ -548,6 +575,7 @@ impl SurfacePanel {
     fn commit_box(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let open = self.message.clone();
+        let generating = self.generating;
 
         v_flex()
             .w_full()
@@ -597,6 +625,33 @@ impl SurfacePanel {
                                     .hover(|this| this.bg(tokens.colors().accent))
                                     .on_click(cx.listener(|this, _, _, cx| this.commit(cx)))
                                     .child(rust_i18n::t!("surface.git.commit").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id("generate-commit")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(tokens.radius.row))
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_secondary)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        if this.generating {
+                                            return;
+                                        }
+                                        this.generating = true;
+                                        this.complaint = None;
+                                        cx.emit(SurfaceEvent::GenerateCommitMessage {
+                                            only_staged: this.only_staged(),
+                                        });
+                                        cx.notify();
+                                    }))
+                                    .child(if generating {
+                                        rust_i18n::t!("surface.git.generating").to_string()
+                                    } else {
+                                        rust_i18n::t!("surface.git.generate").to_string()
+                                    }),
                             )
                             .child(
                                 div()
@@ -1322,7 +1377,14 @@ fn diff_text(line: &ginka_protocol::model::DiffLine, tokens: &Tokens) -> impl In
 }
 
 impl Render for SurfacePanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // A generated message lands here rather than where the event arrived,
+        // because writing into the box needs the window.
+        if let Some(text) = self.generated.take()
+            && let Some(state) = self.message.as_ref()
+        {
+            state.update(cx, |state, cx| state.set_value(text, window, cx));
+        }
         let tokens = Tokens::global(cx);
         let border = tokens.colors().border_subtle;
         let open = self.open;

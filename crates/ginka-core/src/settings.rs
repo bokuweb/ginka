@@ -92,6 +92,10 @@ pub struct DaemonSettings {
     /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
     /// never here.
     pub connectors: crate::connector::ConnectorsSettings,
+    /// The MCP servers every agent is given when it starts
+    /// (`crate::tools`): Ginka's own bridge, zvec-grep where a workspace is
+    /// indexed, and the user's own.
+    pub tools: crate::tools::ToolSettings,
 }
 
 impl DaemonSettings {
@@ -174,6 +178,7 @@ impl Default for DaemonSettings {
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),
             connectors: crate::connector::ConnectorsSettings::default(),
+            tools: crate::tools::ToolSettings::default(),
         }
     }
 }
