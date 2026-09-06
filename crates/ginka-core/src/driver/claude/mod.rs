@@ -78,6 +78,13 @@ impl ClaudeDriver {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+        // The default is what the CLI does when told nothing, so it is only
+        // spelled out when it is not the default: the arguments a test reads
+        // stay what they were.
+        if spec.access_mode != AccessMode::Ask {
+            args.push("--permission-mode".to_string());
+            args.push(permission_mode(spec.access_mode).to_string());
+        }
         args
     }
 }

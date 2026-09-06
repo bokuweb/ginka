@@ -115,6 +115,8 @@ impl Fixture {
                 prompt: prompt.into(),
                 model: None,
                 account: None,
+                access_mode: None,
+                origin: None,
             })
             .unwrap()
         {
@@ -126,7 +128,10 @@ impl Fixture {
     fn state(&mut self, id: &SessionId) -> SessionState {
         match self
             .service
-            .handle(Request::ListSessions { workspace: None })
+            .handle(Request::ListSessions {
+                workspace: None,
+                origin: None,
+            })
             .unwrap()
         {
             Response::Sessions { sessions } => {
@@ -232,7 +237,10 @@ impl Fixture {
     fn stored(&mut self, id: &SessionId) -> ginka_protocol::model::Session {
         match self
             .service
-            .handle(Request::ListSessions { workspace: None })
+            .handle(Request::ListSessions {
+                workspace: None,
+                origin: None,
+            })
             .unwrap()
         {
             Response::Sessions { sessions } => sessions
@@ -319,7 +327,10 @@ fn the_vendors_session_id_is_kept_so_the_conversation_can_be_continued() {
 
     match fixture
         .service
-        .handle(Request::ListSessions { workspace: None })
+        .handle(Request::ListSessions {
+            workspace: None,
+            origin: None,
+        })
         .unwrap()
     {
         Response::Sessions { sessions } => assert_eq!(
@@ -553,6 +564,8 @@ fn two_agents_run_in_two_workspaces_at_once() {
             prompt: "second workspace".into(),
             model: None,
             account: None,
+            access_mode: None,
+            origin: None,
         })
         .unwrap()
     {
@@ -599,7 +612,10 @@ fn a_vendor_that_changed_its_format_fails_loudly_rather_than_reporting_silence()
 
     match fixture
         .service
-        .handle(Request::ListSessions { workspace: None })
+        .handle(Request::ListSessions {
+            workspace: None,
+            origin: None,
+        })
         .unwrap()
     {
         Response::Sessions { sessions } => {
@@ -748,7 +764,10 @@ fn a_conversation_is_titled_renameable_and_forgettable() {
     fixture.ask(Request::RemoveSession {
         session: session.clone(),
     });
-    match fixture.ask(Request::ListSessions { workspace: None }) {
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
         Response::Sessions { sessions } => {
             assert!(sessions.iter().all(|listed| listed.id != session))
         }
@@ -996,6 +1015,8 @@ fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
             prompt: "hello".into(),
             model: None,
             account: None,
+            access_mode: None,
+            origin: None,
         })
         .expect_err("there is no such workspace");
     assert_eq!(error.code, "not_found");
@@ -1012,6 +1033,8 @@ fn asking_for_an_agent_this_build_does_not_have_names_the_ones_it_does() {
             prompt: "hello".into(),
             model: None,
             account: None,
+            access_mode: None,
+            origin: None,
         })
         .expect_err("there is no such agent");
     assert_eq!(error.code, "not_found");
@@ -1366,6 +1389,8 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         prompt: "where are you".into(),
         model: None,
         account: Some(ginka_protocol::AccountId("claude-work".into())),
+        access_mode: None,
+        origin: None,
     }) {
         Ok(Response::Session { session }) => session,
         other => panic!("expected a session, got {other:?}"),
@@ -1391,7 +1416,10 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
     );
     assert_eq!(fixture.settle(&on_default), SessionState::Finished);
     assert!(fixture.text_of(&on_default).contains("home=[]"));
-    let stored = match fixture.ask(Request::ListSessions { workspace: None }) {
+    let stored = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
         Response::Sessions { sessions } => sessions,
         other => panic!("expected sessions, got {other:?}"),
     };
@@ -1428,6 +1456,8 @@ fn a_login_of_one_provider_cannot_run_another_providers_agent() {
         prompt: "hello".into(),
         model: None,
         account: Some(ginka_protocol::AccountId("codex-work".into())),
+        access_mode: None,
+        origin: None,
     });
     let error = refused.expect_err("a codex login is not a claude one");
     assert!(error.message.contains("codex"), "{}", error.message);
@@ -1438,10 +1468,15 @@ fn a_login_of_one_provider_cannot_run_another_providers_agent() {
         prompt: "hello".into(),
         model: None,
         account: Some(ginka_protocol::AccountId("nonesuch".into())),
+        access_mode: None,
+        origin: None,
     });
     assert!(unknown.is_err());
     // Nothing was started for either.
-    match fixture.ask(Request::ListSessions { workspace: None }) {
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
         Response::Sessions { sessions } => assert!(sessions.is_empty()),
         other => panic!("expected sessions, got {other:?}"),
     }

@@ -261,6 +261,7 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_accounts" => Request::Accounts,
         "ginka_sessions" => Request::ListSessions {
             workspace: maybe("workspace").map(WorkspaceId),
+            origin: None,
         },
         "ginka_session_start" => Request::StartSession {
             workspace: WorkspaceId(text("workspace")?),
@@ -268,6 +269,8 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             prompt: text("prompt")?,
             model: maybe("model"),
             account: maybe("account").map(ginka_protocol::AccountId),
+            access_mode: None,
+            origin: None,
         },
         "ginka_fan_out" => Request::FanOut {
             project: ProjectName(text("project")?),

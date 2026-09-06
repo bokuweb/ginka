@@ -143,6 +143,8 @@ impl DaemonLink {
                 prompt,
                 model,
                 account,
+                access_mode: None,
+                origin: None,
             })
             .await
         {

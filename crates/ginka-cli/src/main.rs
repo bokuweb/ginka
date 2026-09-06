@@ -17,8 +17,8 @@ use clap::{Parser, Subcommand};
 use ginka_client::{Client, Discovery};
 use ginka_core::{Paths, project, settings};
 use ginka_protocol::model::{
-    Account, AgentStatus, ChangeSource, Changes, Checkpoint, PlanSnapshot, Project, Session,
-    SessionMatch, UsageRow, WorkspaceSummary,
+    Account, AgentStatus, ChangeSource, Changes, Checkpoint, ConnectorState, PlanSnapshot, Project,
+    Session, SessionMatch, UsageRow, WorkspaceSummary,
 };
 use ginka_protocol::provider::ProviderKind;
 use ginka_protocol::rpc::{Attempt, Request, Response};
@@ -118,6 +118,10 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// The Slack connector: a bound channel starts an agent here, and the
+    /// answer goes back to the thread (`docs/connectors.md`).
+    #[command(subcommand)]
+    Slack(SlackCommand),
     /// Report what the work has cost.
     Usage {
         /// How many days back to look.
@@ -282,6 +286,27 @@ enum AccountCommand {
     Login { id: String },
     /// Ask the provider how much of a login's rate-limit windows is left.
     Refresh { id: String },
+}
+
+#[derive(Subcommand)]
+enum SlackCommand {
+    /// Whether the connector is configured, connected, and listening where.
+    Status,
+    /// The channels the bot listens in, and where each one runs.
+    Bindings,
+    /// Let one more Slack member speak to the bot, by member id (`U…`).
+    ///
+    /// Written into `settings.json`; the running connector picks it up.
+    Allow {
+        /// The member id, from the person's Slack profile.
+        sender: String,
+    },
+    /// Post one message into a channel and take it back, to prove the
+    /// tokens and the channel id are right.
+    Test {
+        /// The conversation id (`C…`), not the name.
+        channel: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -555,6 +580,17 @@ fn request_for(command: Command) -> Result<Request> {
         },
 
         Command::Agents => Request::ListAgents,
+        Command::Slack(SlackCommand::Status) | Command::Slack(SlackCommand::Bindings) => {
+            Request::ListConnectors
+        }
+        Command::Slack(SlackCommand::Allow { sender }) => Request::AllowConnectorSender {
+            connector: "slack".to_string(),
+            sender,
+        },
+        Command::Slack(SlackCommand::Test { channel }) => Request::TestConnector {
+            connector: "slack".to_string(),
+            channel,
+        },
         Command::Account(AccountCommand::List) => Request::Accounts,
         Command::Account(AccountCommand::Add {
             id,
@@ -710,6 +746,7 @@ fn request_for(command: Command) -> Result<Request> {
         },
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
+            origin: None,
         },
         Command::Session(SessionCommand::Start {
             workspace,
@@ -723,6 +760,8 @@ fn request_for(command: Command) -> Result<Request> {
             prompt,
             model,
             account: account.map(AccountId),
+            access_mode: None,
+            origin: None,
         },
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
             session: SessionId(session),
@@ -864,6 +903,7 @@ fn print(response: Response, patch: bool) {
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
         Response::Accounts { accounts } => print_accounts(&accounts, &[]),
+        Response::Connectors { connectors } => print_connectors(&connectors),
         Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
         Response::PlanUsage { snapshot } => match snapshot {
             Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),
@@ -1185,6 +1225,39 @@ fn print_accounts(accounts: &[Account], plans: &[PlanSnapshot]) {
                 plan
             }
         );
+    }
+}
+
+/// One connector per block: its state, then one line per bound channel.
+fn print_connectors(connectors: &[ConnectorState]) {
+    for connector in connectors {
+        let state = if !connector.enabled {
+            rust_i18n::t!("cli.connector.disabled").to_string()
+        } else if connector.connected {
+            rust_i18n::t!(
+                "cli.connector.connected",
+                age = age_label(now() - connector.since.unwrap_or_else(now))
+            )
+            .to_string()
+        } else {
+            rust_i18n::t!("cli.connector.disconnected").to_string()
+        };
+        println!("{:<8} {state}", connector.id);
+        if let Some(error) = &connector.last_error {
+            println!(
+                "         {}",
+                rust_i18n::t!("cli.connector.error", error = error)
+            );
+        }
+        if connector.bindings.is_empty() {
+            println!("         {}", rust_i18n::t!("cli.connector.bindings.empty"));
+        }
+        for binding in &connector.bindings {
+            println!(
+                "         {:<14} {:<24} {:<8} {:<8} {}",
+                binding.channel, binding.target, binding.agent, binding.trigger, binding.worktree
+            );
+        }
     }
 }
 

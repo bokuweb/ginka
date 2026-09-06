@@ -6,7 +6,7 @@
 //! knows what a database or a git repository is.
 
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
-use crate::provider::ProviderKind;
+use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -151,10 +151,74 @@ pub struct Session {
     /// The vendor's own session id, when it has one. This is what a resume is
     /// built from; without it a session can only be replayed, not continued.
     pub vendor_session_id: Option<String>,
+    /// What the agent may touch without asking. Fixed when the session starts
+    /// and carried on every follow-up: a transport cannot widen it on a
+    /// running process (`docs/roadmap.md` §3.3 N2).
+    #[serde(default)]
+    pub access_mode: AccessMode,
+    /// Where the conversation came from, when a chat platform started it.
+    ///
+    /// `None` for a session started from the window or the CLI. This is the
+    /// thread-to-session map for connectors and what the sidebar draws as an
+    /// origin chip (`docs/connectors.md` §7).
+    #[serde(default)]
+    pub origin: Option<SessionOrigin>,
     /// Unix seconds.
     pub created_at: i64,
     /// Unix seconds; moves on every event, and drives the "last activity" sort.
     pub updated_at: i64,
+}
+
+/// Where a session came from, when a chat platform started it.
+///
+/// The three fields together are unique among sessions that are still
+/// answering their thread: a reply in the thread finds its session by them.
+/// The values are the platform's own ids, opaque to everything but the
+/// connector that wrote them.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SessionOrigin {
+    /// Which connector: `slack`.
+    pub connector: String,
+    /// The platform's conversation id — a Slack channel like `C0123…`.
+    pub channel: String,
+    /// The platform's thread key — a Slack root message's `ts`.
+    pub thread: String,
+}
+
+/// What a client sees of one chat connector.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorState {
+    /// `slack`.
+    pub id: String,
+    /// Whether the settings file turns it on. Off means nothing below is
+    /// meaningful.
+    pub enabled: bool,
+    /// Whether the platform connection is up right now.
+    pub connected: bool,
+    /// Unix seconds when the current connection was made, if it is up.
+    pub since: Option<i64>,
+    /// The last thing that went wrong, kept until the next success.
+    pub last_error: Option<String>,
+    /// The channels it listens in, as configured.
+    pub bindings: Vec<ConnectorBinding>,
+}
+
+/// One channel a connector listens in, as a client sees it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConnectorBinding {
+    /// The platform's conversation id.
+    pub channel: String,
+    /// Where a conversation runs: a workspace id or a project name.
+    pub target: String,
+    /// The driver id it starts.
+    pub agent: String,
+    /// `mention` or `all`.
+    pub trigger: String,
+    /// `shared` or `per_thread`.
+    pub worktree: String,
 }
 
 impl Session {
@@ -766,6 +830,8 @@ mod tests {
             title: None,
             summary: None,
             vendor_session_id: None,
+            access_mode: AccessMode::default(),
+            origin: None,
             created_at: 0,
             updated_at: 0,
         }

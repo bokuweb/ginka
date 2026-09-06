@@ -6,7 +6,9 @@
 //! talking to (`AGENTS.md` rule 6).
 
 use crate::ids::{ProjectName, SessionId, TerminalId, WorkspaceId};
-use crate::model::{BranchStatus, PlanSnapshot, PlanUsage, Session, SessionState, TranscriptEntry};
+use crate::model::{
+    BranchStatus, ConnectorState, PlanSnapshot, PlanUsage, Session, SessionState, TranscriptEntry,
+};
 use serde::{Deserialize, Serialize};
 
 /// One normalized thing an agent did.
@@ -144,6 +146,9 @@ pub enum DaemonEvent {
     PlanUsageChanged { snapshot: PlanSnapshot },
     /// An account was added, removed, or signed in. Clients re-read the list.
     AccountsChanged,
+    /// A chat connector connected, dropped, or failed. The whole state
+    /// travels so a window shows the dot going red without asking.
+    ConnectorStateChanged { state: ConnectorState },
 
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,

@@ -95,12 +95,28 @@ impl Daemon {
         let hub = Arc::new(Hub::new(EVENT_WINDOW));
         let service = Service::open(paths.clone(), hub.clone())?
             .with_drivers(ginka_core::driver::Registry::from_settings(&settings));
+        let service = Arc::new(Mutex::new(service));
+        // A connector that is written down is hosted, running or not: one
+        // that is not running still answers `ginka slack status` with why
+        // (`docs/connectors.md` §2).
+        if settings.connectors.slack.is_some() {
+            let connector = crate::connectors::SlackConnector::start(
+                &paths,
+                &settings,
+                hub.clone(),
+                service.clone(),
+            )?;
+            service
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .register_connector(connector);
+        }
         handshake::write(&handshake_path, &handshake)?;
 
         Ok(Self {
             listener,
             hub,
-            service: Arc::new(Mutex::new(service)),
+            service,
             handshake,
             paths,
             live: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

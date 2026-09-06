@@ -497,6 +497,9 @@ impl Shell {
                                 cx.notify();
                             })
                             .map_err(|_| ()),
+                        // A chat connector came or went. Nothing in the
+                        // window draws one yet; `ginka slack status` does.
+                        DaemonEvent::ConnectorStateChanged { .. } => Ok(()),
                         DaemonEvent::Shutdown => {
                             cx.background_executor().timer(RECONNECT_DELAY).await;
                             Ok(())
