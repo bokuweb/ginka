@@ -8,6 +8,9 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+/// The plan windows are wire types now — a client draws them — and are kept
+/// reachable from here because this is where they were first written.
+pub use ginka_protocol::model::{PlanUsage, PlanWindow};
 use ginka_protocol::provider::ProviderKind;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -269,62 +272,6 @@ pub fn summarize(events: &[UsageEvent], rates: Option<&RateTable>) -> UsageSumma
         quality,
         by_day,
         by_model,
-    }
-}
-
-/// A subscription's rate-limit window.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct PlanWindow {
-    pub label: String,
-    pub used_percent: f64,
-    /// Unix seconds, when the provider tells us.
-    pub resets_at: Option<i64>,
-}
-
-impl PlanWindow {
-    pub fn remaining_percent(&self) -> f64 {
-        (100.0 - self.used_percent.clamp(0.0, 100.0)).clamp(0.0, 100.0)
-    }
-
-    pub fn is_exhausted(&self) -> bool {
-        self.used_percent >= 100.0
-    }
-
-    /// "resets in 2h 15m", or nothing at all when the provider did not say.
-    /// A guess here would be worse than silence: the user plans around it.
-    pub fn reset_label(&self, now: i64) -> String {
-        let Some(resets_at) = self.resets_at else {
-            return String::new();
-        };
-        let remaining = resets_at - now;
-        if remaining <= 0 {
-            return "resets now".to_string();
-        }
-        let hours = remaining / 3_600;
-        let minutes = (remaining % 3_600) / 60;
-        match (hours, minutes) {
-            (0, 0) => "resets in under a minute".to_string(),
-            (0, minutes) => format!("resets in {minutes}m"),
-            (hours, 0) => format!("resets in {hours}h"),
-            (hours, minutes) => format!("resets in {hours}h {minutes}m"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct PlanUsage {
-    pub plan: Option<String>,
-    pub windows: Vec<PlanWindow>,
-}
-
-impl PlanUsage {
-    /// The window closest to its ceiling — the one worth the space in the UI.
-    pub fn tightest(&self) -> Option<&PlanWindow> {
-        self.windows.iter().max_by(|left, right| {
-            left.used_percent
-                .partial_cmp(&right.used_percent)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
     }
 }
 

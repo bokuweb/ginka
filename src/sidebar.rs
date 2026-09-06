@@ -65,6 +65,10 @@ pub struct SessionSidebar {
     /// See [`SessionSidebar::set_rows`].
     unlisted: u8,
     archived_open: bool,
+    /// The login the next prompt runs on, and its headroom, for the footer
+    /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
+    /// them.
+    account: Option<(String, Option<String>)>,
 }
 
 impl SessionSidebar {
@@ -76,6 +80,20 @@ impl SessionSidebar {
             selected_project: None,
             unlisted: 0,
             archived_open: true,
+            account: None,
+        }
+    }
+
+    /// Say which login the next prompt runs on, and how much of its window
+    /// is left, for the footer. `None` when nothing is known yet.
+    pub fn set_account(
+        &mut self,
+        account: Option<(String, Option<String>)>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.account != account {
+            self.account = account;
+            cx.notify();
         }
     }
 
@@ -593,8 +611,22 @@ impl SessionSidebar {
             )
     }
 
+    /// The plan label `docs/ui.md` §3.2 reserves: the login in use, and its
+    /// headroom under it. The device line stands in until a login is known.
     fn footer(&self, cx: &App) -> impl IntoElement {
         let tokens = Tokens::global(cx);
+        let (title, detail) = match &self.account {
+            Some((label, headroom)) => (
+                label.clone(),
+                headroom
+                    .clone()
+                    .unwrap_or_else(|| rust_i18n::t!("sidebar.footer.device").to_string()),
+            ),
+            None => (
+                rust_i18n::t!("sidebar.footer.device").to_string(),
+                String::new(),
+            ),
+        };
         h_flex()
             .w_full()
             .px_3()
@@ -623,13 +655,15 @@ impl SessionSidebar {
                             .text_sm()
                             .font_medium()
                             .text_color(tokens.colors().text_primary)
-                            .child(rust_i18n::t!("sidebar.footer.device").to_string()),
+                            .truncate()
+                            .child(title),
                     )
                     .child(
                         div()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child("M0"),
+                            .truncate()
+                            .child(detail),
                     ),
             )
     }

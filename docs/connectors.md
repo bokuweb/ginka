@@ -1,6 +1,6 @@
 # Chat connectors: Slack first
 
-**Status: design.** Nothing in this document is implemented. It exists so that the interfaces — the settings shape, the session origin, the transport trait, the outbound contract — are decided before the first line of adapter code, in the same spirit as roadmap §3.3.
+**Status: implemented, apart from the window.** The domain layer (`ginka-core::connector`), the Slack adapter and runner (`ginka-daemon::connectors`), the settings shape, the session origin, the ledger and the `ginka slack` subcommand are in. What the window does not yet do is draw a connector's state or a session's origin chip; `ginka slack status` is where that is read today. §12 lists where the code departs from the design below, and why.
 
 A *connector* lets a message in a chat platform start, or continue, an agent turn on the user's own machine, and carries the agent's answer back to the thread it came from. Slack is the first platform and the only one this document specifies. The layering is written so that a second platform is a second adapter behind one trait, not a second design.
 
@@ -275,3 +275,18 @@ Read for behaviour under roadmap R9; nothing was copied. Taken:
 Not taken: the twenty other platforms, running the cron scheduler inside the gateway (Ginka's cronjobs are already a daemon feature, M5), voice, pairing by DM (there are no DMs; the allowlist is edited in a file or with `ginka slack allow`), and running the gateway as its own service (the daemon is the service).
 
 From Claude Code channels: the five-letter request id without `l`, gating on `sender` rather than `chat`, and the observation that a reply path is an approval path and must be gated harder.
+
+## 12. Where the code departs from this design
+
+Written as it was built, so the reasons are not lost.
+
+- **`FanOut` does not take an origin.** One origin maps to one session by the unique index in §7, and a fan-out is several sessions. A thread that wants a fan-out asks for one from the window; the connector starts one session per thread.
+- **The access mode is real now.** `Session.access_mode` and `StartSession.access_mode` exist, are stored, and reach the drivers (`--permission-mode` on `claude`, `--full-auto` / `--sandbox read-only` on `codex`). A follow-up runs with the mode the session was started with. The binding's `access_mode` is therefore a ceiling in fact, not only in prose.
+- **`CloseSessionOrigin` is a request.** The `new` control word needs the daemon to stop a session answering its thread, and rule 3 says that goes through the protocol. The origin stays on the record and `origin_active` flips, so the sidebar's chip survives.
+- **`ListSessions` takes an `origin`** rather than a new request: the thread-to-session lookup is a filter on a list the CLI already has.
+- **The transport's methods take the channel.** Slack addresses a message by channel and timestamp together; an adapter that had to remember which channel a message belonged to would be keeping the state the trait exists to avoid.
+- **The footer counts uncommitted files**, not the turn's own changes: a per-turn change source (N7) is not in the protocol yet. `ginka review` shows the same set, so the count is the one the hint leads to.
+- **Steered and queued follow-ups get the same reaction.** The daemon answers `Ack` to both, and telling them apart would need the supervisor to say which it did. The 👀 moves to the latest message either way.
+- **Permission relay is posted, not yet answerable.** `AskUser`, `PlanProposal` and `Permission` are posted with a request id, and a verdict reaches `RespondToAgent` — which, on the drivers this build ships, is a follow-up. When a driver can take an answer mid-turn, nothing here changes.
+- **`app_mention` events are counted, not handled.** The same message arrives under `message` too, and handling both would run every mention twice. Mentions with no messages is the setup diagnostic (§4.3).
+- **The Slack app manifest** is at `assets/slack/manifest.json`. It asks for `channels:read` and `groups:read` as well, so the prompt can name the channel rather than quote its id.

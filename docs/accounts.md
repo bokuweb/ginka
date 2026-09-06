@@ -1,10 +1,11 @@
 # Accounts: several logins per provider, and the headroom on each
 
-**Status:** design, agreed 2026-09-05. Nothing in this document is implemented
-yet. It is the shape M5's "plan usage meter" (roadmap §3.3 N12) takes once a
-provider can have more than one login, and it adds one requirement of its own
-(N17). Read roadmap §4.4, §4.5 and §6.3 first; this document extends them and
-does not repeat them.
+**Status:** design, agreed 2026-09-05; §12 landed in full on 2026-09-06 (see
+the notes in §6 and §12), with Q9 still open. It is the
+shape M5's "plan usage meter" (roadmap §3.3 N12) takes once a provider can
+have more than one login, and it adds one requirement of its own (N17). Read
+roadmap §4.4, §4.5 and §6.3 first; this document extends them and does not
+repeat them.
 
 ## 1. The problem
 
@@ -196,19 +197,28 @@ driver is where the difference stops (rule 6): both feed the same
 
 ### Codex
 
-Every `exec --json` turn already emits a `token_count` event, and beside the
-token counts that event carries the account's rate limits: a `primary` and a
-`secondary` window, each with `used_percent`, `window_minutes` and `resets_at`.
-The driver's parser reads the counts today and drops the rest; it will read the
-rest. The labels are derived from `window_minutes` (five hours, a week) rather
-than from the names `primary` and `secondary`, which say nothing to a reader.
+The older `exec --json` stream (the `msg` envelope) emits a `token_count`
+event, and beside the token counts that event carries the account's rate
+limits: a `primary` and a `secondary` window, each with `used_percent`,
+`window_minutes` and `resets_at`. The driver reads them when they are there,
+and that reading is free. The labels are derived from the window's length
+(`5h`, `week`) rather than from the names `primary` and `secondary`, which
+say nothing to a reader.
 
-So on Codex the gauge is free: it updates on every turn, with nothing fetched
-and no process started. For a reading *without* running a turn — the account
-that is not the one in use — `codex app-server` answers `account/rateLimits/read`
-and the daemon can ask it the way `probe` asks for a version: a short-lived
-process, under the account's environment. That is the on-demand refresh, and it
-is the second step, not the first.
+**Corrected 2026-09-06, from running 0.142.5:** the modern stream — the
+`thread.*` / `turn.*` vocabulary, which is what a current CLI emits — carries
+no rate limits at all. The way to a reading on a current Codex is therefore
+the one the design had as the second step: `codex app-server` answers
+`account/rateLimits/read` over stdio once it has been sent `initialize` and
+`initialized`, and the daemon asks it the way `probe` asks for a version — a
+short-lived process under the account's environment, stopped as soon as the
+answer line arrives, because a server told to read one thing does not exit on
+its own. The answer names the plan (`planType`) and the windows in camelCase
+(`usedPercent`, `windowDurationMins`, `resetsAt`); the driver reads both
+spellings. The exchange and the answer are pinned as fixtures in the driver's
+tests (R6). This is the on-demand refresh: run when the user asks, and when
+the account picker opens on an account whose reading is missing or older than
+the shortest window.
 
 ### Claude Code
 
@@ -227,6 +237,14 @@ Two levels, and only the first is in this design:
    14:30", not "83 %". A driver that finds a richer event in a newer CLI's
    stream reads it — the parser tolerates unknown events already — and that is
    how the gauge improves without a decision here.
+
+   *Landed 2026-09-06:* the refusal's text is read from the assistant's
+   message and from the result. The older wording, `Claude AI usage limit
+   reached|<unix seconds>`, gives a window called `limit` with its reset; the
+   newer sentences name the window — `5-hour`, `Weekly`, `Opus weekly` — and
+   give the reset in prose, which is not turned into a number. One wall said
+   twice in a turn is one reading. No warning reaches the headless stream in
+   1.0.124, so nothing is claimed short of the wall.
 2. **A percentage.** Newer Claude Code has a `/usage` screen that reads an
    Anthropic endpoint with the login's OAuth token. Ginka could call the same
    endpoint under the account's environment. Doing so means reading a
@@ -377,6 +395,12 @@ Additions to `docs/ui.md`, recorded there too:
 ## 12. Order of work
 
 Each step is usable on its own and the earlier ones do not depend on Q9.
+Steps 1–3 landed 2026-09-06: the account chip and picker, the sidebar footer,
+the Reports surface (windows per login over the totals by login, agent and
+day), and an *Add a login…* row in the agent and account pickers that opens a
+small dialog — in the agent picker as well, because the account chip only
+exists once there is a choice, and the first second login has to be reachable
+from somewhere. Step 4 waits on Q9.
 
 1. **Accounts.** The settings block, `home_variable`, the spawn layer, `probe`
    per account, `AccountId` on sessions and usage events, the migration, the

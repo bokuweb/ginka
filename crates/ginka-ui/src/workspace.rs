@@ -278,6 +278,9 @@ pub struct SessionRow {
     pub session: Option<SessionId>,
     pub title: SharedString,
     pub agent: Agent,
+    /// The login the session runs on, when there is a session. A follow-up
+    /// stays on it (`docs/accounts.md` §5).
+    pub account: Option<ginka_protocol::AccountId>,
     /// How the worktree stands against its upstream, drawn beside the branch.
     pub status: BranchStatus,
     /// The worktree on disk, shown by the terminal and the context bar.
@@ -304,6 +307,7 @@ impl SessionRow {
             workspace: summary.id(),
             session: session.map(|session| session.id.clone()),
             title: title_for(&summary.worktree.name).into(),
+            account: session.map(|session| session.account.clone()),
             agent: session
                 .map(|session| Agent::from_id(&session.agent))
                 .unwrap_or(Agent::Claude),
@@ -390,6 +394,7 @@ impl SessionRow {
             session: None,
             title: title.into(),
             agent,
+            account: None,
             status: BranchStatus::default(),
             path: PathBuf::new(),
             origin: origin.into(),
@@ -606,11 +611,14 @@ mod tests {
             id: ginka_protocol::SessionId("s".into()),
             workspace: ginka_protocol::WorkspaceId("comet/remove-r2-file-uploads".into()),
             agent: agent.into(),
+            account: ginka_protocol::AccountId(agent.into()),
             model: None,
             state,
             title: None,
             summary: None,
             vendor_session_id: None,
+            access_mode: Default::default(),
+            origin: None,
             created_at: 0,
             updated_at: 0,
         }

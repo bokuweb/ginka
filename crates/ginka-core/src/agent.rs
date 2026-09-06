@@ -16,7 +16,9 @@ use crate::{checkpoint, session};
 use anyhow::{Context, Result};
 use futures_lite::io::BufReader;
 use futures_lite::{AsyncBufReadExt, StreamExt};
-use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
+use ginka_protocol::model::{
+    PlanSource, PlanUsage, SessionState, TranscriptEntry, TranscriptPayload,
+};
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
 use std::collections::{HashMap, VecDeque};
@@ -75,11 +77,33 @@ impl Shared {
             session,
             turn,
             &stored.agent,
+            &stored.account,
             stored.model.as_deref(),
             usage,
             now(),
         ) {
             tracing::warn!(%error, session = %session, "could not record what a turn cost");
+        }
+    }
+
+    /// Keep what the vendor said about the account's rate-limit windows, and
+    /// tell every client the gauge moved (`docs/accounts.md` §6).
+    ///
+    /// Filed against the session's account rather than its agent: the
+    /// windows are the login's, and two logins of one provider have two.
+    fn record_plan(&self, session: &SessionId, usage: &PlanUsage) {
+        let snapshot = {
+            let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+            let Ok(Some(stored)) = session::get(&conn, session) else {
+                return;
+            };
+            crate::usage::record_plan(&conn, &stored.account, usage, now(), PlanSource::Reported)
+        };
+        match snapshot {
+            Ok(snapshot) => self.events.emit(DaemonEvent::PlanUsageChanged { snapshot }),
+            Err(error) => {
+                tracing::warn!(%error, session = %session, "could not record the account's windows")
+            }
         }
     }
 
@@ -528,6 +552,12 @@ async fn pump(
                     // it is filed against the turn it was current at.
                     AgentEvent::Usage { usage } => {
                         context.record_usage(session, parse.turn + 1, usage);
+                    }
+                    // A gauge, not conversation: kept per account and pushed,
+                    // never written into the transcript.
+                    AgentEvent::PlanUsage { usage } => {
+                        context.record_plan(session, usage);
+                        continue;
                     }
                     AgentEvent::TurnEnd { turn } => {
                         // Nothing more can be steered into a turn that has

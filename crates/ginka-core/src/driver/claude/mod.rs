@@ -78,6 +78,13 @@ impl ClaudeDriver {
             args.push("--model".to_string());
             args.push(model.clone());
         }
+        // The default is what the CLI does when told nothing, so it is only
+        // spelled out when it is not the default: the arguments a test reads
+        // stay what they were.
+        if spec.access_mode != AccessMode::Ask {
+            args.push("--permission-mode".to_string());
+            args.push(permission_mode(spec.access_mode).to_string());
+        }
         args
     }
 }
@@ -154,6 +161,18 @@ impl AgentDriver for ClaudeDriver {
 
     fn supports_steer(&self) -> bool {
         true
+    }
+
+    /// Claude Code keeps its login, settings and sessions under one
+    /// directory, `~/.claude` unless this says otherwise.
+    fn home_variable(&self) -> Option<&'static str> {
+        Some("CLAUDE_CONFIG_DIR")
+    }
+
+    /// The CLI has no `login` subcommand: starting it interactively in a
+    /// directory with no login is what asks for one.
+    fn login_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec::new(&self.program))
     }
 
     fn encode_user_message(&self, text: &str) -> Option<String> {

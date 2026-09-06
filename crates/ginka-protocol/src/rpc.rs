@@ -5,12 +5,14 @@
 //! command line and from the MCP server (`AGENTS.md` rule 3). Adding a private
 //! path from a view into `ginka-core` is how that guarantee gets lost.
 
-use crate::ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ContentMatch, DiffSide,
-    FileContent, FileEntry, Project, ReviewComment, Session, SessionMatch, SlashCommand,
-    TerminalInfo, TranscriptEntry, UsageRow, WorkspaceSummary,
+    Account, AgentStatus, Attachment, ChangeSource, Changes, Checkpoint, ConnectorState,
+    ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session,
+    SessionMatch, SessionOrigin, SlashCommand, TerminalInfo, TranscriptEntry, UsageRow,
+    WorkspaceSummary,
 };
+use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -59,8 +61,43 @@ pub enum Request {
     /// Probing runs each vendor's CLI, so this is a request rather than
     /// something a client can work out for itself.
     ListAgents,
-    /// Sessions, newest first. `workspace` limits it.
-    ListSessions { workspace: Option<WorkspaceId> },
+    /// Every login of every provider, the defaults first, with what the last
+    /// probe said about each (`docs/accounts.md` §8).
+    Accounts,
+    /// Add a login: a directory for the provider's CLI to sign into.
+    ///
+    /// The directory is created empty; the vendor fills it through
+    /// [`Request::LoginAccount`]. Ginka never holds the credential.
+    AddAccount {
+        /// A slug, immutable once created, unique across providers.
+        id: AccountId,
+        provider: ProviderKind,
+        /// What the chip says.
+        label: String,
+    },
+    /// Forget a login. The directory holds the vendor's sign-in, which is the
+    /// thing a person least wants deleted by accident, so it stays unless
+    /// `delete_home` says otherwise.
+    RemoveAccount { id: AccountId, delete_home: bool },
+    /// Run the vendor's own sign-in for an account, in a terminal in
+    /// `workspace`'s dock, with the account's directory in its environment.
+    LoginAccount {
+        id: AccountId,
+        workspace: WorkspaceId,
+        rows: u16,
+        cols: u16,
+    },
+    /// Ask the provider how much of an account's rate-limit windows is left,
+    /// without running a turn. Answers with the reading, and pushes it.
+    RefreshPlanUsage { account: AccountId },
+    /// Sessions, newest first. `workspace` limits it; `origin` limits it to
+    /// the session still answering that thread, which is how a connector
+    /// finds where a reply belongs.
+    ListSessions {
+        workspace: Option<WorkspaceId>,
+        #[serde(default)]
+        origin: Option<SessionOrigin>,
+    },
     /// Start an agent in a workspace and send it `prompt`.
     StartSession {
         workspace: WorkspaceId,
@@ -68,6 +105,15 @@ pub enum Request {
         agent: String,
         prompt: String,
         model: Option<String>,
+        /// Which login to run on; the provider's default when absent.
+        account: Option<AccountId>,
+        /// What the agent may do without asking. `Ask` when absent.
+        #[serde(default)]
+        access_mode: Option<AccessMode>,
+        /// Where the conversation came from, when a chat platform is asking.
+        /// Recorded on the session and never changed.
+        #[serde(default)]
+        origin: Option<SessionOrigin>,
     },
     /// Ask the same question in several worktrees at once.
     ///
@@ -97,6 +143,9 @@ pub enum Request {
     },
     /// Rename a conversation. An empty title clears it back to none.
     RenameSession { session: SessionId, title: String },
+    /// Stop a session answering the thread that started it, so the next
+    /// message there starts a new one. The origin stays on the record.
+    CloseSessionOrigin { session: SessionId },
     /// Forget a session and its transcript and checkpoints.
     RemoveSession { session: SessionId },
     /// Take a copy of a conversation as it was, and carry on from there.
@@ -186,7 +235,8 @@ pub enum Request {
         text: String,
     },
 
-    /// What the work has cost, by day and by agent.
+    /// What the work has cost, by day, by agent and by account, with the
+    /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
     /// Leave a comment on a line of the diff.
@@ -275,6 +325,28 @@ pub enum Request {
     /// Close a terminal and stop its shell.
     CloseTerminal { terminal: TerminalId },
 
+    /// Every chat connector this daemon hosts, and whether each is connected
+    /// (`docs/connectors.md` §3.3).
+    ListConnectors,
+    /// Let one more platform member speak to a connector.
+    ///
+    /// Written into the settings file, because the allowlist is
+    /// configuration; the connector picks the change up at once.
+    AllowConnectorSender {
+        /// `slack`.
+        connector: String,
+        /// The platform's own member id, `U01ABC2DEF3` on Slack.
+        sender: String,
+    },
+    /// Post one message into a channel and take it back, to prove the
+    /// tokens and the channel are right.
+    TestConnector {
+        /// `slack`.
+        connector: String,
+        /// The platform's conversation id.
+        channel: String,
+    },
+
     /// Ask the daemon to exit once it has flushed its state.
     Shutdown,
 }
@@ -286,6 +358,9 @@ pub struct Attempt {
     /// A driver id: `claude`, `codex`, …
     pub agent: String,
     pub model: Option<String>,
+    /// Which login to run on; the provider's default when absent.
+    #[serde(default)]
+    pub account: Option<AccountId>,
 }
 
 /// What the daemon answers with.
@@ -313,6 +388,17 @@ pub enum Response {
     },
     Agents {
         agents: Vec<AgentStatus>,
+    },
+    Accounts {
+        accounts: Vec<Account>,
+    },
+    Account {
+        account: Account,
+    },
+    /// A reading of an account's windows, or none when the provider could
+    /// not be asked.
+    PlanUsage {
+        snapshot: Option<PlanSnapshot>,
     },
     Sessions {
         sessions: Vec<Session>,
@@ -373,10 +459,16 @@ pub enum Response {
     Usage {
         by_day: Vec<UsageRow>,
         by_agent: Vec<UsageRow>,
+        by_account: Vec<UsageRow>,
+        /// The latest reading per account, for those that have one.
+        plans: Vec<PlanSnapshot>,
     },
     /// A commit was made, and this is what it is called.
     Committed {
         commit: String,
+    },
+    Connectors {
+        connectors: Vec<ConnectorState>,
     },
 }
 
@@ -391,6 +483,21 @@ mod tests {
         let request: Request =
             serde_json::from_str(r#"{"method":"list_workspaces"}"#).expect("omitted option");
         assert_eq!(request, Request::ListWorkspaces { project: None });
+        // A field added after a client was written is one that client never
+        // sends, and it must still parse.
+        let request: Request = serde_json::from_str(
+            r#"{"method":"start_session","workspace":"comet/harbor","agent":"claude",
+                "prompt":"go","model":null,"account":null}"#,
+        )
+        .expect("a start with no origin and no access mode");
+        assert!(matches!(
+            request,
+            Request::StartSession {
+                origin: None,
+                access_mode: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -415,7 +522,15 @@ mod tests {
                 agent: "claude".into(),
                 prompt: "write the test first".into(),
                 model: Some("opus".into()),
+                account: Some(AccountId("claude-work".into())),
+                access_mode: Some(AccessMode::Auto),
+                origin: Some(SessionOrigin {
+                    connector: "slack".into(),
+                    channel: "C1".into(),
+                    thread: "1725500000.000100".into(),
+                }),
             },
+            Request::ListConnectors,
             Request::SessionTranscript {
                 session: SessionId("s-1".into()),
                 after: Some(10),

@@ -46,6 +46,12 @@ async-signal = "0.2"
 # AsyncWrite`, which is what keeps the daemon on smol rather than dragging a
 # second reactor in behind tokio. See docs/roadmap.md §4.3.
 async-tungstenite = "0.35"
+# The synchronous client, for the Slack connector's Socket Mode connection:
+# it lives on a thread of its own, like a driver's reader, and the TLS it
+# needs is the client-side kind the server never uses.
+tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+# A blocking HTTPS client for the Slack Web API, run on the blocking pool.
+ureq = { version = "3", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"

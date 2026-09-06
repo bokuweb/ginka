@@ -84,6 +84,14 @@ pub struct DaemonSettings {
     /// for is ignored rather than refused, so a settings file can outlive the
     /// build that reads it.
     pub agents: BTreeMap<String, AgentSettings>,
+    /// Logins beyond each provider's own, keyed by account id
+    /// (`docs/accounts.md` §3). A provider's default account is never here:
+    /// it is the vendor's own home, configured by `agents` above.
+    pub accounts: BTreeMap<String, AccountSettings>,
+    /// Chat connectors: which platforms the daemon listens to, in which
+    /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
+    /// never here.
+    pub connectors: crate::connector::ConnectorsSettings,
 }
 
 impl DaemonSettings {
@@ -136,6 +144,24 @@ pub struct AgentSettings {
     pub env: BTreeMap<String, String>,
 }
 
+/// One login of one provider, beyond the provider's own.
+///
+/// The directory it names is `~/.ginka/accounts/<id>/`, derived from the id
+/// rather than stored, so the record cannot point somewhere it does not own.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccountSettings {
+    pub provider: ProviderKind,
+    /// What the chip says.
+    pub label: String,
+    /// Environment for this account's processes, applied after the
+    /// provider's own and before the session's. The same escape hatch as
+    /// [`AgentSettings::env`], and where a key goes if the user wants one
+    /// attached to one login rather than to every session of a provider.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
 impl Default for DaemonSettings {
     fn default() -> Self {
         Self {
@@ -146,6 +172,8 @@ impl Default for DaemonSettings {
             checkpoint_limit: 200,
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
+            accounts: BTreeMap::new(),
+            connectors: crate::connector::ConnectorsSettings::default(),
         }
     }
 }
@@ -247,6 +275,31 @@ mod tests {
         assert_eq!(
             claude.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
             Some("http://localhost:8080")
+        );
+    }
+
+    #[test]
+    fn an_account_is_a_provider_a_label_and_optionally_its_own_variables() {
+        let settings: DaemonSettings = serde_json::from_str(
+            r#"{"accounts":{"claude-work":{"provider":"claude","label":"Work",
+                 "env":{"ANTHROPIC_BASE_URL":"https://gateway"}},
+                 "codex-personal":{"provider":"codex","label":"Personal"}}}"#,
+        )
+        .expect("accounts parse");
+        let work = &settings.accounts["claude-work"];
+        assert_eq!(work.provider, ProviderKind::Claude);
+        assert_eq!(work.label, "Work");
+        assert_eq!(
+            work.env.get("ANTHROPIC_BASE_URL").map(String::as_str),
+            Some("https://gateway")
+        );
+        assert!(settings.accounts["codex-personal"].env.is_empty());
+        // A record cannot say where its directory is: that is derived.
+        assert!(
+            serde_json::from_str::<DaemonSettings>(
+                r#"{"accounts":{"x":{"provider":"claude","label":"X","home":"/elsewhere"}}}"#
+            )
+            .is_err()
         );
     }
 

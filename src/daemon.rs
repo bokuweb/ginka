@@ -15,11 +15,12 @@ use ginka_core::Paths;
 use std::path::PathBuf;
 
 use ginka_protocol::model::{
-    AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry, Project,
-    ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
+    Account, AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
+    PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
+    WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{CheckpointId, SessionId, TerminalId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -133,6 +134,7 @@ impl DaemonLink {
         agent: &str,
         prompt: String,
         model: Option<String>,
+        account: Option<AccountId>,
     ) -> Option<Session> {
         match self
             .ask(Request::StartSession {
@@ -140,10 +142,112 @@ impl DaemonLink {
                 agent: agent.to_string(),
                 prompt,
                 model,
+                account,
+                access_mode: None,
+                origin: None,
             })
             .await
         {
             Some(Response::Session { session }) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// What the work cost over `days`, and where each login stands.
+    pub async fn usage(&self, days: u32) -> Option<ginka_ui::reports::UsageReport> {
+        match self.ask(Request::Usage { days: Some(days) }).await {
+            Some(Response::Usage {
+                by_day,
+                by_agent,
+                by_account,
+                plans,
+            }) => Some(ginka_ui::reports::UsageReport {
+                by_day,
+                by_agent,
+                by_account,
+                plans,
+            }),
+            _ => None,
+        }
+    }
+
+    /// Add a login for a provider: a directory for its CLI to sign into.
+    ///
+    /// The daemon's refusal — a bad id, a name already taken — comes back as
+    /// the sentence it gave, because the dialog shows it to the reader.
+    pub async fn add_account(
+        &self,
+        id: AccountId,
+        provider: ginka_protocol::ProviderKind,
+        label: String,
+    ) -> Result<Account, String> {
+        match self
+            .ask_result(Request::AddAccount {
+                id,
+                provider,
+                label,
+            })
+            .await?
+        {
+            Response::Account { account } => Ok(account),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Every login of every provider, with what the daemon last learned
+    /// about each being signed in.
+    pub async fn accounts(&self) -> Vec<Account> {
+        match self.ask(Request::Accounts).await {
+            Some(Response::Accounts { accounts }) => accounts,
+            _ => Vec::new(),
+        }
+    }
+
+    /// The latest reading of every account's rate-limit windows.
+    ///
+    /// Comes with the usage report, of which the readings are the part the
+    /// composer wants; the totals are asked for a day so the rest stays
+    /// small.
+    pub async fn plans(&self) -> Vec<PlanSnapshot> {
+        match self.ask(Request::Usage { days: Some(1) }).await {
+            Some(Response::Usage { plans, .. }) => plans,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ask the provider for an account's windows now. The daemon pushes the
+    /// reading too, so every window sees it.
+    pub async fn refresh_plan(&self, account: &AccountId) -> Option<PlanSnapshot> {
+        match self
+            .ask(Request::RefreshPlanUsage {
+                account: account.clone(),
+            })
+            .await
+        {
+            Some(Response::PlanUsage { snapshot }) => snapshot,
+            _ => None,
+        }
+    }
+
+    /// Run the vendor's own sign-in for an account in a terminal in the
+    /// workspace's dock, and return the terminal.
+    pub async fn login_account(
+        &self,
+        account: &AccountId,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Option<TerminalId> {
+        match self
+            .ask(Request::LoginAccount {
+                id: account.clone(),
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await
+        {
+            Some(Response::Terminal { terminal }) => Some(terminal),
             _ => None,
         }
     }
@@ -476,6 +580,20 @@ impl DaemonLink {
             text,
         })
         .await;
+    }
+
+    /// Ask the daemon one question and keep its refusal, for the callers
+    /// that show one: a refused request is an answer, not a lost connection.
+    async fn ask_result(&self, request: Request) -> Result<Response, String> {
+        let client = self
+            .client()
+            .await
+            .ok_or_else(|| rust_i18n::t!("daemon.unreachable").to_string())?;
+        client.request(request).await.map_err(|error| {
+            // The daemon answered — it just said no — so the connection is
+            // still good and is kept.
+            error.message
+        })
     }
 
     /// Ask the daemon one question, reconnecting next time if it fails.

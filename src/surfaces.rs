@@ -50,6 +50,9 @@ pub struct SurfacePanel {
     matches: Vec<ContentMatch>,
     /// The file being read, if one was opened.
     showing: Option<FileContent>,
+    /// What the work cost and where each login stands, as the shell last
+    /// read it. `None` until the Reports surface has been opened.
+    usage: Option<ginka_ui::reports::UsageReport>,
 }
 
 /// Emitted when the panel wants the shell to do something only it can.
@@ -109,6 +112,29 @@ impl SurfacePanel {
             reverting: None,
             message: None,
             complaint: None,
+            usage: None,
+        }
+    }
+
+    /// Hand the panel the usage report. Called from the shell's refresh while
+    /// the Reports surface is open.
+    pub fn set_usage(&mut self, usage: ginka_ui::reports::UsageReport, cx: &mut Context<Self>) {
+        if self.usage.as_ref() != Some(&usage) {
+            self.usage = Some(usage);
+            cx.notify();
+        }
+    }
+
+    /// A login's windows were read again: the report shows the new reading
+    /// without waiting for the next refresh.
+    pub fn set_plan(
+        &mut self,
+        snapshot: ginka_protocol::model::PlanSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(usage) = self.usage.as_mut() {
+            usage.set_plan(snapshot);
+            cx.notify();
         }
     }
 
@@ -924,6 +950,138 @@ impl SurfacePanel {
 }
 
 impl SurfacePanel {
+    /// The Reports surface: what the work cost, by day, by agent and by
+    /// login, and each login's rate-limit windows with the reading's age.
+    ///
+    /// Lists, not charts: the question mid-task is "how close am I to the
+    /// wall" (roadmap N12), and a number with its age answers it where a bar
+    /// would only decorate it. The percentage is printed and *at the wall*
+    /// is a word beside it, never a colour alone (§6.4).
+    fn reports(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let now = crate::daemon::now();
+        let Some(usage) = self.usage.as_ref() else {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.reports.reading").to_string()),
+                )
+                .into_any_element();
+        };
+        if usage.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.reports.empty").to_string()),
+                )
+                .into_any_element();
+        }
+
+        let heading = |text: String| {
+            div()
+                .px_3()
+                .pt_3()
+                .pb_1()
+                .text_xs()
+                .text_color(tokens.colors().text_muted)
+                .child(text)
+        };
+        let row = |label: String, detail: String| {
+            h_flex()
+                .w_full()
+                .px_3()
+                .py_1()
+                .gap_3()
+                .items_baseline()
+                .child(
+                    div()
+                        .w(px(120.))
+                        .flex_shrink_0()
+                        .text_sm()
+                        .text_color(tokens.colors().text_primary)
+                        .truncate()
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(detail),
+                )
+        };
+        let usage_rows = |rows: &[ginka_protocol::model::UsageRow]| {
+            rows.iter()
+                .map(|entry| {
+                    row(
+                        entry.label.clone(),
+                        ginka_ui::reports::totals_line(&entry.totals),
+                    )
+                    .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        };
+        let at_the_wall = rust_i18n::t!("composer.account.at_wall").to_string();
+        let plan_rows: Vec<AnyElement> = usage
+            .plans
+            .iter()
+            .map(|snapshot| {
+                let mut lines = ginka_ui::reports::window_lines(snapshot, now, &at_the_wall);
+                if let Some(plan) = &snapshot.usage.plan {
+                    lines.insert(0, plan.clone());
+                }
+                lines.push(
+                    rust_i18n::t!(
+                        "composer.account.age",
+                        age = ginka_ui::workspace::relative_age(now, snapshot.observed_at)
+                    )
+                    .to_string(),
+                );
+                row(snapshot.account.0.clone(), lines.join(" · ")).into_any_element()
+            })
+            .collect();
+
+        v_flex()
+            .id("reports")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .pb_3()
+            .child(heading(
+                rust_i18n::t!("surface.reports.windows").to_string(),
+            ))
+            .children(plan_rows)
+            .children((usage.plans.is_empty()).then(|| {
+                div()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.reports.no_reading").to_string())
+            }))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_account").to_string(),
+            ))
+            .children(usage_rows(&usage.by_account))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_agent").to_string(),
+            ))
+            .children(usage_rows(&usage.by_agent))
+            .child(heading(rust_i18n::t!("surface.reports.by_day").to_string()))
+            .children(usage_rows(&usage.by_day))
+            .into_any_element()
+    }
+
     /// The files surface: a finder over the worktree, and what it opens.
     ///
     /// Read-only, and honestly so — the editor is M4. What it is for now is
@@ -1178,6 +1336,7 @@ impl Render for SurfacePanel {
                 None => self.empty_state(cx).into_any_element(),
                 Some(Surface::Git) => self.git(cx).into_any_element(),
                 Some(Surface::Files) => self.files(cx).into_any_element(),
+                Some(Surface::Reports) => self.reports(cx).into_any_element(),
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
             })
     }

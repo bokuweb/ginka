@@ -8,8 +8,10 @@
 //! As with every driver, the shapes are pinned by the fixtures below rather
 //! than by a live session.
 
-use super::{ActivityItem, AgentDriver, CommandSpec, ParseState, ProviderModel, SessionSpec};
-use ginka_protocol::model::SessionState;
+use super::{
+    ActivityItem, AgentDriver, CommandSpec, ParseState, PlanUsageProbe, ProviderModel, SessionSpec,
+};
+use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
 use ginka_protocol::{AgentEvent, Usage};
 use serde_json::Value;
 
@@ -42,10 +44,21 @@ impl CodexDriver {
     }
 
     fn model_args(spec: &SessionSpec) -> Vec<String> {
-        match &spec.model {
+        let mut args = match &spec.model {
             Some(model) => vec!["--model".to_string(), model.clone()],
             None => Vec::new(),
+        };
+        // Our access modes in the vendor's vocabulary, only when they are
+        // not what `codex exec` does on its own.
+        match spec.access_mode {
+            ginka_protocol::provider::AccessMode::Ask => {}
+            ginka_protocol::provider::AccessMode::ReadOnly => {
+                args.push("--sandbox".to_string());
+                args.push("read-only".to_string());
+            }
+            ginka_protocol::provider::AccessMode::Auto => args.push("--full-auto".to_string()),
         }
+        args
     }
 }
 
@@ -126,6 +139,43 @@ impl AgentDriver for CodexDriver {
         command
     }
 
+    /// Codex reads everything — login, config, sessions — from `~/.codex`
+    /// unless this says otherwise.
+    fn home_variable(&self) -> Option<&'static str> {
+        Some("CODEX_HOME")
+    }
+
+    fn login_command(&self) -> Option<CommandSpec> {
+        Some(CommandSpec::new(&self.program).arg("login"))
+    }
+
+    /// The app server answers `account/rateLimits/read` over stdio once it
+    /// has been initialized. Verified against 0.142.5, which is also where
+    /// the modern `exec --json` stream turned out to carry no rate limits:
+    /// this is the way to a reading, not a fallback.
+    fn plan_usage_probe(&self) -> Option<PlanUsageProbe> {
+        Some(PlanUsageProbe {
+            command: CommandSpec::new(&self.program).arg("app-server"),
+            input: vec![
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "ginka", "title": "Ginka", "version": env!("CARGO_PKG_VERSION")}}
+                })
+                .to_string(),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}}).to_string(),
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read", "params": {}
+                })
+                .to_string(),
+            ],
+        })
+    }
+
+    fn parse_plan_usage(&self, line: &str) -> Option<PlanUsage> {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        plan_usage_from(value.get("result")?.get("rateLimits")?)
+    }
+
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent> {
         let line = line.trim();
         if line.is_empty() {
@@ -170,6 +220,9 @@ impl AgentDriver for CodexDriver {
                     events.push(AgentEvent::Usage {
                         usage: usage_from(usage),
                     });
+                }
+                if let Some(usage) = value.get("rate_limits").and_then(plan_usage_from) {
+                    events.push(AgentEvent::PlanUsage { usage });
                 }
                 state.turn += 1;
                 events.push(AgentEvent::TurnEnd { turn: state.turn });
@@ -341,14 +394,72 @@ fn parse_legacy(msg: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
         }
         Some("token_count") => {
             state.recognized += 1;
-            vec![AgentEvent::Usage {
+            let mut events = vec![AgentEvent::Usage {
                 usage: usage_from(msg.get("info").unwrap_or(msg)),
-            }]
+            }];
+            // The older stream carries the account's windows beside the
+            // counts; the reading is free, so it is taken.
+            if let Some(usage) = msg.get("rate_limits").and_then(plan_usage_from) {
+                events.push(AgentEvent::PlanUsage { usage });
+            }
+            events
         }
         _ => {
             state.unrecognized += 1;
             Vec::new()
         }
+    }
+}
+
+/// The account's rate-limit windows as Codex describes them: a `primary` and
+/// a `secondary` window, each with a used percentage, a length in minutes and
+/// a reset time — snake_case on the event stream, camelCase from the app
+/// server. `None` when there is no window in it, which is not a reading.
+fn plan_usage_from(limits: &Value) -> Option<PlanUsage> {
+    let number = |value: &Value, keys: &[&str]| -> Option<f64> {
+        keys.iter()
+            .find_map(|key| value.get(*key))
+            .and_then(Value::as_f64)
+    };
+    let mut windows = Vec::new();
+    for key in ["primary", "secondary"] {
+        let Some(window) = limits.get(key).filter(|window| !window.is_null()) else {
+            continue;
+        };
+        let Some(used_percent) = number(window, &["used_percent", "usedPercent"]) else {
+            continue;
+        };
+        let minutes = number(window, &["window_minutes", "windowDurationMins"]).map(|m| m as i64);
+        windows.push(PlanWindow {
+            label: window_label(minutes, key),
+            used_percent,
+            resets_at: number(window, &["resets_at", "resetsAt"]).map(|at| at as i64),
+        });
+    }
+    if windows.is_empty() {
+        return None;
+    }
+    Some(PlanUsage {
+        plan: limits
+            .get("plan_type")
+            .or_else(|| limits.get("planType"))
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        windows,
+    })
+}
+
+/// What a window is called, from its length: `5h`, `week`. The vendor's own
+/// names for them — `primary`, `secondary` — say nothing to a reader, and are
+/// only used when the length is missing.
+fn window_label(minutes: Option<i64>, fallback: &str) -> String {
+    const DAY: i64 = 24 * 60;
+    match minutes {
+        Some(minutes) if minutes == 7 * DAY => "week".to_string(),
+        Some(minutes) if minutes > 0 && minutes % DAY == 0 => format!("{}d", minutes / DAY),
+        Some(minutes) if minutes > 0 && minutes % 60 == 0 => format!("{}h", minutes / 60),
+        Some(minutes) if minutes > 0 => format!("{minutes}m"),
+        _ => fallback.to_string(),
     }
 }
 
@@ -546,6 +657,103 @@ mod tests {
                 summary: Some("Hello".into()),
             })
         );
+    }
+
+    #[test]
+    fn the_older_stream_reports_the_accounts_windows_beside_the_counts() {
+        let (events, _) = parse(&[
+            r#"{"id":"1","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5}},"rate_limits":{"primary":{"used_percent":92.5,"window_minutes":300,"resets_at":1700000000},"secondary":{"used_percent":40,"window_minutes":10080,"resets_at":1700600000}}}}"#,
+        ]);
+        let plan = events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::PlanUsage { usage } => Some(usage.clone()),
+                _ => None,
+            })
+            .expect("the windows are read");
+        assert_eq!(plan.plan, None);
+        assert_eq!(
+            plan.windows,
+            vec![
+                PlanWindow {
+                    label: "5h".into(),
+                    used_percent: 92.5,
+                    resets_at: Some(1_700_000_000),
+                },
+                PlanWindow {
+                    label: "week".into(),
+                    used_percent: 40.0,
+                    resets_at: Some(1_700_600_000),
+                },
+            ]
+        );
+        assert_eq!(plan.tightest().map(|w| w.label.as_str()), Some("5h"));
+    }
+
+    #[test]
+    fn a_token_count_with_no_windows_reports_none_rather_than_an_empty_reading() {
+        let (events, _) = parse(&[
+            r#"{"id":"1","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":5}},"rate_limits":null}}"#,
+        ]);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::PlanUsage { .. })),
+            "nothing was reported, so nothing is claimed"
+        );
+    }
+
+    #[test]
+    fn the_app_server_is_asked_for_the_windows_and_its_answer_is_read() {
+        // The exchange and the answer as 0.142.5 gave them; the shape is the
+        // fixture, not a live server (R6).
+        let driver = CodexDriver::default();
+        let probe = driver.plan_usage_probe().expect("codex can be asked");
+        assert_eq!(probe.command.args, vec!["app-server"]);
+        assert!(probe.input[0].contains("\"initialize\""));
+        assert!(probe.input[2].contains("account/rateLimits/read"));
+
+        assert_eq!(
+            driver.parse_plan_usage(
+                r#"{"id":1,"result":{"userAgent":"ginka/0.142.5","codexHome":"/Users/x/.codex"}}"#
+            ),
+            None,
+            "the handshake's answer is not the reading"
+        );
+        assert_eq!(
+            driver.parse_plan_usage(r#"{"method":"remoteControl/status/changed","params":{}}"#),
+            None
+        );
+        let usage = driver
+            .parse_plan_usage(
+                r#"{"id":2,"result":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":40,"windowDurationMins":10080,"resetsAt":1789141311},"secondary":null,"planType":"pro"}}}"#,
+            )
+            .expect("the reading");
+        assert_eq!(usage.plan.as_deref(), Some("pro"));
+        assert_eq!(
+            usage.windows,
+            vec![PlanWindow {
+                label: "week".into(),
+                used_percent: 40.0,
+                resets_at: Some(1_789_141_311),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_window_is_named_by_its_length() {
+        assert_eq!(window_label(Some(300), "primary"), "5h");
+        assert_eq!(window_label(Some(10_080), "secondary"), "week");
+        assert_eq!(window_label(Some(2_880), "x"), "2d");
+        assert_eq!(window_label(Some(90), "x"), "90m");
+        assert_eq!(window_label(None, "primary"), "primary");
+    }
+
+    #[test]
+    fn the_cli_is_pointed_at_an_accounts_directory_through_codex_home() {
+        let driver = CodexDriver::default();
+        assert_eq!(driver.home_variable(), Some("CODEX_HOME"));
+        assert_eq!(driver.login_command().unwrap().args, vec!["login"]);
     }
 
     #[test]

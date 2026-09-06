@@ -76,6 +76,25 @@ impl Paths {
         self.root.join("blobs")
     }
 
+    /// One directory per account, each the home a vendor's CLI keeps one
+    /// login in (`docs/accounts.md` §3). The directories themselves are made
+    /// private when an account is added, not here.
+    pub fn accounts(&self) -> PathBuf {
+        self.root.join("accounts")
+    }
+
+    /// Chat connectors' secrets, one `<connector>.env` per connector, each
+    /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
+    /// environment, and nowhere else.
+    pub fn connectors(&self) -> PathBuf {
+        self.root.join("connectors")
+    }
+
+    /// The Slack connector's tokens.
+    pub fn slack_secrets(&self) -> PathBuf {
+        self.connectors().join("slack.env")
+    }
+
     /// Create every directory Ginka writes into. Idempotent.
     pub fn ensure(&self) -> Result<()> {
         for dir in [
@@ -85,6 +104,8 @@ impl Paths {
             self.scratch_projects(),
             self.attachments(),
             self.blobs(),
+            self.accounts(),
+            self.connectors(),
         ] {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }

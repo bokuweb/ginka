@@ -57,6 +57,8 @@ enum Picker {
     Agent,
     /// Which of that agent's models it runs on.
     Model,
+    /// Which of that agent's logins it runs on (`docs/accounts.md` §11).
+    Account,
     /// Which file the `@` being typed means.
     Mention,
     /// Which command the `/` being typed means.
@@ -149,6 +151,11 @@ pub struct Shell {
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
+    /// Every login of every provider, as the daemon lists them.
+    accounts: Vec<ginka_protocol::model::Account>,
+    /// The latest reading of each login's rate-limit windows, followed from
+    /// the daemon's pushes so a chip moves when a turn moves the gauge.
+    plans: Vec<ginka_protocol::model::PlanSnapshot>,
     /// How much of the answer being written is on screen.
     reveal: Reveal,
     /// What the daemon last said the shown session was doing.
@@ -179,6 +186,11 @@ pub struct Shell {
     chosen_agent: Option<String>,
     /// The model the user chose for that agent.
     chosen_model: Option<String>,
+    /// The login the user chose for that agent. `None` runs the provider's
+    /// default, which is what one login per provider always is.
+    chosen_account: Option<ginka_protocol::AccountId>,
+    /// The add-login dialog, while it is open.
+    add_account: Option<AddAccount>,
     /// Set when the next prompt should open a new conversation rather than
     /// continue the one on screen.
     start_fresh: bool,
@@ -295,6 +307,7 @@ impl Shell {
                         this.picker = None;
                         this.chosen_agent = None;
                         this.chosen_model = None;
+                        this.chosen_account = None;
                         this.start_fresh = false;
                         this.checkpoints = Vec::new();
                         this.rewinding = None;
@@ -450,6 +463,23 @@ impl Shell {
                         | DaemonEvent::SessionStarted { .. } => {
                             pull_rows(&this, &link, cx).await.map(|_| ())
                         }
+                        // A gauge moved. Straight onto the chip: the turn
+                        // that moved it is the one the reader is watching.
+                        DaemonEvent::PlanUsageChanged { snapshot } => this
+                            .update(cx, |this, cx| {
+                                this.plans.retain(|known| known.account != snapshot.account);
+                                this.plans.push(snapshot.clone());
+                                this.surfaces
+                                    .update(cx, |surfaces, cx| surfaces.set_plan(snapshot, cx));
+                                this.sync_footer(cx);
+                                cx.notify();
+                            })
+                            .map_err(|_| ()),
+                        // A login was added, removed or signed in: the list
+                        // is re-read with the rest.
+                        DaemonEvent::AccountsChanged => {
+                            pull_rows(&this, &link, cx).await.map(|_| ())
+                        }
                         // The shell printed something. Straight onto its
                         // screen: a terminal that lagged behind what was typed
                         // into it would be unusable for the thing terminals
@@ -467,6 +497,9 @@ impl Shell {
                                 cx.notify();
                             })
                             .map_err(|_| ()),
+                        // A chat connector came or went. Nothing in the
+                        // window draws one yet; `ginka slack status` does.
+                        DaemonEvent::ConnectorStateChanged { .. } => Ok(()),
                         DaemonEvent::Shutdown => {
                             cx.background_executor().timer(RECONNECT_DELAY).await;
                             Ok(())
@@ -493,6 +526,8 @@ impl Shell {
             transcript: Transcript::new(),
             transcript_of: None,
             agents: Vec::new(),
+            accounts: Vec::new(),
+            plans: Vec::new(),
             reveal: Reveal::new(),
             palette: None,
             terminal_focus: cx.focus_handle(),
@@ -506,6 +541,8 @@ impl Shell {
             commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
+            chosen_account: None,
+            add_account: None,
             projects: Vec::new(),
             target_project: None,
             start_fresh: false,
@@ -941,6 +978,47 @@ impl Shell {
         .detach();
     }
 
+    /// Run the vendor's sign-in for a login in the dock, pointed at the
+    /// login's directory (`docs/accounts.md` §4).
+    ///
+    /// The daemon owns the terminal and re-probes the login when the command
+    /// exits, so the chip changes on its own. Needs a workspace for the dock
+    /// to belong to; on the home screen there is none, and the CLI's
+    /// `ginka account login` is the way.
+    fn sign_in(
+        &mut self,
+        account: ginka_protocol::AccountId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let (rows, cols) = self.dock_size();
+        let link = self.link.clone();
+        self.terminal_focus.focus(window, cx);
+        cx.spawn(async move |this, cx| {
+            let opened = cx
+                .background_spawn(async move {
+                    link.login_account(&account, &workspace, rows, cols).await
+                })
+                .await;
+            if let Some(terminal) = opened {
+                this.update(cx, |this, cx| {
+                    let title = this.terminals.tabs().len() + 1;
+                    this.terminals
+                        .open(terminal, format!("shell {title}"), rows, cols);
+                    // Adopted straight afterwards so the tab takes the name
+                    // the daemon gave it, which says whose sign-in it is.
+                    this.adopt_terminals(cx);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// Stop one of the dock's shells.
     fn close_terminal(&mut self, terminal: ginka_protocol::TerminalId, cx: &mut Context<Self>) {
         self.terminals.close(&terminal);
@@ -1218,6 +1296,7 @@ impl Shell {
             .agent_to_start()
             .unwrap_or_else(|| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
         let model = self.chosen_model.clone();
+        let account = self.account_to_start().map(|account| account.id.clone());
         let fresh = self.start_fresh;
         self.start_fresh = false;
         cx.spawn(async move |this, cx| {
@@ -1232,7 +1311,8 @@ impl Shell {
                     let workspace = row.workspace.clone();
                     let started = cx
                         .background_spawn(async move {
-                            link.start_session(&workspace, &agent, text, model).await
+                            link.start_session(&workspace, &agent, text, model, account)
+                                .await
                         })
                         .await;
                     // Adopt the new session immediately rather than waiting for
@@ -2333,6 +2413,7 @@ impl Shell {
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
         let agent_chip = self.agent_chip_button(cx);
+        let account_chip = self.account_chip_button(cx);
         let new_session = self.new_session_button(cx);
 
         v_flex()
@@ -2374,6 +2455,7 @@ impl Shell {
                             .child(div().flex_1())
                             .children(model_chip)
                             .child(agent_chip)
+                            .children(account_chip)
                             .child(if working {
                                 // An agent that cannot be stopped is one the
                                 // user has to wait out. The composer keeps
@@ -2491,36 +2573,11 @@ impl Shell {
                 ));
                 rows
             }
-            Picker::Agent => self
-                .agents
-                .iter()
-                .map(|agent| {
-                    let id = agent.id.clone();
-                    let chosen = self.chosen_agent.as_deref() == Some(agent.id.as_str());
-                    let note = if !agent.installed {
-                        Some(rust_i18n::t!("composer.agent.missing").to_string())
-                    } else if agent.authenticated == Some(false) {
-                        Some(rust_i18n::t!("composer.agent.signed_out").to_string())
-                    } else {
-                        agent.version.clone()
-                    };
-                    self.picker_row(
-                        SharedString::from(format!("agent-option:{}", agent.id)),
-                        agent.display_name.clone(),
-                        note,
-                        chosen,
-                        cx.listener(move |this, _, _, cx| {
-                            this.chosen_agent = Some(id.clone());
-                            // The model belonged to the agent that was chosen
-                            // before; it means nothing to the new one.
-                            this.chosen_model = None;
-                            this.picker = None;
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                })
-                .collect(),
+            Picker::Agent => self.agent_rows(cx),
+            // The provider's logins, each with its headroom or its state:
+            // the numbers beside the choice are what make a router
+            // unnecessary (`docs/accounts.md` §7).
+            Picker::Account => self.account_rows(cx),
             Picker::Command => self
                 .commands
                 .iter()
@@ -2833,6 +2890,481 @@ impl Shell {
             })
             .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Agent, cx)))
             .child(self.agent_chip(cx))
+    }
+
+    /// The login the next prompt runs on.
+    ///
+    /// A conversation stays on the login it started on — the vendor's thread
+    /// lives in that login's directory — so while one is being continued the
+    /// answer is its account. A fresh chat takes what the reader picked, or
+    /// the provider's default.
+    fn account_to_start(&self) -> Option<&ginka_protocol::model::Account> {
+        let provider = self.agent_to_start()?;
+        let continuing = self
+            .session
+            .as_ref()
+            .filter(|row| row.session.is_some() && !self.start_fresh)
+            .and_then(|row| row.account.as_ref());
+        ginka_ui::accounts::account_to_start(
+            &self.accounts,
+            &provider,
+            continuing.or(self.chosen_account.as_ref()),
+        )
+    }
+
+    /// What a login's row says beside its name: the tightest window and the
+    /// reading's age, or that it is signed out, or that nothing is known.
+    fn account_note(&self, account: &ginka_protocol::model::Account, now: i64) -> Option<String> {
+        if account.signed_in == Some(false) {
+            return Some(rust_i18n::t!("composer.agent.signed_out").to_string());
+        }
+        let snapshot = ginka_ui::accounts::snapshot_of(&self.plans, &account.id);
+        match ginka_ui::accounts::headroom(snapshot, now) {
+            Some(headroom) => {
+                let mut parts = vec![headroom.summary()];
+                if headroom.exhausted {
+                    parts.push(rust_i18n::t!("composer.account.at_wall").to_string());
+                }
+                if !headroom.reset.is_empty() {
+                    parts.push(headroom.reset.clone());
+                }
+                parts.push(
+                    rust_i18n::t!(
+                        "composer.account.age",
+                        age = ginka_ui::workspace::relative_age(now, now - headroom.age)
+                    )
+                    .to_string(),
+                );
+                Some(parts.join(" · "))
+            }
+            None => Some(rust_i18n::t!("composer.account.no_reading").to_string()),
+        }
+    }
+
+    /// Ask the daemon for a fresh reading of every login of the chosen
+    /// provider whose reading is missing or older than the shortest window.
+    ///
+    /// On opening the picker rather than on a timer: a quota is cheap to
+    /// observe from the traffic that spends it, and a request when the number
+    /// is wanted is the one active refresh the design allows.
+    fn refresh_stale_accounts(&self, cx: &mut Context<Self>) {
+        let Some(provider) = self.agent_to_start() else {
+            return;
+        };
+        let now = crate::daemon::now();
+        let stale: Vec<ginka_protocol::AccountId> =
+            ginka_ui::accounts::accounts_for(&self.accounts, &provider)
+                .into_iter()
+                .filter(|account| account.signed_in != Some(false))
+                .filter(|account| {
+                    ginka_ui::accounts::wants_refresh(
+                        ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
+                        now,
+                    )
+                })
+                .map(|account| account.id.clone())
+                .collect();
+        for account in stale {
+            let link = self.link.clone();
+            cx.background_spawn(async move {
+                // The daemon pushes the reading; nothing to do with the
+                // answer here.
+                let _ = link.refresh_plan(&account).await;
+            })
+            .detach();
+        }
+    }
+
+    /// The account chip, present only when the chosen agent has more than
+    /// one login: a chip that could only restate the agent chip is noise.
+    fn account_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let provider = self.agent_to_start()?;
+        if !ginka_ui::accounts::offers_choice(&self.accounts, &provider) {
+            return None;
+        }
+        let account = self.account_to_start()?;
+        let tokens = Tokens::global(cx);
+        let now = crate::daemon::now();
+        let headroom = ginka_ui::accounts::headroom(
+            ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
+            now,
+        );
+        let (note, colour) = match (&headroom, account.signed_in) {
+            (_, Some(false)) => (
+                Some(rust_i18n::t!("composer.agent.signed_out").to_string()),
+                tokens.colors().status_attention,
+            ),
+            (Some(headroom), _) if headroom.exhausted => (
+                Some(format!(
+                    "{} · {}",
+                    headroom.summary(),
+                    rust_i18n::t!("composer.account.at_wall")
+                )),
+                tokens.colors().status_attention,
+            ),
+            (Some(headroom), _) => (Some(headroom.summary()), tokens.colors().text_secondary),
+            (None, _) => (None, tokens.colors().text_secondary),
+        };
+        let label = account.label.clone();
+
+        Some(
+            h_flex()
+                .id("account-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .tooltip(|window, cx| {
+                    Tooltip::new(rust_i18n::t!("composer.account.pick").to_string())
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| {
+                    if this.picker != Some(Picker::Account) {
+                        this.refresh_stale_accounts(cx);
+                    }
+                    this.toggle_picker(Picker::Account, cx)
+                }))
+                .child(div().text_size(px(12.)).text_color(colour).child(label))
+                .children(note.map(|note| {
+                    div()
+                        .text_size(px(12.))
+                        .text_color(colour)
+                        .child(format!("· {note}"))
+                }))
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(tokens.colors().text_muted),
+                ),
+        )
+    }
+
+    /// The agent picker's rows: every agent this machine has, then a way to
+    /// add a login for the chosen one, so the first second login is
+    /// reachable before there is an account chip to open.
+    fn agent_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let mut rows: Vec<AnyElement> = self
+            .agents
+            .iter()
+            .map(|agent| {
+                let id = agent.id.clone();
+                let chosen = self.chosen_agent.as_deref() == Some(agent.id.as_str());
+                let note = if !agent.installed {
+                    Some(rust_i18n::t!("composer.agent.missing").to_string())
+                } else if agent.authenticated == Some(false) {
+                    Some(rust_i18n::t!("composer.agent.signed_out").to_string())
+                } else {
+                    agent.version.clone()
+                };
+                self.picker_row(
+                    SharedString::from(format!("agent-option:{}", agent.id)),
+                    agent.display_name.clone(),
+                    note,
+                    chosen,
+                    cx.listener(move |this, _, _, cx| {
+                        this.chosen_agent = Some(id.clone());
+                        // The model and the login belonged to the agent that
+                        // was chosen before; they mean nothing to the new
+                        // one.
+                        this.chosen_model = None;
+                        this.chosen_account = None;
+                        this.picker = None;
+                        this.sync_footer(cx);
+                        cx.notify();
+                    }),
+                    cx,
+                )
+            })
+            .collect();
+        rows.extend(self.add_login_row(cx));
+        rows
+    }
+
+    /// The account picker's rows: the provider's logins, each with its
+    /// headroom or its state — the numbers beside the choice are what make a
+    /// router unnecessary (`docs/accounts.md` §7) — and a way to add one.
+    fn account_rows(&self, cx: &Context<Self>) -> Vec<AnyElement> {
+        let provider = self.agent_to_start().unwrap_or_default();
+        let current = self.account_to_start().map(|account| account.id.clone());
+        let now = crate::daemon::now();
+        let mut rows: Vec<AnyElement> = ginka_ui::accounts::accounts_for(&self.accounts, &provider)
+            .into_iter()
+            .map(|account| {
+                let id = account.id.clone();
+                let signed_out = account.signed_in == Some(false);
+                let note = self.account_note(account, now);
+                self.picker_row(
+                    SharedString::from(format!("account-option:{}", account.id.0)),
+                    account.label.clone(),
+                    note,
+                    current.as_ref() == Some(&account.id),
+                    cx.listener(move |this, _, window, cx| {
+                        this.chosen_account = Some(id.clone());
+                        this.picker = None;
+                        // Choosing a login that is signed out is asking to
+                        // sign in: the vendor's own command opens in the
+                        // dock, pointed at the login's directory.
+                        if signed_out {
+                            this.sign_in(id.clone(), window, cx);
+                        }
+                        this.sync_footer(cx);
+                        cx.notify();
+                    }),
+                    cx,
+                )
+            })
+            .collect();
+        rows.extend(self.add_login_row(cx));
+        rows
+    }
+
+    /// The row that opens the add-login dialog for the chosen agent.
+    fn add_login_row(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let provider = self.agent_to_start()?;
+        let display = self
+            .agents
+            .iter()
+            .find(|agent| agent.id == provider)
+            .map(|agent| agent.display_name.clone())
+            .unwrap_or_else(|| provider.clone());
+        Some(self.picker_row(
+            SharedString::from("account-option:add"),
+            rust_i18n::t!("composer.account.add", agent = display).to_string(),
+            None,
+            false,
+            cx.listener(move |this, _, window, cx| {
+                this.picker = None;
+                this.open_add_account(provider.clone(), window, cx);
+            }),
+            cx,
+        ))
+    }
+
+    /// Tell the sidebar's footer which login the next prompt runs on and
+    /// how much of its window is left.
+    fn sync_footer(&self, cx: &mut Context<Self>) {
+        let now = crate::daemon::now();
+        let account = self.account_to_start().map(|account| {
+            let display = self
+                .agents
+                .iter()
+                .find(|agent| agent.id == account.provider.as_str())
+                .map(|agent| agent.display_name.clone())
+                .unwrap_or_else(|| account.provider.to_string());
+            let label = if account.is_default {
+                display
+            } else {
+                format!("{} · {display}", account.label)
+            };
+            (label, self.account_note(account, now))
+        });
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_account(account, cx));
+    }
+
+    /// Open the dialog that adds a login for `provider`.
+    fn open_add_account(&mut self, provider: String, window: &mut Window, cx: &mut Context<Self>) {
+        let id = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.account.add.id").to_string())
+        });
+        let label = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.account.add.label").to_string())
+        });
+        id.read(cx).focus_handle(cx).focus(window, cx);
+        self.add_account = Some(AddAccount {
+            provider,
+            id,
+            label,
+            error: None,
+            busy: false,
+        });
+        cx.notify();
+    }
+
+    /// Send the dialog's login to the daemon, and close it when the daemon
+    /// took it — or show what the daemon said when it did not.
+    fn submit_add_account(&mut self, cx: &mut Context<Self>) {
+        let Some(dialog) = self.add_account.as_mut() else {
+            return;
+        };
+        if dialog.busy {
+            return;
+        }
+        let typed_id = dialog.id.read(cx).value().to_string();
+        let typed_label = dialog.label.read(cx).value().to_string();
+        let Some(provider) = ginka_protocol::ProviderKind::parse(&dialog.provider) else {
+            dialog.error = Some(rust_i18n::t!("composer.account.add.no_provider").to_string());
+            cx.notify();
+            return;
+        };
+        dialog.busy = true;
+        dialog.error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let id = ginka_protocol::AccountId(typed_id.trim().to_string());
+            let label = if typed_label.trim().is_empty() {
+                id.0.clone()
+            } else {
+                typed_label.trim().to_string()
+            };
+            let added = cx
+                .background_spawn(async move { link.add_account(id, provider, label).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match added {
+                    Ok(account) => {
+                        this.add_account = None;
+                        this.chosen_account = Some(account.id.clone());
+                        // The list is re-read on the daemon's push; adopting
+                        // the record now is what lets the chip say it before
+                        // the push lands.
+                        this.accounts.push(account);
+                        this.sync_footer(cx);
+                    }
+                    Err(message) => {
+                        if let Some(dialog) = this.add_account.as_mut() {
+                            dialog.busy = false;
+                            dialog.error = Some(message);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Escape closes the dialog and Return submits it, from either field.
+    fn add_account_key(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.add_account = None;
+                cx.notify();
+            }
+            "enter" => self.submit_add_account(cx),
+            _ => {}
+        }
+    }
+
+    /// The add-login dialog, drawn over the window like the palette.
+    fn add_account_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.add_account.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let display = self
+            .agents
+            .iter()
+            .find(|agent| agent.id == dialog.provider)
+            .map(|agent| agent.display_name.clone())
+            .unwrap_or_else(|| dialog.provider.clone());
+        let busy = dialog.busy;
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .child(
+                    v_flex()
+                        .id("add-account")
+                        .mt(px(120.))
+                        .w(px(460.))
+                        .p_4()
+                        .gap_3()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                            this.add_account_key(event, cx)
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(tokens.colors().text_primary)
+                                .child(
+                                    rust_i18n::t!("composer.account.add.title", agent = display)
+                                        .to_string(),
+                                ),
+                        )
+                        .child(Input::new(&dialog.id))
+                        .child(Input::new(&dialog.label))
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("composer.account.add.hint").to_string()),
+                        )
+                        .children(dialog.error.clone().map(|error| {
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child(error)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("add-account-cancel")
+                                        .px(px(9.))
+                                        .py(px(5.))
+                                        .rounded(px(tokens.radius.row))
+                                        .text_size(px(12.))
+                                        .text_color(tokens.colors().text_secondary)
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_account = None;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            rust_i18n::t!("composer.account.add.cancel")
+                                                .to_string(),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-account-submit")
+                                        .px(px(9.))
+                                        .py(px(5.))
+                                        .rounded(px(tokens.radius.row))
+                                        .bg(tokens.colors().accent.opacity(if busy {
+                                            0.3
+                                        } else {
+                                            0.6
+                                        }))
+                                        .text_size(px(12.))
+                                        .text_color(tokens.colors().text_primary)
+                                        .cursor_pointer()
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.submit_add_account(cx)
+                                            }),
+                                        )
+                                        .child(
+                                            rust_i18n::t!("composer.account.add.submit")
+                                                .to_string(),
+                                        ),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// The model chip, when the chosen agent offers a choice of models.
@@ -3365,19 +3897,21 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (showing, wants_changes) = this
+    let (showing, wants_changes, wants_usage) = this
         .update(cx, |this, cx| {
+            let open = this.surfaces.read(cx).open_surface();
             (
                 this.session.as_ref().map(|row| row.workspace.clone()),
                 // Only while the surface that shows them is open: reading a
                 // diff runs git over the whole worktree, and a panel nobody
                 // opened is not worth that on every tick.
-                this.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Git),
+                open == Some(ginka_ui::surface::Surface::Git),
+                open == Some(ginka_ui::surface::Surface::Reports),
             )
         })
         .map_err(|_| ())?;
-    let (rows, projects, agents, checkpoints, changes, staged, comments) = cx
-        .background_spawn(async move {
+    let (rows, projects, agents, accounts, plans, usage, checkpoints, changes, staged, comments) =
+        cx.background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Separately from the workspaces: a project with no worktree is
             // still a heading a chat can be started under.
@@ -3385,6 +3919,15 @@ async fn pull_rows(
             // Cached by the daemon, so this is a request rather than two
             // subprocesses per agent every tick.
             let agents = listing.agents().await;
+            // The logins and their gauges: cached and pushed by the daemon
+            // respectively, so both are a request rather than a probe.
+            let accounts = listing.accounts().await;
+            let plans = listing.plans().await;
+            let usage = if wants_usage {
+                listing.usage(30).await
+            } else {
+                None
+            };
             let checkpoints = match &showing {
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
@@ -3403,6 +3946,9 @@ async fn pull_rows(
                 rows,
                 projects,
                 agents,
+                accounts,
+                plans,
+                usage,
                 checkpoints,
                 changes,
                 staged,
@@ -3417,7 +3963,14 @@ async fn pull_rows(
     );
     this.update(cx, |this, cx| {
         this.agents = agents;
+        this.accounts = accounts;
+        this.plans = plans;
         this.checkpoints = checkpoints;
+        if let Some(usage) = usage {
+            this.surfaces
+                .update(cx, |surfaces, cx| surfaces.set_usage(usage, cx));
+        }
+        this.sync_footer(cx);
         this.projects = projects.iter().map(ProjectRow::from_project).collect();
         let listed = this.projects.clone();
         this.sidebar
@@ -3568,6 +4121,7 @@ impl Render for Shell {
                 ),
             )
             .children(self.palette_view(cx))
+            .children(self.add_account_view(cx))
     }
 }
 
@@ -3666,6 +4220,18 @@ impl Shell {
                 .into_any_element(),
         )
     }
+}
+
+/// The add-login dialog's own state while it is open.
+struct AddAccount {
+    /// The driver id the login is for.
+    provider: String,
+    id: Entity<InputState>,
+    label: Entity<InputState>,
+    /// What the daemon said when it refused, shown until the next attempt.
+    error: Option<String>,
+    /// Set while the daemon is being asked, so Return twice is one request.
+    busy: bool,
 }
 
 /// The palette's own state while it is open.

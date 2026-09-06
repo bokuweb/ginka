@@ -74,6 +74,11 @@ pub fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
+            name: "ginka_accounts",
+            description: "Every login of every provider, with whether each is signed in. A session can be started on one by id.",
+            schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
             name: "ginka_sessions",
             description: "List agent sessions, newest first.",
             schema: json!({
@@ -91,6 +96,7 @@ pub fn tools() -> Vec<Tool> {
                     "agent": {"type": "string", "description": "A driver id: claude, codex"},
                     "prompt": {"type": "string"},
                     "model": {"type": "string"},
+                    "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's default otherwise"},
                 },
                 "required": ["workspace", "agent", "prompt"],
             }),
@@ -252,14 +258,19 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             base: maybe("base"),
         },
         "ginka_agents" => Request::ListAgents,
+        "ginka_accounts" => Request::Accounts,
         "ginka_sessions" => Request::ListSessions {
             workspace: maybe("workspace").map(WorkspaceId),
+            origin: None,
         },
         "ginka_session_start" => Request::StartSession {
             workspace: WorkspaceId(text("workspace")?),
             agent: text("agent")?,
             prompt: text("prompt")?,
             model: maybe("model"),
+            account: maybe("account").map(ginka_protocol::AccountId),
+            access_mode: None,
+            origin: None,
         },
         "ginka_fan_out" => Request::FanOut {
             project: ProjectName(text("project")?),
@@ -277,10 +288,12 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                             Some((agent, model)) => ginka_protocol::rpc::Attempt {
                                 agent: agent.to_string(),
                                 model: Some(model.to_string()),
+                                account: None,
                             },
                             None => ginka_protocol::rpc::Attempt {
                                 agent: agent.to_string(),
                                 model: None,
+                                account: None,
                             },
                         })
                         .collect()

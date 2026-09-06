@@ -28,12 +28,13 @@ pub use envelope::{
 };
 pub use event::{AgentEvent, DaemonEvent, Usage};
 pub use handshake::Handshake;
-pub use ids::{CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
+pub use ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 pub use model::{
-    AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint, CommandScope,
-    DiffLine, DiffSide, FileChange, FileEntry, Hunk, LineKind, Project, ProjectKind, ReviewComment,
-    Session, SessionMatch, SessionState, SlashCommand, TranscriptEntry, TranscriptPayload,
-    UsageRow, UsageTotals, WorkspaceSummary, Worktree,
+    Account, AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint,
+    CommandScope, DiffLine, DiffSide, FileChange, FileEntry, Hunk, LineKind, LoginCommand,
+    PlanSnapshot, PlanSource, PlanUsage, PlanWindow, Project, ProjectKind, ReviewComment, Session,
+    SessionMatch, SessionState, SlashCommand, TranscriptEntry, TranscriptPayload, UsageRow,
+    UsageTotals, WorkspaceSummary, Worktree,
 };
 pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
 pub use rpc::{Request, Response};

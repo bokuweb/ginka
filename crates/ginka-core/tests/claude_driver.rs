@@ -21,6 +21,7 @@ fn spec() -> SessionSpec {
             reasoning_effort: None,
             service_tier: None,
             access_mode: AccessMode::Ask,
+            account: None,
         },
         resume: None,
     }

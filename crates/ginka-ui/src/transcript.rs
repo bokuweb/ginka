@@ -219,8 +219,10 @@ impl Transcript {
                 plan: plan.clone(),
                 answered: false,
             }),
-            // Accounting belongs in the context bar, not in the conversation.
+            // Accounting belongs in the context bar, not in the conversation,
+            // and the account's windows belong to the account chip.
             AgentEvent::Usage { usage } => self.usage = *usage,
+            AgentEvent::PlanUsage { .. } => {}
             AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn }),
             AgentEvent::SessionResult { state, summary } => self.blocks.push(Block::Outcome {
                 state: *state,

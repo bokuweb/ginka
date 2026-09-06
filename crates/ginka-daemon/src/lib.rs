@@ -9,6 +9,7 @@
 //! authentication and the discovery file. Anything that decides what a request
 //! *means* belongs in `ginka-core` (`AGENTS.md` rule 2).
 
+pub mod connectors;
 pub mod handshake;
 pub mod hub;
 pub mod server;

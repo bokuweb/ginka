@@ -4,6 +4,7 @@
 //! a viewport onto this crate, and the daemon is its long-running host. If a
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
+pub mod account;
 pub mod agent;
 pub mod attachment;
 pub mod blob;
@@ -12,6 +13,7 @@ pub mod commands;
 pub mod comments;
 pub mod commit;
 pub mod composer;
+pub mod connector;
 pub mod daemon;
 pub mod db;
 pub mod diff;
