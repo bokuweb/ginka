@@ -14,6 +14,7 @@ use ginka_ui::editor::{
     FileTabs, PreviewKind, SaveState, image_data_url, language_for_path, markdown_preview,
     preview_kind, save_state, saved_selection_reference,
 };
+use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -93,6 +94,10 @@ pub struct SurfacePanel {
     /// The selected project's skills plus the user's own, as last read from
     /// the daemon. `None` while the first read is in flight.
     skills: Option<Vec<Skill>>,
+    /// What is typed into the skills finder.
+    skill_finder: Entity<InputState>,
+    /// Scope and enablement facets composed with the skills finder.
+    skill_filter: SkillFilter,
     /// The daemon stopped its bounded skill scan before visiting every root.
     skills_truncated: bool,
     /// The grouped skill whose every installed copy is being changed.
@@ -162,6 +167,17 @@ impl SurfacePanel {
             }
         })
         .detach();
+        let skill_finder = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.search").to_string())
+        });
+        cx.subscribe(&skill_finder, |this, finder, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.skill_filter.query = finder.read(cx).value().to_string();
+                cx.notify();
+            }
+        })
+        .detach();
         Self {
             finder,
             files: Vec::new(),
@@ -183,6 +199,8 @@ impl SurfacePanel {
             complaint: None,
             usage: None,
             skills: None,
+            skill_finder,
+            skill_filter: SkillFilter::default(),
             skills_truncated: false,
             skill_changing: None,
             skill_error: None,
@@ -1538,7 +1556,17 @@ impl SurfacePanel {
                 .into_any_element();
         }
 
-        let rows = skills.into_iter().map(|skill| {
+        let total = skills.len();
+        let visible = ginka_ui::skills::filter_skills(&skills, &self.skill_filter)
+            .into_iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let visible_count = visible.len();
+        let scope = self.skill_filter.scope;
+        let state = self.skill_filter.state;
+        let active_bg = tokens.colors().row_active();
+
+        let rows = visible.into_iter().map(|skill| {
             let request = ginka_ui::skills::toggle_request(&skill);
             let name = request.name.clone();
             let enabled = request.enabled;
@@ -1546,6 +1574,8 @@ impl SurfacePanel {
             let installs = ginka_ui::skills::install_rows(&skill)
                 .iter()
                 .map(|install| {
+                    let path = ginka_ui::skills::install_path_text(install);
+                    let copied_path = path.clone();
                     let scope = match install.scope {
                         SkillScope::User => rust_i18n::t!("surface.skills.scope.user").to_string(),
                         SkillScope::Project => {
@@ -1566,11 +1596,33 @@ impl SurfacePanel {
                                 .child(format!("{} · {scope} · {state}", install.root_label)),
                         )
                         .child(
-                            div()
-                                .text_size(px(10.))
-                                .text_color(tokens.colors().text_muted)
-                                .truncate()
-                                .child(install.directory.display().to_string()),
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_size(px(10.))
+                                        .text_color(tokens.colors().text_muted)
+                                        .truncate()
+                                        .child(path),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "copy-skill-path:{}:{}",
+                                        skill.name, install.root_label
+                                    )))
+                                    .ghost()
+                                    .child(rust_i18n::t!("surface.skills.copy_path").to_string())
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                copied_path.clone(),
+                                            ));
+                                        },
+                                    ),
+                                ),
                         )
                         .into_any_element()
                 })
@@ -1633,26 +1685,140 @@ impl SurfacePanel {
             .id("skills-surface")
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll()
-            .children(self.skill_error.clone().map(|error| {
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(tokens.colors().status_error)
+            .child(
+                v_flex()
+                    .w_full()
+                    .p_2()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(Input::new(&self.skill_finder))
                     .child(
-                        rust_i18n::t!("surface.skills.error", error = error.as_ref()).to_string(),
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                Button::new("skill-scope-all")
+                                    .ghost()
+                                    .when(scope == ScopeFilter::All, |this| this.bg(active_bg))
+                                    .child(rust_i18n::t!("surface.skills.filter.all").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.scope = ScopeFilter::All;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-scope-project")
+                                    .ghost()
+                                    .when(scope == ScopeFilter::Project, |this| this.bg(active_bg))
+                                    .child(
+                                        rust_i18n::t!("surface.skills.scope.project").to_string(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.scope = ScopeFilter::Project;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-scope-user")
+                                    .ghost()
+                                    .when(scope == ScopeFilter::User, |this| this.bg(active_bg))
+                                    .child(rust_i18n::t!("surface.skills.scope.user").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.scope = ScopeFilter::User;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(
+                                        rust_i18n::t!(
+                                            "surface.skills.filter.count",
+                                            visible = visible_count,
+                                            total = total
+                                        )
+                                        .to_string(),
+                                    ),
+                            ),
                     )
-            }))
-            .children(self.skills_truncated.then(|| {
-                div()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(tokens.colors().status_error)
-                    .child(rust_i18n::t!("surface.skills.truncated").to_string())
-            }))
-            .children(rows)
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .child(
+                                Button::new("skill-state-all")
+                                    .ghost()
+                                    .when(state == StateFilter::All, |this| this.bg(active_bg))
+                                    .child(
+                                        rust_i18n::t!("surface.skills.filter.any_state")
+                                            .to_string(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.state = StateFilter::All;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-state-enabled")
+                                    .ghost()
+                                    .when(state == StateFilter::Enabled, |this| this.bg(active_bg))
+                                    .child(rust_i18n::t!("surface.skills.enabled").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.state = StateFilter::Enabled;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("skill-state-disabled")
+                                    .ghost()
+                                    .when(state == StateFilter::Disabled, |this| this.bg(active_bg))
+                                    .child(rust_i18n::t!("surface.skills.disabled").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.skill_filter.state = StateFilter::Disabled;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("skills-results")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .children(self.skill_error.clone().map(|error| {
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(
+                                rust_i18n::t!("surface.skills.error", error = error.as_ref())
+                                    .to_string(),
+                            )
+                    }))
+                    .children(self.skills_truncated.then(|| {
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(rust_i18n::t!("surface.skills.truncated").to_string())
+                    }))
+                    .children((visible_count == 0).then(|| {
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_6()
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.skills.no_matches").to_string())
+                    }))
+                    .children(rows),
+            )
             .into_any_element()
     }
 

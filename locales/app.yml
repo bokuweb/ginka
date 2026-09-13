@@ -258,6 +258,24 @@ surface.skills.reading:
 surface.skills.empty:
   en: No skills are installed for this project or user.
   ja: このプロジェクトまたはユーザー用のSkillはインストールされていません。
+surface.skills.search:
+  en: Search skills, descriptions and paths
+  ja: Skill、説明、パスを検索
+surface.skills.filter.all:
+  en: All scopes
+  ja: すべての範囲
+surface.skills.filter.any_state:
+  en: Any state
+  ja: すべての状態
+surface.skills.filter.count:
+  en: "%{visible} of %{total}"
+  ja: "%{visible} / %{total}"
+surface.skills.no_matches:
+  en: No skills match these filters.
+  ja: 条件に一致するSkillはありません。
+surface.skills.copy_path:
+  en: Copy path
+  ja: パスをコピー
 surface.skills.retry:
   en: Try again
   ja: 再試行
