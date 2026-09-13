@@ -825,6 +825,54 @@ impl Service {
                         .map_err(failed)?,
                 })
             }
+            Request::SearchProject {
+                project,
+                query,
+                limit,
+            } => {
+                self.project(&project)?;
+                let limit = limit
+                    .map(|limit| limit as usize)
+                    .unwrap_or(crate::files::DEFAULT_LIMIT);
+                let mut remaining_files = limit;
+                let mut remaining_matches = limit;
+                let mut files = Vec::new();
+                let mut matches = Vec::new();
+                for worktree in project::list_worktrees(&self.conn(), &project)
+                    .map_err(failed)?
+                    .into_iter()
+                    .filter(|worktree| !worktree.archived)
+                {
+                    if remaining_files == 0 && remaining_matches == 0 {
+                        break;
+                    }
+                    let workspace = worktree.workspace_id();
+                    if remaining_files > 0 {
+                        let paths = crate::files::list(&worktree.path).map_err(failed)?;
+                        let found = crate::files::search(&paths, &query, remaining_files);
+                        remaining_files = remaining_files.saturating_sub(found.len());
+                        files.extend(found.into_iter().map(|file| {
+                            ginka_protocol::model::WorkspaceFileMatch {
+                                workspace: workspace.clone(),
+                                path: file.path,
+                            }
+                        }));
+                    }
+                    let found =
+                        crate::files::search_content(&worktree.path, &query, remaining_matches)
+                            .map_err(failed)?;
+                    remaining_matches = remaining_matches.saturating_sub(found.len());
+                    matches.extend(found.into_iter().map(|hit| {
+                        ginka_protocol::model::WorkspaceContentMatch {
+                            workspace: workspace.clone(),
+                            path: hit.path,
+                            line: hit.line,
+                            text: hit.text,
+                        }
+                    }));
+                }
+                Ok(Response::WorkspaceMatches { files, matches })
+            }
             Request::ReadFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::FileContent {
@@ -1617,6 +1665,7 @@ impl Service {
         let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
             .unwrap_or_default();
         WorkspaceSummary {
+            indexed: crate::tools::is_indexed(&worktree.path),
             worktree,
             status,
             session,

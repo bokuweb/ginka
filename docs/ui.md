@@ -202,6 +202,14 @@ active conversation. With nothing selected, the rail stands alone.
   tool lifecycle sit beneath the original brief, with explicit working,
   completed and failed words and glyphs. The fold retains at most 300 steps;
   the view shows the newest 12 and states how many earlier steps are hidden.
+  Each completed turn exposes a compact *Fork* action when another installed,
+  signed-in agent is available. Choosing one copies the transcript through
+  that exact turn and continues in the same workspace with the receiving
+  agent; the turn's transcript sequence, not its visual index, is the boundary.
+  ⌘F (Ctrl+F elsewhere) opens daemon-side find-in-page above the transcript;
+  Enter/Shift+Enter or its buttons move through open-session matches in reading
+  order, show the current excerpt and count, and reveal the folded block that
+  owns the persisted sequence. The chosen block is visibly highlighted.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.
@@ -232,6 +240,9 @@ active conversation. With nothing selected, the rail stands alone.
   fuzzily filters them, switches an available branch without changing the
   workspace id, and creates the typed branch when it does not exist. A branch
   held by another worktree stays visible with its path but cannot be selected.
+  Beside it, an explicit *Indexed* or *Index workspace* word reports whether
+  semantic search is ready. Activating it starts `zg index` in the workspace's
+  daemon-owned terminal, opening the dock so progress and failures stay visible.
 - **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
@@ -241,7 +252,7 @@ active conversation. With nothing selected, the rail stands alone.
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file, keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, and add a saved selection's exact line location to chat; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close). Installed local language servers provide hover, same-file definition jumps and diagnostics; missing or failed servers leave the editor in syntax-only mode. **Editor** is the later full code surface with a tree and cross-file navigation. **Browser** lands in M5. **Reports** shows usage by day, agent and account, with each account's rate-limit windows and the age of the reading. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (show a directory-first expandable tree while the query is empty; typing switches to fuzzy path and full-text results; scope chips search either this workspace or every active workspace in its project, and a project hit switches workspace before opening; keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, and add a saved selection's exact line location to chat; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading), and **Skills** (the selected project's and user's agent skills, grouped by name with every install path and one all-copies enable/disable action). The tree retains at most 2,000 files, says when it was truncated, and leaves search able to reach the complete daemon catalogue. Project search is globally bounded and excludes archived worktrees. Skills search matches names, descriptions, provider roots and daemon-host paths; scope and grouped enablement facets compose with the query, keep the catalogue's stable order, and show the visible/total count. Each path has a copy action. Installed local language servers provide hover, diagnostics and definition jumps across workspace file tabs; targets outside the canonical worktree are not opened, and missing or failed servers leave the editor in syntax-only mode. **Browser** lands in M5. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
 
 ## 4. Component mapping
 
