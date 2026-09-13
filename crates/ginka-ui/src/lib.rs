@@ -21,6 +21,7 @@ pub mod layout;
 pub mod models;
 pub mod palette;
 pub mod reports;
+pub mod skills;
 pub mod surface;
 pub mod terminal;
 pub mod theme;

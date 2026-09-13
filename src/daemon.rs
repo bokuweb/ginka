@@ -16,11 +16,11 @@ use std::path::PathBuf;
 
 use ginka_protocol::model::{
     Account, AgentStatus, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent,
-    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo,
+    FileEntry, PlanSnapshot, Project, ReviewComment, Session, Skill, SlashCommand, TerminalInfo,
     TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{AccountId, CheckpointId, SessionId, TerminalId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -205,6 +205,34 @@ impl DaemonLink {
                 plans,
             }),
             _ => None,
+        }
+    }
+
+    /// The agents' own reusable skills, narrowed to one project when asked.
+    pub async fn skills(&self, project: Option<ProjectName>) -> Result<(Vec<Skill>, bool), String> {
+        match self.ask_result(Request::ListSkills { project }).await? {
+            Response::Skills { skills, truncated } => Ok((skills, truncated)),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Enable or disable every installed copy of a named skill.
+    pub async fn set_skill_enabled(
+        &self,
+        name: String,
+        enabled: bool,
+        project: Option<ProjectName>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::SetSkillEnabled {
+                name,
+                enabled,
+                project,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
         }
     }
 

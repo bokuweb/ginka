@@ -6,7 +6,9 @@
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
 use ginka_protocol::WorkspaceId;
-use ginka_protocol::model::{ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind};
+use ginka_protocol::model::{
+    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind, Skill, SkillScope,
+};
 use ginka_ui::Tokens;
 use ginka_ui::editor::{
     FileTabs, PreviewKind, SaveState, image_data_url, language_for_path, markdown_preview,
@@ -88,6 +90,15 @@ pub struct SurfacePanel {
     /// What the work cost and where each login stands, as the shell last
     /// read it. `None` until the Reports surface has been opened.
     usage: Option<ginka_ui::reports::UsageReport>,
+    /// The selected project's skills plus the user's own, as last read from
+    /// the daemon. `None` while the first read is in flight.
+    skills: Option<Vec<Skill>>,
+    /// The daemon stopped its bounded skill scan before visiting every root.
+    skills_truncated: bool,
+    /// The grouped skill whose every installed copy is being changed.
+    skill_changing: Option<String>,
+    /// Why the most recent skill read or mutation failed.
+    skill_error: Option<SharedString>,
 }
 
 /// Emitted when the panel wants the shell to do something only it can.
@@ -123,6 +134,10 @@ pub enum SurfaceEvent {
     },
     /// Add an editor selection's exact source location to the chat draft.
     AddFileReference(String),
+    /// Read the selected project's skills plus the user's own.
+    RefreshSkills,
+    /// Set every installed copy of a grouped skill to one state.
+    SetSkillEnabled { name: String, enabled: bool },
     /// Put a file into the next commit, or take it back out.
     Stage { path: String, staged: bool },
     /// Throw away a file's uncommitted work.
@@ -167,7 +182,44 @@ impl SurfacePanel {
             generated: None,
             complaint: None,
             usage: None,
+            skills: None,
+            skills_truncated: false,
+            skill_changing: None,
+            skill_error: None,
         }
+    }
+
+    /// Hand the panel a completed daemon read of the skill library.
+    pub fn set_skills(
+        &mut self,
+        result: Result<(Vec<Skill>, bool), String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.skill_changing = None;
+        match result {
+            Ok((skills, truncated)) => {
+                self.skills = Some(skills);
+                self.skills_truncated = truncated;
+                self.skill_error = None;
+            }
+            Err(error) => self.skill_error = Some(error.into()),
+        }
+        cx.notify();
+    }
+
+    /// Mark one grouped skill busy until the daemon has changed every copy.
+    pub fn begin_skill_change(&mut self, name: String, cx: &mut Context<Self>) {
+        self.skill_changing = Some(name);
+        self.skill_error = None;
+        cx.notify();
+    }
+
+    /// Clear a previous project's library while a new daemon read begins.
+    pub fn begin_skill_refresh(&mut self, cx: &mut Context<Self>) {
+        self.skills = None;
+        self.skill_changing = None;
+        self.skill_error = None;
+        cx.notify();
     }
 
     /// Hand the panel the usage report. Called from the shell's refresh while
@@ -528,6 +580,11 @@ impl SurfacePanel {
         // anything is typed.
         if surface == Surface::Files && self.files.is_empty() {
             cx.emit(SurfaceEvent::FindFiles(String::new()));
+        }
+        if surface == Surface::Skills {
+            self.skills = None;
+            self.skill_error = None;
+            cx.emit(SurfaceEvent::RefreshSkills);
         }
         cx.notify();
     }
@@ -1434,6 +1491,171 @@ impl SurfacePanel {
             .into_any_element()
     }
 
+    /// The agents' own skills, grouped across the places each was installed.
+    fn skills(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let changing = self.skill_changing.clone();
+        let Some(skills) = self.skills.clone() else {
+            let message = self
+                .skill_error
+                .clone()
+                .unwrap_or_else(|| rust_i18n::t!("surface.skills.reading").to_string().into());
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(if self.skill_error.is_some() {
+                            tokens.colors().status_error
+                        } else {
+                            tokens.colors().text_muted
+                        })
+                        .child(message),
+                )
+                .children(self.skill_error.as_ref().map(|_| {
+                    Button::new("retry-skills")
+                        .ghost()
+                        .child(rust_i18n::t!("surface.skills.retry").to_string())
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::RefreshSkills)))
+                }))
+                .into_any_element();
+        };
+
+        if skills.is_empty() {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.skills.empty").to_string()),
+                )
+                .into_any_element();
+        }
+
+        let rows = skills.into_iter().map(|skill| {
+            let request = ginka_ui::skills::toggle_request(&skill);
+            let name = request.name.clone();
+            let enabled = request.enabled;
+            let is_changing = changing.as_deref() == Some(name.as_str());
+            let installs = ginka_ui::skills::install_rows(&skill)
+                .iter()
+                .map(|install| {
+                    let scope = match install.scope {
+                        SkillScope::User => rust_i18n::t!("surface.skills.scope.user").to_string(),
+                        SkillScope::Project => {
+                            rust_i18n::t!("surface.skills.scope.project").to_string()
+                        }
+                    };
+                    let state = if install.enabled {
+                        rust_i18n::t!("surface.skills.enabled").to_string()
+                    } else {
+                        rust_i18n::t!("surface.skills.disabled").to_string()
+                    };
+                    v_flex()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(format!("{} · {scope} · {state}", install.root_label)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.))
+                                .text_color(tokens.colors().text_muted)
+                                .truncate()
+                                .child(install.directory.display().to_string()),
+                        )
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>();
+            let action = if is_changing {
+                rust_i18n::t!("surface.skills.changing").to_string()
+            } else if enabled {
+                rust_i18n::t!("surface.skills.enable").to_string()
+            } else {
+                rust_i18n::t!("surface.skills.disable").to_string()
+            };
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2p5()
+                .gap_2()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .items_start()
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(skill.name),
+                                )
+                                .children(skill.description.map(|description| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(description)
+                                })),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("toggle-skill:{name}")))
+                                .ghost()
+                                .disabled(changing.is_some())
+                                .child(action)
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(SurfaceEvent::SetSkillEnabled {
+                                        name: name.clone(),
+                                        enabled,
+                                    })
+                                })),
+                        ),
+                )
+                .child(v_flex().gap_1().children(installs))
+                .into_any_element()
+        });
+
+        v_flex()
+            .id("skills-surface")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .children(self.skill_error.clone().map(|error| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(
+                        rust_i18n::t!("surface.skills.error", error = error.as_ref()).to_string(),
+                    )
+            }))
+            .children(self.skills_truncated.then(|| {
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(rust_i18n::t!("surface.skills.truncated").to_string())
+            }))
+            .children(rows)
+            .into_any_element()
+    }
+
     /// The files surface: a finder over the worktree, and what it opens.
     ///
     fn files(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1947,6 +2169,7 @@ impl Render for SurfacePanel {
                 Some(Surface::Git) => self.git(cx).into_any_element(),
                 Some(Surface::Files) => self.files(cx).into_any_element(),
                 Some(Surface::Reports) => self.reports(cx).into_any_element(),
+                Some(Surface::Skills) => self.skills(cx).into_any_element(),
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
             })
     }

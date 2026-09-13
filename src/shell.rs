@@ -365,6 +365,10 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
+                crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
+                    this.set_skill_enabled(name.clone(), *enabled, cx)
+                }
             },
         );
 
@@ -431,6 +435,11 @@ impl Shell {
                         this.composer
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
+                        if this.surfaces.read(cx).open_surface()
+                            == Some(ginka_ui::surface::Surface::Skills)
+                        {
+                            this.refresh_skills(cx);
+                        }
                         cx.notify();
                     }
                 },
@@ -897,6 +906,9 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.composer.focus_handle(cx).focus(window, cx);
+        if self.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Skills) {
+            self.refresh_skills(cx);
+        }
         cx.notify();
     }
 
@@ -1362,6 +1374,56 @@ impl Shell {
                     Err(error) => this.index_error = Some(error),
                 }
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Read the selected project's skills plus the user's own from the daemon.
+    fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.begin_skill_refresh(cx));
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        let expected_project = project.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.skills(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Enable or disable every installed copy of one grouped skill.
+    fn set_skill_enabled(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
+        self.surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_skill_change(name.clone(), cx)
+        });
+        let link = self.link.clone();
+        let mutation_project = self.target_project.clone();
+        let listing_project = mutation_project.clone();
+        let expected_project = mutation_project.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.set_skill_enabled(name, enabled, mutation_project)
+                        .await?;
+                    link.skills(listing_project).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
             })
             .ok();
         })

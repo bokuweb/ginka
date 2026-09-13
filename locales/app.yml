@@ -249,6 +249,45 @@ surface.reports.by_agent:
 surface.reports.by_day:
   en: By day
   ja: 日別
+surface.skills.pending:
+  en: Discover and manage the reusable instructions installed for your agents.
+  ja: エージェントにインストールされた再利用可能な指示を確認・管理します。
+surface.skills.reading:
+  en: Reading skills…
+  ja: Skillsを読み込んでいます…
+surface.skills.empty:
+  en: No skills are installed for this project or user.
+  ja: このプロジェクトまたはユーザー用のSkillはインストールされていません。
+surface.skills.retry:
+  en: Try again
+  ja: 再試行
+surface.skills.error:
+  en: "Skills could not be updated: %{error}"
+  ja: "Skillsを更新できませんでした: %{error}"
+surface.skills.enable:
+  en: Enable
+  ja: 有効にする
+surface.skills.disable:
+  en: Disable
+  ja: 無効にする
+surface.skills.changing:
+  en: Changing…
+  ja: 変更中…
+surface.skills.enabled:
+  en: enabled
+  ja: 有効
+surface.skills.disabled:
+  en: disabled
+  ja: 無効
+surface.skills.scope.user:
+  en: user
+  ja: ユーザー
+surface.skills.scope.project:
+  en: project
+  ja: プロジェクト
+surface.skills.truncated:
+  en: The scan limit was reached. Some skills may not be shown.
+  ja: 検索上限に達したため、一部のSkillが表示されていない可能性があります。
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー
