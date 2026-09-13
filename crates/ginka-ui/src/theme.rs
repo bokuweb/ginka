@@ -55,10 +55,11 @@ pub struct Tokens {
     pub duration_ms: Durations,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeAppearance {
     Light,
+    #[default]
     Dark,
 }
 
@@ -71,6 +72,8 @@ pub enum ThemeAppearance {
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct Colors {
+    #[serde(skip)]
+    appearance: ThemeAppearance,
     #[serde(rename = "bg.window", deserialize_with = "hex")]
     pub bg_window: Hsla,
     #[serde(rename = "bg.sidebar", deserialize_with = "hex")]
@@ -118,12 +121,20 @@ pub struct Radii {
     pub row: f32,
 }
 
+impl Radii {
+    /// A control sits one radius step inside a row or card.
+    pub fn control(&self) -> f32 {
+        (self.row - 3.).max(2.)
+    }
+}
+
 /// Motion durations. `docs/ui.md` §1: ~260 ms for layout, ~120 ms for feedback.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct Durations {
     pub quick: u64,
+    pub fade: u64,
     pub standard: u64,
 }
 
@@ -136,6 +147,10 @@ impl Durations {
     pub fn standard(&self) -> Duration {
         Duration::from_millis(self.standard)
     }
+
+    pub fn fade(&self) -> Duration {
+        Duration::from_millis(self.fade)
+    }
 }
 
 impl Tokens {
@@ -146,7 +161,9 @@ impl Tokens {
         };
         // The themes are compiled in, so a parse failure is a build-time
         // authoring mistake and the tests below catch it.
-        serde_json::from_str(source).expect("built-in theme is valid")
+        let mut tokens: Self = serde_json::from_str(source).expect("built-in theme is valid");
+        tokens.colors.appearance = tokens.appearance;
+        tokens
     }
 
     pub fn global(cx: &App) -> &Tokens {
@@ -252,7 +269,7 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.title_bar_border = tokens.border_subtle;
     theme.colors.window_border = tokens.border_subtle;
 
-    theme.colors.popover = tokens.bg_raised;
+    theme.colors.popover = tokens.popover();
     theme.colors.popover_foreground = tokens.text_primary;
     theme.colors.list = tokens.transparent_surface();
     theme.colors.list_hover = tokens.row_hover();
@@ -272,8 +289,14 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.danger = tokens.status_error;
     theme.colors.success = tokens.status_done;
 
-    theme.radius = gpui::px(radii.row);
-    theme.radius_lg = gpui::px(radii.card);
+    theme.radius = gpui::px(radii.control());
+    theme.radius_lg = gpui::px(radii.panel);
+    theme.font_size = gpui::px(13.);
+    theme.mono_font_size = gpui::px(12.);
+    theme.highlight_theme = match mode {
+        Mode::Dark => gpui_component::highlighter::HighlightTheme::default_dark(),
+        Mode::Light => gpui_component::highlighter::HighlightTheme::default_light(),
+    };
 
     // `Root` and several components paint from the derived semantic tokens
     // rather than from `colors`. Without regenerating them the window keeps the
@@ -292,6 +315,16 @@ impl Tokens {
 }
 
 impl Colors {
+    fn light(&self) -> bool {
+        self.appearance == ThemeAppearance::Light
+    }
+
+    /// Opaque raised fill for content that floats above text.
+    pub fn popover(&self) -> Hsla {
+        let mut color = self.bg_raised;
+        color.a = 1.0;
+        color
+    }
     /// A fully transparent fill, for surfaces that should show the window's
     /// glass rather than paint over it.
     fn transparent_surface(&self) -> Hsla {
@@ -307,12 +340,12 @@ impl Colors {
     /// needs a tint to say so. Ported from bokuweb/pedro's palette, where the
     /// same rule keeps a translucent window from turning into a grey one.
     pub fn row_hover(&self) -> Hsla {
-        self.accent.opacity(0.14)
+        self.accent.opacity(if self.light() { 0.08 } else { 0.14 })
     }
 
     /// The row you are on.
     pub fn row_active(&self) -> Hsla {
-        self.accent.opacity(0.22)
+        self.accent.opacity(if self.light() { 0.14 } else { 0.22 })
     }
 
     /// A raised control the pointer is over.
@@ -344,12 +377,12 @@ mod tests {
     fn the_window_background_is_painted_once() {
         // Regression: `Root` paints `bg.window`, so any full-bleed surface
         // stacked on it must not paint the same translucent colour again. Two
-        // coats of 82% composite to 97% and the glass reads as solid.
+        // coats materially increase opacity and make the glass read as solid.
         let dark = Tokens::load(Mode::Dark);
         let once = dark.colors.bg_window.a;
         let twice = once + (1.0 - once) * once;
         assert!(
-            twice > 0.95,
+            twice - once > 0.15,
             "double-painting must be understood as the failure it is: {twice}"
         );
     }

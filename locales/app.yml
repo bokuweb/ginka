@@ -8,6 +8,12 @@ _version: 2
 sidebar.projects:
   en: Projects
   ja: プロジェクト
+sidebar.workspace:
+  en: Workspace
+  ja: ワークスペース
+sidebar.sessions.empty:
+  en: No sessions in this project
+  ja: このプロジェクトにはセッションがありません
 sidebar.archived:
   en: Archived
   ja: アーカイブ
@@ -52,6 +58,12 @@ composer.agent.pick:
 composer.model.default:
   en: Model
   ja: モデル
+composer.model.search:
+  en: Search models…
+  ja: モデルを検索…
+composer.model.empty:
+  en: No models match this search.
+  ja: 一致するモデルはありません。
 composer.option.provider_default:
   en: Provider default
   ja: プロバイダー既定
@@ -103,6 +115,12 @@ composer.account.at_wall:
 composer.account.no_reading:
   en: no reading yet
   ja: 残量は未取得
+composer.usage.unknown:
+  en: Usage —
+  ja: 使用量 —
+composer.usage.refresh:
+  en: Refresh usage
+  ja: 使用量を更新
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"

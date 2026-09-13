@@ -15,6 +15,7 @@ pub mod assets;
 pub mod editor;
 pub mod home;
 pub mod layout;
+pub mod models;
 pub mod palette;
 pub mod reports;
 pub mod surface;
