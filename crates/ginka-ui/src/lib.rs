@@ -15,6 +15,8 @@ pub mod assets;
 pub mod branches;
 pub mod composer;
 pub mod editor;
+pub mod file_search;
+pub mod file_tree;
 pub mod handoff;
 pub mod home;
 pub mod layout;

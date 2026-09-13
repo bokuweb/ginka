@@ -181,6 +181,8 @@ pub struct Shell {
     /// Where a chat that has no workspace yet would run. `None` means no
     /// project, which is a scratch worktree rather than nowhere.
     target_project: Option<ProjectName>,
+    /// A project-search hit to open after the sidebar finishes switching workspaces.
+    pending_file_open: Option<(WorkspaceId, String)>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -364,6 +366,12 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenFile(path) => {
                     this.open_file(path.clone(), false, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenWorkspaceFile { workspace, path } => {
+                    this.open_workspace_file(workspace.clone(), path.clone(), window, cx)
+                }
+                crate::surfaces::SurfaceEvent::OpenDefinition { workspace, target } => {
+                    this.open_definition(workspace, target.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::OpenFileFromHistory(path) => {
                     this.open_file(path.clone(), true, window, cx)
                 }
@@ -457,6 +465,19 @@ impl Shell {
                             == Some(ginka_ui::surface::Surface::Skills)
                         {
                             this.refresh_skills(cx);
+                        }
+                        if changed_workspace
+                            && this.surfaces.read(cx).open_surface()
+                                == Some(ginka_ui::surface::Surface::Files)
+                        {
+                            this.find_files(String::new(), cx);
+                        }
+                        if let Some((workspace, path)) = this.pending_file_open.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.open_file(path, false, window, cx);
+                            } else {
+                                this.pending_file_open = Some((workspace, path));
+                            }
                         }
                         cx.notify();
                     }
@@ -731,6 +752,7 @@ impl Shell {
             add_project: None,
             projects: Vec::new(),
             target_project: None,
+            pending_file_open: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -1233,8 +1255,52 @@ impl Shell {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
+        let scope = self.surfaces.read(cx).file_search_scope();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let target = scope.target(workspace.clone(), project);
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        if query.trim().is_empty() {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_file_tree(workspace.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_workspace = workspace.clone();
+                let (files, truncated) = cx
+                    .background_spawn(async move { link.file_tree(&workspace).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_tree(requested_workspace, files, truncated, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if let ginka_ui::file_search::FileSearchTarget::Project(project) = target {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_project_search(project.clone(), query.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_project = project.clone();
+                let requested_query = query.clone();
+                let (files, matches) = cx
+                    .background_spawn(async move { link.search_project(&project, &query).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_project_matches(
+                        requested_project,
+                        requested_query,
+                        files,
+                        matches,
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |_, cx| {
             let (found, matched) = cx
                 .background_spawn(async move {
@@ -1251,6 +1317,23 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Open a project-search hit, switching the centre column when necessary.
+    fn open_workspace_file(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+            self.open_file(path, false, window, cx);
+            return;
+        }
+        self.pending_file_open = Some((workspace.clone(), path));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
     }
 
     /// Read a file and show it in the files surface.
@@ -1273,6 +1356,47 @@ impl Shell {
         let surfaces = self.surfaces.clone();
         let should_read = surfaces.update(cx, |surfaces, cx| {
             surfaces.begin_file_open(workspace.clone(), path.clone(), from_history, cx)
+        });
+        if !should_read {
+            return;
+        }
+        let read_workspace = workspace.clone();
+        let read_path = path.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&read_workspace, &read_path).await })
+                .await;
+            let _ = surfaces.update_in(cx, |surfaces, window, cx| {
+                surfaces.set_file(workspace, worktree, path, file, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Open a language-server definition in this workspace and select it.
+    fn open_definition(
+        &mut self,
+        source_workspace: &WorkspaceId,
+        target: ginka_ui::editor::DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if &workspace != source_workspace {
+            return;
+        }
+        let worktree = self
+            .session
+            .as_ref()
+            .map(|row| row.path.clone())
+            .expect("the selected session has a worktree");
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let path = target.path.clone();
+        let should_read = surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_definition_open(workspace.clone(), target, window, cx)
         });
         if !should_read {
             return;

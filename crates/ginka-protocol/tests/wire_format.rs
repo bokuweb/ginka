@@ -99,6 +99,24 @@ fn a_file_save_carries_the_revision_it_may_replace() {
 }
 
 #[test]
+fn a_project_search_names_its_scope_and_global_limit() {
+    let request = Request::SearchProject {
+        project: ProjectName("comet".into()),
+        query: "needle".into(),
+        limit: Some(12),
+    };
+    assert_eq!(
+        wire(&request),
+        json!({
+            "method": "search_project",
+            "project": "comet",
+            "query": "needle",
+            "limit": 12,
+        })
+    );
+}
+
+#[test]
 fn a_session_start_carries_provider_model_options_explicitly() {
     let request = Request::StartSession {
         workspace: WorkspaceId("comet/bright-harbor".into()),
