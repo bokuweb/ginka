@@ -11,8 +11,8 @@ use ginka_protocol::model::{
 };
 use ginka_ui::Tokens;
 use ginka_ui::editor::{
-    FileTabs, PreviewKind, SaveState, image_data_url, language_for_path, markdown_preview,
-    preview_kind, save_state, saved_selection_reference,
+    DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
+    language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
 };
 use ginka_ui::file_tree::{FileTree, TreeRowKind};
 use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
@@ -26,6 +26,7 @@ use gpui_component::input::{
 };
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
+use std::rc::Rc;
 
 struct FileBuffer {
     workspace: WorkspaceId,
@@ -97,6 +98,8 @@ pub struct SurfacePanel {
     browsing_files: bool,
     /// Workspace and path whose asynchronous read may replace the panel next.
     opening: Option<(WorkspaceId, String, FileOpenMode)>,
+    /// Cross-file definition to select after its buffer has been opened.
+    definition: Option<(WorkspaceId, DefinitionTarget)>,
     /// What the work cost and where each login stands, as the shell last
     /// read it. `None` until the Reports surface has been opened.
     usage: Option<ginka_ui::reports::UsageReport>,
@@ -137,6 +140,11 @@ pub enum SurfaceEvent {
     FindFiles(String),
     /// Read a file and show it.
     OpenFile(String),
+    /// Open and select a definition returned by the active language server.
+    OpenDefinition {
+        workspace: WorkspaceId,
+        target: DefinitionTarget,
+    },
     /// Reload a closed file selected by back/forward history.
     OpenFileFromHistory(String),
     /// Save an editor buffer against the revision it was opened from.
@@ -199,6 +207,7 @@ impl SurfacePanel {
             file_buffers: Vec::new(),
             browsing_files: true,
             opening: None,
+            definition: None,
             open: None,
             changes: None,
             expanded: None,
@@ -346,6 +355,7 @@ impl SurfacePanel {
         from_history: bool,
         cx: &mut Context<Self>,
     ) -> bool {
+        self.definition = None;
         if self
             .file_buffers
             .iter()
@@ -370,6 +380,25 @@ impl SurfacePanel {
         true
     }
 
+    /// Mark a cross-file definition as the next file visit.
+    ///
+    /// Returns whether the daemon must read the target. An already-open buffer
+    /// is focused and selected synchronously.
+    pub fn begin_definition_open(
+        &mut self,
+        workspace: WorkspaceId,
+        target: DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let should_read = self.begin_file_open(workspace.clone(), target.path.clone(), false, cx);
+        self.definition = Some((workspace.clone(), target.clone()));
+        if !should_read {
+            self.apply_definition(&workspace, &target.path, window, cx);
+        }
+        should_read
+    }
+
     /// Forget a file and any in-flight read when its workspace leaves screen.
     pub fn clear_file(&mut self, cx: &mut Context<Self>) {
         self.file_tabs.clear();
@@ -382,6 +411,7 @@ impl SurfacePanel {
         self.file_tree_truncated = false;
         self.browsing_files = true;
         self.opening = None;
+        self.definition = None;
         cx.notify();
     }
 
@@ -404,9 +434,12 @@ impl SurfacePanel {
         let mode = *mode;
         self.opening = None;
         let Some(file) = file else {
+            self.definition = None;
             cx.notify();
             return;
         };
+        let surface = cx.entity().downgrade();
+        let definition_workspace = workspace.clone();
         let editor = (!file.binary && !file.truncated).then(|| {
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
@@ -439,19 +472,30 @@ impl SurfacePanel {
             })
             .detach();
             cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+            let show_definition = Rc::new(move |target, cx: &mut App| {
+                let _ = surface.update(cx, |_, cx| {
+                    cx.emit(SurfaceEvent::OpenDefinition {
+                        workspace: definition_workspace.clone(),
+                        target,
+                    });
+                });
+            });
             crate::lsp::attach(
                 editor.clone(),
                 lsp,
-                worktree,
-                file.path.clone(),
-                file.text.clone(),
+                crate::lsp::EditorLspDocument::new(
+                    worktree,
+                    file.path.clone(),
+                    file.text.clone(),
+                    show_definition,
+                ),
                 window,
                 cx,
             );
             editor
         });
         self.file_buffers.push(FileBuffer {
-            workspace,
+            workspace: workspace.clone(),
             file,
             editor,
             complaint: None,
@@ -465,11 +509,42 @@ impl SurfacePanel {
             .path
             .clone();
         match mode {
-            FileOpenMode::Visit => self.file_tabs.open(path),
-            FileOpenMode::History => self.file_tabs.restore(path),
+            FileOpenMode::Visit => self.file_tabs.open(path.clone()),
+            FileOpenMode::History => self.file_tabs.restore(path.clone()),
         }
+        self.apply_definition(&workspace, &path, window, cx);
         self.browsing_files = false;
         cx.notify();
+    }
+
+    fn apply_definition(
+        &mut self,
+        workspace: &WorkspaceId,
+        path: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((pending_workspace, target)) = self.definition.as_ref() else {
+            return;
+        };
+        if pending_workspace != workspace || target.path != path {
+            return;
+        }
+        let range = target.range;
+        self.definition = None;
+        let Some(editor) = self
+            .file_buffers
+            .iter()
+            .find(|buffer| &buffer.workspace == workspace && buffer.file.path == path)
+            .and_then(|buffer| buffer.editor.clone())
+        else {
+            return;
+        };
+        editor.update(cx, |editor, cx| {
+            let selection = definition_selection(&editor.value(), range);
+            editor.set_selected_range(selection, cx);
+            editor.focus(window, cx);
+        });
     }
 
     /// Accept the daemon's new revision after a successful save.

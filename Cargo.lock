@@ -2517,11 +2517,13 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
+ "lsp-types",
  "nucleo-matcher",
  "rust-i18n",
  "serde",
  "serde_json",
  "tempfile",
+ "url",
 ]
 
 [[package]]

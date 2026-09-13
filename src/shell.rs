@@ -364,6 +364,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenFile(path) => {
                     this.open_file(path.clone(), false, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenDefinition { workspace, target } => {
+                    this.open_definition(workspace, target.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::OpenFileFromHistory(path) => {
                     this.open_file(path.clone(), true, window, cx)
                 }
@@ -1295,6 +1298,47 @@ impl Shell {
         let surfaces = self.surfaces.clone();
         let should_read = surfaces.update(cx, |surfaces, cx| {
             surfaces.begin_file_open(workspace.clone(), path.clone(), from_history, cx)
+        });
+        if !should_read {
+            return;
+        }
+        let read_workspace = workspace.clone();
+        let read_path = path.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&read_workspace, &read_path).await })
+                .await;
+            let _ = surfaces.update_in(cx, |surfaces, window, cx| {
+                surfaces.set_file(workspace, worktree, path, file, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Open a language-server definition in this workspace and select it.
+    fn open_definition(
+        &mut self,
+        source_workspace: &WorkspaceId,
+        target: ginka_ui::editor::DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if &workspace != source_workspace {
+            return;
+        }
+        let worktree = self
+            .session
+            .as_ref()
+            .map(|row| row.path.clone())
+            .expect("the selected session has a worktree");
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let path = target.path.clone();
+        let should_read = surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_definition_open(workspace.clone(), target, window, cx)
         });
         if !should_read {
             return;
