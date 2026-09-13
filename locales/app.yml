@@ -297,6 +297,30 @@ composer.context.project:
 composer.context.no_project:
   en: No project
   ja: プロジェクトなし
+transcript.search.placeholder:
+  en: Find in conversation
+  ja: 会話内を検索
+transcript.search.searching:
+  en: Searching…
+  ja: 検索中…
+transcript.search.failed:
+  en: Search failed
+  ja: 検索失敗
+transcript.search.previous:
+  en: Previous match (Shift+Enter)
+  ja: 前の一致（Shift+Enter）
+transcript.search.next:
+  en: Next match (Enter)
+  ja: 次の一致（Enter）
+transcript.search.close:
+  en: Close find
+  ja: 検索を閉じる
+palette.transcript.find:
+  en: Find in conversation
+  ja: 会話内を検索
+palette.transcript.find.hint:
+  en: ⌘F
+  ja: ⌘F
 composer.project.pick:
   en: Choose where this runs
   ja: 実行する場所を選ぶ

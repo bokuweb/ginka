@@ -206,6 +206,10 @@ active conversation. With nothing selected, the rail stands alone.
   signed-in agent is available. Choosing one copies the transcript through
   that exact turn and continues in the same workspace with the receiving
   agent; the turn's transcript sequence, not its visual index, is the boundary.
+  ⌘F (Ctrl+F elsewhere) opens daemon-side find-in-page above the transcript;
+  Enter/Shift+Enter or its buttons move through open-session matches in reading
+  order, show the current excerpt and count, and reveal the folded block that
+  owns the persisted sequence. The chosen block is visibly highlighted.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.

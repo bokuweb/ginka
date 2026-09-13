@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use ginka_protocol::model::{
     Account, AgentStatus, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent,
-    FileEntry, PlanSnapshot, Project, ReviewComment, Session, Skill, SlashCommand, TerminalInfo,
-    TranscriptEntry, WorkspaceSummary,
+    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch, Skill, SlashCommand,
+    TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
@@ -144,6 +144,25 @@ impl DaemonLink {
         {
             Some(Response::Transcript { entries }) => entries,
             _ => Vec::new(),
+        }
+    }
+
+    /// Find stored transcript entries in one workspace.
+    pub async fn search_sessions(
+        &self,
+        workspace: WorkspaceId,
+        query: String,
+    ) -> Result<Vec<SessionMatch>, String> {
+        match self
+            .ask_result(Request::SearchSessions {
+                workspace: Some(workspace),
+                query,
+                limit: Some(100),
+            })
+            .await?
+        {
+            Response::SessionMatches { matches } => Ok(matches),
+            other => Err(format!("unexpected answer {other:?}")),
         }
     }
 
