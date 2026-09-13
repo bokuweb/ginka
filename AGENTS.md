@@ -37,17 +37,18 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 - **The review loop.** The right panel draws the workspace's diff, marked word by word where a line was replaced, with per-file staging, a revert, and comments anchored to lines that go back to the agent as one message. `ginka review`, `stage`, `revert`, `commit`, `push`.
 - **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
-- **Finding things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, and reads what it opens. ⌘K reaches every action, panel, surface and workspace by name.
+- **Finding and editing things.** A files surface searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box, keeps several independently editable `CodeEditor` tabs with back/forward visit history, previews the live Markdown buffer, finds/replaces, and saves through the daemon without overwriting a newer revision. Installed local language servers provide hover, same-file definition jumps and diagnostics for Rust, TypeScript/JavaScript, Python and Go; an absent server falls back to syntax-only editing. A saved selection can be added to chat as an exact file-line mention; dirty tabs cannot be closed silently. Markdown preview never loads images named by repository text. `ginka save` and `ginka_write_file` expose the save operation. ⌘K reaches every action, panel, surface and workspace by name.
 - **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
 - **Slack.** A bound channel starts or continues a `claude` or `codex` turn on this machine over Socket Mode, and the answer goes back to the thread, with a 👀 while it works and a progress line edited in place. Sessions carry an `origin`; the daemon hosts the connector as a fourth client of the protocol; `ginka slack status` says whether it is connected and why not. `docs/connectors.md` is the design and §12 there is where the code departs from it.
 - **Moving a conversation.** `ginka session fork --agent codex` (or `--account`) copies the record onto another agent and hands it a bounded digest of the transcript with its first prompt, because the vendor's thread cannot follow (`ginka-core::handoff`, roadmap §4.4).
 - **Branches.** `ginka workspace branches|checkout [--create]` and the same over MCP; a checkout changes the branch column and nothing else (rule 4).
 - **Commit messages (N9).** `ginka commit <workspace> --generate` has an agent write the subject on its cheap tier; the daemon pushes it as `CommitMessageGenerated` and the CLI commits with it.
 - **Access mode (N2).** `session start --access read-only|ask|auto`, the same over MCP, and a chip in the composer. Stored on the session; a follow-up runs under the mode the conversation began in. Claude gets `--permission-mode`, Codex `--sandbox read-only` / `--full-auto`.
+- **Interactive responses.** Ask-user, plan and permission events pause a session; answers from the cards or composer, `session respond`, MCP, and Slack are validated against the open request and delivered into the live transport. A scripted driver pins the loop; the shipped headless drivers do not raise native requests yet.
 - **Skills.** `ginka skills list|enable|disable` and `ginka_skills` over MCP manage the agents' own skills across every ecosystem's roots, under the home and under each project (N11). No surface in the window yet.
 - **Accounts.** Several logins per provider (`docs/accounts.md`, N17): `ginka account add|list|login|remove|refresh`, `session start --account`, an *Add a login…* row in the pickers, and an account chip in the composer when a provider has more than one. A session records the login it ran on, usage is filed by it, and each login's rate-limit windows — Codex's through its app server, Claude's from a refused turn — are shown beside the choice, in the sidebar footer and on the **Reports** surface.
 
-What is *not* there yet: the code surface with an editor and LSP (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, plan approval and ask-user, and the drivers beyond `claude` and `codex` (M5).
+What is *not* there yet: the full code surface with a file tree and cross-file definition navigation (M4), a virtualized transcript, split diffs, terminal splits and scrollback search, a shipped interactive transport for plan/ask-user/permission requests, and the drivers beyond `claude` and `codex` (M5).
 
 **The domain layer for N1–N14 has landed ahead of its milestones** (roadmap §3.3), test-first and with no UI on top of it yet:
 
@@ -80,7 +81,10 @@ cargo run -p ginka-cli -- doctor            # where state lives and whether it i
 cargo run -p ginka-cli -- daemon status
 cargo run -p ginka-cli -- project add .
 cargo run -p ginka-cli -- workspace new <project> <branch>
-cargo run -p ginka-cli -- session start <workspace> "<prompt>" --access auto
+cargo run -p ginka-cli -- workspace archive <workspace> [--restore]
+cargo run -p ginka-cli -- session start <workspace> "<prompt>" --model <model> --reasoning-effort high --service-tier priority --access auto
+cargo run -p ginka-cli -- session options <session> --model <model> --reasoning-effort high --service-tier priority
+cargo run -p ginka-cli -- session respond <session> <request-id> "<answer>"
 cargo run -p ginka-cli -- account add codex-work --provider codex --label Work
 cargo run -p ginka-cli -- account login codex-work   # the vendor's sign-in, here
 cargo run -p ginka-cli -- account list               # signed in, and headroom
@@ -95,6 +99,8 @@ cargo run -p ginka-cli -- skills list           # the agents' own skills, and wh
 cargo run -p ginka-cli -- workspace branches <workspace>          # and `checkout <branch> --create`
 cargo run -p ginka-cli -- commit <workspace> --generate           # an agent writes the message
 cargo run -p ginka-cli -- workspace index <workspace>            # zg index, so agents get semantic search
+cargo run -p ginka-cli -- --json show <workspace> <path>         # includes the revision required to save
+cargo run -p ginka-cli -- save <workspace> <path> --expected-revision <revision> < replacement
 
 cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```

@@ -52,6 +52,15 @@ composer.agent.pick:
 composer.model.default:
   en: Model
   ja: モデル
+composer.option.provider_default:
+  en: Provider default
+  ja: プロバイダー既定
+composer.effort.default:
+  en: Effort
+  ja: 推論
+composer.tier.default:
+  en: Tier
+  ja: ティア
 composer.new_session:
   en: New session
   ja: 新しいセッション
@@ -286,6 +295,42 @@ surface.files.matches:
 surface.files.back:
   en: Back
   ja: 戻る
+surface.files.browse:
+  en: Files
+  ja: ファイル
+surface.files.history.back:
+  en: Back
+  ja: 戻る
+surface.files.history.forward:
+  en: Forward
+  ja: 進む
+surface.files.close_dirty:
+  en: Save this file before closing its tab.
+  ja: タブを閉じる前にこのファイルを保存してください。
+surface.files.close:
+  en: "Close %{path}"
+  ja: "%{path} を閉じる"
+surface.files.save:
+  en: Save
+  ja: 保存
+surface.files.preview:
+  en: Preview
+  ja: プレビュー
+surface.files.edit:
+  en: Edit
+  ja: 編集
+surface.files.add_selection:
+  en: Add selection to chat
+  ja: 選択範囲をチャットに追加
+surface.files.find:
+  en: Find
+  ja: 検索
+surface.files.replace:
+  en: Replace
+  ja: 置換
+surface.files.editor:
+  en: Editing %{path}
+  ja: "%{path} を編集中"
 surface.files.empty:
   en: Nothing matches
   ja: 一致するものはありません
@@ -377,6 +422,12 @@ cli.workspaces.empty:
 cli.sessions.empty:
   en: "no sessions yet; try `ginka session start <workspace> <prompt>`"
   ja: "セッションはまだありません。`ginka session start <workspace> <prompt>` を試してください"
+cli.session.options.absorbed:
+  en: provider options will apply to the next turn
+  ja: プロバイダ設定は次のターンから適用されます
+cli.session.options.restart:
+  en: the conversation was restarted with its context preserved
+  ja: 文脈を引き継いで会話を再起動しました
 cli.changes.empty:
   en: nothing has changed
   ja: 変更はありません

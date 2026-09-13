@@ -477,11 +477,11 @@ impl Connection {
                 &message,
             )),
             ClientMessage::Request { id, payload } => {
-                let stop = matches!(payload, Request::Shutdown);
-                let answer = match self.handle(payload).await {
+                let stop = matches!(*payload, Request::Shutdown);
+                let answer = match self.handle(*payload).await {
                     Ok(response) => ServerMessage::Response {
                         id,
-                        payload: response,
+                        payload: Box::new(response),
                     },
                     Err(error) => ServerMessage::Error { id, error },
                 };

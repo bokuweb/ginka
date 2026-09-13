@@ -31,6 +31,7 @@ pub use spec::SessionSpec as ProcessSessionSpec;
 
 use anyhow::Result;
 use ginka_protocol::model::PlanUsage;
+pub use ginka_protocol::provider::ProviderModel;
 use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,13 +51,17 @@ pub struct PlanUsageProbe {
     pub input: Vec<String>,
 }
 
-/// A model a driver can be asked for.
+/// A short-lived process that answers with the provider's current model list.
+///
+/// The request is described here because a catalogue is vendor-owned and can
+/// change independently of Ginka. A driver's static [`AgentDriver::models`]
+/// list is used whenever this probe is absent, times out, or cannot be parsed.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderModel {
-    /// What is passed to the vendor's `--model` flag.
-    pub id: String,
-    /// What the model picker shows.
-    pub label: String,
+pub struct ModelCatalogueProbe {
+    /// The long-running provider endpoint to start.
+    pub command: CommandSpec,
+    /// JSONL requests written to the endpoint in order.
+    pub input: Vec<String>,
 }
 
 /// A command to run, described rather than executed.
@@ -116,6 +121,10 @@ pub struct SessionSpec {
     /// (`crate::handoff`). Sent once, on the turn that carries it.
     pub preamble: Option<String>,
     pub model: Option<String>,
+    /// Provider reasoning level passed on every turn.
+    pub reasoning_effort: Option<String>,
+    /// Provider service tier passed on every turn.
+    pub service_tier: Option<String>,
     /// What the agent may do without asking. A launch argument on every
     /// transport this build drives, so it is fixed for the process.
     pub access_mode: AccessMode,
@@ -134,6 +143,8 @@ impl SessionSpec {
             prompt: prompt.into(),
             preamble: None,
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             access_mode: AccessMode::default(),
             env: Vec::new(),
             mcp_servers: Vec::new(),
@@ -165,6 +176,18 @@ impl SessionSpec {
     /// Ask for a specific model.
     pub fn with_model(mut self, model: Option<String>) -> Self {
         self.model = model;
+        self
+    }
+
+    /// Ask for a provider reasoning level.
+    pub fn with_reasoning_effort(mut self, effort: Option<String>) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
+    /// Ask for a provider service tier.
+    pub fn with_service_tier(mut self, tier: Option<String>) -> Self {
+        self.service_tier = tier;
         self
     }
 
@@ -229,6 +252,16 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// The models this driver offers. May be empty when the vendor decides.
     fn models(&self) -> Vec<ProviderModel>;
 
+    /// How to ask the provider for its current model catalogue.
+    fn model_catalogue_probe(&self) -> Option<ModelCatalogueProbe> {
+        None
+    }
+
+    /// Read a complete catalogue from one line printed by the probe.
+    fn parse_model_catalogue(&self, _line: &str) -> Option<Vec<ProviderModel>> {
+        None
+    }
+
     /// The binary this driver would run.
     fn program(&self) -> &str;
 
@@ -285,9 +318,29 @@ pub trait AgentDriver: Send + Sync + 'static {
         false
     }
 
+    /// Decide whether later turns can use `after` without abandoning the
+    /// provider's conversation. Drivers default to the conservative answer;
+    /// a transport opts into carrying model, effort and tier on resume.
+    fn apply_options(&self, _before: &SessionOptions, _after: &SessionOptions) -> OptionOutcome {
+        OptionOutcome::RestartRequired
+    }
+
     /// One user message, in whatever the transport reads from its input.
     /// `None` where there is no such thing.
     fn encode_user_message(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    /// Whether the transport can answer a request without ending the turn.
+    ///
+    /// This is separate from steering: an agent may reject unsolicited input
+    /// while still accepting a response to a question it opened.
+    fn supports_responses(&self) -> bool {
+        false
+    }
+
+    /// Encode one answer for the transport's live input stream.
+    fn encode_response(&self, _request_id: &str, _response: &str) -> Option<String> {
         None
     }
 

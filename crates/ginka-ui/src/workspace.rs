@@ -278,6 +278,12 @@ pub struct SessionRow {
     pub session: Option<SessionId>,
     pub title: SharedString,
     pub agent: Agent,
+    /// Model used by the latest session in this workspace.
+    pub model: Option<String>,
+    /// Reasoning level used by later turns of that session.
+    pub reasoning_effort: Option<String>,
+    /// Service tier used by later turns of that session.
+    pub service_tier: Option<String>,
     /// The login the session runs on, when there is a session. A follow-up
     /// stays on it (`docs/accounts.md` §5).
     pub account: Option<ginka_protocol::AccountId>,
@@ -308,6 +314,9 @@ impl SessionRow {
             session: session.map(|session| session.id.clone()),
             title: title_for(&summary.worktree.name).into(),
             account: session.map(|session| session.account.clone()),
+            model: session.and_then(|session| session.model.clone()),
+            reasoning_effort: session.and_then(|session| session.reasoning_effort.clone()),
+            service_tier: session.and_then(|session| session.service_tier.clone()),
             agent: session
                 .map(|session| Agent::from_id(&session.agent))
                 .unwrap_or(Agent::Claude),
@@ -325,7 +334,7 @@ impl SessionRow {
                 .map(|then| relative_age(now, then))
                 .unwrap_or_default()
                 .into(),
-            archived: false,
+            archived: summary.worktree.archived,
         }
     }
 
@@ -395,6 +404,9 @@ impl SessionRow {
             title: title.into(),
             agent,
             account: None,
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
             status: BranchStatus::default(),
             path: PathBuf::new(),
             origin: origin.into(),
@@ -599,6 +611,7 @@ mod tests {
                 path: PathBuf::from("/tmp/wt"),
                 head: None,
                 pinned: false,
+                archived: false,
             },
             status: BranchStatus::default(),
             session,
@@ -613,6 +626,8 @@ mod tests {
             agent: agent.into(),
             account: ginka_protocol::AccountId(agent.into()),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             state,
             title: None,
             summary: None,
@@ -635,6 +650,26 @@ mod tests {
         assert_eq!(row.branch, "remove/r2-file-uploads");
         assert_eq!(row.state, AgentState::Idle);
         assert_eq!(row.age, "1d");
+    }
+
+    #[test]
+    fn archive_state_reaches_the_sidebar_row() {
+        let mut summary = summary(None);
+        summary.worktree.archived = true;
+        let row = SessionRow::from_summary(&summary, 1_000_000);
+        assert!(row.archived);
+    }
+
+    #[test]
+    fn provider_options_reach_the_composer_row() {
+        let mut active = session("codex", SessionState::Idle);
+        active.model = Some("gpt-next".into());
+        active.reasoning_effort = Some("high".into());
+        active.service_tier = Some("priority".into());
+        let row = SessionRow::from_summary(&summary(Some(active)), 1_000_000);
+        assert_eq!(row.model.as_deref(), Some("gpt-next"));
+        assert_eq!(row.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(row.service_tier.as_deref(), Some("priority"));
     }
 
     #[test]

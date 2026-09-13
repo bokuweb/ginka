@@ -11,6 +11,7 @@ use super::transport::Glyph;
 use ginka_protocol::AgentEvent;
 use ginka_protocol::model::SessionState;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// What kind of question the agent asked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +77,9 @@ pub struct TurnState {
     reply: String,
     /// Questions the thread has not answered.
     open: Vec<String>,
+    /// The short id shown in chat mapped to the transport's interaction id.
+    #[serde(default)]
+    agent_requests: HashMap<String, String>,
     /// Whether the turn has ended.
     done: bool,
 }
@@ -91,6 +95,7 @@ impl TurnState {
             activity: None,
             reply: String::new(),
             open: Vec::new(),
+            agent_requests: HashMap::new(),
             done: false,
         }
     }
@@ -115,6 +120,12 @@ impl TurnState {
     /// The thread answered one.
     pub fn close_request(&mut self, request_id: &str) {
         self.open.retain(|open| open != request_id);
+        self.agent_requests.remove(request_id);
+    }
+
+    /// The transport interaction addressed by a short thread-facing id.
+    pub fn agent_request_id(&self, request_id: &str) -> Option<&str> {
+        self.agent_requests.get(request_id).map(String::as_str)
     }
 
     /// Fold one agent event. `now` is unix seconds, for the throttle.
@@ -129,14 +140,24 @@ impl TurnState {
                 Vec::new()
             }
             AgentEvent::AskUser {
-                question, options, ..
-            } => self.question(QuestionKind::Ask, question.clone(), options.clone()),
-            AgentEvent::PlanProposal { plan, .. } => {
-                self.question(QuestionKind::Plan, plan.clone(), Vec::new())
+                id,
+                question,
+                options,
+            } => self.question(
+                id.clone(),
+                QuestionKind::Ask,
+                question.clone(),
+                options.clone(),
+            ),
+            AgentEvent::PlanProposal { id, plan } => {
+                self.question(id.clone(), QuestionKind::Plan, plan.clone(), Vec::new())
             }
-            AgentEvent::Permission { request } => {
-                self.question(QuestionKind::Permission, request.clone(), Vec::new())
-            }
+            AgentEvent::Permission { id, request } => self.question(
+                id.clone(),
+                QuestionKind::Permission,
+                request.clone(),
+                Vec::new(),
+            ),
             AgentEvent::TurnEnd { turn } => {
                 self.done = true;
                 let mut out = Vec::new();
@@ -208,12 +229,15 @@ impl TurnState {
 
     fn question(
         &mut self,
+        agent_request_id: String,
         kind: QuestionKind,
         text: String,
         options: Vec<String>,
     ) -> Vec<Outbound> {
         let request_id = new_request_id();
         self.open.push(request_id.clone());
+        self.agent_requests
+            .insert(request_id.clone(), agent_request_id);
         vec![Outbound::Question {
             request_id,
             kind,
@@ -374,6 +398,7 @@ mod tests {
             panic!("expected a question, got {out:?}");
         };
         assert_eq!(*kind, QuestionKind::Ask);
+        assert_eq!(turn.agent_request_id(request_id), Some("q1"));
         assert_eq!(options.len(), 2);
         assert_eq!(turn.open_requests(), std::slice::from_ref(request_id));
         turn.close_request(request_id);

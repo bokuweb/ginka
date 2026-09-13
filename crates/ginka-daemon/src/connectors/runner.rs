@@ -437,9 +437,17 @@ impl Inner {
                 request_id,
                 answer,
             } => {
+                let agent_request_id = self
+                    .following
+                    .lock()
+                    .unwrap()
+                    .get(&session)
+                    .and_then(|follow| follow.turn.agent_request_id(&request_id))
+                    .unwrap_or(&request_id)
+                    .to_string();
                 self.ask(Request::RespondToAgent {
                     session: session.clone(),
-                    request_id: request_id.clone(),
+                    request_id: agent_request_id,
                     response: answer.as_response(),
                 })?;
                 if let Some(follow) = self.following.lock().unwrap().get_mut(&session) {
@@ -474,6 +482,8 @@ impl Inner {
             agent: binding.agent.clone(),
             prompt,
             model: binding.model.clone(),
+            reasoning_effort: None,
+            service_tier: None,
             account: binding.account.clone(),
             access_mode: Some(binding.access_mode),
             origin: Some(inbound.origin()),

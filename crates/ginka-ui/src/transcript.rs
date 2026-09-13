@@ -100,6 +100,26 @@ impl Transcript {
         &self.blocks
     }
 
+    /// The newest question or plan still waiting for an answer.
+    ///
+    /// Free-text answers typed in the composer are addressed here; option
+    /// buttons carry their request id directly.
+    pub fn open_request(&self) -> Option<&str> {
+        self.blocks.iter().rev().find_map(|block| match block {
+            Block::Question {
+                id,
+                answered: false,
+                ..
+            }
+            | Block::Plan {
+                id,
+                answered: false,
+                ..
+            } => Some(id.as_str()),
+            _ => None,
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
@@ -156,11 +176,11 @@ impl Transcript {
 
         match &entry.payload {
             TranscriptPayload::User { text } => {
-                // Anything the reader says answers whatever they were being
-                // asked: the agent is not going to ask twice and wait for the
-                // second answer first.
-                self.answer_everything_open();
                 self.blocks.push(Block::User { text: text.clone() })
+            }
+            TranscriptPayload::Response { request_id, text } => {
+                self.answer(request_id);
+                self.blocks.push(Block::User { text: text.clone() });
             }
             TranscriptPayload::Agent { event } => self.fold(event),
         }
@@ -219,6 +239,12 @@ impl Transcript {
                 plan: plan.clone(),
                 answered: false,
             }),
+            AgentEvent::Permission { id, request } => self.blocks.push(Block::Question {
+                id: id.clone(),
+                question: request.clone(),
+                options: Vec::new(),
+                answered: false,
+            }),
             // Accounting belongs in the context bar, not in the conversation,
             // and the account's windows belong to the account chip.
             AgentEvent::Usage { usage } => self.usage = *usage,
@@ -237,7 +263,6 @@ impl Transcript {
             AgentEvent::Connected { .. }
             | AgentEvent::Commands { .. }
             | AgentEvent::TurnStarted
-            | AgentEvent::Permission { .. }
             | AgentEvent::SteerAccepted
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::AgentTitle { .. }
@@ -262,16 +287,6 @@ impl Transcript {
                     answered,
                     ..
                 } if asked == id => *answered = true,
-                _ => {}
-            }
-        }
-    }
-
-    /// Mark every question and plan still waiting as answered.
-    fn answer_everything_open(&mut self) {
-        for block in &mut self.blocks {
-            match block {
-                Block::Question { answered, .. } | Block::Plan { answered, .. } => *answered = true,
                 _ => {}
             }
         }
@@ -604,6 +619,75 @@ mod tests {
         transcript.extend(&[text(1, "done"), user(2, "again"), text(3, "done")]);
         assert_eq!(transcript.blocks().len(), 3);
         assert!(matches!(transcript.blocks()[2], Block::Assistant { .. }));
+    }
+
+    #[test]
+    fn a_persisted_response_closes_only_its_interaction_card() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::AskUser {
+                    id: "database".into(),
+                    question: "Which database?".into(),
+                    options: Vec::new(),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::PlanProposal {
+                    id: "plan".into(),
+                    plan: "Create the schema".into(),
+                },
+            ),
+            TranscriptEntry {
+                seq: 3,
+                at: 0,
+                payload: TranscriptPayload::Response {
+                    request_id: "database".into(),
+                    text: "SQLite".into(),
+                },
+            },
+        ]);
+
+        assert!(matches!(
+            &transcript.blocks()[0],
+            Block::Question { answered: true, .. }
+        ));
+        assert!(matches!(
+            &transcript.blocks()[1],
+            Block::Plan {
+                answered: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_composer_answers_the_newest_open_interaction() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::AskUser {
+                    id: "old".into(),
+                    question: "First?".into(),
+                    options: Vec::new(),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::AskUser {
+                    id: "new".into(),
+                    question: "Second?".into(),
+                    options: Vec::new(),
+                },
+            ),
+        ]);
+        assert_eq!(transcript.open_request(), Some("new"));
+
+        transcript.answer("new");
+        assert_eq!(transcript.open_request(), Some("old"));
     }
 
     #[test]
@@ -1019,9 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn saying_anything_answers_what_was_being_asked() {
-        // A transcript re-read after a restart has to know as much as one that
-        // was watched, and what it knows is that the reader replied.
+    fn an_ordinary_follow_up_does_not_resolve_an_addressed_request() {
         let mut transcript = Transcript::new();
         transcript.extend(&[
             agent(
@@ -1037,7 +1119,7 @@ mod tests {
             .blocks()
             .iter()
             .any(|block| matches!(block, Block::Plan { answered: true, .. }));
-        assert!(answered, "{:?}", transcript.blocks());
+        assert!(!answered, "{:?}", transcript.blocks());
     }
 }
 

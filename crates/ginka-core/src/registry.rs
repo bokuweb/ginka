@@ -499,6 +499,7 @@ mod tests {
             path: PathBuf::from("/tmp/one"),
             head: None,
             pinned: false,
+            archived: false,
         }];
         // `fix-a` and `fix/a` slugify identically; the second must not collide
         // with the first on a unique key.

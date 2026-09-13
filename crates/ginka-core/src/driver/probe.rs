@@ -7,7 +7,7 @@
 
 use super::{AgentDriver, CommandSpec};
 use ginka_protocol::model::{AgentStatus, PlanUsage};
-use ginka_protocol::provider::ProviderKind;
+use ginka_protocol::provider::{ProviderKind, ProviderModel};
 use std::time::Duration;
 
 use std::path::{Path, PathBuf};
@@ -167,6 +167,13 @@ pub fn probe_driver_with_env(driver: &dyn AgentDriver, env: &[(String, String)])
         _ => (None, None),
     };
 
+    let fallback = driver.models();
+    let models = if installed {
+        probe_model_catalogue(driver, env).unwrap_or(fallback)
+    } else {
+        fallback
+    };
+
     AgentStatus {
         id: driver.id().to_string(),
         display_name: driver.display_name().to_string(),
@@ -176,8 +183,72 @@ pub fn probe_driver_with_env(driver: &dyn AgentDriver, env: &[(String, String)])
         authenticated,
         detail: detail
             .or_else(|| (!installed).then(|| format!("{} is not on PATH", driver.program()))),
-        models: driver.models().into_iter().map(|model| model.id).collect(),
+        models,
     }
+}
+
+/// Ask a provider for the models it currently offers.
+///
+/// `None` means the probe was unavailable, timed out or could not be parsed;
+/// the caller must retain the driver's static catalogue in every such case.
+pub fn probe_model_catalogue(
+    driver: &dyn AgentDriver,
+    env: &[(String, String)],
+) -> Option<Vec<ProviderModel>> {
+    use std::io::{BufRead as _, Write as _};
+
+    let probe = driver.model_catalogue_probe()?;
+    let mut process = std::process::Command::new(&probe.command.program);
+    process.args(&probe.command.args);
+    crate::agent::sanitize(&mut process);
+    for (key, value) in probe.command.env.iter().chain(env.iter()) {
+        process.env(key, value);
+    }
+    let mut child = process
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let input = probe.input;
+        std::thread::spawn(move || {
+            for line in input {
+                if writeln!(stdin, "{line}").is_err() || stdin.flush().is_err() {
+                    break;
+                }
+            }
+            std::thread::sleep(PROBE_TIMEOUT);
+        });
+    }
+
+    let (sender, lines) = std::sync::mpsc::channel::<String>();
+    std::thread::spawn(move || {
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+
+    let deadline = std::time::Instant::now() + PROBE_TIMEOUT;
+    let mut answer = None;
+    while answer.is_none() {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match lines.recv_timeout(deadline - now) {
+            Ok(line) => answer = driver.parse_model_catalogue(&line),
+            Err(_) => break,
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    answer.filter(|models| !models.is_empty())
 }
 
 /// Whether an account is signed in, asked of the vendor under the account's

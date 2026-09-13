@@ -62,8 +62,10 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
 /// Every worktree stored for `project`, pinned ones first.
 pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Worktree>> {
     let mut statement = conn.prepare(
-        "SELECT project_name, name, branch, path, head, pinned
-         FROM worktrees WHERE project_name = ?1 ORDER BY pinned DESC, name",
+        "SELECT project_name, name, branch, path, head, pinned, archived
+         FROM worktrees
+         WHERE project_name = ?1
+         ORDER BY archived, pinned DESC, name",
     )?;
     let rows = statement.query_map([&project.0], |row| {
         Ok(Worktree {
@@ -73,6 +75,7 @@ pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Wo
             path: PathBuf::from(row.get::<_, String>(3)?),
             head: row.get(4)?,
             pinned: row.get(5)?,
+            archived: row.get(6)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -108,6 +111,21 @@ pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> R
     let updated = conn.execute(
         "UPDATE worktrees SET pinned = ?1 WHERE project_name = ?2 AND name = ?3",
         rusqlite::params![pinned, project.0, name],
+    )?;
+    Ok(updated > 0)
+}
+
+/// Archive or restore a workspace. Returns whether a row was affected.
+///
+/// Archive state is app-owned metadata, like pinning. Git reconciliation must
+/// preserve it: archiving removes clutter, not the worktree or its history.
+pub fn set_archived(conn: &Connection, workspace: &WorkspaceId, archived: bool) -> Result<bool> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    let updated = conn.execute(
+        "UPDATE worktrees SET archived = ?1 WHERE project_name = ?2 AND name = ?3",
+        rusqlite::params![archived, project.0, name],
     )?;
     Ok(updated > 0)
 }

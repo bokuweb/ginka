@@ -224,6 +224,41 @@ fn a_workspace_summary_carries_the_worktrees_git_status() {
 }
 
 #[test]
+fn a_file_save_crosses_the_service_and_refuses_a_stale_editor() {
+    let mut fixture = Fixture::new();
+    fixture.with_project();
+    let workspace = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces[0].id(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let opened = match fixture.ask(Request::ReadFile {
+        workspace: workspace.clone(),
+        path: "README.md".into(),
+    }) {
+        Response::FileContent { file } => file,
+        other => panic!("expected file content, got {other:?}"),
+    };
+    let saved = match fixture.ask(Request::WriteFile {
+        workspace: workspace.clone(),
+        path: opened.path.clone(),
+        text: "edited in Ginka\n".into(),
+        expected_revision: opened.revision.clone(),
+    }) {
+        Response::FileContent { file } => file,
+        other => panic!("expected file content, got {other:?}"),
+    };
+    assert_eq!(saved.text, "edited in Ginka\n");
+
+    let stale = fixture.service.handle(Request::WriteFile {
+        workspace,
+        path: opened.path,
+        text: "overwrite\n".into(),
+        expected_revision: opened.revision,
+    });
+    assert!(stale.is_err(), "the first save changed the revision");
+}
+
+#[test]
 fn removing_a_dirty_workspace_needs_force() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
@@ -279,6 +314,69 @@ fn pinning_survives_the_next_reconciliation() {
             .expect("still listed")
             .worktree
             .pinned
+    );
+}
+
+#[test]
+fn archiving_a_workspace_survives_reconciliation_and_can_be_undone() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "later".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: workspace.id(),
+        archived: true,
+    });
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(
+        listed
+            .iter()
+            .find(|summary| summary.id() == workspace.id())
+            .expect("archiving keeps the workspace registered")
+            .worktree
+            .archived
+    );
+
+    // Listing reconciles against git. Archive state belongs to Ginka and must
+    // not be overwritten by that reconciliation.
+    let reconciled = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(
+        reconciled
+            .iter()
+            .find(|summary| summary.id() == workspace.id())
+            .expect("reconciliation keeps the archived workspace")
+            .worktree
+            .archived
+    );
+
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: workspace.id(),
+        archived: false,
+    });
+    let restored = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(
+        !restored
+            .iter()
+            .find(|summary| summary.id() == workspace.id())
+            .expect("restoring keeps the workspace")
+            .worktree
+            .archived
     );
 }
 

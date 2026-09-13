@@ -76,7 +76,7 @@ fn nothing_is_answered_before_the_hello() {
         VERSION,
         &ClientMessage::Request {
             id: 1,
-            payload: ginka_protocol::rpc::Request::ListProjects,
+            payload: Box::new(ginka_protocol::rpc::Request::ListProjects),
         },
     );
     assert!(matches!(

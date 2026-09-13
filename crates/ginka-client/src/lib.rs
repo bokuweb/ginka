@@ -159,7 +159,7 @@ impl Client {
                     while let Some(message) = next_message(&mut incoming).await {
                         match message {
                             ServerMessage::Response { id, payload } => {
-                                answer(&pending, id, Ok(payload));
+                                answer(&pending, id, Ok(*payload));
                             }
                             ServerMessage::Error { id, error } => {
                                 answer(&pending, id, Err(error));
@@ -242,7 +242,7 @@ impl Client {
             .outgoing
             .send(ClientMessage::Request {
                 id,
-                payload: request,
+                payload: Box::new(request),
             })
             .await
             .is_err()

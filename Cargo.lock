@@ -2388,6 +2388,7 @@ name = "ginka"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "async-channel",
  "ginka-client",
  "ginka-core",
  "ginka-protocol",
@@ -2396,9 +2397,11 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",
+ "lsp-types",
  "rust-i18n",
  "serde",
  "serde_json",
+ "smol",
  "tracing",
 ]
 
@@ -2450,7 +2453,9 @@ dependencies = [
  "dirs",
  "futures-lite",
  "ginka-protocol",
+ "lsp-types",
  "nucleo-matcher",
+ "parking_lot",
  "portable-pty",
  "rusqlite",
  "rust-i18n",
@@ -2463,6 +2468,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "uuid",
 ]
 

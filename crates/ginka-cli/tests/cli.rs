@@ -183,6 +183,36 @@ fn a_workspace_created_on_the_command_line_is_a_real_worktree() {
 }
 
 #[test]
+fn a_workspace_can_be_archived_and_restored_without_removing_it() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "later"]);
+
+    home.ok(&["workspace", "archive", "comet/later"]);
+    let archived = home.ok(&["--json", "workspace", "list"]);
+    let archived: serde_json::Value = serde_json::from_str(&archived).unwrap();
+    let workspace = archived["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["worktree"]["name"] == "later")
+        .expect("workspace remains registered");
+    assert_eq!(workspace["worktree"]["archived"], true);
+
+    home.ok(&["workspace", "archive", "comet/later", "--restore"]);
+    let restored = home.ok(&["--json", "workspace", "list"]);
+    let restored: serde_json::Value = serde_json::from_str(&restored).unwrap();
+    let workspace = restored["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|workspace| workspace["worktree"]["name"] == "later")
+        .expect("workspace remains registered");
+    assert_eq!(workspace["worktree"]["archived"], false);
+}
+
+#[test]
 fn json_output_is_the_protocols_own_shape_so_an_agent_can_read_it() {
     let home = Home::new();
     let repository = home.repository("comet");
@@ -352,6 +382,41 @@ fn a_workspaces_files_are_searchable_by_any_part_of_their_path() {
     // Any subsequence of the path will do.
     let found = home.ok(&["files", "comet/files", "prsr"]);
     assert!(found.contains("src/parser.rs"), "{found}");
+}
+
+#[test]
+fn a_file_can_be_saved_from_the_revision_the_cli_read() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "edit"]);
+
+    let opened = home.ok(&["--json", "show", "comet/edit", "README.md"]);
+    let opened: serde_json::Value = serde_json::from_str(&opened).unwrap();
+    let revision = opened["file"]["revision"].as_str().unwrap();
+    home.ok(&[
+        "save",
+        "comet/edit",
+        "README.md",
+        "--expected-revision",
+        revision,
+        "--text",
+        "edited\n",
+    ]);
+    let worktree = home.root().join("worktrees/comet/edit/README.md");
+    assert_eq!(std::fs::read_to_string(worktree).unwrap(), "edited\n");
+
+    let stale = home.run(&[
+        "save",
+        "comet/edit",
+        "README.md",
+        "--expected-revision",
+        revision,
+        "--text",
+        "lost\n",
+    ]);
+    assert!(!stale.status.success());
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("changed since it was opened"));
 }
 
 #[test]

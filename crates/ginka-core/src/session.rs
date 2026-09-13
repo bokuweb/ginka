@@ -17,17 +17,20 @@ use rusqlite::{Connection, OptionalExtension as _};
 pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
     conn.execute(
         "INSERT INTO sessions
-            (id, workspace_id, provider, account_id, model, state, agent_title,
+            (id, workspace_id, provider, account_id, model, reasoning_effort,
+             service_tier, state, agent_title,
              agent_title_is_placeholder, summary, vendor_session_id,
              created_at, updated_at, access_mode,
              origin_connector, origin_channel, origin_thread)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         rusqlite::params![
             session.id.0,
             session.workspace.0,
             session.agent,
             session.account.0,
             session.model,
+            session.reasoning_effort,
+            session.service_tier,
             session.state.as_str(),
             session.title,
             session.summary,
@@ -44,6 +47,21 @@ pub fn insert(conn: &Connection, session: &Session) -> Result<()> {
         ],
     )?;
     Ok(())
+}
+
+/// Replace the provider options used by later turns of a session.
+pub fn update_provider_options(
+    conn: &Connection,
+    id: &SessionId,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE sessions SET model = ?2, reasoning_effort = ?3, service_tier = ?4, updated_at = ?5 WHERE id = ?1",
+        rusqlite::params![id.0, model, reasoning_effort, service_tier, now],
+    )? > 0)
 }
 
 /// The session still answering a thread, if any.
@@ -119,7 +137,11 @@ pub fn list(conn: &Connection, workspace: Option<&WorkspaceId>) -> Result<Vec<Se
 
 /// The session a workspace's sidebar row should show, if it has one.
 pub fn latest_for_workspace(conn: &Connection, workspace: &WorkspaceId) -> Result<Option<Session>> {
-    Ok(list(conn, Some(workspace))?.into_iter().next())
+    let mut statement = conn.prepare(&format!(
+        "{SELECT_ALL} WHERE workspace_id = ?1 ORDER BY created_at DESC, updated_at DESC LIMIT 1"
+    ))?;
+    let mut rows = statement.query_map([&workspace.0], read)?;
+    Ok(rows.next().transpose()?)
 }
 
 /// Move a session to a new state, touching its activity time.
@@ -349,6 +371,7 @@ fn excerpt(payload: &str, query: &str) -> String {
         .ok()
         .map(|payload| match payload {
             TranscriptPayload::User { text } => text,
+            TranscriptPayload::Response { text, .. } => text,
             TranscriptPayload::Agent { event } => match event {
                 ginka_protocol::AgentEvent::TextDelta { text }
                 | ginka_protocol::AgentEvent::Reasoning { text } => text,
@@ -445,22 +468,22 @@ pub fn mark_orphans_failed(conn: &Connection, now: i64) -> Result<usize> {
     )?)
 }
 
-const SELECT_ALL: &str = "SELECT id, workspace_id, provider, model, state, \
+const SELECT_ALL: &str = "SELECT id, workspace_id, provider, model, reasoning_effort, service_tier, state, \
      COALESCE(user_title, agent_title), summary, \
      vendor_session_id, created_at, updated_at, account_id, access_mode, \
      origin_connector, origin_channel, origin_thread FROM sessions";
 const ORDER: &str = "ORDER BY updated_at DESC, created_at DESC";
-const SELECT: &str = "SELECT id, workspace_id, provider, model, state, \
+const SELECT: &str = "SELECT id, workspace_id, provider, model, reasoning_effort, service_tier, state, \
      COALESCE(user_title, agent_title), summary, \
      vendor_session_id, created_at, updated_at, account_id, access_mode, \
      origin_connector, origin_channel, origin_thread FROM sessions WHERE id = ?1";
 
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
-    let origin = match row.get::<_, Option<String>>(12)? {
+    let origin = match row.get::<_, Option<String>>(14)? {
         Some(connector) => Some(SessionOrigin {
             connector,
-            channel: row.get::<_, Option<String>>(13)?.unwrap_or_default(),
-            thread: row.get::<_, Option<String>>(14)?.unwrap_or_default(),
+            channel: row.get::<_, Option<String>>(15)?.unwrap_or_default(),
+            thread: row.get::<_, Option<String>>(16)?.unwrap_or_default(),
         }),
         None => None,
     };
@@ -468,16 +491,18 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Session> {
         id: SessionId(row.get(0)?),
         workspace: WorkspaceId(row.get(1)?),
         agent: row.get(2)?,
-        account: ginka_protocol::AccountId(row.get(10)?),
+        account: ginka_protocol::AccountId(row.get(12)?),
         model: row.get(3)?,
-        state: SessionState::parse(&row.get::<_, String>(4)?),
-        title: row.get(5)?,
-        summary: row.get(6)?,
-        vendor_session_id: row.get(7)?,
-        access_mode: parse_access_mode(&row.get::<_, String>(11)?),
+        reasoning_effort: row.get(4)?,
+        service_tier: row.get(5)?,
+        state: SessionState::parse(&row.get::<_, String>(6)?),
+        title: row.get(7)?,
+        summary: row.get(8)?,
+        vendor_session_id: row.get(9)?,
+        access_mode: parse_access_mode(&row.get::<_, String>(13)?),
         origin,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 
@@ -494,6 +519,8 @@ mod tests {
             agent: "claude".into(),
             account: ginka_protocol::AccountId("claude".into()),
             model: Some("opus".into()),
+            reasoning_effort: None,
+            service_tier: None,
             state: SessionState::Starting,
             title: None,
             summary: None,
@@ -575,6 +602,31 @@ mod tests {
                 .id
                 .0,
             "new"
+        );
+    }
+
+    #[test]
+    fn a_workspace_keeps_showing_its_newest_conversation_when_an_old_one_finishes_late() {
+        let conn = db::open_in_memory().unwrap();
+        insert(&conn, &session("old", "comet/harbor", 100)).unwrap();
+        insert(&conn, &session("replacement", "comet/harbor", 200)).unwrap();
+        update_state(
+            &conn,
+            &SessionId("old".into()),
+            SessionState::Cancelled,
+            None,
+            300,
+        )
+        .unwrap();
+
+        assert_eq!(list(&conn, None).unwrap()[0].id.0, "old");
+        assert_eq!(
+            latest_for_workspace(&conn, &WorkspaceId("comet/harbor".into()))
+                .unwrap()
+                .unwrap()
+                .id
+                .0,
+            "replacement"
         );
     }
 

@@ -9,9 +9,11 @@
 //! than by a live session.
 
 use super::{
-    ActivityItem, AgentDriver, CommandSpec, ParseState, PlanUsageProbe, ProviderModel, SessionSpec,
+    ActivityItem, AgentDriver, CommandSpec, ModelCatalogueProbe, ParseState, PlanUsageProbe,
+    ProviderModel, SessionSpec,
 };
 use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
+use ginka_protocol::provider::{OptionOutcome, ProviderOption, SessionOptions};
 use ginka_protocol::{AgentEvent, Usage};
 use serde_json::Value;
 
@@ -57,6 +59,15 @@ impl CodexDriver {
             Some(model) => vec!["--model".to_string(), model.clone()],
             None => Vec::new(),
         };
+        if let Some(effort) = &spec.reasoning_effort {
+            args.extend([
+                "-c".to_string(),
+                format!("model_reasoning_effort=\"{effort}\""),
+            ]);
+        }
+        if let Some(tier) = &spec.service_tier {
+            args.extend(["-c".to_string(), format!("service_tier=\"{tier}\"")]);
+        }
         // Our access modes in the vendor's vocabulary, only when they are
         // not what `codex exec` does on its own.
         match spec.access_mode {
@@ -81,10 +92,88 @@ impl AgentDriver for CodexDriver {
     }
 
     fn models(&self) -> Vec<ProviderModel> {
-        // Left to the CLI's own configuration: Codex resolves the default from
-        // `~/.codex/config.toml`, and a hardcoded list here would override a
-        // user's choice with a stale one.
-        Vec::new()
+        // Stable family ids as the offline fallback. The app-server catalogue
+        // wins whenever it answers, so new and retired models do not wait for
+        // a Ginka release (`docs/roadmap.md` §3.3 N3).
+        ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]
+            .into_iter()
+            .map(|id| {
+                ProviderModel::new(id, id).with_reasoning_efforts(
+                    ["low", "medium", "high", "xhigh", "max"]
+                        .into_iter()
+                        .map(|effort| ProviderOption::new(effort, effort)),
+                )
+            })
+            .collect()
+    }
+
+    fn apply_options(&self, _before: &SessionOptions, _after: &SessionOptions) -> OptionOutcome {
+        // `codex exec resume` accepts the same model/config overrides as a
+        // fresh turn, so the provider thread remains valid.
+        OptionOutcome::Absorbed
+    }
+
+    fn model_catalogue_probe(&self) -> Option<ModelCatalogueProbe> {
+        Some(ModelCatalogueProbe {
+            command: CommandSpec::new(&self.program)
+                .arg("app-server")
+                .arg("--stdio"),
+            input: vec![
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "ginka", "title": "Ginka", "version": env!("CARGO_PKG_VERSION")}}
+                })
+                .to_string(),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+                    .to_string(),
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "model/list",
+                    "params": {"limit": 100, "includeHidden": false}
+                })
+                .to_string(),
+            ],
+        })
+    }
+
+    fn parse_model_catalogue(&self, line: &str) -> Option<Vec<ProviderModel>> {
+        let value: Value = serde_json::from_str(line.trim()).ok()?;
+        let rows = value.get("result")?.get("data")?.as_array()?;
+        Some(
+            rows.iter()
+                .filter(|row| !row.get("hidden").and_then(Value::as_bool).unwrap_or(false))
+                .filter_map(|row| {
+                    let id = row.get("id")?.as_str()?;
+                    let label = row.get("displayName").and_then(Value::as_str).unwrap_or(id);
+                    let efforts = row
+                        .get("supportedReasoningEfforts")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|option| {
+                            let id = option.get("reasoningEffort")?.as_str()?;
+                            Some(ProviderOption::new(id, id))
+                        });
+                    let tiers = row
+                        .get("serviceTiers")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|option| {
+                            let id = option.get("id")?.as_str()?;
+                            let label = option.get("name").and_then(Value::as_str).unwrap_or(id);
+                            Some(ProviderOption::new(id, label))
+                        });
+                    let mut model = ProviderModel::new(id, label)
+                        .with_reasoning_efforts(efforts)
+                        .with_service_tiers(tiers);
+                    model.is_default = row
+                        .get("isDefault")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    Some(model)
+                })
+                .collect(),
+        )
     }
 
     fn program(&self) -> &str {
@@ -641,6 +730,47 @@ mod tests {
         );
         assert_eq!(driver.parse_auth("Not logged in\n"), Some((false, None)));
         assert_eq!(driver.parse_auth("something else entirely"), None);
+    }
+
+    #[test]
+    fn the_cli_catalogue_keeps_model_options_and_hides_hidden_models() {
+        let driver = CodexDriver::default();
+        let models = driver
+            .parse_model_catalogue(
+                r#"{"id":2,"result":{"data":[
+                    {"id":"gpt-next","displayName":"GPT Next","hidden":false,"isDefault":true,
+                     "supportedReasoningEfforts":[
+                       {"reasoningEffort":"low","description":"Fast"},
+                       {"reasoningEffort":"high","description":"Deep"}],
+                     "serviceTiers":[{"id":"priority","name":"Fast","description":"Faster"}]},
+                    {"id":"retired","displayName":"Retired","hidden":true,"isDefault":false,
+                     "supportedReasoningEfforts":[],"serviceTiers":[]}
+                ]}}"#,
+            )
+            .expect("model/list response");
+
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-next");
+        assert_eq!(models[0].label, "GPT Next");
+        assert!(models[0].is_default);
+        assert!(models[0].supports_reasoning_effort("high"));
+        assert!(models[0].supports_service_tier("priority"));
+    }
+
+    #[test]
+    fn codex_asks_its_app_server_for_the_catalogue() {
+        let probe = CodexDriver::default()
+            .model_catalogue_probe()
+            .expect("Codex exposes model/list");
+        assert_eq!(probe.command.args, ["app-server", "--stdio"]);
+        assert!(probe.input.iter().any(|line| line.contains("model/list")));
+    }
+
+    #[test]
+    fn the_static_catalogue_keeps_the_picker_usable_offline() {
+        let driver = CodexDriver::default();
+        assert!(!driver.models().is_empty());
+        assert_eq!(driver.parse_model_catalogue("not json"), None);
     }
 
     #[test]

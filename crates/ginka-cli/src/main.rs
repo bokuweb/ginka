@@ -113,6 +113,19 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Save an existing UTF-8 workspace file without overwriting a newer edit.
+    Save {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// The revision printed by `--json show`; protects concurrent edits.
+        #[arg(long)]
+        expected_revision: String,
+        /// The complete replacement text. Read from stdin when omitted.
+        #[arg(long)]
+        text: Option<String>,
+    },
     /// The skills the agents can load, and whether each is on.
     #[command(subcommand)]
     Skills(SkillsCommand),
@@ -284,6 +297,14 @@ enum WorkspaceCommand {
         #[arg(long)]
         off: bool,
     },
+    /// Archive a workspace without removing its worktree or conversation.
+    Archive {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Restore it to the active project tree instead.
+        #[arg(long)]
+        restore: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -381,6 +402,12 @@ enum SessionCommand {
         agent: String,
         #[arg(long)]
         model: Option<String>,
+        /// Reasoning level advertised for the selected model.
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        /// Service tier advertised for the selected model.
+        #[arg(long)]
+        service_tier: Option<String>,
         /// Which login to run on, by id. The provider's default otherwise.
         #[arg(long)]
         account: Option<String>,
@@ -391,6 +418,24 @@ enum SessionCommand {
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
+    /// Answer a question, plan or permission request in a running turn.
+    Respond {
+        session: String,
+        /// The request id shown in the transcript.
+        request_id: String,
+        response: String,
+    },
+    /// Replace provider options for later turns. Omitted options use the
+    /// provider default.
+    Options {
+        session: String,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        reasoning_effort: Option<String>,
+        #[arg(long)]
+        service_tier: Option<String>,
+    },
     /// Stop an agent's process tree.
     Cancel { session: String },
     /// Rename a conversation.
@@ -659,6 +704,12 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             pinned: !off,
         },
+        Command::Workspace(WorkspaceCommand::Archive { workspace, restore }) => {
+            Request::ArchiveWorkspace {
+                workspace: WorkspaceId(workspace),
+                archived: !restore,
+            }
+        }
 
         Command::Agents => Request::ListAgents,
         Command::Slack(SlackCommand::Status) | Command::Slack(SlackCommand::Bindings) => {
@@ -767,6 +818,30 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             path,
         },
+        Command::Save {
+            workspace,
+            path,
+            expected_revision,
+            text,
+        } => {
+            let text = match text {
+                Some(text) => text,
+                None => {
+                    use std::io::Read as _;
+                    let mut text = String::new();
+                    std::io::stdin()
+                        .read_to_string(&mut text)
+                        .context("reading replacement text from stdin")?;
+                    text
+                }
+            };
+            Request::WriteFile {
+                workspace: WorkspaceId(workspace),
+                path,
+                text,
+                expected_revision,
+            }
+        }
         Command::Attach { path } => {
             use base64::Engine as _;
             let bytes =
@@ -860,6 +935,8 @@ fn request_for(command: Command) -> Result<Request> {
             prompt,
             agent,
             model,
+            reasoning_effort,
+            service_tier,
             account,
             access,
         }) => Request::StartSession {
@@ -867,6 +944,8 @@ fn request_for(command: Command) -> Result<Request> {
             agent,
             prompt,
             model,
+            reasoning_effort,
+            service_tier,
             account: account.map(AccountId),
             access_mode: access,
             origin: None,
@@ -874,6 +953,26 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
             session: SessionId(session),
             text,
+        },
+        Command::Session(SessionCommand::Respond {
+            session,
+            request_id,
+            response,
+        }) => Request::RespondToAgent {
+            session: SessionId(session),
+            request_id,
+            response,
+        },
+        Command::Session(SessionCommand::Options {
+            session,
+            model,
+            reasoning_effort,
+            service_tier,
+        }) => Request::UpdateSessionOptions {
+            session: SessionId(session),
+            model,
+            reasoning_effort,
+            service_tier,
         },
         Command::Session(SessionCommand::Cancel { session }) => Request::CancelSession {
             session: SessionId(session),
@@ -1128,6 +1227,15 @@ fn print(response: Response, patch: bool) {
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::SessionMatches { matches } => print_matches(&matches),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
+        Response::SessionOptionsApplied { session, outcome } => {
+            print_sessions(std::slice::from_ref(&session));
+            let key = if outcome.absorbed() {
+                "cli.session.options.absorbed"
+            } else {
+                "cli.session.options.restart"
+            };
+            eprintln!("{}", rust_i18n::t!(key));
+        }
         Response::FannedOut { started, failed } => {
             print_sessions(&started);
             // On stderr: the sessions that did start are the answer, and a
@@ -1666,6 +1774,9 @@ mod ginka_cli_format {
     pub fn transcript_line(entry: &TranscriptEntry) -> String {
         match &entry.payload {
             TranscriptPayload::User { text } => format!("{:>4}  you  {text}", entry.seq),
+            TranscriptPayload::Response { request_id, text } => {
+                format!("{:>4}  you  [{request_id}] {text}", entry.seq)
+            }
             TranscriptPayload::Agent { event } => {
                 format!("{:>4}  {}", entry.seq, describe(event))
             }
@@ -1709,7 +1820,7 @@ mod ginka_cli_format {
                 None => "-- connected --".to_string(),
             },
             AgentEvent::AgentTitle { title } => format!("-- titled: {title} --"),
-            AgentEvent::Permission { request } => format!("? permission: {request}"),
+            AgentEvent::Permission { request, .. } => format!("? permission: {request}"),
             AgentEvent::SteerRejected { reason } => format!(
                 "-- steer refused{} --",
                 reason

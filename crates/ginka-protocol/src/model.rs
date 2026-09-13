@@ -93,6 +93,9 @@ pub struct Worktree {
     pub head: Option<String>,
     /// Pinned workspaces sort first and are never pruned automatically.
     pub pinned: bool,
+    /// Archived workspaces stay registered but leave the active project tree.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 impl Worktree {
@@ -139,6 +142,12 @@ pub struct Session {
     /// which one that was.
     pub account: AccountId,
     pub model: Option<String>,
+    /// Provider reasoning level reused by every turn in this conversation.
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// Provider service tier reused by every turn in this conversation.
+    #[serde(default)]
+    pub service_tier: Option<String>,
     pub state: SessionState,
     /// What this conversation is about.
     ///
@@ -321,6 +330,11 @@ pub struct TranscriptEntry {
 pub enum TranscriptPayload {
     /// Something the user sent: the opening prompt, or a follow-up.
     User { text: String },
+    /// An answer delivered to an interaction inside a running turn.
+    ///
+    /// This is distinct from a follow-up because the request id is what lets
+    /// a replay close exactly the card that was answered.
+    Response { request_id: String, text: String },
     /// Anything the driver emitted, already normalized.
     Agent { event: crate::event::AgentEvent },
 }
@@ -659,8 +673,11 @@ pub struct AgentStatus {
     pub authenticated: Option<bool>,
     /// What the CLI said about itself, when it said anything useful.
     pub detail: Option<String>,
-    /// The models this driver offers, empty when the vendor decides.
-    pub models: Vec<String>,
+    /// The models this driver offers, including the options each accepts.
+    ///
+    /// A live CLI catalogue wins; drivers supply a static fallback so the
+    /// picker remains useful offline (`docs/roadmap.md` §3.3 N3).
+    pub models: Vec<crate::provider::ProviderModel>,
 }
 
 impl AgentStatus {
@@ -814,11 +831,33 @@ pub struct ContentMatch {
 pub struct FileContent {
     /// Relative to the worktree root.
     pub path: String,
+    /// UTF-8 preview, empty for binary content and bounded when truncated.
     pub text: String,
+    /// Opaque digest of the complete bytes read from disk.
+    ///
+    /// A save sends this back so an edit made elsewhere is never overwritten
+    /// by a stale editor buffer.
+    pub revision: String,
     /// A binary file has no text worth showing; saying so beats showing none.
     pub binary: bool,
     /// Whether there is more of it than was sent.
     pub truncated: bool,
+    /// A recognized, bounded image payload suitable for a local preview.
+    ///
+    /// Unsupported and oversized binary files omit it. The daemon determines
+    /// the media type from the bytes rather than trusting the file extension.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image: Option<FileImage>,
+}
+
+/// Image bytes carried with a file read for a controlled local preview.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileImage {
+    /// An allow-listed media type inferred from the file signature.
+    pub media_type: String,
+    /// The complete image bytes encoded for the JSON wire protocol.
+    pub data_base64: String,
 }
 
 /// One shell the daemon is running, as a tab strip sees it.
@@ -870,6 +909,7 @@ mod tests {
             path: PathBuf::from("/tmp/wt"),
             head: None,
             pinned: false,
+            archived: false,
         }
     }
 
@@ -880,6 +920,8 @@ mod tests {
             agent: "claude".into(),
             account: AccountId("claude".into()),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             state,
             title: None,
             summary: None,

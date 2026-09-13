@@ -7,7 +7,10 @@
 
 use ginka_protocol::event::ActivityItem;
 use ginka_protocol::event::{AgentEvent, DaemonEvent, Usage};
-use ginka_protocol::model::{ProjectKind, SessionState};
+use ginka_protocol::model::{
+    AgentStatus, FileContent, FileImage, ProjectKind, SessionState, TranscriptPayload,
+};
+use ginka_protocol::provider::{ProviderModel, ProviderOption};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{ClientMessage, RpcError, ServerMessage};
 use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
@@ -36,22 +39,158 @@ fn a_request_is_tagged_by_method() {
 }
 
 #[test]
+fn workspace_archive_is_an_explicit_reversible_wire_operation() {
+    let request = Request::ArchiveWorkspace {
+        workspace: WorkspaceId("comet/bright-harbor".into()),
+        archived: true,
+    };
+    assert_eq!(
+        wire(&request),
+        json!({
+            "method": "archive_workspace",
+            "workspace": "comet/bright-harbor",
+            "archived": true,
+        })
+    );
+}
+
+#[test]
+fn a_file_save_carries_the_revision_it_may_replace() {
+    let request = Request::WriteFile {
+        workspace: WorkspaceId("comet/bright-harbor".into()),
+        path: "src/main.rs".into(),
+        text: "fn main() {}\n".into(),
+        expected_revision: "abc123".into(),
+    };
+    assert_eq!(
+        wire(&request),
+        json!({
+            "method": "write_file",
+            "workspace": "comet/bright-harbor",
+            "path": "src/main.rs",
+            "text": "fn main() {}\n",
+            "expected_revision": "abc123",
+        })
+    );
+}
+
+#[test]
+fn a_session_start_carries_provider_model_options_explicitly() {
+    let request = Request::StartSession {
+        workspace: WorkspaceId("comet/bright-harbor".into()),
+        agent: "codex".into(),
+        prompt: "go".into(),
+        model: Some("gpt-next".into()),
+        reasoning_effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+        account: None,
+        access_mode: None,
+        origin: None,
+    };
+    let wired = wire(&request);
+    assert_eq!(wired["reasoning_effort"], "high");
+    assert_eq!(wired["service_tier"], "priority");
+    assert_eq!(serde_json::from_value::<Request>(wired).unwrap(), request);
+}
+
+#[test]
+fn an_existing_sessions_provider_options_cross_the_wire() {
+    let request = Request::UpdateSessionOptions {
+        session: SessionId("session-1".into()),
+        model: Some("gpt-next".into()),
+        reasoning_effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+    };
+    let wired = serde_json::to_value(&request).unwrap();
+    assert_eq!(wired["method"], "update_session_options");
+    assert_eq!(wired["model"], "gpt-next");
+    assert_eq!(wired["reasoning_effort"], "high");
+    assert_eq!(wired["service_tier"], "priority");
+}
+
+#[test]
 fn a_response_is_tagged_by_result() {
     assert_eq!(wire(&Response::Ack), json!({ "result": "ack" }));
+}
+
+#[test]
+fn a_file_image_crosses_the_shared_wire_as_bounded_base64() {
+    let response = Response::FileContent {
+        file: FileContent {
+            path: "logo.png".into(),
+            text: String::new(),
+            revision: "rev-1".into(),
+            binary: true,
+            truncated: false,
+            image: Some(FileImage {
+                media_type: "image/png".into(),
+                data_base64: "iVBORw0KGgo=".into(),
+            }),
+        },
+    };
+
+    assert_eq!(
+        wire(&response),
+        json!({
+            "result": "file_content",
+            "file": {
+                "path": "logo.png",
+                "text": "",
+                "revision": "rev-1",
+                "binary": true,
+                "truncated": false,
+                "image": {
+                    "media_type": "image/png",
+                    "data_base64": "iVBORw0KGgo="
+                }
+            }
+        })
+    );
+}
+
+#[test]
+fn an_agent_catalogue_keeps_the_options_each_model_accepts() {
+    let model = ProviderModel::new("gpt-next", "GPT Next")
+        .as_default()
+        .with_reasoning_efforts([ProviderOption::new("high", "High")])
+        .with_service_tiers([ProviderOption::new("priority", "Fast")]);
+    let response = Response::Agents {
+        agents: vec![AgentStatus {
+            id: "codex".into(),
+            display_name: "Codex".into(),
+            program: "codex".into(),
+            installed: true,
+            version: Some("1.0".into()),
+            authenticated: Some(true),
+            detail: None,
+            models: vec![model],
+        }],
+    };
+
+    let wired = wire(&response);
+    assert_eq!(wired["agents"][0]["models"][0]["id"], "gpt-next");
+    assert_eq!(
+        wired["agents"][0]["models"][0]["reasoning_efforts"][0]["id"],
+        "high"
+    );
+    assert_eq!(
+        wired["agents"][0]["models"][0]["service_tiers"][0]["id"],
+        "priority"
+    );
 }
 
 #[test]
 fn a_request_round_trips_through_its_envelope() {
     let message = ClientMessage::Request {
         id: 7,
-        payload: Request::Ping,
+        payload: Box::new(Request::Ping),
     };
     let text = serde_json::to_string(&message).unwrap();
     let parsed: ClientMessage = serde_json::from_str(&text).unwrap();
     match parsed {
         ClientMessage::Request { id, payload } => {
             assert_eq!(id, 7);
-            assert!(matches!(payload, Request::Ping));
+            assert!(matches!(*payload, Request::Ping));
         }
         other => panic!("expected a request, got {other:?}"),
     }
@@ -147,6 +286,13 @@ fn agent_events_are_tagged_by_kind() {
             "plan_proposal",
         ),
         (
+            AgentEvent::Permission {
+                id: "permission_1".into(),
+                request: "Run the test suite?".into(),
+            },
+            "permission",
+        ),
+        (
             AgentEvent::Usage {
                 usage: Usage {
                     input_tokens: 10,
@@ -174,6 +320,21 @@ fn agent_events_are_tagged_by_kind() {
         let parsed: AgentEvent = serde_json::from_value(wired).unwrap();
         assert_eq!(format!("{parsed:?}"), format!("{event:?}"));
     }
+}
+
+#[test]
+fn an_interaction_response_keeps_the_request_it_answers() {
+    assert_eq!(
+        wire(&TranscriptPayload::Response {
+            request_id: "ask_1".into(),
+            text: "SQLite".into(),
+        }),
+        json!({
+            "source": "response",
+            "request_id": "ask_1",
+            "text": "SQLite",
+        })
+    );
 }
 
 #[test]

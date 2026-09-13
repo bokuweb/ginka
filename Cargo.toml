@@ -61,6 +61,7 @@ futures-util = { version = "0.3", default-features = false, features = ["std", "
 # mentions (§4.3). Small, pure Rust, and the same one Helix and Zed use.
 base64 = "0.22"
 nucleo-matcher = "0.3"
+lsp-types = { version = "0.97", features = ["proposed"] }
 parking_lot = "0.12"
 portable-pty = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -74,6 +75,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
 
 [dependencies]
 ginka-client.workspace = true
@@ -82,13 +84,16 @@ ginka-core.workspace = true
 ginka-protocol.workspace = true
 ginka-ui.workspace = true
 anyhow.workspace = true
+async-channel.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
 gpui-component-assets.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+smol.workspace = true
 tracing.workspace = true
+lsp-types.workspace = true
 
 [workspace.lints.rust]
 unsafe_code = "deny"

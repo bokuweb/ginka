@@ -31,6 +31,26 @@ pub struct DaemonLink {
     client: Mutex<Option<Arc<Client>>>,
 }
 
+/// Everything the composer chooses when it starts a new conversation.
+pub(crate) struct SessionLaunch {
+    /// Workspace in which the agent runs.
+    pub(crate) workspace: WorkspaceId,
+    /// Driver selected for the conversation.
+    pub(crate) agent: String,
+    /// First user message.
+    pub(crate) prompt: String,
+    /// Optional provider model override.
+    pub(crate) model: Option<String>,
+    /// Optional provider reasoning-effort override.
+    pub(crate) reasoning_effort: Option<String>,
+    /// Optional provider service-tier override.
+    pub(crate) service_tier: Option<String>,
+    /// Access policy fixed for the conversation.
+    pub(crate) access: Option<ginka_protocol::AccessMode>,
+    /// Optional provider login selected for the conversation.
+    pub(crate) account: Option<AccountId>,
+}
+
 impl DaemonLink {
     /// Build a link to the daemon that owns `paths`.
     pub fn new(paths: &Paths) -> Arc<Self> {
@@ -128,28 +148,44 @@ impl DaemonLink {
     }
 
     /// Start an agent in a workspace, and return the session it created.
-    pub async fn start_session(
-        &self,
-        workspace: &WorkspaceId,
-        agent: &str,
-        prompt: String,
-        model: Option<String>,
-        access: Option<ginka_protocol::AccessMode>,
-        account: Option<AccountId>,
-    ) -> Option<Session> {
+    pub async fn start_session(&self, launch: SessionLaunch) -> Option<Session> {
         match self
             .ask(Request::StartSession {
-                workspace: workspace.clone(),
-                agent: agent.to_string(),
-                prompt,
-                model,
-                account,
-                access_mode: access,
+                workspace: launch.workspace,
+                agent: launch.agent,
+                prompt: launch.prompt,
+                model: launch.model,
+                reasoning_effort: launch.reasoning_effort,
+                service_tier: launch.service_tier,
+                account: launch.account,
+                access_mode: launch.access,
                 origin: None,
             })
             .await
         {
             Some(Response::Session { session }) => Some(session),
+            _ => None,
+        }
+    }
+
+    /// Replace the provider options used by later turns of a conversation.
+    pub async fn update_session_options(
+        &self,
+        session: SessionId,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) -> Option<(Session, ginka_protocol::OptionOutcome)> {
+        match self
+            .ask(Request::UpdateSessionOptions {
+                session,
+                model,
+                reasoning_effort,
+                service_tier,
+            })
+            .await
+        {
+            Some(Response::SessionOptionsApplied { session, outcome }) => Some((session, outcome)),
             _ => None,
         }
     }
@@ -375,13 +411,19 @@ impl DaemonLink {
     }
 
     /// Answer a question or a plan the agent is waiting on.
-    pub async fn respond(&self, session: &SessionId, request_id: &str, response: &str) {
-        self.ask(Request::RespondToAgent {
+    pub async fn respond(
+        &self,
+        session: &SessionId,
+        request_id: &str,
+        response: &str,
+    ) -> Result<(), String> {
+        self.ask_result(Request::RespondToAgent {
             session: session.clone(),
             request_id: request_id.to_string(),
             response: response.to_string(),
         })
-        .await;
+        .await
+        .map(|_| ())
     }
 
     /// The lines in a workspace's files that contain `query`.
@@ -410,6 +452,28 @@ impl DaemonLink {
         {
             Some(Response::FileContent { file }) => Some(file),
             _ => None,
+        }
+    }
+
+    /// Save a file only if it still has the revision the editor opened.
+    pub async fn write_file(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        text: String,
+        expected_revision: String,
+    ) -> Result<FileContent, String> {
+        match self
+            .ask_result(Request::WriteFile {
+                workspace: workspace.clone(),
+                path: path.to_string(),
+                text,
+                expected_revision,
+            })
+            .await?
+        {
+            Response::FileContent { file } => Ok(file),
+            response => Err(format!("unexpected response: {response:?}")),
         }
     }
 

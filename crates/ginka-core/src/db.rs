@@ -44,6 +44,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0009_handoff",
         include_str!("../../../db/migrations/0009_handoff.sql"),
     ),
+    (
+        "0010_workspace_archive",
+        include_str!("../../../db/migrations/0010_workspace_archive.sql"),
+    ),
+    (
+        "0011_session_model_options",
+        include_str!("../../../db/migrations/0011_session_model_options.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

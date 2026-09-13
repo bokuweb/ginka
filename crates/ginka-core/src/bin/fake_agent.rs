@@ -11,6 +11,9 @@
 use std::io::{BufRead, Write};
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--lsp") {
+        return language_server();
+    }
     // Two ways to script this, because two suites do. A script file exercises
     // the daemon's supervisor with directives it can pause and block on; the
     // flags exercise the driver's own reading of a stream. Neither knows about
@@ -19,6 +22,121 @@ fn main() {
         return scripted();
     }
     flags();
+}
+
+/// Minimal LSP peer for exercising framing and document synchronization.
+fn language_server() {
+    let mut input = std::io::BufReader::new(std::io::stdin().lock());
+    let mut output = std::io::stdout().lock();
+    let mut document_uri = serde_json::Value::Null;
+    let mut document_text = String::new();
+
+    while let Some(message) = read_lsp_message(&mut input) {
+        let method = message
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        match method {
+            "initialize" => write_lsp_message(
+                &mut output,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {
+                        "capabilities": {
+                            "textDocumentSync": 1,
+                            "hoverProvider": true,
+                            "definitionProvider": true
+                        }
+                    }
+                }),
+            ),
+            "textDocument/didOpen" => {
+                document_uri = message["params"]["textDocument"]["uri"].clone();
+                document_text = message["params"]["textDocument"]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                write_lsp_message(
+                    &mut output,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": document_uri,
+                            "diagnostics": [{
+                                "range": {
+                                    "start": {"line": 0, "character": 0},
+                                    "end": {"line": 0, "character": 2}
+                                },
+                                "message": "fake diagnostic"
+                            }]
+                        }
+                    }),
+                );
+            }
+            "textDocument/didChange" => {
+                document_text = message["params"]["contentChanges"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+            }
+            "textDocument/hover" => write_lsp_message(
+                &mut output,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": {"contents": document_text}
+                }),
+            ),
+            "textDocument/definition" => write_lsp_message(
+                &mut output,
+                &serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": message["id"],
+                    "result": [{
+                        "targetUri": document_uri,
+                        "targetRange": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 2}
+                        },
+                        "targetSelectionRange": {
+                            "start": {"line": 0, "character": 0},
+                            "end": {"line": 0, "character": 2}
+                        }
+                    }]
+                }),
+            ),
+            "exit" => return,
+            _ => {}
+        }
+    }
+}
+
+fn read_lsp_message(reader: &mut impl BufRead) -> Option<serde_json::Value> {
+    let mut content_length = None;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).ok()? == 0 {
+            return None;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = value.trim().parse::<usize>().ok();
+        }
+    }
+    let mut body = vec![0; content_length?];
+    reader.read_exact(&mut body).ok()?;
+    serde_json::from_slice(&body).ok()
+}
+
+fn write_lsp_message(writer: &mut impl Write, message: &serde_json::Value) {
+    let body = serde_json::to_vec(message).expect("LSP response serializes");
+    write!(writer, "Content-Length: {}\r\n\r\n", body.len()).expect("stdout is open");
+    writer.write_all(&body).expect("stdout is open");
+    writer.flush().expect("stdout is open");
 }
 
 /// Flag-driven: what the driver tests script.

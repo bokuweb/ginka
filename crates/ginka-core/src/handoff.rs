@@ -68,6 +68,13 @@ fn fold(entries: &[TranscriptEntry]) -> Vec<Turn> {
                     }),
                 }
             }
+            TranscriptPayload::Response { text, .. } => match turns.last_mut() {
+                Some(turn) => turn.asked.push(text.clone()),
+                None => turns.push(Turn {
+                    asked: vec![text.clone()],
+                    ..Turn::default()
+                }),
+            },
             TranscriptPayload::Agent { event } => {
                 let turn = match turns.last_mut() {
                     Some(turn) => turn,

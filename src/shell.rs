@@ -7,14 +7,15 @@
 //! already running there, and the transcript is folded from the daemon's event
 //! stream. The terminal is still a placeholder (M3).
 
-use crate::daemon::DaemonLink;
+use crate::daemon::{DaemonLink, SessionLaunch};
 use crate::sidebar::{SessionSidebar, SidebarEvent};
 use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
-use ginka_protocol::{ProjectName, SessionId};
+use ginka_protocol::provider::ProviderModel;
+use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
 use ginka_ui::layout::{HEADER_HEIGHT, Layout, Panel, TRAFFIC_LIGHT_INSET};
@@ -57,6 +58,10 @@ enum Picker {
     Agent,
     /// Which of that agent's models it runs on.
     Model,
+    /// How much reasoning the selected model uses.
+    ReasoningEffort,
+    /// Which provider service tier the selected model uses.
+    ServiceTier,
     /// Which of that agent's logins it runs on (`docs/accounts.md` §11).
     Account,
     /// What the agent may touch (`docs/roadmap.md` §3.3 N2).
@@ -188,6 +193,10 @@ pub struct Shell {
     chosen_agent: Option<String>,
     /// The model the user chose for that agent.
     chosen_model: Option<String>,
+    /// The reasoning level chosen for that model.
+    chosen_reasoning_effort: Option<String>,
+    /// The service tier chosen for that model.
+    chosen_service_tier: Option<String>,
     /// What the next session's agent may touch. `None` is the daemon's
     /// default, `ask`. Fixed for a conversation once it has started, so the
     /// chip is only offered where a new session is about to be.
@@ -260,25 +269,51 @@ impl Shell {
         let sidebar = cx.new(|_| SessionSidebar::new(rows));
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
 
-        let committing = cx.subscribe(&surfaces, |this, _, event, cx| match event {
-            crate::surfaces::SurfaceEvent::Commit {
-                message,
-                only_staged,
-            } => this.commit(message.clone(), *only_staged, cx),
-            crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
-                this.leave_comment(path.clone(), *line, text.clone(), cx)
-            }
-            crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
-            crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
-                this.generate_commit_message(*only_staged, cx)
-            }
-            crate::surfaces::SurfaceEvent::Stage { path, staged } => {
-                this.stage(path.clone(), *staged, cx)
-            }
-            crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
-            crate::surfaces::SurfaceEvent::FindFiles(query) => this.find_files(query.clone(), cx),
-            crate::surfaces::SurfaceEvent::OpenFile(path) => this.open_file(path.clone(), cx),
-        });
+        let committing = cx.subscribe_in(
+            &surfaces,
+            window,
+            |this, _, event, window, cx| match event {
+                crate::surfaces::SurfaceEvent::Commit {
+                    message,
+                    only_staged,
+                } => this.commit(message.clone(), *only_staged, cx),
+                crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
+                    this.leave_comment(path.clone(), *line, text.clone(), cx)
+                }
+                crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+                crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
+                    this.generate_commit_message(*only_staged, cx)
+                }
+                crate::surfaces::SurfaceEvent::Stage { path, staged } => {
+                    this.stage(path.clone(), *staged, cx)
+                }
+                crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
+                crate::surfaces::SurfaceEvent::FindFiles(query) => {
+                    this.find_files(query.clone(), cx)
+                }
+                crate::surfaces::SurfaceEvent::OpenFile(path) => {
+                    this.open_file(path.clone(), false, window, cx)
+                }
+                crate::surfaces::SurfaceEvent::OpenFileFromHistory(path) => {
+                    this.open_file(path.clone(), true, window, cx)
+                }
+                crate::surfaces::SurfaceEvent::SaveFile {
+                    workspace,
+                    path,
+                    text,
+                    expected_revision,
+                } => this.save_file(
+                    workspace.clone(),
+                    path.clone(),
+                    text.clone(),
+                    expected_revision.clone(),
+                    cx,
+                ),
+                crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
+                    this.add_file_reference(reference, window, cx)
+                }
+            },
+        );
 
         let selection =
             cx.subscribe_in(
@@ -303,7 +338,14 @@ impl Shell {
                         this.start_new_chat(project, window, cx);
                     }
                     SidebarEvent::Selected => {
-                        this.session = sidebar.read(cx).selected_row().cloned();
+                        let selected = sidebar.read(cx).selected_row().cloned();
+                        let changed_workspace = this.session.as_ref().map(|row| &row.workspace)
+                            != selected.as_ref().map(|row| &row.workspace);
+                        this.session = selected;
+                        if changed_workspace {
+                            this.surfaces
+                                .update(cx, |surfaces, cx| surfaces.clear_file(cx));
+                        }
                         // A row says which project it is in, and the composer's
                         // chip and the next new chat both read that back.
                         this.target_project = sidebar.read(cx).selected_project().cloned();
@@ -316,6 +358,8 @@ impl Shell {
                         this.picker = None;
                         this.chosen_agent = None;
                         this.chosen_model = None;
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = None;
                         this.chosen_account = None;
                         this.start_fresh = false;
                         this.checkpoints = Vec::new();
@@ -469,7 +513,8 @@ impl Shell {
                         DaemonEvent::ProjectsChanged
                         | DaemonEvent::WorkspacesChanged { .. }
                         | DaemonEvent::WorkspaceStatusChanged { .. }
-                        | DaemonEvent::SessionStarted { .. } => {
+                        | DaemonEvent::SessionStarted { .. }
+                        | DaemonEvent::SessionOptionsChanged { .. } => {
                             pull_rows(&this, &link, cx).await.map(|_| ())
                         }
                         // A gauge moved. Straight onto the chip: the turn
@@ -567,6 +612,8 @@ impl Shell {
             commands: Vec::new(),
             chosen_agent: None,
             chosen_model: None,
+            chosen_reasoning_effort: None,
+            chosen_service_tier: None,
             chosen_access: None,
             chosen_account: None,
             add_account: None,
@@ -647,6 +694,8 @@ impl Shell {
             .update(cx, |sidebar, cx| sidebar.aim_at(project.clone(), cx));
         self.target_project = project;
         self.session = None;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.clear_file(cx));
         self.transcript = Transcript::new();
         self.transcript_of = None;
         self.session_state = None;
@@ -675,11 +724,17 @@ impl Shell {
     /// where the prompt is about to go, and waiting a tick to admit it exists
     /// would leave the reader watching an empty window.
     fn adopt(&mut self, row: SessionRow, cx: &mut Context<Self>) {
+        let changed_workspace =
+            self.session.as_ref().map(|current| &current.workspace) != Some(&row.workspace);
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.adopt_workspace(row.workspace.clone(), cx)
         });
         self.target_project = Some(ProjectName(row.origin.to_string()));
         self.session = Some(row);
+        if changed_workspace {
+            self.surfaces
+                .update(cx, |surfaces, cx| surfaces.clear_file(cx));
+        }
         cx.notify();
     }
 
@@ -982,19 +1037,79 @@ impl Shell {
     }
 
     /// Read a file and show it in the files surface.
-    fn open_file(&mut self, path: String, cx: &mut Context<Self>) {
+    fn open_file(
+        &mut self,
+        path: String,
+        from_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
+        let worktree = self
+            .session
+            .as_ref()
+            .map(|row| row.path.clone())
+            .expect("the selected session has a worktree");
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
-        cx.spawn(async move |_, cx| {
+        let should_read = surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_file_open(workspace.clone(), path.clone(), from_history, cx)
+        });
+        if !should_read {
+            return;
+        }
+        let read_workspace = workspace.clone();
+        let read_path = path.clone();
+        cx.spawn_in(window, async move |_, cx| {
             let file = cx
-                .background_spawn(async move { link.read_file(&workspace, &path).await })
+                .background_spawn(async move { link.read_file(&read_workspace, &read_path).await })
                 .await;
-            surfaces.update(cx, |surfaces, cx| surfaces.set_file(file, cx));
+            let _ = surfaces.update_in(cx, |surfaces, window, cx| {
+                surfaces.set_file(workspace, worktree, path, file, window, cx)
+            });
         })
         .detach();
+    }
+
+    /// Save the current editor buffer without overwriting a concurrent edit.
+    fn save_file(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        text: String,
+        expected_revision: String,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let saved_workspace = workspace.clone();
+        let saved_path = path.clone();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.write_file(&workspace, &path, text, expected_revision)
+                        .await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| match result {
+                Ok(file) => surfaces.set_file_saved(&saved_workspace, file, cx),
+                Err(error) => {
+                    surfaces.set_file_save_error(&saved_workspace, &saved_path, error, cx)
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Add an editor selection's source location to the current chat draft.
+    fn add_file_reference(&mut self, reference: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).value();
+        let draft = ginka_ui::editor::append_reference(&draft, reference);
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
     }
 
     /// Start a shell in the workspace on screen.
@@ -1245,6 +1360,13 @@ impl Shell {
         if text.is_empty() {
             return;
         }
+        if self.session_state == Some(SessionState::AwaitingInput)
+            && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
+            && let Some(request_id) = self.transcript.open_request().map(str::to_string)
+        {
+            self.respond_from_composer(session, request_id, text, window, cx);
+            return;
+        }
         match self.session.clone() {
             Some(row) => self.send(row, text, window, cx),
             None => self.send_first(text, window, cx),
@@ -1346,7 +1468,8 @@ impl Shell {
         let agent = self
             .agent_to_start()
             .unwrap_or_else(|| row.agent_to_start(&self.agents, self.chosen_agent.as_deref()));
-        let model = self.chosen_model.clone();
+        let model = self.model_to_start();
+        let (reasoning_effort, service_tier) = self.model_options_to_start();
         let access = self.chosen_access;
         let account = self.account_to_start().map(|account| account.id.clone());
         let fresh = self.start_fresh;
@@ -1363,8 +1486,17 @@ impl Shell {
                     let workspace = row.workspace.clone();
                     let started = cx
                         .background_spawn(async move {
-                            link.start_session(&workspace, &agent, text, model, access, account)
-                                .await
+                            link.start_session(SessionLaunch {
+                                workspace,
+                                agent,
+                                prompt: text,
+                                model,
+                                reasoning_effort,
+                                service_tier,
+                                access,
+                                account,
+                            })
+                            .await
                         })
                         .await;
                     // Adopt the new session immediately rather than waiting for
@@ -2097,14 +2229,68 @@ impl Shell {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
             return;
         };
-        // Folded in as the reader's own words straight away: the daemon will
-        // say the same thing back, and waiting for it is a card that stays
-        // clickable after it has been clicked.
-        self.transcript.answer(&request_id);
         let link = self.link.clone();
+        let answered_request = request_id.clone();
+        cx.spawn(async move |this, cx| {
+            let answered = cx
+                .background_spawn(
+                    async move { link.respond(&session, &request_id, &response).await },
+                )
+                .await;
+            if answered.is_ok() {
+                this.update(cx, |this, cx| {
+                    this.transcript.answer(&answered_request);
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Deliver a free-text interaction answer from the composer.
+    ///
+    /// The text and its draft stay put if the daemon rejects a stale card or
+    /// the transport disappears. Only an acknowledged delivery clears them.
+    fn respond_from_composer(
+        &mut self,
+        session: SessionId,
+        request_id: String,
+        response: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        self.submitted = true;
         cx.notify();
-        cx.background_spawn(async move { link.respond(&session, &request_id, &response).await })
-            .detach();
+        cx.spawn_in(window, async move |this, cx| {
+            let answered = cx
+                .background_spawn(
+                    async move { link.respond(&session, &request_id, &response).await },
+                )
+                .await;
+            let clear_draft = answered.is_ok();
+            this.update_in(cx, |this, window, cx| {
+                this.submitted = false;
+                if clear_draft {
+                    this.composer
+                        .update(cx, |state, cx| state.set_value("", window, cx));
+                }
+                cx.notify();
+            })
+            .ok();
+            if clear_draft && let Some(workspace) = workspace {
+                let link = this.update(cx, |this, _| this.link.clone()).ok();
+                if let Some(link) = link {
+                    cx.background_spawn(
+                        async move { link.save_draft(&workspace, String::new()).await },
+                    )
+                    .await;
+                }
+            }
+        })
+        .detach();
     }
 
     /// The line that says the agent is still there.
@@ -2464,6 +2650,8 @@ impl Shell {
         let working = self.is_working();
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
+        let effort_chip = self.reasoning_effort_chip_button(cx);
+        let tier_chip = self.service_tier_chip_button(cx);
         let access_chip = self.access_chip_button(cx);
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
@@ -2507,6 +2695,8 @@ impl Shell {
                             )
                             .child(div().flex_1())
                             .children(model_chip)
+                            .children(effort_chip)
+                            .children(tier_chip)
                             .children(access_chip)
                             .child(agent_chip)
                             .children(account_chip)
@@ -2691,26 +2881,209 @@ impl Shell {
                     )
                 })
                 .collect(),
-            Picker::Model => self
-                .models()
-                .into_iter()
-                .map(|model| {
-                    let picked = model.clone();
-                    let chosen = self.chosen_model.as_deref() == Some(model.as_str());
+            Picker::Model => {
+                let mut rows = vec![self.picker_row(
+                    "model-option:default",
+                    rust_i18n::t!("composer.option.provider_default").to_string(),
+                    None,
+                    self.model_to_start().is_none(),
+                    cx.listener(|this, _, _, cx| {
+                        if !this.starting_new_session() {
+                            this.update_existing_session_options(None, None, None, cx);
+                        } else {
+                            this.chosen_model = None;
+                            this.chosen_reasoning_effort = None;
+                            this.chosen_service_tier = None;
+                            if let Some(agent) = this.agent_to_start() {
+                                this.settings.forget_model(&agent);
+                                this.persist();
+                            }
+                        }
+                        this.picker = None;
+                        cx.notify();
+                    }),
+                    cx,
+                )];
+                rows.extend(self.models().into_iter().map(|model| {
+                    let picked = model.id.clone();
+                    let chosen = self.model_to_start().as_deref() == Some(model.id.as_str());
+                    let note = (!model.reasoning_efforts.is_empty()).then(|| {
+                        model
+                            .reasoning_efforts
+                            .iter()
+                            .map(|option| option.label.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" · ")
+                    });
                     self.picker_row(
-                        SharedString::from(format!("model-option:{model}")),
-                        model.clone(),
-                        None,
+                        SharedString::from(format!("model-option:{}", model.id)),
+                        model.label,
+                        note,
                         chosen,
                         cx.listener(move |this, _, _, cx| {
+                            if !this.starting_new_session() {
+                                let model =
+                                    this.models().into_iter().find(|model| model.id == picked);
+                                let recent = model
+                                    .as_ref()
+                                    .and_then(|model| {
+                                        this.agent_to_start().map(|agent| {
+                                            this.settings.recent_model_options(&agent, model)
+                                        })
+                                    })
+                                    .unwrap_or_default();
+                                this.update_existing_session_options(
+                                    Some(picked.clone()),
+                                    recent.reasoning_effort,
+                                    recent.service_tier,
+                                    cx,
+                                );
+                                this.picker = None;
+                                cx.notify();
+                                return;
+                            }
                             this.chosen_model = Some(picked.clone());
+                            if let Some(agent) = this.agent_to_start() {
+                                this.settings.remember_model(agent.clone(), picked.clone());
+                                if let Some(model) = this.selected_model() {
+                                    let recent = this.settings.recent_model_options(&agent, &model);
+                                    this.chosen_reasoning_effort = recent.reasoning_effort;
+                                    this.chosen_service_tier = recent.service_tier;
+                                }
+                                this.persist();
+                            }
                             this.picker = None;
                             cx.notify();
                         }),
                         cx,
                     )
-                })
-                .collect(),
+                }));
+                rows
+            }
+            Picker::ReasoningEffort => {
+                let mut rows = vec![self.picker_row(
+                    "effort-option:default",
+                    rust_i18n::t!("composer.option.provider_default").to_string(),
+                    None,
+                    self.model_options_to_start().0.is_none(),
+                    cx.listener(|this, _, _, cx| {
+                        let tier = this.model_options_to_start().1;
+                        if !this.starting_new_session() {
+                            this.update_existing_session_options(
+                                this.model_to_start(),
+                                None,
+                                tier,
+                                cx,
+                            );
+                            this.picker = None;
+                            cx.notify();
+                            return;
+                        }
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = tier;
+                        this.remember_current_model_options();
+                        this.picker = None;
+                        cx.notify();
+                    }),
+                    cx,
+                )];
+                if let Some(model) = self.selected_model() {
+                    rows.extend(model.reasoning_efforts.into_iter().map(|option| {
+                        let picked = option.id.clone();
+                        let chosen =
+                            self.model_options_to_start().0.as_deref() == Some(option.id.as_str());
+                        self.picker_row(
+                            SharedString::from(format!("effort-option:{}", option.id)),
+                            option.label,
+                            None,
+                            chosen,
+                            cx.listener(move |this, _, _, cx| {
+                                let tier = this.model_options_to_start().1;
+                                if !this.starting_new_session() {
+                                    this.update_existing_session_options(
+                                        this.model_to_start(),
+                                        Some(picked.clone()),
+                                        tier,
+                                        cx,
+                                    );
+                                    this.picker = None;
+                                    cx.notify();
+                                    return;
+                                }
+                                this.chosen_reasoning_effort = Some(picked.clone());
+                                this.chosen_service_tier = tier;
+                                this.remember_current_model_options();
+                                this.picker = None;
+                                cx.notify();
+                            }),
+                            cx,
+                        )
+                    }));
+                }
+                rows
+            }
+            Picker::ServiceTier => {
+                let mut rows = vec![self.picker_row(
+                    "tier-option:default",
+                    rust_i18n::t!("composer.option.provider_default").to_string(),
+                    None,
+                    self.model_options_to_start().1.is_none(),
+                    cx.listener(|this, _, _, cx| {
+                        let effort = this.model_options_to_start().0;
+                        if !this.starting_new_session() {
+                            this.update_existing_session_options(
+                                this.model_to_start(),
+                                effort,
+                                None,
+                                cx,
+                            );
+                            this.picker = None;
+                            cx.notify();
+                            return;
+                        }
+                        this.chosen_reasoning_effort = effort;
+                        this.chosen_service_tier = None;
+                        this.remember_current_model_options();
+                        this.picker = None;
+                        cx.notify();
+                    }),
+                    cx,
+                )];
+                if let Some(model) = self.selected_model() {
+                    rows.extend(model.service_tiers.into_iter().map(|option| {
+                        let picked = option.id.clone();
+                        let chosen =
+                            self.model_options_to_start().1.as_deref() == Some(option.id.as_str());
+                        self.picker_row(
+                            SharedString::from(format!("tier-option:{}", option.id)),
+                            option.label,
+                            None,
+                            chosen,
+                            cx.listener(move |this, _, _, cx| {
+                                let effort = this.model_options_to_start().0;
+                                if !this.starting_new_session() {
+                                    this.update_existing_session_options(
+                                        this.model_to_start(),
+                                        effort,
+                                        Some(picked.clone()),
+                                        cx,
+                                    );
+                                    this.picker = None;
+                                    cx.notify();
+                                    return;
+                                }
+                                this.chosen_reasoning_effort = effort;
+                                this.chosen_service_tier = Some(picked.clone());
+                                this.remember_current_model_options();
+                                this.picker = None;
+                                cx.notify();
+                            }),
+                            cx,
+                        )
+                    }));
+                }
+                rows
+            }
         };
 
         if rows.is_empty() {
@@ -2772,7 +3145,7 @@ impl Shell {
     }
 
     /// The models the chosen agent offers, if it offers a choice.
-    fn models(&self) -> Vec<String> {
+    fn models(&self) -> Vec<ProviderModel> {
         self.agent_to_start()
             .and_then(|id| {
                 self.agents
@@ -2781,6 +3154,171 @@ impl Shell {
                     .map(|agent| agent.models.clone())
             })
             .unwrap_or_default()
+    }
+
+    /// The explicit model, then the last valid choice for this provider.
+    fn model_to_start(&self) -> Option<String> {
+        if !self.starting_new_session() {
+            return self.session.as_ref().and_then(|row| row.model.clone());
+        }
+        if let Some(model) = &self.chosen_model {
+            return Some(model.clone());
+        }
+        let agent = self.agent_to_start()?;
+        let models = self.models();
+        self.settings
+            .recent_model(&agent, &models)
+            .map(str::to_string)
+    }
+
+    /// The catalogue entry for the model that will run next.
+    fn selected_model(&self) -> Option<ProviderModel> {
+        let chosen = self.model_to_start()?;
+        self.models().into_iter().find(|model| model.id == chosen)
+    }
+
+    /// Valid effort and tier choices for the next turn.
+    fn model_options_to_start(&self) -> (Option<String>, Option<String>) {
+        let Some(model) = self.selected_model() else {
+            return (None, None);
+        };
+        if !self.starting_new_session() {
+            let Some(row) = self.session.as_ref() else {
+                return (None, None);
+            };
+            return (
+                row.reasoning_effort
+                    .as_ref()
+                    .filter(|effort| model.supports_reasoning_effort(effort))
+                    .cloned(),
+                row.service_tier
+                    .as_ref()
+                    .filter(|tier| model.supports_service_tier(tier))
+                    .cloned(),
+            );
+        }
+        let Some(agent) = self.agent_to_start() else {
+            return (None, None);
+        };
+        let recent = self.settings.recent_model_options(&agent, &model);
+        let effort = self
+            .chosen_reasoning_effort
+            .as_ref()
+            .filter(|effort| model.supports_reasoning_effort(effort))
+            .cloned()
+            .or(recent.reasoning_effort);
+        let tier = self
+            .chosen_service_tier
+            .as_ref()
+            .filter(|tier| model.supports_service_tier(tier))
+            .cloned()
+            .or(recent.service_tier);
+        (effort, tier)
+    }
+
+    /// Persist the currently selected non-default options for this model.
+    fn remember_current_model_options(&mut self) {
+        let Some(agent) = self.agent_to_start() else {
+            return;
+        };
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        self.settings.remember_model_options(
+            &agent,
+            &model.id,
+            self.chosen_reasoning_effort.clone(),
+            self.chosen_service_tier.clone(),
+        );
+        self.persist();
+    }
+
+    /// Apply a complete provider option set to the selected conversation.
+    fn update_existing_session_options(
+        &mut self,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(row) = self.session.as_mut() else {
+            return;
+        };
+        let Some(session) = row.session.clone() else {
+            return;
+        };
+        let previous = (
+            row.model.clone(),
+            row.reasoning_effort.clone(),
+            row.service_tier.clone(),
+        );
+        let requested = (model, reasoning_effort, service_tier);
+        row.model = requested.0.clone();
+        row.reasoning_effort = requested.1.clone();
+        row.service_tier = requested.2.clone();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let sending = requested.clone();
+            let original_session = session.clone();
+            let result = cx
+                .background_spawn(async move {
+                    link.update_session_options(session, sending.0, sending.1, sending.2)
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                let mut accepted = None;
+                if let Some(row) = this.session.as_mut() {
+                    if row.session.as_ref() != Some(&original_session) {
+                        return;
+                    }
+                    let current = (
+                        row.model.clone(),
+                        row.reasoning_effort.clone(),
+                        row.service_tier.clone(),
+                    );
+                    // A newer click already won. Its response will settle its
+                    // own optimistic state; this older one must not overwrite
+                    // or roll it back when requests finish out of order.
+                    if current != requested {
+                        return;
+                    }
+                    match &result {
+                        Some((session, _)) => {
+                            row.session = Some(session.id.clone());
+                            row.model = session.model.clone();
+                            row.reasoning_effort = session.reasoning_effort.clone();
+                            row.service_tier = session.service_tier.clone();
+                            accepted = Some((
+                                session.agent.clone(),
+                                session.model.clone(),
+                                session.reasoning_effort.clone(),
+                                session.service_tier.clone(),
+                            ));
+                        }
+                        _ => {
+                            row.model = previous.0.clone();
+                            row.reasoning_effort = previous.1.clone();
+                            row.service_tier = previous.2.clone();
+                        }
+                    }
+                }
+                if let Some((agent, model, effort, tier)) = accepted {
+                    match model {
+                        Some(model) => {
+                            this.settings.remember_model(&agent, &model);
+                            this.settings
+                                .remember_model_options(&agent, &model, effort, tier);
+                        }
+                        None => this.settings.forget_model(&agent),
+                    }
+                    this.persist();
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Put back what was being typed here when it was last left.
@@ -3187,6 +3725,8 @@ impl Shell {
                         // was chosen before; they mean nothing to the new
                         // one.
                         this.chosen_model = None;
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = None;
                         this.chosen_account = None;
                         this.picker = None;
                         this.sync_footer(cx);
@@ -3495,8 +4035,13 @@ impl Shell {
         }
         let tokens = Tokens::global(cx);
         let label = self
-            .chosen_model
-            .clone()
+            .model_to_start()
+            .and_then(|chosen| {
+                models
+                    .iter()
+                    .find(|model| model.id == chosen)
+                    .map(|model| model.label.clone())
+            })
             .unwrap_or_else(|| rust_i18n::t!("composer.model.default").to_string());
 
         Some(
@@ -3511,6 +4056,109 @@ impl Shell {
                 .cursor_pointer()
                 .hover(|this| this.bg(tokens.colors().row_active()))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Model, cx)))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(label),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(tokens.colors().text_muted),
+                ),
+        )
+    }
+
+    /// Whether composer option changes can still affect the next session.
+    fn starting_new_session(&self) -> bool {
+        self.start_fresh
+            || self
+                .session
+                .as_ref()
+                .and_then(|row| row.session.as_ref())
+                .is_none()
+    }
+
+    /// Reasoning chip when the selected model advertises a choice.
+    fn reasoning_effort_chip_button(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let model = self.selected_model()?;
+        if model.reasoning_efforts.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let label = self
+            .model_options_to_start()
+            .0
+            .and_then(|chosen| {
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .find(|option| option.id == chosen)
+                    .map(|option| option.label.clone())
+            })
+            .unwrap_or_else(|| rust_i18n::t!("composer.effort.default").to_string());
+        Some(
+            h_flex()
+                .id("reasoning-effort-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.toggle_picker(Picker::ReasoningEffort, cx)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(label),
+                )
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(px(12.))
+                        .text_color(tokens.colors().text_muted),
+                ),
+        )
+    }
+
+    /// Service-tier chip when the selected model advertises a choice.
+    fn service_tier_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let model = self.selected_model()?;
+        if model.service_tiers.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let label = self
+            .model_options_to_start()
+            .1
+            .and_then(|chosen| {
+                model
+                    .service_tiers
+                    .iter()
+                    .find(|option| option.id == chosen)
+                    .map(|option| option.label.clone())
+            })
+            .unwrap_or_else(|| rust_i18n::t!("composer.tier.default").to_string());
+        Some(
+            h_flex()
+                .id("service-tier-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::ServiceTier, cx)))
                 .child(
                     div()
                         .text_size(px(12.))

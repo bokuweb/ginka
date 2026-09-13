@@ -10,6 +10,7 @@
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod daemon;
+mod lsp;
 mod shell;
 mod sidebar;
 mod surfaces;
