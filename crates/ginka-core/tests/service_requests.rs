@@ -299,6 +299,68 @@ fn a_file_save_crosses_the_service_and_refuses_a_stale_editor() {
 }
 
 #[test]
+fn project_search_tags_active_workspaces_and_shares_one_limit() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    std::fs::write(fixture.repo().join("README.md"), "needle on main\n").unwrap();
+    std::fs::write(fixture.repo().join("needle-main.txt"), "path hit\n").unwrap();
+
+    let second = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "second".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(second.worktree.path.join("README.md"), "needle on second\n").unwrap();
+    std::fs::write(second.worktree.path.join("needle-second.txt"), "path hit\n").unwrap();
+
+    let archived = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "archived".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(
+        archived.worktree.path.join("README.md"),
+        "needle in archive\n",
+    )
+    .unwrap();
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: archived.id(),
+        archived: true,
+    });
+
+    let (files, matches) = match fixture.ask(Request::SearchProject {
+        project: project.clone(),
+        query: "needle".into(),
+        limit: Some(2),
+    }) {
+        Response::WorkspaceMatches { files, matches } => (files, matches),
+        other => panic!("expected workspace matches, got {other:?}"),
+    };
+    assert_eq!(matches.len(), 2, "the limit is shared across worktrees");
+    assert_eq!(
+        files.len(),
+        2,
+        "path matches have their own shared project limit"
+    );
+    assert!(files.iter().any(|hit| hit.path == "needle-main.txt"));
+    assert!(files.iter().any(|hit| hit.path == "needle-second.txt"));
+    assert!(files.iter().all(|hit| hit.workspace != archived.id()));
+    assert!(matches.iter().all(|hit| hit.workspace != archived.id()));
+    assert!(
+        matches
+            .iter()
+            .any(|hit| hit.workspace == WorkspaceId::new(&project, "main"))
+    );
+    assert!(matches.iter().any(|hit| hit.workspace == second.id()));
+}
+
+#[test]
 fn removing_a_dirty_workspace_needs_force() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
