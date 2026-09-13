@@ -488,6 +488,28 @@ impl DaemonLink {
         }
     }
 
+    /// Literal source hits across every active workspace in a project.
+    pub async fn search_project(
+        &self,
+        project: &ginka_protocol::ProjectName,
+        query: &str,
+    ) -> (
+        Vec<ginka_protocol::model::WorkspaceFileMatch>,
+        Vec<ginka_protocol::model::WorkspaceContentMatch>,
+    ) {
+        match self
+            .ask(Request::SearchProject {
+                project: project.clone(),
+                query: query.to_string(),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::WorkspaceMatches { files, matches }) => (files, matches),
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+
     /// One of a workspace's files, as text.
     pub async fn read_file(&self, workspace: &WorkspaceId, path: &str) -> Option<FileContent> {
         match self
@@ -611,6 +633,25 @@ impl DaemonLink {
             Some(Response::Files { files }) => files,
             _ => Vec::new(),
         }
+    }
+
+    /// The bounded catalogue used to build the workspace file tree.
+    pub async fn file_tree(&self, workspace: &WorkspaceId) -> (Vec<FileEntry>, bool) {
+        let limit = ginka_ui::file_tree::TREE_FILE_LIMIT;
+        let files = match self
+            .ask(Request::WorkspaceFiles {
+                workspace: workspace.clone(),
+                query: None,
+                // Ask for one sentinel beyond the UI bound so truncation is
+                // visible rather than silently presenting a complete tree.
+                limit: Some((limit + 1) as u32),
+            })
+            .await
+        {
+            Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        };
+        ginka_ui::file_tree::bounded_catalogue(files, limit)
     }
 
     /// The commands this workspace offers after `/`.

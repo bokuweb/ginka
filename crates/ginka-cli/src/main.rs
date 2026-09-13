@@ -79,6 +79,9 @@ enum Command {
         workspace: String,
         /// What to look for. Any subsequence of a path will do.
         query: Option<String>,
+        /// Maximum number of paths to return.
+        #[arg(long)]
+        limit: Option<u32>,
     },
     /// Ask the same question in several worktrees at once.
     ///
@@ -235,6 +238,14 @@ enum ProjectCommand {
     },
     /// List registered projects.
     List,
+    /// Find literal source lines across every active workspace.
+    Search {
+        project: String,
+        query: String,
+        /// Maximum hits across all workspaces.
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Forget a project. Its files are left alone.
     Remove { project: String },
 }
@@ -677,6 +688,15 @@ fn request_for(command: Command) -> Result<Request> {
             label,
         },
         Command::Project(ProjectCommand::List) => Request::ListProjects,
+        Command::Project(ProjectCommand::Search {
+            project,
+            query,
+            limit,
+        }) => Request::SearchProject {
+            project: ProjectName(project),
+            query,
+            limit,
+        },
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
             project: ProjectName(project),
         },
@@ -860,10 +880,14 @@ fn request_for(command: Command) -> Result<Request> {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             }
         }
-        Command::Files { workspace, query } => Request::WorkspaceFiles {
+        Command::Files {
+            workspace,
+            query,
+            limit,
+        } => Request::WorkspaceFiles {
             workspace: WorkspaceId(workspace),
             query,
-            limit: None,
+            limit,
         },
         Command::Review(ReviewCommand::Add {
             workspace,
@@ -1270,6 +1294,14 @@ fn print(response: Response, patch: bool) {
         Response::Matches { matches } => {
             for hit in matches {
                 println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
+        Response::WorkspaceMatches { files, matches } => {
+            for hit in files {
+                println!("{}:{}", hit.workspace, hit.path);
+            }
+            for hit in matches {
+                println!("{}:{}:{}: {}", hit.workspace, hit.path, hit.line, hit.text);
             }
         }
         Response::Terminal { terminal } => println!("{terminal}"),
