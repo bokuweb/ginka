@@ -16,11 +16,11 @@ use std::path::PathBuf;
 
 use ginka_protocol::model::{
     Account, AgentStatus, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent,
-    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo,
-    TranscriptEntry, WorkspaceSummary,
+    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch, Skill, SlashCommand,
+    TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
-use ginka_protocol::{AccountId, CheckpointId, SessionId, TerminalId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
 
@@ -147,6 +147,25 @@ impl DaemonLink {
         }
     }
 
+    /// Find stored transcript entries in one workspace.
+    pub async fn search_sessions(
+        &self,
+        workspace: WorkspaceId,
+        query: String,
+    ) -> Result<Vec<SessionMatch>, String> {
+        match self
+            .ask_result(Request::SearchSessions {
+                workspace: Some(workspace),
+                query,
+                limit: Some(100),
+            })
+            .await?
+        {
+            Response::SessionMatches { matches } => Ok(matches),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Start an agent in a workspace, and return the session it created.
     pub async fn start_session(&self, launch: SessionLaunch) -> Option<Session> {
         match self
@@ -205,6 +224,34 @@ impl DaemonLink {
                 plans,
             }),
             _ => None,
+        }
+    }
+
+    /// The agents' own reusable skills, narrowed to one project when asked.
+    pub async fn skills(&self, project: Option<ProjectName>) -> Result<(Vec<Skill>, bool), String> {
+        match self.ask_result(Request::ListSkills { project }).await? {
+            Response::Skills { skills, truncated } => Ok((skills, truncated)),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Enable or disable every installed copy of a named skill.
+    pub async fn set_skill_enabled(
+        &self,
+        name: String,
+        enabled: bool,
+        project: Option<ProjectName>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::SetSkillEnabled {
+                name,
+                enabled,
+                project,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
         }
     }
 
@@ -441,6 +488,28 @@ impl DaemonLink {
         }
     }
 
+    /// Literal source hits across every active workspace in a project.
+    pub async fn search_project(
+        &self,
+        project: &ginka_protocol::ProjectName,
+        query: &str,
+    ) -> (
+        Vec<ginka_protocol::model::WorkspaceFileMatch>,
+        Vec<ginka_protocol::model::WorkspaceContentMatch>,
+    ) {
+        match self
+            .ask(Request::SearchProject {
+                project: project.clone(),
+                query: query.to_string(),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::WorkspaceMatches { files, matches }) => (files, matches),
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+
     /// One of a workspace's files, as text.
     pub async fn read_file(&self, workspace: &WorkspaceId, path: &str) -> Option<FileContent> {
         match self
@@ -566,6 +635,25 @@ impl DaemonLink {
         }
     }
 
+    /// The bounded catalogue used to build the workspace file tree.
+    pub async fn file_tree(&self, workspace: &WorkspaceId) -> (Vec<FileEntry>, bool) {
+        let limit = ginka_ui::file_tree::TREE_FILE_LIMIT;
+        let files = match self
+            .ask(Request::WorkspaceFiles {
+                workspace: workspace.clone(),
+                query: None,
+                // Ask for one sentinel beyond the UI bound so truncation is
+                // visible rather than silently presenting a complete tree.
+                limit: Some((limit + 1) as u32),
+            })
+            .await
+        {
+            Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        };
+        ginka_ui::file_tree::bounded_catalogue(files, limit)
+    }
+
     /// The commands this workspace offers after `/`.
     pub async fn commands(&self, workspace: &WorkspaceId, query: &str) -> Vec<SlashCommand> {
         match self
@@ -619,6 +707,26 @@ impl DaemonLink {
         {
             Some(Response::Terminal { terminal }) => Some(terminal),
             _ => None,
+        }
+    }
+
+    /// Start zvec-grep indexing in a daemon-owned terminal.
+    pub async fn index_workspace(
+        &self,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId, String> {
+        match self
+            .ask_result(Request::IndexWorkspace {
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await?
+        {
+            Response::Terminal { terminal } => Ok(terminal),
+            _ => Err("the daemon returned the wrong response for workspace indexing".into()),
         }
     }
 

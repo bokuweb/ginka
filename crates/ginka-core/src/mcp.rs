@@ -239,7 +239,11 @@ pub fn tools() -> Vec<Tool> {
             description: "Find files in a workspace by path.",
             schema: json!({
                 "type": "object",
-                "properties": {"workspace": workspace, "query": {"type": "string"}},
+                "properties": {
+                    "workspace": workspace,
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
                 "required": ["workspace"],
             }),
         },
@@ -250,6 +254,19 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"workspace": workspace, "query": {"type": "string"}},
                 "required": ["workspace", "query"],
+            }),
+        },
+        Tool {
+            name: "ginka_project_search",
+            description: "Find literal source lines across every active workspace in a project.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["project", "query"],
             }),
         },
         Tool {
@@ -474,12 +491,17 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_files" => Request::WorkspaceFiles {
             workspace: WorkspaceId(text("workspace")?),
             query: maybe("query"),
-            limit: None,
+            limit: number("limit").map(|limit| limit as u32),
         },
         "ginka_search" => Request::SearchContent {
             workspace: WorkspaceId(text("workspace")?),
             query: text("query")?,
             limit: None,
+        },
+        "ginka_project_search" => Request::SearchProject {
+            project: ProjectName(text("project")?),
+            query: text("query")?,
+            limit: number("limit").map(|limit| limit as u32),
         },
         "ginka_read_file" => Request::ReadFile {
             workspace: WorkspaceId(text("workspace")?),
@@ -659,6 +681,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_file_catalogue_limit_crosses_the_mcp_boundary() {
+        let request =
+            request_for("ginka_files", &json!({"workspace": "w", "limit": 2001})).unwrap();
+        assert!(matches!(
+            request,
+            Request::WorkspaceFiles {
+                limit: Some(2001),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_project_search_crosses_the_mcp_boundary() {
+        let request = request_for(
+            "ginka_project_search",
+            &json!({"project": "comet", "query": "needle", "limit": 17}),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::SearchProject {
+                project: ProjectName("comet".into()),
+                query: "needle".into(),
+                limit: Some(17),
+            }
+        );
     }
 
     #[test]

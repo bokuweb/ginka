@@ -825,6 +825,33 @@ pub struct ContentMatch {
     pub text: String,
 }
 
+/// One content-search hit together with the worktree that contains it.
+///
+/// Project-wide search keeps paths relative to their own worktree, so the
+/// workspace id is the missing part a client needs to display or open one.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceContentMatch {
+    /// Immutable workspace containing the matched file.
+    pub workspace: WorkspaceId,
+    /// Path relative to that workspace's worktree root.
+    pub path: String,
+    /// 1-based line number, as an editor counts it.
+    pub line: u32,
+    /// The bounded source line containing the literal query.
+    pub text: String,
+}
+
+/// One fuzzy path-search hit together with the worktree that contains it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileMatch {
+    /// Immutable workspace containing the file.
+    pub workspace: WorkspaceId,
+    /// Path relative to that workspace's worktree root.
+    pub path: String,
+}
+
 /// A file, as the panel that shows it needs it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -880,6 +907,9 @@ pub struct WorkspaceSummary {
     pub session: Option<Session>,
     /// Unix seconds of the worktree's HEAD commit, for the "last activity" line.
     pub last_commit_at: Option<i64>,
+    /// Whether zvec-grep's index directory exists in this worktree.
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 impl WorkspaceSummary {
@@ -983,8 +1013,25 @@ mod tests {
             },
             session: None,
             last_commit_at: None,
+            indexed: false,
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn an_older_workspace_summary_defaults_to_not_indexed() {
+        let json = serde_json::to_value(WorkspaceSummary {
+            worktree: worktree(),
+            status: BranchStatus::default(),
+            session: None,
+            last_commit_at: None,
+            indexed: false,
+        })
+        .unwrap();
+        let mut object = json.as_object().unwrap().clone();
+        object.remove("indexed");
+        let summary: WorkspaceSummary = serde_json::from_value(object.into()).unwrap();
+        assert!(!summary.indexed);
     }
 }
