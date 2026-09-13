@@ -18,11 +18,15 @@ use ginka_protocol::provider::ProviderModel;
 use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
-use ginka_ui::layout::{HEADER_HEIGHT, Layout, Panel, TRAFFIC_LIGHT_INSET};
+use ginka_ui::layout::{
+    HEADER_HEIGHT, Layout, PROJECT_RAIL_WIDTH, Panel, TRAFFIC_LIGHT_INSET, navigator_width,
+};
 use ginka_ui::transcript::{
     Activity, Applied, Block as TranscriptBlock, Reveal, Transcript, head_of,
 };
-use ginka_ui::workspace::{ProjectRow, SessionRow, workspace_for_new_chat};
+use ginka_ui::workspace::{
+    ProjectDraftError, ProjectRow, SessionRow, validate_project_draft, workspace_for_new_chat,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::text::TextView;
@@ -34,6 +38,7 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     v_flex,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -207,6 +212,8 @@ pub struct Shell {
     chosen_account: Option<ginka_protocol::AccountId>,
     /// The add-login dialog, while it is open.
     add_account: Option<AddAccount>,
+    /// The add-project dialog, while it is open.
+    add_project: Option<AddProject>,
     /// Set when the next prompt should open a new conversation rather than
     /// continue the one on screen.
     start_fresh: bool,
@@ -339,7 +346,7 @@ impl Shell {
                 window,
                 |this, sidebar, event, window, cx| match event {
                     // The window's own way in; see `add_project`.
-                    SidebarEvent::AddProjectRequested => this.add_project(window, cx),
+                    SidebarEvent::AddProjectRequested => this.open_add_project(window, cx),
                     // A new conversation in whatever is selected: the project
                     // itself, the project of the selected workspace, or none
                     // at all. The column clears and the next message opens a
@@ -646,6 +653,7 @@ impl Shell {
             chosen_access: None,
             chosen_account: None,
             add_account: None,
+            add_project: None,
             projects: Vec::new(),
             target_project: None,
             start_fresh: false,
@@ -674,20 +682,45 @@ impl Shell {
 
     /// Register a repository or a folder, and aim the next chat at it.
     ///
-    /// The window's own way in. The command in the sidebar's empty state still
-    /// works and is still shown, but a reader who has just opened the app
-    /// should not have to leave it to put something in it. The path is one
+    /// The window's own way in. The CLI remains available separately, but a
+    /// reader who has just opened the app should not have to leave it to put
+    /// something in it. The path is one
     /// this window picked, so it is a path on *this* machine — only the same
     /// thing as a daemon-host path while the daemon is the local child process
     /// (`docs/roadmap.md` §4.1), which is why the picker is offered only then.
-    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let link = self.link.clone();
+    fn open_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("project.add.name.placeholder").to_string())
+        });
+        let name_changed = cx.subscribe(&name, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        name.read(cx).focus_handle(cx).focus(window, cx);
+        self.add_project = Some(AddProject {
+            name,
+            path: None,
+            error: None,
+            busy: false,
+            _name_changed: name_changed,
+        });
+        cx.notify();
+    }
+
+    /// Ask the platform for the source folder while keeping the project dialog open.
+    fn choose_project_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             // A project is a directory: a repository, or a folder to work in.
             directories: true,
             multiple: false,
-            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
+            prompt: Some(
+                rust_i18n::t!("project.add.source.choose")
+                    .to_string()
+                    .into(),
+            ),
         });
         cx.spawn_in(window, async move |this, cx| {
             // Cancelled, or the platform refused to ask: either way there is
@@ -698,19 +731,72 @@ impl Shell {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            // The daemon announces the change and the sidebar is filled from
-            // that announcement rather than from here — but the reader went
-            // looking for a folder in order to work in it, so the next chat is
-            // aimed at what they picked.
-            let added = cx
-                .background_spawn(async move { link.add_project(path).await })
-                .await;
-            if let Some(project) = added {
-                this.update_in(cx, |this, window, cx| {
-                    this.start_new_chat(Some(project.name), window, cx)
-                })
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                let Some(dialog) = this.add_project.as_mut() else {
+                    return;
+                };
+                if dialog.name.read(cx).value().trim().is_empty()
+                    && let Some(folder) = path.file_name().and_then(|name| name.to_str())
+                {
+                    dialog
+                        .name
+                        .update(cx, |name, cx| name.set_value(folder, window, cx));
+                }
+                dialog.path = Some(path);
+                dialog.error = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Register the folder selected in the add-project dialog.
+    fn submit_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.add_project.as_mut() else {
+            return;
+        };
+        if dialog.busy {
+            return;
+        }
+        let draft = match validate_project_draft(
+            dialog.name.read(cx).value().as_ref(),
+            dialog.path.clone(),
+        ) {
+            Ok(draft) => draft,
+            Err(ProjectDraftError::MissingName) => {
+                dialog.error = Some(rust_i18n::t!("project.add.name.required").to_string());
+                cx.notify();
+                return;
             }
+            Err(ProjectDraftError::MissingSource) => {
+                dialog.error = Some(rust_i18n::t!("project.add.source.required").to_string());
+                cx.notify();
+                return;
+            }
+        };
+        dialog.busy = true;
+        dialog.error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let added = cx
+                .background_spawn(
+                    async move { link.add_project(draft.path, Some(draft.label)).await },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(project) = added {
+                    this.add_project = None;
+                    this.start_new_chat(Some(project.name), window, cx);
+                } else if let Some(dialog) = this.add_project.as_mut() {
+                    dialog.busy = false;
+                    dialog.error = Some(rust_i18n::t!("project.add.failed").to_string());
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -2992,7 +3078,7 @@ impl Shell {
                     false,
                     cx.listener(|this, _, window, cx| {
                         this.picker = None;
-                        this.add_project(window, cx);
+                        this.open_add_project(window, cx);
                     }),
                     cx,
                 ));
@@ -4281,6 +4367,206 @@ impl Shell {
         }
     }
 
+    /// Escape closes the project dialog and Return creates it when complete.
+    fn add_project_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.add_project = None;
+                cx.notify();
+            }
+            "enter" => self.submit_add_project(window, cx),
+            _ => {}
+        }
+    }
+
+    /// Project name and source-folder selection, drawn as one modal workflow.
+    fn add_project_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.add_project.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let source = dialog
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| rust_i18n::t!("project.add.source.empty").to_string());
+        let ready = !dialog.busy
+            && validate_project_draft(dialog.name.read(cx).value().as_ref(), dialog.path.clone())
+                .is_ok();
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(tokens.colors().bg_window.opacity(0.72))
+                .child(
+                    v_flex()
+                        .id("add-project-dialog")
+                        .w(px(620.))
+                        .p_5()
+                        .gap_4()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.add_project_key(event, window, cx)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xl()
+                                        .font_semibold()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(rust_i18n::t!("project.add.title").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project-close")
+                                        .p_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_project = None;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::Close)
+                                                .size_4()
+                                                .text_color(tokens.colors().text_secondary),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .h(px(46.))
+                                .px_3()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(tokens.radius.control()))
+                                .border_1()
+                                .border_color(tokens.colors().border_strong)
+                                .child(
+                                    Icon::new(IconName::Folder)
+                                        .size_4()
+                                        .text_color(tokens.colors().text_secondary),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&dialog.name))),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(rust_i18n::t!("project.add.source.label").to_string()),
+                        )
+                        .child(
+                            v_flex()
+                                .id("choose-project-folder")
+                                .w_full()
+                                .h(px(118.))
+                                .px_4()
+                                .gap_2()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(tokens.radius.control()))
+                                .border_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .cursor_pointer()
+                                .hover(|this| this.bg(tokens.colors().row_hover()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_project_folder(window, cx)
+                                }))
+                                .child(
+                                    Icon::new(IconName::Folder)
+                                        .size_5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(source),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(
+                                            rust_i18n::t!("project.add.source.hint").to_string(),
+                                        ),
+                                ),
+                        )
+                        .children(dialog.error.clone().map(|error| {
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child(error)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("add-project-cancel")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(tokens.radius.row))
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_project = None;
+                                            cx.notify();
+                                        }))
+                                        .child(rust_i18n::t!("project.add.cancel").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project-submit")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded(px(tokens.radius.row))
+                                        .bg(tokens.colors().accent.opacity(if ready {
+                                            0.7
+                                        } else {
+                                            0.2
+                                        }))
+                                        .text_sm()
+                                        .text_color(if ready {
+                                            tokens.colors().text_primary
+                                        } else {
+                                            tokens.colors().text_muted
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_add_project(window, cx)
+                                        }))
+                                        .child(rust_i18n::t!("project.add.submit").to_string()),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The add-login dialog, drawn over the window like the palette.
     fn add_account_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.add_account.as_ref()?;
@@ -5196,7 +5482,13 @@ impl Render for Shell {
         let tokens = Tokens::global(cx).clone();
         let sidebar_open = self.layout.is_open(Panel::Sidebar);
         let right_open = self.layout.is_open(Panel::RightPanel);
-        let sidebar_width = self.layout.size(Panel::Sidebar);
+        let project_selected = self.sidebar.read(cx).has_project_selection();
+        let sidebar_width = navigator_width(project_selected, self.layout.size(Panel::Sidebar));
+        let sidebar_range = if project_selected {
+            px(420.)..px(720.)
+        } else {
+            PROJECT_RAIL_WIDTH..PROJECT_RAIL_WIDTH
+        };
         let right_width = self.layout.size(Panel::RightPanel);
         // Built before the column chain: both headers bind listeners, and the
         // chain's own closures hold `self` while they run.
@@ -5238,7 +5530,7 @@ impl Render for Shell {
                             this.child(
                                 resizable_panel()
                                     .size(sidebar_width)
-                                    .size_range(px(420.)..px(720.))
+                                    .size_range(sidebar_range)
                                     .child(
                                         // The column runs to the top of the
                                         // window and carries the window's own
@@ -5274,6 +5566,7 @@ impl Render for Shell {
                 ),
             )
             .children(self.palette_view(cx))
+            .children(self.add_project_view(cx))
             .children(self.add_account_view(cx))
     }
 }
@@ -5385,6 +5678,20 @@ struct AddAccount {
     error: Option<String>,
     /// Set while the daemon is being asked, so Return twice is one request.
     busy: bool,
+}
+
+/// The add-project modal's state while it is open.
+struct AddProject {
+    /// Reader-facing name stored separately from the stable path-derived key.
+    name: Entity<InputState>,
+    /// Source folder selected through the platform picker.
+    path: Option<PathBuf>,
+    /// What validation or the daemon refused.
+    error: Option<String>,
+    /// Set while the daemon is being asked, so Return twice is one request.
+    busy: bool,
+    /// Keeps the name field driving the modal's validation state.
+    _name_changed: Subscription,
 }
 
 /// The palette's own state while it is open.

@@ -42,6 +42,40 @@ sidebar.footer.device:
   en: Local
   ja: ローカル
 
+project.add.title:
+  en: Create a project
+  ja: プロジェクトを作成
+project.add.name.placeholder:
+  en: Project name
+  ja: プロジェクト名
+project.add.name.required:
+  en: Enter a project name
+  ja: プロジェクト名を入力してください
+project.add.source.label:
+  en: Source folder
+  ja: ソースフォルダー
+project.add.source.empty:
+  en: Choose a folder
+  ja: フォルダーを選択
+project.add.source.choose:
+  en: Choose source folder
+  ja: ソースフォルダーを選択
+project.add.source.hint:
+  en: Add a folder Ginka can read and edit
+  ja: Ginka が読み込み・編集できるフォルダーを追加
+project.add.source.required:
+  en: Choose a source folder
+  ja: ソースフォルダーを選択してください
+project.add.cancel:
+  en: Cancel
+  ja: キャンセル
+project.add.submit:
+  en: Create project
+  ja: プロジェクトを作成
+project.add.failed:
+  en: Ginka could not add this project
+  ja: プロジェクトを追加できませんでした
+
 status.working:
   en: Working
   ja: 実行中

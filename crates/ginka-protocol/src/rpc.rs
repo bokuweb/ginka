@@ -27,7 +27,12 @@ pub enum Request {
     /// Every registered project, in sidebar order.
     ListProjects,
     /// Register a repository or folder, adopting the worktrees it already has.
-    AddProject { path: PathBuf },
+    AddProject {
+        path: PathBuf,
+        /// Optional reader-facing name; the stable key still derives from the path.
+        #[serde(default)]
+        label: Option<String>,
+    },
     /// Forget a project. The worktrees on disk are left alone: the daemon
     /// registered them, it did not create the user's code.
     RemoveProject { project: ProjectName },
@@ -640,6 +645,7 @@ mod tests {
             Request::Ping,
             Request::AddProject {
                 path: PathBuf::from("/tmp/comet"),
+                label: Some("Client website".into()),
             },
             Request::StartSession {
                 workspace: WorkspaceId("comet/harbor".into()),

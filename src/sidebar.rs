@@ -161,6 +161,11 @@ impl SessionSidebar {
         self.selected_project.as_ref()
     }
 
+    /// Whether the contextual sessions column should be visible.
+    pub fn has_project_selection(&self) -> bool {
+        self.selected_project.is_some()
+    }
+
     /// The rows as they stand, for the palette to offer.
     pub fn rows(&self) -> &[SessionRow] {
         &self.rows
@@ -627,51 +632,17 @@ impl SessionSidebar {
 
     /// First run: nothing is registered yet.
     ///
-    /// A line under the section heading rather than a takeover of the whole
-    /// sidebar: a window with no project is still a window you can talk to —
-    /// the chat above runs in a scratch worktree — so the list says what is
-    /// missing without implying nothing works until it is fixed.
+    /// A quiet line under the section heading. The adjacent plus is the one
+    /// way into the modal, so this state does not repeat it as another button.
     fn no_projects(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        v_flex()
+        div()
             .w_full()
-            .px_2p5()
+            .px_3()
             .py_1p5()
-            .gap_2()
-            .items_start()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors().text_muted)
-                    .child(rust_i18n::t!("sidebar.empty.title").to_string()),
-            )
-            .child(
-                div()
-                    .id("add-project-empty")
-                    .px_2()
-                    .py_1()
-                    .rounded(px(tokens.radius.row))
-                    .bg(tokens.colors().accent.opacity(0.22))
-                    .text_xs()
-                    .text_color(tokens.colors().text_primary)
-                    .cursor_pointer()
-                    .child(rust_i18n::t!("sidebar.empty.add").to_string())
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(SidebarEvent::AddProjectRequested);
-                    })),
-            )
-            // The command stays: a window is not the only way in, and a reader
-            // who prefers the terminal should not have to guess the name.
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(tokens.radius.row))
-                    .bg(tokens.colors().code_bg)
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .child(rust_i18n::t!("sidebar.empty.hint").to_string()),
-            )
+            .text_xs()
+            .text_color(tokens.colors().text_muted)
+            .child(rust_i18n::t!("sidebar.empty.title").to_string())
     }
 
     /// The plan label `docs/ui.md` §3.2 reserves: the login in use, and its
@@ -820,108 +791,115 @@ impl Render for SessionSidebar {
                             })),
                     ),
             )
-            .child(
-                v_flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .bg(tokens.colors().bg_window.opacity(0.34))
-                    .child(self.workspace_header(cx))
-                    .child(
-                        h_flex()
-                            .h(px(36.))
-                            .mx_2()
-                            .mt_2()
-                            .px_2()
-                            .gap_2()
-                            .items_center()
-                            .rounded(px(tokens.radius.control()))
-                            .bg(tokens.colors().row_hover())
-                            .child(
-                                Icon::new(IconName::Search)
-                                    .size_3p5()
-                                    .text_color(tokens.colors().text_muted),
-                            )
-                            .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
-                            .when(!self.search_query.is_empty(), |this| {
-                                this.child(
-                                    div()
-                                        .id("clear-session-search")
-                                        .p_1()
-                                        .rounded(px(tokens.radius.control()))
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(tokens.colors().row_active()))
-                                        .child(
-                                            Icon::new(IconName::Close)
-                                                .size_3()
-                                                .text_color(tokens.colors().text_muted),
-                                        )
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.search.update(cx, |search, cx| {
-                                                search.set_value("", window, cx)
-                                            });
-                                        })),
+            .when(selected_project, |this| {
+                this.child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(tokens.colors().bg_window.opacity(0.34))
+                        .child(self.workspace_header(cx))
+                        .child(
+                            h_flex()
+                                .h(px(36.))
+                                .mx_2()
+                                .mt_2()
+                                .px_2()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(tokens.radius.control()))
+                                .bg(tokens.colors().row_hover())
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
                                 )
-                            }),
-                    )
-                    .child(self.new_chat(cx))
-                    .child(
-                        v_flex()
-                            .id("session-list")
-                            .flex_1()
-                            .min_h_0()
-                            .px_1p5()
-                            .gap_0p5()
-                            .overflow_y_scroll()
-                            .when(no_matching_sessions, |this| {
-                                this.child(
-                                    div()
-                                        .px_3()
-                                        .py_2()
-                                        .text_xs()
-                                        .text_color(tokens.colors().text_muted)
-                                        .child(if self.search_query.trim().is_empty() {
-                                            rust_i18n::t!("sidebar.sessions.empty").to_string()
-                                        } else {
-                                            rust_i18n::t!("sidebar.sessions.no_match").to_string()
-                                        }),
-                                )
-                            })
-                            .children(groups.into_iter().flat_map(|group| {
-                                let mut elements = Vec::new();
-                                if !selected_project {
-                                    elements.push(
-                                        self.project_header(group.name, group.project, cx)
-                                            .into_any_element(),
-                                    );
-                                }
-                                elements.extend(group.rows.iter().map(|(index, row)| {
-                                    self.session_row(*index, row, cx).into_any_element()
-                                }));
-                                elements
-                            }))
-                            .when(archived_count > 0, |this| {
-                                this.child(div().h_2())
-                                    .child(self.archived_header(cx))
-                                    .when(self.archived_open, |this| {
-                                        this.children(archived.iter().map(|(index, row)| {
-                                            self.archived_row(*index, row, cx).into_any_element()
-                                        }))
-                                        .child(
-                                            div()
-                                                .px_2p5()
-                                                .py_1p5()
-                                                .text_xs()
-                                                .text_color(tokens.colors().text_muted)
-                                                .child(
-                                                    rust_i18n::t!("sidebar.show_more", count = 25)
+                                .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                                .when(!self.search_query.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .id("clear-session-search")
+                                            .p_1()
+                                            .rounded(px(tokens.radius.control()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(tokens.colors().row_active()))
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size_3()
+                                                    .text_color(tokens.colors().text_muted),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.search.update(cx, |search, cx| {
+                                                    search.set_value("", window, cx)
+                                                });
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(self.new_chat(cx))
+                        .child(
+                            v_flex()
+                                .id("session-list")
+                                .flex_1()
+                                .min_h_0()
+                                .px_1p5()
+                                .gap_0p5()
+                                .overflow_y_scroll()
+                                .when(no_matching_sessions, |this| {
+                                    this.child(
+                                        div()
+                                            .px_3()
+                                            .py_2()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(if self.search_query.trim().is_empty() {
+                                                rust_i18n::t!("sidebar.sessions.empty").to_string()
+                                            } else {
+                                                rust_i18n::t!("sidebar.sessions.no_match")
+                                                    .to_string()
+                                            }),
+                                    )
+                                })
+                                .children(groups.into_iter().flat_map(|group| {
+                                    let mut elements = Vec::new();
+                                    if !selected_project {
+                                        elements.push(
+                                            self.project_header(group.name, group.project, cx)
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    elements.extend(group.rows.iter().map(|(index, row)| {
+                                        self.session_row(*index, row, cx).into_any_element()
+                                    }));
+                                    elements
+                                }))
+                                .when(archived_count > 0, |this| {
+                                    this.child(div().h_2())
+                                        .child(self.archived_header(cx))
+                                        .when(self.archived_open, |this| {
+                                            this.children(archived.iter().map(|(index, row)| {
+                                                self.archived_row(*index, row, cx)
+                                                    .into_any_element()
+                                            }))
+                                            .child(
+                                                div()
+                                                    .px_2p5()
+                                                    .py_1p5()
+                                                    .text_xs()
+                                                    .text_color(tokens.colors().text_muted)
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "sidebar.show_more",
+                                                            count = 25
+                                                        )
                                                         .to_string(),
-                                                ),
-                                        )
-                                    })
-                            }),
-                    )
-                    .child(self.footer(cx)),
-            )
+                                                    ),
+                                            )
+                                        })
+                                }),
+                        )
+                        .child(self.footer(cx)),
+                )
+            })
     }
 }

@@ -23,6 +23,21 @@ pub const HEADER_HEIGHT: Pixels = px(44.);
 /// sidebar is closed.
 pub const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
+/// Width of the always-present project navigation rail.
+pub const PROJECT_RAIL_WIDTH: Pixels = px(188.);
+
+/// Width of the navigator for its current selection state.
+///
+/// The session column is contextual: before a project is selected the rail
+/// stands alone and the new-session surface gets the remaining room.
+pub fn navigator_width(project_selected: bool, expanded: Pixels) -> Pixels {
+    if project_selected {
+        expanded
+    } else {
+        PROJECT_RAIL_WIDTH
+    }
+}
+
 /// The panels the user can open and close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -220,6 +235,12 @@ mod tests {
         };
         let layout = Layout::from_settings(&settings);
         assert_eq!(layout.size(Panel::Sidebar), px(520.));
+    }
+
+    #[test]
+    fn the_session_column_appears_only_after_a_project_is_selected() {
+        assert_eq!(navigator_width(false, px(520.)), PROJECT_RAIL_WIDTH);
+        assert_eq!(navigator_width(true, px(520.)), px(520.));
     }
 
     #[test]

@@ -223,8 +223,9 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
-            Request::AddProject { path } => {
-                let project = registry::register_project(&self.conn(), &path).map_err(failed)?;
+            Request::AddProject { path, label } => {
+                let project = registry::register_project_as(&self.conn(), &path, label.as_deref())
+                    .map_err(failed)?;
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::ProjectsChanged);
                 self.events.emit(DaemonEvent::WorkspacesChanged {

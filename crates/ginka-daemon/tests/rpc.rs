@@ -159,7 +159,10 @@ fn a_mutation_by_one_client_is_pushed_to_another() {
         let actor = fixture.client().await;
 
         actor
-            .request(Request::AddProject { path: repository })
+            .request(Request::AddProject {
+                path: repository,
+                label: None,
+            })
             .await
             .unwrap();
 
@@ -188,6 +191,7 @@ fn a_reconnecting_client_is_given_the_events_it_missed() {
         actor
             .request(Request::AddProject {
                 path: repository.clone(),
+                label: None,
             })
             .await
             .unwrap();
@@ -223,7 +227,10 @@ fn a_fresh_client_is_told_where_the_stream_is_rather_than_replaying_history() {
     smol::block_on(async {
         let actor = fixture.client().await;
         actor
-            .request(Request::AddProject { path: repository })
+            .request(Request::AddProject {
+                path: repository,
+                label: None,
+            })
             .await
             .unwrap();
 
@@ -279,7 +286,10 @@ fn concurrent_requests_do_not_cross_their_replies() {
     smol::block_on(async {
         let client = fixture.client().await;
         client
-            .request(Request::AddProject { path: repository })
+            .request(Request::AddProject {
+                path: repository,
+                label: None,
+            })
             .await
             .unwrap();
 

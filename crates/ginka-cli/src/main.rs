@@ -229,6 +229,9 @@ enum ProjectCommand {
     Add {
         /// Defaults to the current directory.
         path: Option<PathBuf>,
+        /// Reader-facing name; the stable project key still follows the folder.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// List registered projects.
     List,
@@ -666,11 +669,12 @@ async fn connect(paths: &Paths) -> Result<Client> {
 /// Turn a subcommand into the one request that carries it out.
 fn request_for(command: Command) -> Result<Request> {
     Ok(match command {
-        Command::Project(ProjectCommand::Add { path }) => Request::AddProject {
+        Command::Project(ProjectCommand::Add { path, label }) => Request::AddProject {
             path: match path {
                 Some(path) => path,
                 None => std::env::current_dir()?,
             },
+            label,
         },
         Command::Project(ProjectCommand::List) => Request::ListProjects,
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {

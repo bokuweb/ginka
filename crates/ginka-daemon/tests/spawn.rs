@@ -149,6 +149,7 @@ fn a_spawned_daemon_keeps_the_state_it_was_given() {
         client
             .request(Request::AddProject {
                 path: repository.clone(),
+                label: None,
             })
             .await
             .unwrap();

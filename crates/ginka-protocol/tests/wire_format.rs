@@ -39,6 +39,30 @@ fn a_request_is_tagged_by_method() {
 }
 
 #[test]
+fn adding_a_project_keeps_its_optional_display_name_on_the_wire() {
+    let request = Request::AddProject {
+        path: "/work/comet".into(),
+        label: Some("Client website".into()),
+    };
+    assert_eq!(
+        wire(&request),
+        json!({
+            "method": "add_project",
+            "path": "/work/comet",
+            "label": "Client website",
+        })
+    );
+    let old = json!({ "method": "add_project", "path": "/work/comet" });
+    assert_eq!(
+        serde_json::from_value::<Request>(old).unwrap(),
+        Request::AddProject {
+            path: "/work/comet".into(),
+            label: None,
+        }
+    );
+}
+
+#[test]
 fn workspace_archive_is_an_explicit_reversible_wire_operation() {
     let request = Request::ArchiveWorkspace {
         workspace: WorkspaceId("comet/bright-harbor".into()),

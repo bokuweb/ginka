@@ -6,8 +6,9 @@
 ## 1. Design direction
 
 The reference is a four-region agent workstation on a dark, glass-tinted
-surface. The two leading regions form one resizable navigator: a stable project
-rail and the selected project's session list.
+surface. The two leading regions form one navigator: a stable project rail and,
+only after a project is selected, that project's resizable session list. With
+no selection the rail is 188 px and the new-session surface takes the rest.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
@@ -93,7 +94,8 @@ crate later without rewriting their views.
 holding a group of controls — a card is an object on the surface and the corner
 is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
 radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
-188 px project rail and a flexible session list. Right panel
+188 px project rail and a flexible session list shown only for the selected
+project. Right panel
 default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
 column height.
 
@@ -125,13 +127,15 @@ the strip would carry the window off with it.
 ### 3.2 Project rail and session list
 
 Two adjacent navigation levels. The rail keeps projects stable while the
-session list changes with the selected project, matching the spatial model used
-by e1 and leaving the centre column exclusively for the active conversation.
+session list appears and changes with the selected project, matching the
+spatial model used by e1 and leaving the centre column exclusively for the
+active conversation. With nothing selected, the rail stands alone.
 
 - **Project rail** — app header, the `Projects` action row, then selectable
   project rows. The selected project remains highlighted while one of its
   sessions is open.
-- **Session list header** — `Workspace` and a `+` for a new session.
+- **Session list header** — `Workspace` and a `+` for a new session. The whole
+  sessions column is absent until a project is selected.
 - **Conversation search** — directly below the header, with the rail's search
   icon focusing it and an explicit clear action. Matching is fuzzy and local
   over the row metadata already pushed by the daemon: title, model, provider,
@@ -141,19 +145,18 @@ by e1 and leaving the centre column exclusively for the active conversation.
   for a conversation aimed at whatever is selected: a project, the project of
   the selected workspace, or nothing at all.
 - **Section label** — `Projects`, small and muted, over the run of groups, with
-  a `+` beside it that registers another. The reader who has one project wants
-  the second added from the same place, and an empty state is by definition not
-  there any more once they do.
+  a `+` beside it that opens the add-project modal. The modal keeps the
+  reader-facing project name and source-folder chooser in one card; selecting
+  a folder prefills its basename, and successful registration selects the new
+  project immediately. Escape, the close control and Cancel all dismiss it.
 - **Project heading** — folder icon + project name, muted, and **selectable**:
   a project is something the reader picks *before* there is a conversation, and
-  picking one shows the home screen aimed at it. Selected only when the project
-  itself is what the centre column shows — a selected row already says which
-  project it is in, and two highlights read as two selections.
-- **Nothing registered** — a muted line under the section label, the way to add
-  one, and the `ginka project add .` command. Not a takeover of the sidebar: a
-  window with no project is still a window you can talk to (the chat runs in a
-  scratch worktree), so the list says what is missing without implying nothing
-  works until it is fixed.
+  picking one shows the home screen aimed at it. It stays highlighted while a
+  session inside it is selected, because the two highlights identify different
+  navigation levels.
+- **Nothing registered** — one muted line under the section label. The adjacent
+  `+` remains the single visual way into project registration; the CLI remains
+  available without being repeated in the empty rail.
 - **Workspace row**, indented under its project (8 px radius, selected =
   `bg.raised` fill):
   1. Agent glyph, session title, right-aligned status: relative time (`now`,

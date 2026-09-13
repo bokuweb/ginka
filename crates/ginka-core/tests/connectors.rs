@@ -63,7 +63,12 @@ impl Fixture {
         .with_drivers(drivers);
         let root = work.path().join("comet");
         support::repository(&root);
-        service.handle(Request::AddProject { path: root }).unwrap();
+        service
+            .handle(Request::AddProject {
+                path: root,
+                label: None,
+            })
+            .unwrap();
         let workspace = match service
             .handle(Request::CreateWorkspace {
                 project: ProjectName("comet".into()),
