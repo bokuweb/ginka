@@ -113,6 +113,25 @@ fn adding_a_project_registers_it_and_announces_the_change() {
 }
 
 #[test]
+fn workspace_summaries_report_the_daemon_hosts_semantic_index_state() {
+    let mut fixture = Fixture::new();
+    fixture.with_project();
+
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(!listed[0].indexed);
+
+    std::fs::create_dir(fixture.repo().join(ginka_core::tools::ZVEC_GREP_INDEX_DIR)).unwrap();
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(listed[0].indexed);
+}
+
+#[test]
 fn adding_a_project_keeps_the_display_name_across_the_service_boundary() {
     let mut fixture = Fixture::new();
     let root = fixture.work.path().join("client-checkout");
@@ -277,6 +296,68 @@ fn a_file_save_crosses_the_service_and_refuses_a_stale_editor() {
         expected_revision: opened.revision,
     });
     assert!(stale.is_err(), "the first save changed the revision");
+}
+
+#[test]
+fn project_search_tags_active_workspaces_and_shares_one_limit() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    std::fs::write(fixture.repo().join("README.md"), "needle on main\n").unwrap();
+    std::fs::write(fixture.repo().join("needle-main.txt"), "path hit\n").unwrap();
+
+    let second = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "second".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(second.worktree.path.join("README.md"), "needle on second\n").unwrap();
+    std::fs::write(second.worktree.path.join("needle-second.txt"), "path hit\n").unwrap();
+
+    let archived = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "archived".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(
+        archived.worktree.path.join("README.md"),
+        "needle in archive\n",
+    )
+    .unwrap();
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: archived.id(),
+        archived: true,
+    });
+
+    let (files, matches) = match fixture.ask(Request::SearchProject {
+        project: project.clone(),
+        query: "needle".into(),
+        limit: Some(2),
+    }) {
+        Response::WorkspaceMatches { files, matches } => (files, matches),
+        other => panic!("expected workspace matches, got {other:?}"),
+    };
+    assert_eq!(matches.len(), 2, "the limit is shared across worktrees");
+    assert_eq!(
+        files.len(),
+        2,
+        "path matches have their own shared project limit"
+    );
+    assert!(files.iter().any(|hit| hit.path == "needle-main.txt"));
+    assert!(files.iter().any(|hit| hit.path == "needle-second.txt"));
+    assert!(files.iter().all(|hit| hit.workspace != archived.id()));
+    assert!(matches.iter().all(|hit| hit.workspace != archived.id()));
+    assert!(
+        matches
+            .iter()
+            .any(|hit| hit.workspace == WorkspaceId::new(&project, "main"))
+    );
+    assert!(matches.iter().any(|hit| hit.workspace == second.id()));
 }
 
 #[test]

@@ -32,7 +32,9 @@ use gpui::*;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Icon, IconName, InteractiveElementExt as _, StyledExt as _, h_flex,
+    Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
+    button::{Button, ButtonVariants as _},
+    h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
@@ -48,7 +50,8 @@ actions!(
         ToggleSidebar,
         ToggleRightPanel,
         ToggleTerminalDock,
-        TogglePalette
+        TogglePalette,
+        FindTranscript
     ]
 );
 
@@ -60,6 +63,8 @@ actions!(
 enum Picker {
     /// Which project — or none at all — the next chat runs in.
     Project,
+    /// Which local branch the current workspace has checked out.
+    Branch,
     /// Which agent runs the next prompt.
     Agent,
     /// Which of that agent's models it runs on.
@@ -104,6 +109,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-f", FindTranscript, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-f", FindTranscript, Some(CONTEXT)),
     ]);
 }
 
@@ -137,6 +146,24 @@ const TERMINAL_COLUMNS: u16 = 100;
 /// as the reader scrolling away.
 const NEARLY_THE_FOOT: f32 = 24.;
 
+/// The turn-level handoff choice currently expanded in the transcript.
+struct ForkMenu {
+    turn: u32,
+    seq: u64,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// Find-in-page state for the open persisted conversation.
+struct TranscriptSearch {
+    query: Entity<InputState>,
+    typed: String,
+    matches: Vec<ginka_protocol::model::SessionMatch>,
+    chosen: Option<usize>,
+    loading: bool,
+    error: Option<String>,
+}
+
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
@@ -154,6 +181,8 @@ pub struct Shell {
     /// Where a chat that has no workspace yet would run. `None` means no
     /// project, which is a scratch worktree rather than nowhere.
     target_project: Option<ProjectName>,
+    /// A project-search hit to open after the sidebar finishes switching workspaces.
+    pending_file_open: Option<(WorkspaceId, String)>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -161,6 +190,8 @@ pub struct Shell {
     /// Which session the transcript belongs to, so switching rows replaces it
     /// rather than appending one conversation to another.
     transcript_of: Option<SessionId>,
+    /// Present while the reader is finding text in the open conversation.
+    transcript_search: Option<TranscriptSearch>,
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
@@ -225,6 +256,8 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// A turn whose conversation can be continued by another agent.
+    forking: Option<ForkMenu>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
     /// The command palette, while it is open: what is typed into it, the
@@ -246,6 +279,20 @@ pub struct Shell {
     model_query: Entity<InputState>,
     /// A copied query keeps filtering in the testable `ginka-ui` layer.
     model_filter: String,
+    /// Search or new-branch text in the branch popover.
+    branch_query: Entity<InputState>,
+    /// A copied query keeps branch filtering in the testable `ginka-ui` layer.
+    branch_filter: String,
+    /// The branches most recently read from git through the daemon.
+    branches: Vec<ginka_protocol::model::BranchInfo>,
+    /// A branch listing or checkout refusal shown in the open popover.
+    branch_error: Option<String>,
+    /// Set while branch state is being read or changed.
+    branch_busy: bool,
+    /// Set while the daemon is opening the semantic-index terminal.
+    index_starting: bool,
+    /// Why the most recent indexing request could not start.
+    index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -319,6 +366,12 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenFile(path) => {
                     this.open_file(path.clone(), false, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenWorkspaceFile { workspace, path } => {
+                    this.open_workspace_file(workspace.clone(), path.clone(), window, cx)
+                }
+                crate::surfaces::SurfaceEvent::OpenDefinition { workspace, target } => {
+                    this.open_definition(workspace, target.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::OpenFileFromHistory(path) => {
                     this.open_file(path.clone(), true, window, cx)
                 }
@@ -336,6 +389,10 @@ impl Shell {
                 ),
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
+                }
+                crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
+                crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
+                    this.set_skill_enabled(name.clone(), *enabled, cx)
                 }
             },
         );
@@ -377,6 +434,7 @@ impl Shell {
                         // A different workspace is a different conversation.
                         this.transcript = Transcript::new();
                         this.transcript_of = None;
+                        this.transcript_search = None;
                         this.session_state = None;
                         this.submitted = false;
                         this.transcript_follows = true;
@@ -389,6 +447,9 @@ impl Shell {
                         this.start_fresh = false;
                         this.checkpoints = Vec::new();
                         this.rewinding = None;
+                        this.forking = None;
+                        this.index_starting = false;
+                        this.index_error = None;
                         // The shells belong to the workspace, not to the
                         // window: a different workspace is a different strip.
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
@@ -400,6 +461,24 @@ impl Shell {
                         this.composer
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
+                        if this.surfaces.read(cx).open_surface()
+                            == Some(ginka_ui::surface::Surface::Skills)
+                        {
+                            this.refresh_skills(cx);
+                        }
+                        if changed_workspace
+                            && this.surfaces.read(cx).open_surface()
+                                == Some(ginka_ui::surface::Surface::Files)
+                        {
+                            this.find_files(String::new(), cx);
+                        }
+                        if let Some((workspace, path)) = this.pending_file_open.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.open_file(path, false, window, cx);
+                            } else {
+                                this.pending_file_open = Some((workspace, path));
+                            }
+                        }
                         cx.notify();
                     }
                 },
@@ -426,6 +505,22 @@ impl Shell {
                     cx.notify();
                 }
             });
+        let branch_query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.branch.search").to_string())
+                .submit_on_enter(true)
+        });
+        let branch_query_changed = cx.subscribe(
+            &branch_query,
+            |this, query, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.branch_filter = query.read(cx).value().to_string();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift: false, .. } => this.take_branch_choice(cx),
+                _ => {}
+            },
+        );
         let submitted = cx.subscribe_in(
             &composer,
             window,
@@ -632,6 +727,7 @@ impl Shell {
             link,
             transcript: Transcript::new(),
             transcript_of: None,
+            transcript_search: None,
             agents: Vec::new(),
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -656,14 +752,23 @@ impl Shell {
             add_project: None,
             projects: Vec::new(),
             target_project: None,
+            pending_file_open: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
+            forking: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
             model_query,
             model_filter: String::new(),
+            branch_query,
+            branch_filter: String::new(),
+            branches: Vec::new(),
+            branch_error: None,
+            branch_busy: false,
+            index_starting: false,
+            index_error: None,
             paths,
             settings,
             session,
@@ -675,6 +780,7 @@ impl Shell {
                 submitted,
                 committing,
                 model_query_changed,
+                branch_query_changed,
                 sidebar_search_changed,
             ],
         }
@@ -822,6 +928,7 @@ impl Shell {
             .update(cx, |surfaces, cx| surfaces.clear_file(cx));
         self.transcript = Transcript::new();
         self.transcript_of = None;
+        self.transcript_search = None;
         self.session_state = None;
         self.submitted = false;
         self.transcript_follows = true;
@@ -833,11 +940,17 @@ impl Shell {
         self.commands.clear();
         self.checkpoints = Vec::new();
         self.rewinding = None;
+        self.forking = None;
+        self.index_starting = false;
+        self.index_error = None;
         // The shells belong to the workspace that is no longer on screen.
         self.terminals = ginka_ui::terminal::TerminalTabs::new();
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.composer.focus_handle(cx).focus(window, cx);
+        if self.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Skills) {
+            self.refresh_skills(cx);
+        }
         cx.notify();
     }
 
@@ -939,6 +1052,7 @@ impl Shell {
                     .unwrap_or(0),
             );
         }
+        self.scroll_to_search_hit();
         cx.notify();
     }
 
@@ -1025,6 +1139,7 @@ impl Shell {
     /// worse record than one that shows the work being undone.
     fn rewind(&mut self, checkpoint: ginka_protocol::CheckpointId, cx: &mut Context<Self>) {
         self.rewinding = None;
+        self.forking = None;
         cx.notify();
         let link = self.link.clone();
         cx.spawn(async move |_, cx| {
@@ -1140,8 +1255,52 @@ impl Shell {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
+        let scope = self.surfaces.read(cx).file_search_scope();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let target = scope.target(workspace.clone(), project);
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        if query.trim().is_empty() {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_file_tree(workspace.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_workspace = workspace.clone();
+                let (files, truncated) = cx
+                    .background_spawn(async move { link.file_tree(&workspace).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_tree(requested_workspace, files, truncated, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if let ginka_ui::file_search::FileSearchTarget::Project(project) = target {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_project_search(project.clone(), query.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_project = project.clone();
+                let requested_query = query.clone();
+                let (files, matches) = cx
+                    .background_spawn(async move { link.search_project(&project, &query).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_project_matches(
+                        requested_project,
+                        requested_query,
+                        files,
+                        matches,
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |_, cx| {
             let (found, matched) = cx
                 .background_spawn(async move {
@@ -1158,6 +1317,23 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Open a project-search hit, switching the centre column when necessary.
+    fn open_workspace_file(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+            self.open_file(path, false, window, cx);
+            return;
+        }
+        self.pending_file_open = Some((workspace.clone(), path));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
     }
 
     /// Read a file and show it in the files surface.
@@ -1180,6 +1356,47 @@ impl Shell {
         let surfaces = self.surfaces.clone();
         let should_read = surfaces.update(cx, |surfaces, cx| {
             surfaces.begin_file_open(workspace.clone(), path.clone(), from_history, cx)
+        });
+        if !should_read {
+            return;
+        }
+        let read_workspace = workspace.clone();
+        let read_path = path.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&read_workspace, &read_path).await })
+                .await;
+            let _ = surfaces.update_in(cx, |surfaces, window, cx| {
+                surfaces.set_file(workspace, worktree, path, file, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Open a language-server definition in this workspace and select it.
+    fn open_definition(
+        &mut self,
+        source_workspace: &WorkspaceId,
+        target: ginka_ui::editor::DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if &workspace != source_workspace {
+            return;
+        }
+        let worktree = self
+            .session
+            .as_ref()
+            .map(|row| row.path.clone())
+            .expect("the selected session has a worktree");
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let path = target.path.clone();
+        let should_read = surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_definition_open(workspace.clone(), target, window, cx)
         });
         if !should_read {
             return;
@@ -1264,6 +1481,96 @@ impl Shell {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Start or refresh semantic indexing in a visible daemon terminal.
+    fn index_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.index_starting {
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if !self.layout.is_open(Panel::TerminalDock) {
+            self.toggle(Panel::TerminalDock, cx);
+        }
+        let (rows, cols) = self.dock_size();
+        self.index_starting = true;
+        self.index_error = None;
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.index_workspace(&workspace, rows, cols).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.index_starting = false;
+                match result {
+                    Ok(terminal) => {
+                        let title = this.terminals.tabs().len() + 1;
+                        this.terminals
+                            .open(terminal, format!("shell {title}"), rows, cols);
+                        this.adopt_terminals(cx);
+                    }
+                    Err(error) => this.index_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Read the selected project's skills plus the user's own from the daemon.
+    fn refresh_skills(&mut self, cx: &mut Context<Self>) {
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.begin_skill_refresh(cx));
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        let expected_project = project.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.skills(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Enable or disable every installed copy of one grouped skill.
+    fn set_skill_enabled(&mut self, name: String, enabled: bool, cx: &mut Context<Self>) {
+        self.surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_skill_change(name.clone(), cx)
+        });
+        let link = self.link.clone();
+        let mutation_project = self.target_project.clone();
+        let listing_project = mutation_project.clone();
+        let expected_project = mutation_project.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.set_skill_enabled(name, enabled, mutation_project)
+                        .await?;
+                    link.skills(listing_project).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -1634,6 +1941,7 @@ impl Shell {
                                 }
                                 this.transcript = Transcript::new();
                                 this.transcript_of = Some(session.id);
+                                this.transcript_search = None;
                                 this.session_state = Some(session.state);
                                 cx.notify();
                             })
@@ -1741,6 +2049,139 @@ impl Shell {
         self.toggle(Panel::RightPanel, cx);
     }
 
+    /// Open find-in-page for the persisted conversation on screen.
+    fn on_find_transcript(
+        &mut self,
+        _: &FindTranscript,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .session
+            .as_ref()
+            .and_then(|row| row.session.as_ref())
+            .is_none()
+        {
+            return;
+        }
+        if let Some(search) = self.transcript_search.as_ref() {
+            search.query.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("transcript.search.placeholder").to_string())
+        });
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| match event {
+            InputEvent::Change => this.search_transcript(query.read(cx).value().to_string(), cx),
+            InputEvent::PressEnter { shift, .. } => this.step_transcript_search(
+                if *shift {
+                    ginka_ui::search::Direction::Previous
+                } else {
+                    ginka_ui::search::Direction::Next
+                },
+                cx,
+            ),
+            _ => {}
+        })
+        .detach();
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        self.transcript_search = Some(TranscriptSearch {
+            query,
+            typed: String::new(),
+            matches: Vec::new(),
+            chosen: None,
+            loading: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Ask the daemon for matches, discarding a reply after the query moved on.
+    fn search_transcript(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(search) = self.transcript_search.as_mut() else {
+            return;
+        };
+        search.typed = query.clone();
+        search.matches.clear();
+        search.chosen = None;
+        search.error = None;
+        if query.trim().is_empty() {
+            search.loading = false;
+            cx.notify();
+            return;
+        }
+        let Some((session, workspace)) = self.session.as_ref().and_then(|row| {
+            row.session
+                .as_ref()
+                .map(|session| (session.clone(), row.workspace.clone()))
+        }) else {
+            return;
+        };
+        search.loading = true;
+        cx.notify();
+        let link = self.link.clone();
+        let expected_query = query.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.search_sessions(workspace, query).await })
+                .await;
+            this.update(cx, |this, cx| {
+                let still_open =
+                    this.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&session);
+                let Some(search) = this.transcript_search.as_mut() else {
+                    return;
+                };
+                if !still_open || search.typed != expected_query {
+                    return;
+                }
+                search.loading = false;
+                match result {
+                    Ok(matches) => {
+                        search.matches = ginka_ui::search::matches_for_session(matches, &session);
+                        search.chosen = (!search.matches.is_empty()).then_some(0);
+                        search.error = None;
+                    }
+                    Err(error) => search.error = Some(error),
+                }
+                this.scroll_to_search_hit();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move to another match and keep the selected block in view.
+    fn step_transcript_search(
+        &mut self,
+        direction: ginka_ui::search::Direction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.transcript_search.as_mut() else {
+            return;
+        };
+        search.chosen = ginka_ui::search::step(search.matches.len(), search.chosen, direction);
+        self.scroll_to_search_hit();
+        cx.notify();
+    }
+
+    /// Scroll the persisted match's folded transcript block into view.
+    fn scroll_to_search_hit(&mut self) {
+        let Some(seq) = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|index| search.matches.get(index))
+                .map(|found| found.seq)
+        }) else {
+            return;
+        };
+        if let Some(index) = self.transcript.block_index_for_seq(seq) {
+            self.transcript_follows = false;
+            self.transcript_scroll.scroll_to_top_of_item(index);
+        }
+    }
+
     /// Open the palette, or close it if it is already open.
     fn on_toggle_palette(
         &mut self,
@@ -1786,7 +2227,15 @@ impl Shell {
         };
         let rows = self.sidebar.read(cx).rows().to_vec();
         ginka_ui::palette::filter(
-            ginka_ui::palette::entries(&self.layout, &rows),
+            ginka_ui::palette::entries(
+                &self.layout,
+                &rows,
+                self.session.as_ref().map(|row| row.indexed),
+                self.session
+                    .as_ref()
+                    .and_then(|row| row.session.as_ref())
+                    .is_some(),
+            ),
             &palette.typed,
         )
     }
@@ -1846,6 +2295,8 @@ impl Shell {
                 }
                 self.open_terminal(window, cx);
             }
+            Command::IndexWorkspace => self.index_workspace(window, cx),
+            Command::FindTranscript => self.on_find_transcript(&FindTranscript, window, cx),
             Command::Switch(workspace) => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
@@ -2067,8 +2518,14 @@ impl Shell {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
-        v_flex()
-            .id("transcript")
+        let hit = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
+        });
+        let scroller = v_flex()
+            .id("transcript-scroll")
             .flex_1()
             .px_8()
             .py_6()
@@ -2077,41 +2534,150 @@ impl Shell {
             // The gesture, not the resulting offset: an answer that grows
             // moves the foot away from the reader too.
             .on_scroll_wheel(cx.listener(|this, _, _, _| this.transcript_scrolled()))
+            .children({
+                let last = self.transcript.blocks().len().saturating_sub(1);
+                self.transcript
+                    .blocks()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        let block = match block {
+                            // Only the tail is still being written; every
+                            // block before it is finished text.
+                            TranscriptBlock::Assistant { text } if index == last => self.block(
+                                index,
+                                &TranscriptBlock::Assistant {
+                                    text: self.reveal.shown(text).to_string(),
+                                },
+                                cx,
+                            ),
+                            block => self.block(index, block, cx),
+                        };
+                        // Each block is a direct child of the scroller so its
+                        // persisted sequence can be brought into view by ⌘F.
+                        div()
+                            .w_full()
+                            .max_w(px(TRANSCRIPT_MEASURE))
+                            .mx_auto()
+                            .mb_5()
+                            .when(hit == Some(index), |this| {
+                                this.rounded(px(Tokens::global(cx).radius.card))
+                                    .bg(Tokens::global(cx).colors().row_active())
+                            })
+                            .child(block)
+                    })
+                    .collect::<Vec<_>>()
+            })
             .child(
-                // One column for the whole conversation, centred, at the
-                // measure from docs/ui.md §3.3: long-form text stays readable
-                // because the column stops growing, not because the window
-                // does. Centred rather than pinned left because the composer
-                // sits under it at the same width, and a conversation stranded
-                // against one edge of a wide window reads as a mistake.
-                v_flex()
+                div()
                     .w_full()
                     .max_w(px(TRANSCRIPT_MEASURE))
                     .mx_auto()
-                    .gap_5()
-                    .children({
-                        let last = self.transcript.blocks().len().saturating_sub(1);
-                        self.transcript
-                            .blocks()
-                            .iter()
-                            .enumerate()
-                            .map(|(index, block)| match block {
-                                // Only the tail is still being written; every
-                                // block before it is finished text.
-                                TranscriptBlock::Assistant { text } if index == last => self.block(
-                                    index,
-                                    &TranscriptBlock::Assistant {
-                                        text: self.reveal.shown(text).to_string(),
-                                    },
-                                    cx,
-                                ),
-                                block => self.block(index, block, cx),
-                            })
-                            .collect::<Vec<_>>()
-                    })
                     .children(self.activity_line(cx)),
-            )
+            );
+        v_flex()
+            .id("transcript")
+            .flex_1()
+            .min_h_0()
+            .children(self.transcript_search_bar(cx))
+            .child(scroller)
             .into_any_element()
+    }
+
+    /// Find-in-page controls above the conversation.
+    fn transcript_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.transcript_search.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let count = match (&search.error, search.loading, search.chosen) {
+            (Some(_), _, _) => rust_i18n::t!("transcript.search.failed").to_string(),
+            (_, true, _) => rust_i18n::t!("transcript.search.searching").to_string(),
+            (_, false, Some(chosen)) => format!("{} / {}", chosen + 1, search.matches.len()),
+            _ => format!("0 / {}", search.matches.len()),
+        };
+        let excerpt = search
+            .chosen
+            .and_then(|chosen| search.matches.get(chosen))
+            .map(|found| found.excerpt.clone())
+            .or_else(|| search.error.clone());
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.transcript_search = None;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_1()
+                        .items_center()
+                        .child(div().flex_1().child(Input::new(&search.query)))
+                        .child(
+                            div()
+                                .min_w(px(58.))
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(count),
+                        )
+                        .child(
+                            Button::new("previous-transcript-match")
+                                .ghost()
+                                .disabled(search.matches.is_empty())
+                                .tooltip(rust_i18n::t!("transcript.search.previous").to_string())
+                                .child(Icon::new(IconName::ArrowUp).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.step_transcript_search(
+                                        ginka_ui::search::Direction::Previous,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("next-transcript-match")
+                                .ghost()
+                                .disabled(search.matches.is_empty())
+                                .tooltip(rust_i18n::t!("transcript.search.next").to_string())
+                                .child(Icon::new(IconName::ArrowDown).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.step_transcript_search(
+                                        ginka_ui::search::Direction::Next,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("close-transcript-search")
+                                .ghost()
+                                .tooltip(rust_i18n::t!("transcript.search.close").to_string())
+                                .child(Icon::new(IconName::Close).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.transcript_search = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .children(excerpt.map(|excerpt| {
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_xs()
+                        .text_color(if search.error.is_some() {
+                            tokens.colors().status_error
+                        } else {
+                            tokens.colors().text_secondary
+                        })
+                        .child(excerpt)
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The home screen: what the centre column asks before there is a
@@ -2557,7 +3123,7 @@ impl Shell {
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.
-            TranscriptBlock::TurnEnd { turn } => self.turn_rule(*turn, cx),
+            TranscriptBlock::TurnEnd { turn, seq } => self.turn_rule(*turn, *seq, cx),
             // A turn that worked says so by being answered. Only an outcome
             // the user has to do something about is worth a line of its own.
             TranscriptBlock::Outcome { state, summary } => match state {
@@ -2588,16 +3154,76 @@ impl Shell {
         }
     }
 
-    /// The rule between turns, and the way back to one.
+    /// Copy the conversation through `after` onto another agent and show it.
+    fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let Some(menu) = self.forking.as_mut() else {
+            return;
+        };
+        if menu.busy {
+            return;
+        }
+        menu.busy = true;
+        menu.error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requesting = link.clone();
+            let result = cx
+                .background_spawn(
+                    async move { requesting.fork_session(&session, after, agent).await },
+                )
+                .await;
+            match result {
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        if let Some(menu) = this.forking.as_mut() {
+                            menu.busy = false;
+                            menu.error = Some(
+                                rust_i18n::t!("transcript.fork.failed", error = error).to_string(),
+                            );
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(fork) => {
+                    this.update(cx, |this, cx| {
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.transcript_search = None;
+                        this.session_state = Some(fork.state);
+                        this.checkpoints.clear();
+                        this.rewinding = None;
+                        this.forking = None;
+                        this.chosen_agent = None;
+                        this.chosen_model = None;
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = None;
+                        this.chosen_account = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    if let Ok(Some(showing)) = pull_rows(&this, &link, cx).await
+                        && showing == fork.id
+                    {
+                        let _ = pull_transcript(&this, &link, showing, cx).await;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The rule between turns, and the ways to rewind or continue elsewhere.
     ///
-    /// waku's idea, and the reason checkpoints exist: a position in a
-    /// transcript maps to a working tree, so "put it back to how it was three
-    /// turns ago" is an operation rather than an apology. Offered in two steps
-    /// because it is destructive — work written since is removed — and a single
-    /// click that quietly rewrites the worktree is not something to discover by
-    /// accident. What it replaces is snapshotted first, so even a rewind the
-    /// user regrets is reachable.
-    fn turn_rule(&self, turn: u32, cx: &mut Context<Self>) -> AnyElement {
+    /// A transcript position maps both to a checkpointed working tree and to
+    /// the inclusive event range a fork copies. Rewind is confirmed because it
+    /// changes files; a fork is additive and can run immediately.
+    fn turn_rule(&self, turn: u32, seq: u64, cx: &mut Context<Self>) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let checkpoint = self
             .checkpoints
@@ -2605,6 +3231,38 @@ impl Shell {
             .find(|checkpoint| checkpoint.turn == turn)
             .map(|checkpoint| checkpoint.id.clone());
         let asking = self.rewinding == Some(turn);
+        let current_agent = self
+            .session
+            .as_ref()
+            .map(|row| row.agent.driver_id())
+            .unwrap_or_default();
+        let targets = ginka_ui::handoff::fork_targets(&self.agents, current_agent);
+        let has_targets = !targets.is_empty();
+        let (fork_open, fork_busy, fork_error) = self
+            .forking
+            .as_ref()
+            .filter(|menu| menu.turn == turn && menu.seq == seq)
+            .map(|menu| (true, menu.busy, menu.error.clone()))
+            .unwrap_or((false, false, None));
+        let target_buttons = targets.into_iter().map(|agent| {
+            let id = agent.id.clone();
+            Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+                .disabled(fork_busy)
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .text_color(tokens.colors().text_primary)
+                .when(!fork_busy, |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
+                        )
+                })
+                .child(agent.display_name.clone())
+                .into_any_element()
+        });
         let rule = || {
             div()
                 .h(px(1.))
@@ -2690,6 +3348,58 @@ impl Shell {
                                     }))
                                     .child(rust_i18n::t!("transcript.rewind.no").to_string()),
                             )
+                    }))
+            }))
+            .children(has_targets.then(|| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new(SharedString::from(format!("fork-menu-{turn}")))
+                            .disabled(fork_busy)
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(tokens.radius.row))
+                            .text_xs()
+                            .text_color(if fork_open {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_muted.opacity(0.7)
+                            })
+                            .when(!fork_busy, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .tooltip(rust_i18n::t!("transcript.fork.hint").to_string())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rewinding = None;
+                                        this.forking =
+                                            if this.forking.as_ref().is_some_and(|menu| {
+                                                menu.turn == turn && menu.seq == seq
+                                            }) {
+                                                None
+                                            } else {
+                                                Some(ForkMenu {
+                                                    turn,
+                                                    seq,
+                                                    busy: false,
+                                                    error: None,
+                                                })
+                                            };
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(if fork_busy {
+                                rust_i18n::t!("transcript.fork.working").to_string()
+                            } else {
+                                rust_i18n::t!("transcript.fork.label").to_string()
+                            }),
+                    )
+                    .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
+                    .children(fork_error.map(|error| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(error)
                     }))
             }))
             .child(rule())
@@ -3045,6 +3755,9 @@ impl Shell {
         if picker == Picker::Model {
             return self.model_picker_panel(cx);
         }
+        if picker == Picker::Branch {
+            return self.branch_picker_panel(cx);
+        }
         let tokens = Tokens::global(cx);
 
         let rows: Vec<AnyElement> = match picker {
@@ -3093,6 +3806,7 @@ impl Shell {
                 rows
             }
             Picker::Agent => self.agent_rows(cx),
+            Picker::Branch => unreachable!("the searchable branch panel returns above"),
             // The provider's logins, each with its headroom or its state:
             // the numbers beside the choice are what make a router
             // unnecessary (`docs/accounts.md` §7).
@@ -3456,6 +4170,246 @@ impl Shell {
                                 .overflow_y_scrollbar()
                                 .children(rows),
                         ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Open the branch picker and read git's current branch ownership.
+    fn open_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker == Some(Picker::Branch) {
+            self.picker = None;
+            cx.notify();
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.picker = Some(Picker::Branch);
+        self.branch_filter.clear();
+        self.branches.clear();
+        self.branch_error = None;
+        self.branch_busy = true;
+        self.branch_query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+        self.branch_query
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.branches(&workspace).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.branch_busy = false;
+                match result {
+                    Ok(branches) => this.branches = branches,
+                    Err(error) => this.branch_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Take Return in the branch search as create or the best selectable match.
+    fn take_branch_choice(&mut self, cx: &mut Context<Self>) {
+        let Some(submission) =
+            ginka_ui::branches::branch_submission(&self.branches, &self.branch_filter)
+        else {
+            return;
+        };
+        match submission {
+            ginka_ui::branches::BranchSubmission::KeepCurrent => {
+                self.picker = None;
+                cx.notify();
+            }
+            ginka_ui::branches::BranchSubmission::Switch(branch) => {
+                self.choose_branch(branch, false, cx)
+            }
+            ginka_ui::branches::BranchSubmission::Create(branch) => {
+                self.choose_branch(branch, true, cx)
+            }
+        }
+    }
+
+    /// Switch or create the branch named by the picker.
+    fn choose_branch(&mut self, branch: String, create: bool, cx: &mut Context<Self>) {
+        if self.branch_busy {
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.branch_busy = true;
+        self.branch_error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.checkout_branch(&workspace, branch, create).await },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.branch_busy = false;
+                match result {
+                    Ok(()) => {
+                        this.picker = None;
+                        this.branch_filter.clear();
+                    }
+                    Err(error) => this.branch_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Searchable local branches plus an inline create action.
+    fn branch_picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let options = ginka_ui::branches::matching_branches(&self.branches, &self.branch_filter);
+        let create = ginka_ui::branches::new_branch_candidate(&self.branches, &self.branch_filter);
+        let mut rows: Vec<AnyElement> = Vec::new();
+
+        for option in options {
+            let name = option.branch.name.clone();
+            match option.availability {
+                ginka_ui::branches::BranchAvailability::Current => {
+                    rows.push(self.picker_row(
+                        SharedString::from(format!("branch-option:{name}")),
+                        name,
+                        Some(rust_i18n::t!("composer.branch.current").to_string()),
+                        true,
+                        cx.listener(|this, _, _, cx| {
+                            this.picker = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    ));
+                }
+                ginka_ui::branches::BranchAvailability::Available => {
+                    let picked = name.clone();
+                    rows.push(self.picker_row(
+                        SharedString::from(format!("branch-option:{name}")),
+                        name,
+                        None,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.choose_branch(picked.clone(), false, cx)
+                        }),
+                        cx,
+                    ));
+                }
+                ginka_ui::branches::BranchAvailability::CheckedOutAt(path) => {
+                    rows.push(
+                        h_flex()
+                            .id(SharedString::from(format!("branch-option:{name}")))
+                            .w_full()
+                            .h(px(30.))
+                            .px(px(9.))
+                            .gap(px(8.))
+                            .items_center()
+                            .rounded(px(tokens.radius.row))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .truncate()
+                                    .child(
+                                        rust_i18n::t!(
+                                            "composer.branch.checked_out",
+                                            path = path.display().to_string()
+                                        )
+                                        .to_string(),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        if let Some(branch) = create {
+            let picked = branch.clone();
+            rows.push(self.picker_row(
+                SharedString::from("branch-option:create"),
+                rust_i18n::t!("composer.branch.create", branch = branch).to_string(),
+                None,
+                false,
+                cx.listener(move |this, _, _, cx| this.choose_branch(picked.clone(), true, cx)),
+                cx,
+            ));
+        }
+
+        if rows.is_empty() && self.branch_busy {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.branch.loading").to_string())
+                    .into_any_element(),
+            );
+        } else if rows.is_empty() && self.branch_error.is_none() {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.branch.empty").to_string())
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            v_flex()
+                .w_full()
+                .max_h(px(360.))
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().popover())
+                .border_1()
+                .border_color(tokens.colors().border_strong)
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .p_2()
+                        .border_b_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(Input::new(&self.branch_query)),
+                )
+                .children(self.branch_error.clone().map(|error| {
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
+                .child(
+                    v_flex()
+                        .p_1()
+                        .gap_0p5()
+                        .overflow_y_scrollbar()
+                        .children(rows),
                 )
                 .into_any_element(),
         )
@@ -4968,6 +5922,29 @@ impl Shell {
             .project_label()
             .unwrap_or_else(|| rust_i18n::t!("composer.context.project").to_string().into());
         let chosen = self.project_label().is_some();
+        let branch = self
+            .session
+            .as_ref()
+            .map(|session| session.branch.clone())
+            .filter(|branch| !branch.is_empty());
+        let branch_picker = branch.is_some();
+        let indexed = self.session.as_ref().map(|session| session.indexed);
+        let index_label = if self.index_starting {
+            rust_i18n::t!("composer.index.starting").to_string()
+        } else if indexed == Some(true) {
+            rust_i18n::t!("composer.index.ready").to_string()
+        } else if self.index_error.is_some() {
+            rust_i18n::t!("composer.index.failed").to_string()
+        } else {
+            rust_i18n::t!("composer.index.action").to_string()
+        };
+        let index_colour = if self.index_error.is_some() {
+            tokens.colors().status_error
+        } else if indexed == Some(true) {
+            tokens.colors().status_done
+        } else {
+            tokens.colors().text_muted
+        };
 
         h_flex()
             .w_full()
@@ -5017,24 +5994,71 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .gap_1p5()
+                    .gap_1()
                     .items_center()
-                    .child(
-                        Icon::empty()
-                            .path(ginka_ui::assets::icon::GIT_BRANCH)
-                            .size_3()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .child(
-                        div()
+                    .children(indexed.map(|ready| {
+                        Button::new("workspace-index")
+                            .disabled(self.index_starting)
+                            .h(px(22.))
+                            .px(px(6.))
+                            .rounded(px(tokens.radius.row))
                             .text_size(px(11.))
-                            .text_color(tokens.colors().text_muted)
+                            .text_color(index_colour)
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .tooltip(self.index_error.clone().map_or_else(
+                                || {
+                                    if ready {
+                                        rust_i18n::t!("palette.workspace.reindex").to_string()
+                                    } else {
+                                        rust_i18n::t!("palette.workspace.index").to_string()
+                                    }
+                                },
+                                |error| {
+                                    rust_i18n::t!("composer.index.error", error = error).to_string()
+                                },
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.index_workspace(window, cx)),
+                            )
+                            .child(index_label)
+                    }))
+                    .child(
+                        h_flex()
+                            .id("branch-chip")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .gap(px(5.))
+                            .items_center()
+                            .rounded(px(tokens.radius.row))
+                            .when(self.picker == Some(Picker::Branch), |this| {
+                                this.bg(tokens.colors().row_active())
+                            })
+                            .when(branch_picker, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_branch_picker(window, cx)
+                                    }))
+                            })
                             .child(
-                                self.session
-                                    .as_ref()
-                                    .map(|session| session.branch.clone())
-                                    .unwrap_or_else(|| "—".into()),
-                            ),
+                                Icon::empty()
+                                    .path(ginka_ui::assets::icon::GIT_BRANCH)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(branch.unwrap_or_else(|| "—".into())),
+                            )
+                            .when(branch_picker, |this| {
+                                this.child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .size(px(11.))
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                            }),
                     ),
             )
     }
@@ -5510,6 +6534,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_find_transcript))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.

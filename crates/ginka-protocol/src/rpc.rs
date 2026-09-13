@@ -10,7 +10,7 @@ use crate::model::{
     Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint,
     ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project,
     ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand, TerminalInfo,
-    TranscriptEntry, UsageRow, WorkspaceSummary,
+    TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch, WorkspaceSummary,
 };
 use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -382,6 +382,15 @@ pub enum Request {
         query: String,
         limit: Option<u32>,
     },
+    /// Find fuzzy file paths and literal source lines across a project's active workspaces.
+    ///
+    /// `limit` is shared across the complete result, rather than applied once
+    /// per worktree, so one request remains bounded as projects grow.
+    SearchProject {
+        project: ProjectName,
+        query: String,
+        limit: Option<u32>,
+    },
 
     /// Read one of a workspace's files, for the panel that shows it.
     ///
@@ -553,6 +562,13 @@ pub enum Response {
     },
     Matches {
         matches: Vec<ContentMatch>,
+    },
+    /// Path and content hits from more than one worktree, tagged with their source.
+    WorkspaceMatches {
+        /// Fuzzy path hits, under their own shared project-wide limit.
+        files: Vec<WorkspaceFileMatch>,
+        /// Literal content hits, under their own shared project-wide limit.
+        matches: Vec<WorkspaceContentMatch>,
     },
     Terminals {
         terminals: Vec<TerminalInfo>,
