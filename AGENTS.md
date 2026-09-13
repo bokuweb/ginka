@@ -27,6 +27,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - A **daemon** owns the state: SQLite, git and agent processes. It binds loopback, publishes its port and a bearer token to `~/.ginka/daemon.json`, and pushes every mutation to connected clients with a sequence number and a bounded replay window.
 - The **CLI and the app are both clients of it.** `ginka` registers projects, creates and removes worktrees, starts agents, reads transcripts, lists and restores checkpoints — and starts the daemon when there is none.
 - **Agents run.** `claude` and `codex` drivers normalize their output into one `AgentEvent` stream; a turn is one process, follow-ups resume the vendor's session, and cancelling signals the process group. Transcripts are persisted as events.
+- **Claude delegated agents are visible.** One parent row owns a bounded trail of the child's reasoning, messages and tool lifecycle, and is settled if the turn ends before a final report. Codex child-thread reporting waits on its app-server transport rather than guessing at `exec --json` output.
 - **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
 - The shell renders a project rail, session list, conversation and resizable right panel, with a composer, context bar, terminal dock and surface chooser. Its palette and type bases share e1's token contract for future integration. **Not yet visually signed off** (see roadmap M0).
 

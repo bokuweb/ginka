@@ -273,6 +273,21 @@ transcript.turn:
 transcript.tool:
   en: tool
   ja: ツール
+transcript.subagent:
+  en: Subagent
+  ja: サブエージェント
+transcript.subagent.running:
+  en: Working
+  ja: 作業中
+transcript.subagent.completed:
+  en: Completed
+  ja: 完了
+transcript.subagent.failed:
+  en: Failed
+  ja: 失敗
+transcript.subagent.earlier:
+  en: "%{count} earlier steps"
+  ja: "前の %{count} ステップ"
 transcript.truncated:
   en: "… %{count} more lines"
   ja: "… 他 %{count} 行"

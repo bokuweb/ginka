@@ -15,7 +15,7 @@ use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
 use ginka_protocol::provider::ProviderModel;
-use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
 use ginka_ui::layout::{HEADER_HEIGHT, Layout, Panel, TRAFFIC_LIGHT_INSET};
@@ -2453,6 +2453,13 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
+            TranscriptBlock::Subagent {
+                title,
+                steps,
+                summary,
+                is_error,
+                ..
+            } => self.subagent_card(title, steps, summary.as_deref(), *is_error, cx),
             TranscriptBlock::Question {
                 id,
                 question,
@@ -2670,6 +2677,141 @@ impl Shell {
                     // conversation off the screen.
                     .child(head_of(output, 24))
             }))
+            .into_any_element()
+    }
+
+    /// One delegated run, with its newest work kept under the row that spawned it.
+    fn subagent_card(
+        &self,
+        title: &str,
+        steps: &[ginka_protocol::SubagentStep],
+        summary: Option<&str>,
+        is_error: bool,
+        cx: &App,
+    ) -> AnyElement {
+        const VISIBLE_STEPS: usize = 12;
+
+        let tokens = Tokens::global(cx).clone();
+        let hidden = steps.len().saturating_sub(VISIBLE_STEPS);
+        let shown = steps.iter().skip(hidden);
+        let state = if summary.is_none() {
+            rust_i18n::t!("transcript.subagent.running").to_string()
+        } else if is_error {
+            rust_i18n::t!("transcript.subagent.failed").to_string()
+        } else {
+            rust_i18n::t!("transcript.subagent.completed").to_string()
+        };
+
+        v_flex()
+            .w_full()
+            .rounded(px(tokens.radius.row))
+            .border_1()
+            .border_color(if is_error {
+                tokens.colors().status_error.opacity(0.55)
+            } else {
+                tokens.colors().border_subtle
+            })
+            .bg(tokens.colors().bg_surface)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(rust_i18n::t!("transcript.subagent").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if is_error {
+                                tokens.colors().status_error
+                            } else {
+                                tokens.colors().text_muted
+                            })
+                            .child(state),
+                    ),
+            )
+            .when(!steps.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .gap_1p5()
+                        .border_t_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .children((hidden > 0).then(|| {
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(
+                                    rust_i18n::t!("transcript.subagent.earlier", count = hidden)
+                                        .to_string(),
+                                )
+                        }))
+                        .children(shown.map(|step| {
+                            let (mark, color) = match step.status {
+                                Some(SubagentStepStatus::Running) => {
+                                    ("·", tokens.colors().status_working)
+                                }
+                                Some(SubagentStepStatus::Completed) => {
+                                    ("✓", tokens.colors().text_muted)
+                                }
+                                Some(SubagentStepStatus::Failed) => {
+                                    ("×", tokens.colors().status_error)
+                                }
+                                None => ("›", tokens.colors().text_muted),
+                            };
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_start()
+                                .child(div().w_3().text_xs().text_color(color).child(mark))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .line_height(px(18.))
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(step.text.clone()),
+                                )
+                        })),
+                )
+            })
+            .children(
+                summary
+                    .filter(|summary| !summary.is_empty())
+                    .map(|summary| {
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(tokens.colors().border_subtle)
+                            .text_xs()
+                            .line_height(px(18.))
+                            .text_color(if is_error {
+                                tokens.colors().status_error
+                            } else {
+                                tokens.colors().text_secondary
+                            })
+                            .child(summary.to_string())
+                    }),
+            )
             .into_any_element()
     }
 

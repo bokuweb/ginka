@@ -194,7 +194,11 @@ by e1 and leaving the centre column exclusively for the active conversation.
   ask-user cards with inline buttons. The reader's own words are a tinted
   bubble, right-aligned within the column. A finished answer carries a copy
   action; a turn that succeeded prints no outcome of its own, because being
-  answered is how a turn says it worked.
+  answered is how a turn says it worked. A delegated agent is one bordered
+  parent card rather than a second conversation: its reasoning, messages and
+  tool lifecycle sit beneath the original brief, with explicit working,
+  completed and failed words and glyphs. The fold retains at most 300 steps;
+  the view shows the newest 12 and states how many earlier steps are hidden.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.

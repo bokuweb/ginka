@@ -38,6 +38,29 @@ pub enum AgentEvent {
     ToolCall { activity: ActivityItem },
     /// The result of a tool call, completing the call it belongs to.
     ToolResult { activity: ActivityItem },
+    /// A delegated agent began work under one parent transcript row.
+    SubagentStarted {
+        /// Provider call id used to correlate its later steps and result.
+        id: String,
+        /// The brief or description the parent gave the delegated run.
+        title: String,
+    },
+    /// One piece of work performed by a delegated agent.
+    SubagentStep {
+        /// The [`SubagentStarted`](Self::SubagentStarted) id this belongs to.
+        parent_id: String,
+        /// The bounded, provider-neutral-and-tool-independent step.
+        step: SubagentStep,
+    },
+    /// A delegated agent returned to its parent.
+    SubagentFinished {
+        /// The [`SubagentStarted`](Self::SubagentStarted) id this completes.
+        id: String,
+        /// Its bounded final report, when the provider exposes one.
+        summary: Option<String>,
+        /// Whether the delegated run failed.
+        failed: bool,
+    },
     /// The agent is blocked on the user. `options` is empty for a free-text
     /// question.
     AskUser {
@@ -97,6 +120,76 @@ pub struct Usage {
     pub reasoning_tokens: u64,
     /// `None` when the vendor does not price the request.
     pub cost_usd: Option<f64>,
+}
+
+/// The kind of information one delegated-agent step carries.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStepKind {
+    /// Reasoning exposed by the provider.
+    Reasoning,
+    /// Prose addressed to the parent agent.
+    Message,
+    /// A tool invocation inside the delegated run.
+    Tool,
+}
+
+/// Lifecycle state for a delegated agent's tool step.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentStepStatus {
+    /// The tool is still running.
+    Running,
+    /// The tool completed successfully.
+    Completed,
+    /// The tool failed.
+    Failed,
+}
+
+/// One bounded row in a delegated agent's trail.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubagentStep {
+    /// Provider id used to update a running tool in place.
+    pub id: String,
+    /// Whether this is thought, prose or a tool.
+    pub kind: SubagentStepKind,
+    /// Human-readable content, bounded by [`Self::MAX_TEXT_CHARS`].
+    pub text: String,
+    /// Present for a tool step whose lifecycle the provider exposes.
+    pub status: Option<SubagentStepStatus>,
+}
+
+impl SubagentStep {
+    /// Maximum Unicode scalar count kept for one step.
+    pub const MAX_TEXT_CHARS: usize = 2_000;
+
+    /// Build a step with bounded text and no lifecycle state.
+    pub fn new(id: impl Into<String>, kind: SubagentStepKind, text: impl Into<String>) -> Self {
+        let text = text.into();
+        let mut chars = text.chars();
+        let mut bounded = chars
+            .by_ref()
+            .take(Self::MAX_TEXT_CHARS)
+            .collect::<String>();
+        if chars.next().is_some() {
+            bounded.push('…');
+        }
+        Self {
+            id: id.into(),
+            kind,
+            text: bounded,
+            status: None,
+        }
+    }
+
+    /// Attach the lifecycle state supplied by a tool notification.
+    pub fn with_status(mut self, status: SubagentStepStatus) -> Self {
+        self.status = Some(status);
+        self
+    }
 }
 
 /// Something the daemon pushes to every connected client.
@@ -205,6 +298,14 @@ mod tests {
         let usage = Usage::default();
         assert_eq!(usage.input_tokens, 0);
         assert_eq!(usage.cost_usd, None);
+    }
+
+    #[test]
+    fn a_subagent_step_is_bounded_on_a_character_boundary() {
+        let text = "界".repeat(SubagentStep::MAX_TEXT_CHARS + 1);
+        let step = SubagentStep::new("step", SubagentStepKind::Message, text);
+        assert_eq!(step.text.chars().count(), SubagentStep::MAX_TEXT_CHARS + 1);
+        assert!(step.text.ends_with('…'));
     }
 
     #[test]

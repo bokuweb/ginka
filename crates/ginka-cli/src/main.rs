@@ -1799,6 +1799,27 @@ mod ginka_cli_format {
                     .unwrap_or("");
                 format!("[result]{marker} {first}")
             }
+            AgentEvent::SubagentStarted { title, .. } => {
+                format!("[subagent] {title}")
+            }
+            AgentEvent::SubagentStep { step, .. } => {
+                let marker = match step.status {
+                    Some(ginka_protocol::SubagentStepStatus::Running) => "…",
+                    Some(ginka_protocol::SubagentStepStatus::Completed) => "✓",
+                    Some(ginka_protocol::SubagentStepStatus::Failed) => "!",
+                    None => "·",
+                };
+                format!("[subagent {marker}] {}", step.text)
+            }
+            AgentEvent::SubagentFinished {
+                summary, failed, ..
+            } => {
+                let marker = if *failed { "!" } else { "✓" };
+                format!(
+                    "[subagent {marker}] {}",
+                    summary.as_deref().unwrap_or_default()
+                )
+            }
             AgentEvent::AskUser { question, .. } => format!("? {question}"),
             AgentEvent::PlanProposal { plan, .. } => format!("plan: {plan}"),
             AgentEvent::Usage { usage } => format!(

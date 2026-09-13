@@ -26,7 +26,9 @@ pub use envelope::{
     ClientMessage, HandshakeRejection, MAX_WIRE_MESSAGE_BYTES, PROTOCOL_VERSION, RequestId,
     RpcError, Seq, ServerMessage,
 };
-pub use event::{AgentEvent, DaemonEvent, Usage};
+pub use event::{
+    AgentEvent, DaemonEvent, SubagentStep, SubagentStepKind, SubagentStepStatus, Usage,
+};
 pub use handshake::Handshake;
 pub use ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 pub use model::{

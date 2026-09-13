@@ -12,7 +12,7 @@
 //! detectable rather than silently swallowed.
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
-use ginka_protocol::{AgentEvent, Usage};
+use ginka_protocol::{AgentEvent, SubagentStep, Usage};
 use std::time::{Duration, Instant};
 
 /// One drawable piece of a transcript.
@@ -32,6 +32,19 @@ pub enum Block {
         input: String,
         /// `None` while the tool is still running.
         output: Option<String>,
+        is_error: bool,
+    },
+    /// A delegated agent and the bounded trail of work it reported.
+    Subagent {
+        /// Provider call id correlating steps and the final report.
+        id: String,
+        /// The brief the parent gave this run.
+        title: String,
+        /// Steps merged by provider id, newest steps retained at the cap.
+        steps: Vec<SubagentStep>,
+        /// The final report returned to the parent, when available.
+        summary: Option<String>,
+        /// Whether the delegated run failed.
         is_error: bool,
     },
     /// The agent is blocked on the user.
@@ -150,6 +163,13 @@ impl Transcript {
             }) => Activity::Running {
                 tool: input.clone(),
             },
+            Some(Block::Subagent {
+                title,
+                summary: None,
+                ..
+            }) => Activity::Running {
+                tool: title.clone(),
+            },
             _ => Activity::Thinking,
         }
     }
@@ -224,6 +244,21 @@ impl Transcript {
                 activity.detail.as_deref().unwrap_or_default(),
                 activity.failed,
             ),
+            AgentEvent::SubagentStarted { id, title } => self.blocks.push(Block::Subagent {
+                id: id.clone(),
+                title: title.clone(),
+                steps: Vec::new(),
+                summary: None,
+                is_error: false,
+            }),
+            AgentEvent::SubagentStep { parent_id, step } => {
+                self.attach_subagent_step(parent_id, step)
+            }
+            AgentEvent::SubagentFinished {
+                id,
+                summary,
+                failed,
+            } => self.finish_subagent(id, summary.clone(), *failed),
             AgentEvent::AskUser {
                 id,
                 question,
@@ -339,6 +374,55 @@ impl Transcript {
                 is_error,
             }),
         }
+    }
+
+    /// Number of delegated-agent steps retained in one drawable row.
+    const MAX_SUBAGENT_STEPS: usize = 300;
+
+    /// Merge a delegated tool lifecycle update instead of adding a second row.
+    fn attach_subagent_step(&mut self, parent_id: &str, step: &SubagentStep) {
+        let Some(Block::Subagent { steps, .. }) = self
+            .blocks
+            .iter_mut()
+            .rev()
+            .find(|block| matches!(block, Block::Subagent { id, .. } if id == parent_id))
+        else {
+            return;
+        };
+        if let Some(existing) = steps.iter_mut().find(|existing| existing.id == step.id) {
+            let text = (!step.text.is_empty()).then(|| step.text.clone());
+            existing.kind = step.kind;
+            existing.status = step.status;
+            if let Some(text) = text {
+                existing.text = text;
+            }
+            return;
+        }
+        steps.push(step.clone());
+        if steps.len() > Self::MAX_SUBAGENT_STEPS {
+            steps.remove(0);
+        }
+    }
+
+    /// Settle the delegated row without allowing its report to rename it.
+    fn finish_subagent(&mut self, id: &str, summary: Option<String>, failed: bool) {
+        let Some(Block::Subagent {
+            summary: output,
+            is_error,
+            ..
+        }) = self
+            .blocks
+            .iter_mut()
+            .rev()
+            .find(|block| matches!(block, Block::Subagent { id: parent, .. } if parent == id))
+        else {
+            return;
+        };
+        // `Some("")` is a completed run whose provider had no report. Keeping
+        // completion separate from visible text prevents the activity line
+        // from claiming the child is still working forever.
+        *output = Some(summary.unwrap_or_default());
+        *is_error = failed;
     }
 }
 
@@ -561,6 +645,7 @@ pub fn head_of(text: &str, limit: usize) -> String {
 mod tests {
     use super::*;
     use ginka_protocol::event::ActivityItem;
+    use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;
 
     fn user(seq: u64, text: &str) -> TranscriptEntry {
@@ -755,6 +840,143 @@ mod tests {
                 is_error: false,
             }
         );
+    }
+
+    #[test]
+    fn subagent_steps_merge_by_id_and_finish_under_one_parent_row() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::SubagentStarted {
+                    id: "agent-1".into(),
+                    title: "Review correctness".into(),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::SubagentStep {
+                    parent_id: "agent-1".into(),
+                    step: SubagentStep::new("read-1", SubagentStepKind::Tool, "Read src/state.rs")
+                        .with_status(SubagentStepStatus::Running),
+                },
+            ),
+            agent(
+                3,
+                AgentEvent::SubagentStep {
+                    parent_id: "agent-1".into(),
+                    step: SubagentStep::new("read-1", SubagentStepKind::Tool, "")
+                        .with_status(SubagentStepStatus::Completed),
+                },
+            ),
+            agent(
+                4,
+                AgentEvent::SubagentFinished {
+                    id: "agent-1".into(),
+                    summary: Some("No regressions found.".into()),
+                    failed: false,
+                },
+            ),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            [Block::Subagent {
+                id: "agent-1".into(),
+                title: "Review correctness".into(),
+                steps: vec![
+                    SubagentStep::new("read-1", SubagentStepKind::Tool, "Read src/state.rs",)
+                        .with_status(SubagentStepStatus::Completed)
+                ],
+                summary: Some("No regressions found.".into()),
+                is_error: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn orphan_subagent_updates_are_dropped() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::SubagentStep {
+                    parent_id: "missing-agent".into(),
+                    step: SubagentStep::new(
+                        "message-1:text",
+                        SubagentStepKind::Message,
+                        "private child output",
+                    ),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::SubagentFinished {
+                    id: "missing-agent".into(),
+                    summary: Some("private child report".into()),
+                    failed: false,
+                },
+            ),
+        ]);
+
+        assert!(transcript.blocks().is_empty());
+    }
+
+    #[test]
+    fn a_subagent_trail_keeps_only_its_newest_bounded_steps() {
+        let mut entries = vec![agent(
+            1,
+            AgentEvent::SubagentStarted {
+                id: "agent-1".into(),
+                title: "Review correctness".into(),
+            },
+        )];
+        entries.extend((0..=Transcript::MAX_SUBAGENT_STEPS).map(|index| {
+            agent(
+                index as u64 + 2,
+                AgentEvent::SubagentStep {
+                    parent_id: "agent-1".into(),
+                    step: SubagentStep::new(
+                        format!("step-{index}"),
+                        SubagentStepKind::Message,
+                        format!("step {index}"),
+                    ),
+                },
+            )
+        }));
+
+        let mut transcript = Transcript::new();
+        transcript.extend(&entries);
+        let Block::Subagent { steps, .. } = &transcript.blocks()[0] else {
+            panic!("expected a delegated-agent row");
+        };
+        assert_eq!(steps.len(), Transcript::MAX_SUBAGENT_STEPS);
+        assert_eq!(steps.first().unwrap().id, "step-1");
+        assert_eq!(steps.last().unwrap().id, "step-300");
+    }
+
+    #[test]
+    fn finishing_without_a_report_stops_the_running_activity() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::SubagentStarted {
+                    id: "agent-1".into(),
+                    title: "Review correctness".into(),
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::SubagentFinished {
+                    id: "agent-1".into(),
+                    summary: None,
+                    failed: false,
+                },
+            ),
+        ]);
+
+        assert_eq!(transcript.activity(), Activity::Thinking);
     }
 
     #[test]
