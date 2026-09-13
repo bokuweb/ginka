@@ -33,7 +33,7 @@ use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
-    button::Button,
+    button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
@@ -50,7 +50,8 @@ actions!(
         ToggleSidebar,
         ToggleRightPanel,
         ToggleTerminalDock,
-        TogglePalette
+        TogglePalette,
+        FindTranscript
     ]
 );
 
@@ -108,6 +109,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-f", FindTranscript, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-f", FindTranscript, Some(CONTEXT)),
     ]);
 }
 
@@ -149,6 +154,16 @@ struct ForkMenu {
     error: Option<String>,
 }
 
+/// Find-in-page state for the open persisted conversation.
+struct TranscriptSearch {
+    query: Entity<InputState>,
+    typed: String,
+    matches: Vec<ginka_protocol::model::SessionMatch>,
+    chosen: Option<usize>,
+    loading: bool,
+    error: Option<String>,
+}
+
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
@@ -166,6 +181,8 @@ pub struct Shell {
     /// Where a chat that has no workspace yet would run. `None` means no
     /// project, which is a scratch worktree rather than nowhere.
     target_project: Option<ProjectName>,
+    /// A project-search hit to open after the sidebar finishes switching workspaces.
+    pending_file_open: Option<(WorkspaceId, String)>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -173,6 +190,8 @@ pub struct Shell {
     /// Which session the transcript belongs to, so switching rows replaces it
     /// rather than appending one conversation to another.
     transcript_of: Option<SessionId>,
+    /// Present while the reader is finding text in the open conversation.
+    transcript_search: Option<TranscriptSearch>,
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
@@ -347,6 +366,12 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenFile(path) => {
                     this.open_file(path.clone(), false, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenWorkspaceFile { workspace, path } => {
+                    this.open_workspace_file(workspace.clone(), path.clone(), window, cx)
+                }
+                crate::surfaces::SurfaceEvent::OpenDefinition { workspace, target } => {
+                    this.open_definition(workspace, target.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::OpenFileFromHistory(path) => {
                     this.open_file(path.clone(), true, window, cx)
                 }
@@ -409,6 +434,7 @@ impl Shell {
                         // A different workspace is a different conversation.
                         this.transcript = Transcript::new();
                         this.transcript_of = None;
+                        this.transcript_search = None;
                         this.session_state = None;
                         this.submitted = false;
                         this.transcript_follows = true;
@@ -439,6 +465,19 @@ impl Shell {
                             == Some(ginka_ui::surface::Surface::Skills)
                         {
                             this.refresh_skills(cx);
+                        }
+                        if changed_workspace
+                            && this.surfaces.read(cx).open_surface()
+                                == Some(ginka_ui::surface::Surface::Files)
+                        {
+                            this.find_files(String::new(), cx);
+                        }
+                        if let Some((workspace, path)) = this.pending_file_open.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.open_file(path, false, window, cx);
+                            } else {
+                                this.pending_file_open = Some((workspace, path));
+                            }
                         }
                         cx.notify();
                     }
@@ -688,6 +727,7 @@ impl Shell {
             link,
             transcript: Transcript::new(),
             transcript_of: None,
+            transcript_search: None,
             agents: Vec::new(),
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -712,6 +752,7 @@ impl Shell {
             add_project: None,
             projects: Vec::new(),
             target_project: None,
+            pending_file_open: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -887,6 +928,7 @@ impl Shell {
             .update(cx, |surfaces, cx| surfaces.clear_file(cx));
         self.transcript = Transcript::new();
         self.transcript_of = None;
+        self.transcript_search = None;
         self.session_state = None;
         self.submitted = false;
         self.transcript_follows = true;
@@ -1010,6 +1052,7 @@ impl Shell {
                     .unwrap_or(0),
             );
         }
+        self.scroll_to_search_hit();
         cx.notify();
     }
 
@@ -1212,8 +1255,52 @@ impl Shell {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
+        let scope = self.surfaces.read(cx).file_search_scope();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let target = scope.target(workspace.clone(), project);
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        if query.trim().is_empty() {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_file_tree(workspace.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_workspace = workspace.clone();
+                let (files, truncated) = cx
+                    .background_spawn(async move { link.file_tree(&workspace).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_tree(requested_workspace, files, truncated, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if let ginka_ui::file_search::FileSearchTarget::Project(project) = target {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_project_search(project.clone(), query.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_project = project.clone();
+                let requested_query = query.clone();
+                let (files, matches) = cx
+                    .background_spawn(async move { link.search_project(&project, &query).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_project_matches(
+                        requested_project,
+                        requested_query,
+                        files,
+                        matches,
+                        cx,
+                    );
+                });
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |_, cx| {
             let (found, matched) = cx
                 .background_spawn(async move {
@@ -1230,6 +1317,23 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Open a project-search hit, switching the centre column when necessary.
+    fn open_workspace_file(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+            self.open_file(path, false, window, cx);
+            return;
+        }
+        self.pending_file_open = Some((workspace.clone(), path));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
     }
 
     /// Read a file and show it in the files surface.
@@ -1252,6 +1356,47 @@ impl Shell {
         let surfaces = self.surfaces.clone();
         let should_read = surfaces.update(cx, |surfaces, cx| {
             surfaces.begin_file_open(workspace.clone(), path.clone(), from_history, cx)
+        });
+        if !should_read {
+            return;
+        }
+        let read_workspace = workspace.clone();
+        let read_path = path.clone();
+        cx.spawn_in(window, async move |_, cx| {
+            let file = cx
+                .background_spawn(async move { link.read_file(&read_workspace, &read_path).await })
+                .await;
+            let _ = surfaces.update_in(cx, |surfaces, window, cx| {
+                surfaces.set_file(workspace, worktree, path, file, window, cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Open a language-server definition in this workspace and select it.
+    fn open_definition(
+        &mut self,
+        source_workspace: &WorkspaceId,
+        target: ginka_ui::editor::DefinitionTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if &workspace != source_workspace {
+            return;
+        }
+        let worktree = self
+            .session
+            .as_ref()
+            .map(|row| row.path.clone())
+            .expect("the selected session has a worktree");
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let path = target.path.clone();
+        let should_read = surfaces.update(cx, |surfaces, cx| {
+            surfaces.begin_definition_open(workspace.clone(), target, window, cx)
         });
         if !should_read {
             return;
@@ -1796,6 +1941,7 @@ impl Shell {
                                 }
                                 this.transcript = Transcript::new();
                                 this.transcript_of = Some(session.id);
+                                this.transcript_search = None;
                                 this.session_state = Some(session.state);
                                 cx.notify();
                             })
@@ -1903,6 +2049,139 @@ impl Shell {
         self.toggle(Panel::RightPanel, cx);
     }
 
+    /// Open find-in-page for the persisted conversation on screen.
+    fn on_find_transcript(
+        &mut self,
+        _: &FindTranscript,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .session
+            .as_ref()
+            .and_then(|row| row.session.as_ref())
+            .is_none()
+        {
+            return;
+        }
+        if let Some(search) = self.transcript_search.as_ref() {
+            search.query.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("transcript.search.placeholder").to_string())
+        });
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| match event {
+            InputEvent::Change => this.search_transcript(query.read(cx).value().to_string(), cx),
+            InputEvent::PressEnter { shift, .. } => this.step_transcript_search(
+                if *shift {
+                    ginka_ui::search::Direction::Previous
+                } else {
+                    ginka_ui::search::Direction::Next
+                },
+                cx,
+            ),
+            _ => {}
+        })
+        .detach();
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        self.transcript_search = Some(TranscriptSearch {
+            query,
+            typed: String::new(),
+            matches: Vec::new(),
+            chosen: None,
+            loading: false,
+            error: None,
+        });
+        cx.notify();
+    }
+
+    /// Ask the daemon for matches, discarding a reply after the query moved on.
+    fn search_transcript(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(search) = self.transcript_search.as_mut() else {
+            return;
+        };
+        search.typed = query.clone();
+        search.matches.clear();
+        search.chosen = None;
+        search.error = None;
+        if query.trim().is_empty() {
+            search.loading = false;
+            cx.notify();
+            return;
+        }
+        let Some((session, workspace)) = self.session.as_ref().and_then(|row| {
+            row.session
+                .as_ref()
+                .map(|session| (session.clone(), row.workspace.clone()))
+        }) else {
+            return;
+        };
+        search.loading = true;
+        cx.notify();
+        let link = self.link.clone();
+        let expected_query = query.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.search_sessions(workspace, query).await })
+                .await;
+            this.update(cx, |this, cx| {
+                let still_open =
+                    this.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&session);
+                let Some(search) = this.transcript_search.as_mut() else {
+                    return;
+                };
+                if !still_open || search.typed != expected_query {
+                    return;
+                }
+                search.loading = false;
+                match result {
+                    Ok(matches) => {
+                        search.matches = ginka_ui::search::matches_for_session(matches, &session);
+                        search.chosen = (!search.matches.is_empty()).then_some(0);
+                        search.error = None;
+                    }
+                    Err(error) => search.error = Some(error),
+                }
+                this.scroll_to_search_hit();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move to another match and keep the selected block in view.
+    fn step_transcript_search(
+        &mut self,
+        direction: ginka_ui::search::Direction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.transcript_search.as_mut() else {
+            return;
+        };
+        search.chosen = ginka_ui::search::step(search.matches.len(), search.chosen, direction);
+        self.scroll_to_search_hit();
+        cx.notify();
+    }
+
+    /// Scroll the persisted match's folded transcript block into view.
+    fn scroll_to_search_hit(&mut self) {
+        let Some(seq) = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|index| search.matches.get(index))
+                .map(|found| found.seq)
+        }) else {
+            return;
+        };
+        if let Some(index) = self.transcript.block_index_for_seq(seq) {
+            self.transcript_follows = false;
+            self.transcript_scroll.scroll_to_top_of_item(index);
+        }
+    }
+
     /// Open the palette, or close it if it is already open.
     fn on_toggle_palette(
         &mut self,
@@ -1952,6 +2231,10 @@ impl Shell {
                 &self.layout,
                 &rows,
                 self.session.as_ref().map(|row| row.indexed),
+                self.session
+                    .as_ref()
+                    .and_then(|row| row.session.as_ref())
+                    .is_some(),
             ),
             &palette.typed,
         )
@@ -2013,6 +2296,7 @@ impl Shell {
                 self.open_terminal(window, cx);
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
+            Command::FindTranscript => self.on_find_transcript(&FindTranscript, window, cx),
             Command::Switch(workspace) => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
@@ -2234,8 +2518,14 @@ impl Shell {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
-        v_flex()
-            .id("transcript")
+        let hit = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
+        });
+        let scroller = v_flex()
+            .id("transcript-scroll")
             .flex_1()
             .px_8()
             .py_6()
@@ -2244,41 +2534,150 @@ impl Shell {
             // The gesture, not the resulting offset: an answer that grows
             // moves the foot away from the reader too.
             .on_scroll_wheel(cx.listener(|this, _, _, _| this.transcript_scrolled()))
+            .children({
+                let last = self.transcript.blocks().len().saturating_sub(1);
+                self.transcript
+                    .blocks()
+                    .iter()
+                    .enumerate()
+                    .map(|(index, block)| {
+                        let block = match block {
+                            // Only the tail is still being written; every
+                            // block before it is finished text.
+                            TranscriptBlock::Assistant { text } if index == last => self.block(
+                                index,
+                                &TranscriptBlock::Assistant {
+                                    text: self.reveal.shown(text).to_string(),
+                                },
+                                cx,
+                            ),
+                            block => self.block(index, block, cx),
+                        };
+                        // Each block is a direct child of the scroller so its
+                        // persisted sequence can be brought into view by ⌘F.
+                        div()
+                            .w_full()
+                            .max_w(px(TRANSCRIPT_MEASURE))
+                            .mx_auto()
+                            .mb_5()
+                            .when(hit == Some(index), |this| {
+                                this.rounded(px(Tokens::global(cx).radius.card))
+                                    .bg(Tokens::global(cx).colors().row_active())
+                            })
+                            .child(block)
+                    })
+                    .collect::<Vec<_>>()
+            })
             .child(
-                // One column for the whole conversation, centred, at the
-                // measure from docs/ui.md §3.3: long-form text stays readable
-                // because the column stops growing, not because the window
-                // does. Centred rather than pinned left because the composer
-                // sits under it at the same width, and a conversation stranded
-                // against one edge of a wide window reads as a mistake.
-                v_flex()
+                div()
                     .w_full()
                     .max_w(px(TRANSCRIPT_MEASURE))
                     .mx_auto()
-                    .gap_5()
-                    .children({
-                        let last = self.transcript.blocks().len().saturating_sub(1);
-                        self.transcript
-                            .blocks()
-                            .iter()
-                            .enumerate()
-                            .map(|(index, block)| match block {
-                                // Only the tail is still being written; every
-                                // block before it is finished text.
-                                TranscriptBlock::Assistant { text } if index == last => self.block(
-                                    index,
-                                    &TranscriptBlock::Assistant {
-                                        text: self.reveal.shown(text).to_string(),
-                                    },
-                                    cx,
-                                ),
-                                block => self.block(index, block, cx),
-                            })
-                            .collect::<Vec<_>>()
-                    })
                     .children(self.activity_line(cx)),
-            )
+            );
+        v_flex()
+            .id("transcript")
+            .flex_1()
+            .min_h_0()
+            .children(self.transcript_search_bar(cx))
+            .child(scroller)
             .into_any_element()
+    }
+
+    /// Find-in-page controls above the conversation.
+    fn transcript_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.transcript_search.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let count = match (&search.error, search.loading, search.chosen) {
+            (Some(_), _, _) => rust_i18n::t!("transcript.search.failed").to_string(),
+            (_, true, _) => rust_i18n::t!("transcript.search.searching").to_string(),
+            (_, false, Some(chosen)) => format!("{} / {}", chosen + 1, search.matches.len()),
+            _ => format!("0 / {}", search.matches.len()),
+        };
+        let excerpt = search
+            .chosen
+            .and_then(|chosen| search.matches.get(chosen))
+            .map(|found| found.excerpt.clone())
+            .or_else(|| search.error.clone());
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.transcript_search = None;
+                        cx.notify();
+                    }
+                }))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_1()
+                        .items_center()
+                        .child(div().flex_1().child(Input::new(&search.query)))
+                        .child(
+                            div()
+                                .min_w(px(58.))
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(count),
+                        )
+                        .child(
+                            Button::new("previous-transcript-match")
+                                .ghost()
+                                .disabled(search.matches.is_empty())
+                                .tooltip(rust_i18n::t!("transcript.search.previous").to_string())
+                                .child(Icon::new(IconName::ArrowUp).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.step_transcript_search(
+                                        ginka_ui::search::Direction::Previous,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("next-transcript-match")
+                                .ghost()
+                                .disabled(search.matches.is_empty())
+                                .tooltip(rust_i18n::t!("transcript.search.next").to_string())
+                                .child(Icon::new(IconName::ArrowDown).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.step_transcript_search(
+                                        ginka_ui::search::Direction::Next,
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("close-transcript-search")
+                                .ghost()
+                                .tooltip(rust_i18n::t!("transcript.search.close").to_string())
+                                .child(Icon::new(IconName::Close).size_3())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.transcript_search = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .children(excerpt.map(|excerpt| {
+                    div()
+                        .w_full()
+                        .truncate()
+                        .text_xs()
+                        .text_color(if search.error.is_some() {
+                            tokens.colors().status_error
+                        } else {
+                            tokens.colors().text_secondary
+                        })
+                        .child(excerpt)
+                }))
+                .into_any_element(),
+        )
     }
 
     /// The home screen: what the centre column asks before there is a
@@ -2795,6 +3194,7 @@ impl Shell {
                     this.update(cx, |this, cx| {
                         this.transcript = Transcript::new();
                         this.transcript_of = None;
+                        this.transcript_search = None;
                         this.session_state = Some(fork.state);
                         this.checkpoints.clear();
                         this.rewinding = None;
@@ -6134,6 +6534,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_find_transcript))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.

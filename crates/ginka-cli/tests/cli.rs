@@ -158,6 +158,26 @@ fn a_project_registered_through_the_daemon_is_visible_to_the_next_command() {
 }
 
 #[test]
+fn a_project_search_finds_paths_and_content_across_its_worktrees() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "second"]);
+
+    std::fs::write(repository.join("needle-main.txt"), "path only\n").unwrap();
+    std::fs::write(repository.join("README.md"), "needle on main\n").unwrap();
+    let second = home.root().join("worktrees/comet/second");
+    std::fs::write(second.join("needle-second.txt"), "path only\n").unwrap();
+    std::fs::write(second.join("README.md"), "needle on second\n").unwrap();
+
+    let found = home.ok(&["project", "search", "comet", "needle", "--limit", "2"]);
+    assert!(found.contains("comet/main:needle-main.txt"), "{found}");
+    assert!(found.contains("comet/second:needle-second.txt"), "{found}");
+    assert!(found.contains("comet/main:README.md:1"), "{found}");
+    assert!(found.contains("comet/second:README.md:1"), "{found}");
+}
+
+#[test]
 fn a_workspace_created_on_the_command_line_is_a_real_worktree() {
     let home = Home::new();
     let repository = home.repository("comet");

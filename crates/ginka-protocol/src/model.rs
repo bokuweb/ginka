@@ -825,6 +825,33 @@ pub struct ContentMatch {
     pub text: String,
 }
 
+/// One content-search hit together with the worktree that contains it.
+///
+/// Project-wide search keeps paths relative to their own worktree, so the
+/// workspace id is the missing part a client needs to display or open one.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceContentMatch {
+    /// Immutable workspace containing the matched file.
+    pub workspace: WorkspaceId,
+    /// Path relative to that workspace's worktree root.
+    pub path: String,
+    /// 1-based line number, as an editor counts it.
+    pub line: u32,
+    /// The bounded source line containing the literal query.
+    pub text: String,
+}
+
+/// One fuzzy path-search hit together with the worktree that contains it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFileMatch {
+    /// Immutable workspace containing the file.
+    pub workspace: WorkspaceId,
+    /// Path relative to that workspace's worktree root.
+    pub path: String,
+}
+
 /// A file, as the panel that shows it needs it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

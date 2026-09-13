@@ -4,6 +4,70 @@ use ginka_protocol::model::FileContent;
 use std::ops::Range;
 use std::path::Path;
 
+/// A language-server definition that can be opened inside the current worktree.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DefinitionTarget {
+    /// Slash-separated path relative to the worktree root.
+    pub path: String,
+    /// UTF-16 range reported by the language server.
+    pub range: lsp_types::Range,
+}
+
+/// Resolve a language-server file URI to a safe path inside canonical `worktree`.
+///
+/// Definitions in dependencies or virtual documents deliberately stay with the
+/// language-server integration instead of escaping the workspace file API.
+pub fn definition_target(
+    worktree: &Path,
+    uri: &str,
+    range: lsp_types::Range,
+) -> Option<DefinitionTarget> {
+    let absolute = url::Url::parse(uri).ok()?.to_file_path().ok()?;
+    let relative = absolute.strip_prefix(worktree).ok()?;
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    let path = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(DefinitionTarget { path, range })
+}
+
+/// Convert one UTF-16 language-server range to UTF-8 editor byte offsets.
+///
+/// Invalid positions are clamped to the nearest character boundary so a stale
+/// server answer cannot create an invalid editor selection.
+pub fn definition_selection(text: &str, range: lsp_types::Range) -> Range<usize> {
+    let start = lsp_position_offset(text, range.start);
+    let end = lsp_position_offset(text, range.end);
+    start.min(end)..start.max(end)
+}
+
+fn lsp_position_offset(text: &str, position: lsp_types::Position) -> usize {
+    let Some(line) = text.split('\n').nth(position.line as usize) else {
+        return text.len();
+    };
+    let line_start = text
+        .split('\n')
+        .take(position.line as usize)
+        .map(|line| line.len() + 1)
+        .sum::<usize>();
+    let mut utf16 = 0_u32;
+    for (byte, character) in line.char_indices() {
+        if utf16 >= position.character {
+            return line_start + byte;
+        }
+        let next = utf16 + character.len_utf16() as u32;
+        if next > position.character {
+            return line_start + byte;
+        }
+        utf16 = next;
+    }
+    line_start + line.len()
+}
+
 /// Whether the file surface can save its current editor contents.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SaveState {
@@ -583,5 +647,64 @@ mod tests {
 
         assert_eq!(tabs.go_back().as_deref(), Some("one.rs"));
         assert_eq!(tabs.go_back(), None);
+    }
+
+    #[test]
+    fn a_file_uri_inside_the_worktree_becomes_a_relative_definition_target() {
+        let root = Path::new("/tmp/a workspace");
+        let target = definition_target(
+            root,
+            "file:///tmp/a%20workspace/src/lib.rs",
+            lsp_types::Range::new(
+                lsp_types::Position::new(4, 2),
+                lsp_types::Position::new(4, 8),
+            ),
+        )
+        .expect("workspace target");
+
+        assert_eq!(target.path, "src/lib.rs");
+        assert_eq!(target.range.start, lsp_types::Position::new(4, 2));
+        assert_eq!(target.range.end, lsp_types::Position::new(4, 8));
+    }
+
+    #[test]
+    fn definitions_outside_the_worktree_or_without_a_file_uri_are_refused() {
+        let root = Path::new("/tmp/worktree");
+        let range = lsp_types::Range::default();
+
+        assert_eq!(
+            definition_target(root, "file:///tmp/other/src/lib.rs", range),
+            None
+        );
+        assert_eq!(
+            definition_target(root, "https://example.com/lib.rs", range),
+            None
+        );
+    }
+
+    #[test]
+    fn a_definition_range_counts_utf16_but_selects_utf8_bytes() {
+        let text = "zero\n中a🙂b\nlast";
+        let range = lsp_types::Range::new(
+            lsp_types::Position::new(1, 1),
+            lsp_types::Position::new(1, 4),
+        );
+
+        assert_eq!(definition_selection(text, range), 8..13);
+        assert_eq!(
+            &text[definition_selection(text, range)],
+            "a🙂",
+            "one BMP character and one surrogate pair precede the end"
+        );
+    }
+
+    #[test]
+    fn a_stale_reversed_definition_range_is_normalized() {
+        let range = lsp_types::Range::new(
+            lsp_types::Position::new(0, 4),
+            lsp_types::Position::new(0, 1),
+        );
+
+        assert_eq!(definition_selection("abcdef", range), 1..4);
     }
 }
