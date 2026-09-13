@@ -229,6 +229,9 @@ enum ProjectCommand {
     Add {
         /// Defaults to the current directory.
         path: Option<PathBuf>,
+        /// Reader-facing name; the stable project key still follows the folder.
+        #[arg(long)]
+        label: Option<String>,
     },
     /// List registered projects.
     List,
@@ -666,11 +669,12 @@ async fn connect(paths: &Paths) -> Result<Client> {
 /// Turn a subcommand into the one request that carries it out.
 fn request_for(command: Command) -> Result<Request> {
     Ok(match command {
-        Command::Project(ProjectCommand::Add { path }) => Request::AddProject {
+        Command::Project(ProjectCommand::Add { path, label }) => Request::AddProject {
             path: match path {
                 Some(path) => path,
                 None => std::env::current_dir()?,
             },
+            label,
         },
         Command::Project(ProjectCommand::List) => Request::ListProjects,
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
@@ -1798,6 +1802,27 @@ mod ginka_cli_format {
                     .and_then(|detail| detail.lines().next())
                     .unwrap_or("");
                 format!("[result]{marker} {first}")
+            }
+            AgentEvent::SubagentStarted { title, .. } => {
+                format!("[subagent] {title}")
+            }
+            AgentEvent::SubagentStep { step, .. } => {
+                let marker = match step.status {
+                    Some(ginka_protocol::SubagentStepStatus::Running) => "…",
+                    Some(ginka_protocol::SubagentStepStatus::Completed) => "✓",
+                    Some(ginka_protocol::SubagentStepStatus::Failed) => "!",
+                    None => "·",
+                };
+                format!("[subagent {marker}] {}", step.text)
+            }
+            AgentEvent::SubagentFinished {
+                summary, failed, ..
+            } => {
+                let marker = if *failed { "!" } else { "✓" };
+                format!(
+                    "[subagent {marker}] {}",
+                    summary.as_deref().unwrap_or_default()
+                )
             }
             AgentEvent::AskUser { question, .. } => format!("? {question}"),
             AgentEvent::PlanProposal { plan, .. } => format!("plan: {plan}"),

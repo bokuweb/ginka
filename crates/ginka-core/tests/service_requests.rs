@@ -68,7 +68,10 @@ impl Fixture {
     fn with_project(&mut self) -> ProjectName {
         let root = self.work.path().join("comet");
         support::repository(&root);
-        match self.ask(Request::AddProject { path: root }) {
+        match self.ask(Request::AddProject {
+            path: root,
+            label: None,
+        }) {
             Response::Project { project } => project.name,
             other => panic!("expected a project, got {other:?}"),
         }
@@ -107,6 +110,24 @@ fn adding_a_project_registers_it_and_announces_the_change() {
         Response::Projects { projects } => assert_eq!(projects.len(), 1),
         other => panic!("expected projects, got {other:?}"),
     }
+}
+
+#[test]
+fn adding_a_project_keeps_the_display_name_across_the_service_boundary() {
+    let mut fixture = Fixture::new();
+    let root = fixture.work.path().join("client-checkout");
+    support::repository(&root);
+
+    let project = match fixture.ask(Request::AddProject {
+        path: root,
+        label: Some("Comet".into()),
+    }) {
+        Response::Project { project } => project,
+        other => panic!("expected a project, got {other:?}"),
+    };
+
+    assert_eq!(project.name.0, "client-checkout");
+    assert_eq!(project.label.as_deref(), Some("Comet"));
 }
 
 #[test]
@@ -434,6 +455,7 @@ fn a_plain_folder_has_one_workspace_an_agent_can_run_in() {
     std::fs::create_dir_all(&notes).unwrap();
     let project = match fixture.ask(Request::AddProject {
         path: notes.clone(),
+        label: None,
     }) {
         Response::Project { project } => project,
         other => panic!("expected a project, got {other:?}"),

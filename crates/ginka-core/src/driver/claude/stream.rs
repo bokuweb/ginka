@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use crate::driver::{ActivityItem, AgentEvent, DriverError};
 use ginka_protocol::event::Usage;
 use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
+use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
 
 /// Reads a session's lines, holding the little state pairing needs.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -26,6 +27,10 @@ pub struct ClaudeStream {
     /// Calls waiting for their result, so a result can be rendered as the row
     /// it belongs to rather than as an orphan with no title.
     pending: HashMap<String, ActivityItem>,
+    /// Delegated-agent calls waiting for the report returned to their parent.
+    subagents: HashMap<String, String>,
+    /// Tool steps inside delegated runs, keyed by the child's tool id.
+    subagent_tools: HashMap<String, String>,
     /// Set once this turn has reported hitting a rate limit: the CLI says it
     /// in the assistant's text and again in the result, and one wall is one
     /// reading.
@@ -94,6 +99,10 @@ impl ClaudeStream {
                     field: "content",
                 })?;
 
+        if let Some(parent_id) = string_at(message, "parent_tool_use_id") {
+            return Ok(self.subagent_assistant(&parent_id, body, content));
+        }
+
         let mut events = Vec::new();
         for block in content {
             let kind = block
@@ -128,14 +137,25 @@ impl ClaudeStream {
                 }),
                 "tool_use" => {
                     let id = string_at(block, "id");
+                    let tool = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
                     let activity = ActivityItem::from_tool(
                         id.clone(),
-                        block
-                            .get("name")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default(),
+                        tool,
                         block.get("input").unwrap_or(&Value::Null),
                     );
+                    if is_subagent_tool(tool)
+                        && let Some(id) = id
+                    {
+                        self.subagents.insert(id.clone(), activity.title.clone());
+                        events.push(AgentEvent::SubagentStarted {
+                            id,
+                            title: activity.title,
+                        });
+                        continue;
+                    }
                     if let Some(id) = id {
                         self.pending.insert(id, activity.clone());
                     }
@@ -153,6 +173,67 @@ impl ClaudeStream {
         Ok(events)
     }
 
+    /// Normalize a child message beneath the delegated run that owns it.
+    fn subagent_assistant(
+        &mut self,
+        parent_id: &str,
+        body: &Value,
+        content: &[Value],
+    ) -> Vec<AgentEvent> {
+        // A resumed or truncated stream can expose a child message without
+        // the Agent call that owns it. Promoting that private exchange into
+        // the parent transcript would both lose its hierarchy and leak noise.
+        if !self.subagents.contains_key(parent_id) {
+            return Vec::new();
+        }
+        let message_id = string_at(body, "id").unwrap_or_else(|| parent_id.to_string());
+        let mut events = Vec::new();
+        for block in content {
+            let kind = block.get("type").and_then(Value::as_str);
+            let (step_kind, field) = match kind {
+                Some("thinking") => (SubagentStepKind::Reasoning, "thinking"),
+                Some("text") => (SubagentStepKind::Message, "text"),
+                Some("tool_use") => {
+                    let Some(id) = string_at(block, "id") else {
+                        continue;
+                    };
+                    let tool = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let activity = ActivityItem::from_tool(
+                        Some(id.clone()),
+                        tool,
+                        block.get("input").unwrap_or(&Value::Null),
+                    );
+                    self.subagent_tools
+                        .insert(id.clone(), parent_id.to_string());
+                    events.push(AgentEvent::SubagentStep {
+                        parent_id: parent_id.to_string(),
+                        step: SubagentStep::new(id, SubagentStepKind::Tool, activity.title)
+                            .with_status(SubagentStepStatus::Running),
+                    });
+                    continue;
+                }
+                _ => continue,
+            };
+            let Some(text) = block.get(field).and_then(Value::as_str) else {
+                continue;
+            };
+            if text.trim().is_empty() {
+                continue;
+            }
+            events.push(AgentEvent::SubagentStep {
+                parent_id: parent_id.to_string(),
+                step: SubagentStep::new(format!("{message_id}:{field}"), step_kind, text),
+            });
+        }
+        if let Some(usage) = usage_of(body) {
+            events.push(AgentEvent::Usage { usage });
+        }
+        events
+    }
+
     fn user(&mut self, message: &Value) -> Result<Vec<AgentEvent>, DriverError> {
         let content = message
             .get("message")
@@ -164,11 +245,42 @@ impl ClaudeStream {
             })?;
 
         let mut events = Vec::new();
+        let parent_id = string_at(message, "parent_tool_use_id");
         for block in content {
             if block.get("type").and_then(Value::as_str) != Some("tool_result") {
                 continue;
             }
             let id = string_at(block, "tool_use_id");
+            let failed = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if let Some(id) = id.as_ref()
+                && let Some(owner) = self.subagent_tools.remove(id)
+            {
+                events.push(AgentEvent::SubagentStep {
+                    parent_id: parent_id.clone().unwrap_or(owner),
+                    step: SubagentStep::new(id, SubagentStepKind::Tool, "").with_status(
+                        if failed {
+                            SubagentStepStatus::Failed
+                        } else {
+                            SubagentStepStatus::Completed
+                        },
+                    ),
+                });
+                continue;
+            }
+            if let Some(id) = id.as_ref()
+                && self.subagents.remove(id).is_some()
+            {
+                let summary = bounded_detail(&flatten_content(block.get("content")));
+                events.push(AgentEvent::SubagentFinished {
+                    id: id.clone(),
+                    summary: (!summary.is_empty()).then_some(summary),
+                    failed,
+                });
+                continue;
+            }
             // A resumed session replays results whose calls happened before we
             // attached, so an unmatched result still becomes a row.
             let mut activity = id
@@ -176,22 +288,13 @@ impl ClaudeStream {
                 .and_then(|id| self.pending.remove(id))
                 .unwrap_or_else(|| ActivityItem::from_tool(id.clone(), "tool", &Value::Null));
 
-            activity.complete_with(
-                &flatten_content(block.get("content")),
-                block
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false),
-            );
+            activity.complete_with(&flatten_content(block.get("content")), failed);
             events.push(AgentEvent::ToolResult { activity });
         }
         Ok(events)
     }
 
     fn result(&mut self, message: &Value) -> Vec<AgentEvent> {
-        // Whatever was still outstanding will never be answered now.
-        self.pending.clear();
-
         let mut events = Vec::new();
         if let Some(usage) = usage_of(message) {
             events.push(AgentEvent::Usage { usage });
@@ -201,6 +304,23 @@ impl ClaudeStream {
             .get("is_error")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // Whatever was still outstanding will never be answered now. Settle
+        // delegated rows explicitly before the turn boundary so replay never
+        // leaves a child claiming it is still working after its process ended.
+        let mut unfinished: Vec<_> = self.subagents.drain().map(|(id, _)| id).collect();
+        unfinished.sort();
+        events.extend(
+            unfinished
+                .into_iter()
+                .map(|id| AgentEvent::SubagentFinished {
+                    id,
+                    summary: None,
+                    failed,
+                }),
+        );
+        self.pending.clear();
+        self.subagent_tools.clear();
+
         let text = string_at(message, "result");
         let subtype = string_at(message, "subtype").unwrap_or_default();
 
@@ -324,6 +444,21 @@ fn limit_reached(text: &str) -> Option<PlanUsage> {
 
 fn string_at(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Names Claude Code uses for a delegated-agent call.
+fn is_subagent_tool(tool: &str) -> bool {
+    matches!(
+        tool.rsplit_once("__").map_or(tool, |(_, name)| name),
+        "Agent" | "Task"
+    )
+}
+
+/// Bound a final delegated-agent report by the same rule as ordinary tools.
+fn bounded_detail(text: &str) -> String {
+    let mut activity = ActivityItem::from_tool(None, "agent", &Value::Null);
+    activity.complete_with(text, false);
+    activity.detail.unwrap_or_default()
 }
 
 fn usage_of(value: &Value) -> Option<Usage> {

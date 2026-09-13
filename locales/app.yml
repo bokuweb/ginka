@@ -8,6 +8,18 @@ _version: 2
 sidebar.projects:
   en: Projects
   ja: プロジェクト
+sidebar.workspace:
+  en: Workspace
+  ja: ワークスペース
+sidebar.sessions.empty:
+  en: No sessions in this project
+  ja: このプロジェクトにはセッションがありません
+sidebar.sessions.search:
+  en: Search conversations…
+  ja: 会話を検索…
+sidebar.sessions.no_match:
+  en: No conversations match this search
+  ja: 一致する会話はありません
 sidebar.archived:
   en: Archived
   ja: アーカイブ
@@ -29,6 +41,40 @@ sidebar.show_more:
 sidebar.footer.device:
   en: Local
   ja: ローカル
+
+project.add.title:
+  en: Create a project
+  ja: プロジェクトを作成
+project.add.name.placeholder:
+  en: Project name
+  ja: プロジェクト名
+project.add.name.required:
+  en: Enter a project name
+  ja: プロジェクト名を入力してください
+project.add.source.label:
+  en: Source folder
+  ja: ソースフォルダー
+project.add.source.empty:
+  en: Choose a folder
+  ja: フォルダーを選択
+project.add.source.choose:
+  en: Choose source folder
+  ja: ソースフォルダーを選択
+project.add.source.hint:
+  en: Add a folder Ginka can read and edit
+  ja: Ginka が読み込み・編集できるフォルダーを追加
+project.add.source.required:
+  en: Choose a source folder
+  ja: ソースフォルダーを選択してください
+project.add.cancel:
+  en: Cancel
+  ja: キャンセル
+project.add.submit:
+  en: Create project
+  ja: プロジェクトを作成
+project.add.failed:
+  en: Ginka could not add this project
+  ja: プロジェクトを追加できませんでした
 
 status.working:
   en: Working
@@ -52,6 +98,12 @@ composer.agent.pick:
 composer.model.default:
   en: Model
   ja: モデル
+composer.model.search:
+  en: Search models…
+  ja: モデルを検索…
+composer.model.empty:
+  en: No models match this search.
+  ja: 一致するモデルはありません。
 composer.option.provider_default:
   en: Provider default
   ja: プロバイダー既定
@@ -103,6 +155,12 @@ composer.account.at_wall:
 composer.account.no_reading:
   en: no reading yet
   ja: 残量は未取得
+composer.usage.unknown:
+  en: Usage —
+  ja: 使用量 —
+composer.usage.refresh:
+  en: Refresh usage
+  ja: 使用量を更新
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"
@@ -249,6 +307,21 @@ transcript.turn:
 transcript.tool:
   en: tool
   ja: ツール
+transcript.subagent:
+  en: Subagent
+  ja: サブエージェント
+transcript.subagent.running:
+  en: Working
+  ja: 作業中
+transcript.subagent.completed:
+  en: Completed
+  ja: 完了
+transcript.subagent.failed:
+  en: Failed
+  ja: 失敗
+transcript.subagent.earlier:
+  en: "%{count} earlier steps"
+  ja: "前の %{count} ステップ"
 transcript.truncated:
   en: "… %{count} more lines"
   ja: "… 他 %{count} 行"

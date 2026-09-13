@@ -1,5 +1,5 @@
-//! The window shell: title bar plus the three resizable columns of
-//! `docs/ui.md` §1.
+//! The window shell: project/session navigation plus the conversation and
+//! resizable surfaces of `docs/ui.md` §1.
 //!
 //! The centre column carries the transcript, the composer, the context bar and
 //! the terminal dock. The transcript and composer are live: the composer starts
@@ -15,14 +15,18 @@ use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
 use ginka_protocol::provider::ProviderModel;
-use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
-use ginka_ui::layout::{HEADER_HEIGHT, Layout, Panel, TRAFFIC_LIGHT_INSET};
+use ginka_ui::layout::{
+    HEADER_HEIGHT, Layout, PROJECT_RAIL_WIDTH, Panel, TRAFFIC_LIGHT_INSET, navigator_width,
+};
 use ginka_ui::transcript::{
     Activity, Applied, Block as TranscriptBlock, Reveal, Transcript, head_of,
 };
-use ginka_ui::workspace::{ProjectRow, SessionRow, workspace_for_new_chat};
+use ginka_ui::workspace::{
+    ProjectDraftError, ProjectRow, SessionRow, validate_project_draft, workspace_for_new_chat,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::text::TextView;
@@ -31,8 +35,10 @@ use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
+    scroll::ScrollableElement as _,
     v_flex,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -206,6 +212,8 @@ pub struct Shell {
     chosen_account: Option<ginka_protocol::AccountId>,
     /// The add-login dialog, while it is open.
     add_account: Option<AddAccount>,
+    /// The add-project dialog, while it is open.
+    add_project: Option<AddProject>,
     /// Set when the next prompt should open a new conversation rather than
     /// continue the one on screen.
     start_fresh: bool,
@@ -234,6 +242,10 @@ pub struct Shell {
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
     composer: Entity<TextareaState>,
+    /// Search text for the model catalogue popover.
+    model_query: Entity<InputState>,
+    /// A copied query keeps filtering in the testable `ginka-ui` layer.
+    model_filter: String,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -266,8 +278,21 @@ impl Shell {
         // The centre column shows whichever row the sidebar has selected; until
         // selection is wired up that is simply the first.
         let session = rows.first().cloned();
-        let sidebar = cx.new(|_| SessionSidebar::new(rows));
+        let sidebar_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
+        });
+        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone()));
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
+
+        let sidebar_search_changed =
+            cx.subscribe(&sidebar_search, |this, query, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = query.read(cx).value().to_string();
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.set_search_query(value, cx));
+                }
+            });
 
         let committing = cx.subscribe_in(
             &surfaces,
@@ -321,7 +346,7 @@ impl Shell {
                 window,
                 |this, sidebar, event, window, cx| match event {
                     // The window's own way in; see `add_project`.
-                    SidebarEvent::AddProjectRequested => this.add_project(window, cx),
+                    SidebarEvent::AddProjectRequested => this.open_add_project(window, cx),
                     // A new conversation in whatever is selected: the project
                     // itself, the project of the selected workspace, or none
                     // at all. The column clears and the next message opens a
@@ -390,6 +415,17 @@ impl Shell {
                 // every chat surface the user already has works this way.
                 .submit_on_enter(true)
         });
+        let model_query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.model.search").to_string())
+        });
+        let model_query_changed =
+            cx.subscribe(&model_query, |this, query, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.model_filter = query.read(cx).value().to_string();
+                    cx.notify();
+                }
+            });
         let submitted = cx.subscribe_in(
             &composer,
             window,
@@ -617,6 +653,7 @@ impl Shell {
             chosen_access: None,
             chosen_account: None,
             add_account: None,
+            add_project: None,
             projects: Vec::new(),
             target_project: None,
             start_fresh: false,
@@ -625,31 +662,65 @@ impl Shell {
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
+            model_query,
+            model_filter: String::new(),
             paths,
             settings,
             session,
             sidebar,
             surfaces,
-            _subscriptions: vec![appearance, selection, submitted, committing],
+            _subscriptions: vec![
+                appearance,
+                selection,
+                submitted,
+                committing,
+                model_query_changed,
+                sidebar_search_changed,
+            ],
         }
     }
 
     /// Register a repository or a folder, and aim the next chat at it.
     ///
-    /// The window's own way in. The command in the sidebar's empty state still
-    /// works and is still shown, but a reader who has just opened the app
-    /// should not have to leave it to put something in it. The path is one
+    /// The window's own way in. The CLI remains available separately, but a
+    /// reader who has just opened the app should not have to leave it to put
+    /// something in it. The path is one
     /// this window picked, so it is a path on *this* machine — only the same
     /// thing as a daemon-host path while the daemon is the local child process
     /// (`docs/roadmap.md` §4.1), which is why the picker is offered only then.
-    fn add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let link = self.link.clone();
+    fn open_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("project.add.name.placeholder").to_string())
+        });
+        let name_changed = cx.subscribe(&name, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        name.read(cx).focus_handle(cx).focus(window, cx);
+        self.add_project = Some(AddProject {
+            name,
+            path: None,
+            error: None,
+            busy: false,
+            _name_changed: name_changed,
+        });
+        cx.notify();
+    }
+
+    /// Ask the platform for the source folder while keeping the project dialog open.
+    fn choose_project_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
             files: false,
             // A project is a directory: a repository, or a folder to work in.
             directories: true,
             multiple: false,
-            prompt: Some(rust_i18n::t!("sidebar.empty.add").to_string().into()),
+            prompt: Some(
+                rust_i18n::t!("project.add.source.choose")
+                    .to_string()
+                    .into(),
+            ),
         });
         cx.spawn_in(window, async move |this, cx| {
             // Cancelled, or the platform refused to ask: either way there is
@@ -660,19 +731,72 @@ impl Shell {
             let Some(path) = paths.into_iter().next() else {
                 return;
             };
-            // The daemon announces the change and the sidebar is filled from
-            // that announcement rather than from here — but the reader went
-            // looking for a folder in order to work in it, so the next chat is
-            // aimed at what they picked.
-            let added = cx
-                .background_spawn(async move { link.add_project(path).await })
-                .await;
-            if let Some(project) = added {
-                this.update_in(cx, |this, window, cx| {
-                    this.start_new_chat(Some(project.name), window, cx)
-                })
-                .ok();
+            this.update_in(cx, |this, window, cx| {
+                let Some(dialog) = this.add_project.as_mut() else {
+                    return;
+                };
+                if dialog.name.read(cx).value().trim().is_empty()
+                    && let Some(folder) = path.file_name().and_then(|name| name.to_str())
+                {
+                    dialog
+                        .name
+                        .update(cx, |name, cx| name.set_value(folder, window, cx));
+                }
+                dialog.path = Some(path);
+                dialog.error = None;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Register the folder selected in the add-project dialog.
+    fn submit_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(dialog) = self.add_project.as_mut() else {
+            return;
+        };
+        if dialog.busy {
+            return;
+        }
+        let draft = match validate_project_draft(
+            dialog.name.read(cx).value().as_ref(),
+            dialog.path.clone(),
+        ) {
+            Ok(draft) => draft,
+            Err(ProjectDraftError::MissingName) => {
+                dialog.error = Some(rust_i18n::t!("project.add.name.required").to_string());
+                cx.notify();
+                return;
             }
+            Err(ProjectDraftError::MissingSource) => {
+                dialog.error = Some(rust_i18n::t!("project.add.source.required").to_string());
+                cx.notify();
+                return;
+            }
+        };
+        dialog.busy = true;
+        dialog.error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let added = cx
+                .background_spawn(
+                    async move { link.add_project(draft.path, Some(draft.label)).await },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                if let Some(project) = added {
+                    this.add_project = None;
+                    this.start_new_chat(Some(project.name), window, cx);
+                } else if let Some(dialog) = this.add_project.as_mut() {
+                    dialog.busy = false;
+                    dialog.error = Some(rust_i18n::t!("project.add.failed").to_string());
+                    cx.notify();
+                }
+            })
+            .ok();
         })
         .detach();
     }
@@ -2415,6 +2539,13 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
+            TranscriptBlock::Subagent {
+                title,
+                steps,
+                summary,
+                is_error,
+                ..
+            } => self.subagent_card(title, steps, summary.as_deref(), *is_error, cx),
             TranscriptBlock::Question {
                 id,
                 question,
@@ -2635,6 +2766,141 @@ impl Shell {
             .into_any_element()
     }
 
+    /// One delegated run, with its newest work kept under the row that spawned it.
+    fn subagent_card(
+        &self,
+        title: &str,
+        steps: &[ginka_protocol::SubagentStep],
+        summary: Option<&str>,
+        is_error: bool,
+        cx: &App,
+    ) -> AnyElement {
+        const VISIBLE_STEPS: usize = 12;
+
+        let tokens = Tokens::global(cx).clone();
+        let hidden = steps.len().saturating_sub(VISIBLE_STEPS);
+        let shown = steps.iter().skip(hidden);
+        let state = if summary.is_none() {
+            rust_i18n::t!("transcript.subagent.running").to_string()
+        } else if is_error {
+            rust_i18n::t!("transcript.subagent.failed").to_string()
+        } else {
+            rust_i18n::t!("transcript.subagent.completed").to_string()
+        };
+
+        v_flex()
+            .w_full()
+            .rounded(px(tokens.radius.row))
+            .border_1()
+            .border_color(if is_error {
+                tokens.colors().status_error.opacity(0.55)
+            } else {
+                tokens.colors().border_subtle
+            })
+            .bg(tokens.colors().bg_surface)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(rust_i18n::t!("transcript.subagent").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(title.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(if is_error {
+                                tokens.colors().status_error
+                            } else {
+                                tokens.colors().text_muted
+                            })
+                            .child(state),
+                    ),
+            )
+            .when(!steps.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .gap_1p5()
+                        .border_t_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .children((hidden > 0).then(|| {
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(
+                                    rust_i18n::t!("transcript.subagent.earlier", count = hidden)
+                                        .to_string(),
+                                )
+                        }))
+                        .children(shown.map(|step| {
+                            let (mark, color) = match step.status {
+                                Some(SubagentStepStatus::Running) => {
+                                    ("·", tokens.colors().status_working)
+                                }
+                                Some(SubagentStepStatus::Completed) => {
+                                    ("✓", tokens.colors().text_muted)
+                                }
+                                Some(SubagentStepStatus::Failed) => {
+                                    ("×", tokens.colors().status_error)
+                                }
+                                None => ("›", tokens.colors().text_muted),
+                            };
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .items_start()
+                                .child(div().w_3().text_xs().text_color(color).child(mark))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .line_height(px(18.))
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(step.text.clone()),
+                                )
+                        })),
+                )
+            })
+            .children(
+                summary
+                    .filter(|summary| !summary.is_empty())
+                    .map(|summary| {
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .border_t_1()
+                            .border_color(tokens.colors().border_subtle)
+                            .text_xs()
+                            .line_height(px(18.))
+                            .text_color(if is_error {
+                                tokens.colors().status_error
+                            } else {
+                                tokens.colors().text_secondary
+                            })
+                            .child(summary.to_string())
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// The composer: a card holding the input, what will run it, and the way
     /// to send or stop it.
     ///
@@ -2648,6 +2914,8 @@ impl Shell {
         // borrow held across the whole composer.
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
+        let primary_action =
+            ginka_ui::composer::primary_action(working, self.composer.read(cx).value().as_ref());
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
         let effort_chip = self.reasoning_effort_chip_button(cx);
@@ -2655,6 +2923,7 @@ impl Shell {
         let access_chip = self.access_chip_button(cx);
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
+        let usage_chip = self.usage_chip_button(cx);
         let new_session = self.new_session_button(cx);
 
         v_flex()
@@ -2700,56 +2969,59 @@ impl Shell {
                             .children(access_chip)
                             .child(agent_chip)
                             .children(account_chip)
-                            .child(if working {
-                                // An agent that cannot be stopped is one the
-                                // user has to wait out. The composer keeps
-                                // working: what is typed while it runs is
-                                // queued, not lost.
-                                div()
-                                    .id("stop")
-                                    .size(px(30.))
-                                    .rounded_full()
-                                    .bg(tokens.colors().bg_raised)
-                                    .border_1()
-                                    .border_color(tokens.colors().border_strong)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_active()))
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new(rust_i18n::t!("composer.stop").to_string())
-                                            .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-                                    .child(
-                                        div()
-                                            .size(px(9.))
-                                            .rounded(px(2.5))
-                                            .bg(tokens.colors().text_primary),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .id("send")
-                                    .size(px(30.))
-                                    .rounded_full()
-                                    .bg(tokens.colors().text_primary)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().accent))
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                    )
-                                    .child(
-                                        Icon::new(IconName::ArrowUp)
-                                            .size_4()
-                                            .text_color(tokens.colors().bg_window),
-                                    )
-                                    .into_any_element()
-                            }),
+                            .children(usage_chip)
+                            .child(
+                                if primary_action == ginka_ui::composer::PrimaryAction::Stop {
+                                    // With no follow-up waiting, stopping is the
+                                    // one useful action on a running turn. As
+                                    // soon as there is a draft this place turns
+                                    // back into Send for steer-or-queue.
+                                    div()
+                                        .id("stop")
+                                        .size(px(30.))
+                                        .rounded_full()
+                                        .bg(tokens.colors().bg_raised)
+                                        .border_1()
+                                        .border_color(tokens.colors().border_strong)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_active()))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new(rust_i18n::t!("composer.stop").to_string())
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                                        .child(
+                                            div()
+                                                .size(px(9.))
+                                                .rounded(px(2.5))
+                                                .bg(tokens.colors().text_primary),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .id("send")
+                                        .size(px(30.))
+                                        .rounded_full()
+                                        .bg(tokens.colors().text_primary)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().accent))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit(window, cx)
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::ArrowUp)
+                                                .size_4()
+                                                .text_color(tokens.colors().bg_window),
+                                        )
+                                        .into_any_element()
+                                },
+                            ),
                     ),
             )
             .child(
@@ -2769,8 +3041,11 @@ impl Shell {
     /// still allowed — the user may be signing in in another window, and a
     /// picker that refuses the pick is not a picker.
     fn picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tokens = Tokens::global(cx);
         let picker = self.picker?;
+        if picker == Picker::Model {
+            return self.model_picker_panel(cx);
+        }
+        let tokens = Tokens::global(cx);
 
         let rows: Vec<AnyElement> = match picker {
             // Every project, then the two things that are not one: registering
@@ -2803,7 +3078,7 @@ impl Shell {
                     false,
                     cx.listener(|this, _, window, cx| {
                         this.picker = None;
-                        this.add_project(window, cx);
+                        this.open_add_project(window, cx);
                     }),
                     cx,
                 ));
@@ -2881,85 +3156,7 @@ impl Shell {
                     )
                 })
                 .collect(),
-            Picker::Model => {
-                let mut rows = vec![self.picker_row(
-                    "model-option:default",
-                    rust_i18n::t!("composer.option.provider_default").to_string(),
-                    None,
-                    self.model_to_start().is_none(),
-                    cx.listener(|this, _, _, cx| {
-                        if !this.starting_new_session() {
-                            this.update_existing_session_options(None, None, None, cx);
-                        } else {
-                            this.chosen_model = None;
-                            this.chosen_reasoning_effort = None;
-                            this.chosen_service_tier = None;
-                            if let Some(agent) = this.agent_to_start() {
-                                this.settings.forget_model(&agent);
-                                this.persist();
-                            }
-                        }
-                        this.picker = None;
-                        cx.notify();
-                    }),
-                    cx,
-                )];
-                rows.extend(self.models().into_iter().map(|model| {
-                    let picked = model.id.clone();
-                    let chosen = self.model_to_start().as_deref() == Some(model.id.as_str());
-                    let note = (!model.reasoning_efforts.is_empty()).then(|| {
-                        model
-                            .reasoning_efforts
-                            .iter()
-                            .map(|option| option.label.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    });
-                    self.picker_row(
-                        SharedString::from(format!("model-option:{}", model.id)),
-                        model.label,
-                        note,
-                        chosen,
-                        cx.listener(move |this, _, _, cx| {
-                            if !this.starting_new_session() {
-                                let model =
-                                    this.models().into_iter().find(|model| model.id == picked);
-                                let recent = model
-                                    .as_ref()
-                                    .and_then(|model| {
-                                        this.agent_to_start().map(|agent| {
-                                            this.settings.recent_model_options(&agent, model)
-                                        })
-                                    })
-                                    .unwrap_or_default();
-                                this.update_existing_session_options(
-                                    Some(picked.clone()),
-                                    recent.reasoning_effort,
-                                    recent.service_tier,
-                                    cx,
-                                );
-                                this.picker = None;
-                                cx.notify();
-                                return;
-                            }
-                            this.chosen_model = Some(picked.clone());
-                            if let Some(agent) = this.agent_to_start() {
-                                this.settings.remember_model(agent.clone(), picked.clone());
-                                if let Some(model) = this.selected_model() {
-                                    let recent = this.settings.recent_model_options(&agent, &model);
-                                    this.chosen_reasoning_effort = recent.reasoning_effort;
-                                    this.chosen_service_tier = recent.service_tier;
-                                }
-                                this.persist();
-                            }
-                            this.picker = None;
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                }));
-                rows
-            }
+            Picker::Model => unreachable!("the searchable model panel returns above"),
             Picker::ReasoningEffort => {
                 let mut rows = vec![self.picker_row(
                     "effort-option:default",
@@ -3102,6 +3299,205 @@ impl Shell {
                 .children(rows)
                 .into_any_element(),
         )
+    }
+
+    /// Searchable model catalogue, grouped by the CLI that advertised it.
+    ///
+    /// Providers are switchable only before a conversation starts. Once a
+    /// vendor session exists, changing its model remains possible when that
+    /// driver supports it, but moving the conversation is the explicit
+    /// handoff flow rather than a surprising side effect of this popover.
+    fn model_picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let mut providers: Vec<AgentStatus> = ginka_ui::models::available_providers(&self.agents)
+            .into_iter()
+            .cloned()
+            .collect();
+        if !self.starting_new_session() {
+            let current = self.agent_to_start()?;
+            providers.retain(|provider| provider.id == current);
+        }
+        let active_id = self
+            .agent_to_start()
+            .filter(|id| providers.iter().any(|provider| provider.id == *id))
+            .or_else(|| providers.first().map(|provider| provider.id.clone()))?;
+        let active = providers.iter().find(|provider| provider.id == active_id)?;
+        let models = ginka_ui::models::matching_models(active, &self.model_filter);
+        let active_display_name = active.display_name.clone();
+
+        let provider_tabs = providers.into_iter().map(|provider| {
+            let id = provider.id.clone();
+            let label = provider.display_name.clone();
+            let initial = label.chars().next().unwrap_or('?').to_string();
+            let selected = id == active_id;
+            div()
+                .id(SharedString::from(format!("model-provider:{id}")))
+                .size(px(38.))
+                .rounded(px(tokens.radius.control()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .font_medium()
+                .text_color(if selected {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .when(selected, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.chosen_agent = Some(id.clone());
+                    this.chosen_model = None;
+                    this.chosen_reasoning_effort = None;
+                    this.chosen_service_tier = None;
+                    this.chosen_account = None;
+                    this.model_filter.clear();
+                    this.model_query
+                        .update(cx, |query, cx| query.set_value("", window, cx));
+                    this.sync_footer(cx);
+                    cx.notify();
+                }))
+                .child(initial)
+        });
+
+        let default_provider = active_id.clone();
+        let mut rows = vec![self.picker_row(
+            "model-option:default",
+            rust_i18n::t!("composer.option.provider_default").to_string(),
+            Some(active_display_name),
+            self.model_to_start().is_none(),
+            cx.listener(move |this, _, _, cx| {
+                if this.starting_new_session() {
+                    this.chosen_agent = Some(default_provider.clone());
+                }
+                this.choose_model(None, cx);
+            }),
+            cx,
+        )];
+        rows.extend(models.into_iter().map(|model| {
+            let provider = active_id.clone();
+            let picked = model.id.clone();
+            let chosen = self.model_to_start().as_deref() == Some(model.id.as_str());
+            let note = (!model.reasoning_efforts.is_empty()).then(|| {
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            });
+            self.picker_row(
+                SharedString::from(format!("model-option:{}:{}", provider, model.id)),
+                model.label,
+                note,
+                chosen,
+                cx.listener(move |this, _, _, cx| {
+                    if this.starting_new_session() {
+                        this.chosen_agent = Some(provider.clone());
+                        this.chosen_account = None;
+                    }
+                    this.choose_model(Some(picked.clone()), cx);
+                }),
+                cx,
+            )
+        }));
+        if rows.len() == 1 && !self.model_filter.trim().is_empty() {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.model.empty").to_string())
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(360.))
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().popover())
+                .border_1()
+                .border_color(tokens.colors().border_strong)
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    v_flex()
+                        .h_full()
+                        .w(px(58.))
+                        .p_2()
+                        .gap_2()
+                        .items_center()
+                        .border_r_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .children(provider_tabs),
+                )
+                .child(
+                    v_flex()
+                        .h_full()
+                        .flex_1()
+                        .child(
+                            div()
+                                .p_2()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(Input::new(&self.model_query)),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .p_1()
+                                .gap_0p5()
+                                .overflow_y_scrollbar()
+                                .children(rows),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Apply a model choice and preserve the most recent valid effort/tier.
+    fn choose_model(&mut self, picked: Option<String>, cx: &mut Context<Self>) {
+        if !self.starting_new_session() {
+            let recent = picked
+                .as_ref()
+                .and_then(|picked| self.models().into_iter().find(|model| model.id == *picked))
+                .and_then(|model| {
+                    self.agent_to_start()
+                        .map(|agent| self.settings.recent_model_options(&agent, &model))
+                })
+                .unwrap_or_default();
+            self.update_existing_session_options(
+                picked,
+                recent.reasoning_effort,
+                recent.service_tier,
+                cx,
+            );
+        } else {
+            self.chosen_model = picked.clone();
+            self.chosen_reasoning_effort = None;
+            self.chosen_service_tier = None;
+            if let Some(agent) = self.agent_to_start() {
+                if let Some(picked) = picked {
+                    self.settings.remember_model(agent.clone(), picked);
+                    if let Some(model) = self.selected_model() {
+                        let recent = self.settings.recent_model_options(&agent, &model);
+                        self.chosen_reasoning_effort = recent.reasoning_effort;
+                        self.chosen_service_tier = recent.service_tier;
+                    }
+                } else {
+                    self.settings.forget_model(&agent);
+                }
+                self.persist();
+            }
+        }
+        self.picker = None;
+        cx.notify();
     }
 
     /// One option in an open picker.
@@ -3697,6 +4093,67 @@ impl Shell {
         )
     }
 
+    /// The active login's tightest usage window, even when there is only one
+    /// login and therefore no account picker chip.
+    ///
+    /// Turn events update this passively. Clicking asks the daemon for an
+    /// explicit fresh reading; there is deliberately no background quota
+    /// polling (`docs/accounts.md` §7).
+    fn usage_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let account = self.account_to_start()?;
+        if account.signed_in == Some(false) {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let headroom = ginka_ui::accounts::headroom(
+            ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
+            crate::daemon::now(),
+        );
+        let exhausted = headroom.as_ref().is_some_and(|headroom| headroom.exhausted);
+        let label = match headroom.as_ref() {
+            Some(headroom) if headroom.exhausted => format!(
+                "{} · {}",
+                headroom.summary(),
+                rust_i18n::t!("composer.account.at_wall")
+            ),
+            Some(headroom) => headroom.summary(),
+            None => rust_i18n::t!("composer.usage.unknown").to_string(),
+        };
+        let account = account.id.clone();
+
+        Some(
+            h_flex()
+                .id("usage-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .text_size(px(12.))
+                .text_color(if exhausted {
+                    tokens.colors().status_attention
+                } else {
+                    tokens.colors().text_secondary
+                })
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .tooltip(|window, cx| {
+                    Tooltip::new(rust_i18n::t!("composer.usage.refresh").to_string())
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let link = this.link.clone();
+                    let account = account.clone();
+                    cx.background_spawn(async move {
+                        let _ = link.refresh_plan(&account).await;
+                    })
+                    .detach();
+                }))
+                .child(label),
+        )
+    }
+
     /// The agent picker's rows: every agent this machine has, then a way to
     /// add a login for the chosen one, so the first second login is
     /// reachable before there is an account chip to open.
@@ -3910,6 +4367,206 @@ impl Shell {
         }
     }
 
+    /// Escape closes the project dialog and Return creates it when complete.
+    fn add_project_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.add_project = None;
+                cx.notify();
+            }
+            "enter" => self.submit_add_project(window, cx),
+            _ => {}
+        }
+    }
+
+    /// Project name and source-folder selection, drawn as one modal workflow.
+    fn add_project_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let dialog = self.add_project.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let source = dialog
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| rust_i18n::t!("project.add.source.empty").to_string());
+        let ready = !dialog.busy
+            && validate_project_draft(dialog.name.read(cx).value().as_ref(), dialog.path.clone())
+                .is_ok();
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(tokens.colors().bg_window.opacity(0.72))
+                .child(
+                    v_flex()
+                        .id("add-project-dialog")
+                        .w(px(620.))
+                        .p_5()
+                        .gap_4()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.add_project_key(event, window, cx)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xl()
+                                        .font_semibold()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(rust_i18n::t!("project.add.title").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project-close")
+                                        .p_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_project = None;
+                                            cx.notify();
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::Close)
+                                                .size_4()
+                                                .text_color(tokens.colors().text_secondary),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .h(px(46.))
+                                .px_3()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(tokens.radius.control()))
+                                .border_1()
+                                .border_color(tokens.colors().border_strong)
+                                .child(
+                                    Icon::new(IconName::Folder)
+                                        .size_4()
+                                        .text_color(tokens.colors().text_secondary),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&dialog.name))),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(rust_i18n::t!("project.add.source.label").to_string()),
+                        )
+                        .child(
+                            v_flex()
+                                .id("choose-project-folder")
+                                .w_full()
+                                .h(px(118.))
+                                .px_4()
+                                .gap_2()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(tokens.radius.control()))
+                                .border_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .cursor_pointer()
+                                .hover(|this| this.bg(tokens.colors().row_hover()))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.choose_project_folder(window, cx)
+                                }))
+                                .child(
+                                    Icon::new(IconName::Folder)
+                                        .size_5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(source),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(
+                                            rust_i18n::t!("project.add.source.hint").to_string(),
+                                        ),
+                                ),
+                        )
+                        .children(dialog.error.clone().map(|error| {
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child(error)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id("add-project-cancel")
+                                        .px_3()
+                                        .py_2()
+                                        .rounded(px(tokens.radius.row))
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.add_project = None;
+                                            cx.notify();
+                                        }))
+                                        .child(rust_i18n::t!("project.add.cancel").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .id("add-project-submit")
+                                        .px_4()
+                                        .py_2()
+                                        .rounded(px(tokens.radius.row))
+                                        .bg(tokens.colors().accent.opacity(if ready {
+                                            0.7
+                                        } else {
+                                            0.2
+                                        }))
+                                        .text_sm()
+                                        .text_color(if ready {
+                                            tokens.colors().text_primary
+                                        } else {
+                                            tokens.colors().text_muted
+                                        })
+                                        .cursor_pointer()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit_add_project(window, cx)
+                                        }))
+                                        .child(rust_i18n::t!("project.add.submit").to_string()),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The add-login dialog, drawn over the window like the palette.
     fn add_account_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.add_account.as_ref()?;
@@ -4034,15 +4691,16 @@ impl Shell {
             return None;
         }
         let tokens = Tokens::global(cx);
-        let label = self
+        let selected = self
             .model_to_start()
-            .and_then(|chosen| {
-                models
-                    .iter()
-                    .find(|model| model.id == chosen)
-                    .map(|model| model.label.clone())
-            })
+            .and_then(|chosen| models.iter().find(|model| model.id == chosen));
+        let label = selected
+            .map(|model| model.label.clone())
             .unwrap_or_else(|| rust_i18n::t!("composer.model.default").to_string());
+        let effort = self.model_options_to_start().0;
+        let effort_label = selected
+            .and_then(|model| ginka_ui::models::effort_label(model, effort.as_deref()))
+            .map(str::to_string);
 
         Some(
             h_flex()
@@ -4055,13 +4713,30 @@ impl Shell {
                 .bg(tokens.colors().row_hover())
                 .cursor_pointer()
                 .hover(|this| this.bg(tokens.colors().row_active()))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Model, cx)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.picker == Some(Picker::Model) {
+                        this.picker = None;
+                    } else {
+                        this.picker = Some(Picker::Model);
+                        this.model_filter.clear();
+                        this.model_query
+                            .update(cx, |query, cx| query.set_value("", window, cx));
+                        this.model_query.read(cx).focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                }))
                 .child(
                     div()
                         .text_size(px(12.))
                         .text_color(tokens.colors().text_secondary)
                         .child(label),
                 )
+                .children(effort_label.map(|effort| {
+                    div()
+                        .text_size(px(11.))
+                        .text_color(tokens.colors().text_muted)
+                        .child(effort)
+                }))
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size(px(12.))
@@ -4807,7 +5482,13 @@ impl Render for Shell {
         let tokens = Tokens::global(cx).clone();
         let sidebar_open = self.layout.is_open(Panel::Sidebar);
         let right_open = self.layout.is_open(Panel::RightPanel);
-        let sidebar_width = self.layout.size(Panel::Sidebar);
+        let project_selected = self.sidebar.read(cx).has_project_selection();
+        let sidebar_width = navigator_width(project_selected, self.layout.size(Panel::Sidebar));
+        let sidebar_range = if project_selected {
+            px(420.)..px(720.)
+        } else {
+            PROJECT_RAIL_WIDTH..PROJECT_RAIL_WIDTH
+        };
         let right_width = self.layout.size(Panel::RightPanel);
         // Built before the column chain: both headers bind listeners, and the
         // chain's own closures hold `self` while they run.
@@ -4849,7 +5530,7 @@ impl Render for Shell {
                             this.child(
                                 resizable_panel()
                                     .size(sidebar_width)
-                                    .size_range(px(200.)..px(400.))
+                                    .size_range(sidebar_range)
                                     .child(
                                         // The column runs to the top of the
                                         // window and carries the window's own
@@ -4885,6 +5566,7 @@ impl Render for Shell {
                 ),
             )
             .children(self.palette_view(cx))
+            .children(self.add_project_view(cx))
             .children(self.add_account_view(cx))
     }
 }
@@ -4996,6 +5678,20 @@ struct AddAccount {
     error: Option<String>,
     /// Set while the daemon is being asked, so Return twice is one request.
     busy: bool,
+}
+
+/// The add-project modal's state while it is open.
+struct AddProject {
+    /// Reader-facing name stored separately from the stable path-derived key.
+    name: Entity<InputState>,
+    /// Source folder selected through the platform picker.
+    path: Option<PathBuf>,
+    /// What validation or the daemon refused.
+    error: Option<String>,
+    /// Set while the daemon is being asked, so Return twice is one request.
+    busy: bool,
+    /// Keeps the name field driving the modal's validation state.
+    _name_changed: Subscription,
 }
 
 /// The palette's own state while it is open.

@@ -1,33 +1,29 @@
 # Ginka UI Specification
 
 > Companion to [`roadmap.md`](roadmap.md). The roadmap says *what* we build and when; this document says *what it looks like* and *which components render it*.
-> Last updated: 2026-09-05
+> Last updated: 2026-09-13
 
 ## 1. Design direction
 
-The reference is a three-column agent workstation on a dark, glass-tinted surface:
+The reference is a four-region agent workstation on a dark, glass-tinted
+surface. The two leading regions form one navigator: a stable project rail and,
+only after a project is selected, that project's resizable session list. With
+no selection the rail is 188 px and the new-session surface takes the rest.
 
 ```
-┌──────────────────────────────────────────────────────────────────────────────────┐
-│ ●●●  ⬓ ← →  │ ⬔ Session Title   org @ device        │  +            ⤢  ⬓        │
-├─────────────┼───────────────────────────────────────┼──────────────────────────  │
-│ ⌸ comet     │                                       │                            │
-│   @ device  │   transcript                          │   right panel              │
-│      ⌄  +   │   (markdown, tool cards,              │   ("surfaces")             │
-│             │    reasoning, diffs)                  │                            │
-│ ▸ session   │                                       │   empty state:             │
-│ ▸ session   │                                       │     Open a surface         │
-│ ▸ session   │                                       │     ┌────────────────┐     │
-│             │                                       │     │ ▢ Terminal     │     │
-│ Archived  ⌄ ├───────────────────────────────────────┤     ├────────────────┤     │
-│ ▸ ...       │  ┌─ composer ─────────────────────┐   │     │ ⑂ Git          │     │
-│ ▸ ...       │  │ Do anything…   [model][mode]▲ │   │     └────────────────┘     │
-│ Show 25 more│  └────────────────────────────────┘   │                            │
-│             │  ▤ Worktree            ⑂ branch-name  │                            │
-├─────────────┼───────────────────────────────────────┤                            │
-│ (W) Wing Lee│  [ ubuntu ×] [+]                   ⌄  │                            │
-│     Alpha   │  ubuntu@dev:~/.ginka/worktrees/…$ █   │                            │
-└─────────────┴───────────────────────────────────────┴────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│ ●●● Projects │ Workspace     │ Session title        │ Surfaces           │
+├──────────────┼───────────────┼──────────────────────┼────────────────────┤
+│ ⌸ comet      │ + New chat    │                      │ Files · Git · ...  │
+│ ⌸ ginka      │               │ transcript           │                    │
+│              │ ▸ session     │                      │ editor / diff      │
+│              │ ▸ session     │                      │                    │
+│              │               ├──────────────────────┤                    │
+│              │ Archived      │ composer             │                    │
+│              │ ▸ ...         │ [model][mode][usage] │                    │
+├──────────────┴───────────────┼──────────────────────┤                    │
+│ account · headroom           │ terminal dock        │                    │
+└──────────────────────────────┴──────────────────────┴────────────────────┘
 ```
 
 Five properties define the look:
@@ -46,22 +42,22 @@ Defined once in `assets/themes/*.json`, installed into GPUI's global context at 
 
 | Token | Value | Use |
 | --- | --- | --- |
-| `bg.window` | `#0E0A14` @ 82 % + blur | window base, translucent |
-| `bg.sidebar` | `#120D19` @ 70 % | left column |
-| `bg.surface` | `#1B1426` @ 66 % | cards, composer, fields |
-| `bg.raised` | `#241A33` @ 72 % | popovers, menus |
-| `bg.terminal` | `#0A0710` | terminal pane |
+| `bg.window` | `#0E0C12` @ 72 % + blur | window base, translucent |
+| `bg.sidebar` | `#F2EEF8` @ 6 % | project rail |
+| `bg.surface` | `#1B1624` @ 66 % | cards, composer, fields |
+| `bg.raised` | `#241E2F` @ 72 % | raised surfaces |
+| `bg.terminal` | `#0A090E` | terminal pane |
 | `border.subtle` | `#FFFFFF` @ 6 % | panel separators |
 | `border.strong` | `#FFFFFF` @ 12 % | focused input, selected row |
-| `text.primary` | `#EDE9F5` | titles, transcript body |
-| `text.secondary` | `#A79FBC` | subtitles, metadata |
-| `text.muted` | `#6F6885` | timestamps, placeholders |
-| `accent` | `#A78BFA` | selection, links, focus ring |
-| `status.working` | `#F472B6` | running agent |
-| `status.attention` | `#FBBF24` | agent waiting on the user |
-| `status.done` | `#4ADE80` | completed |
-| `status.error` | `#F87171` | failed |
-| `code.bg` | `#A78BFA` @ 10 % | inline code |
+| `text.primary` | `#EDEAF4` | titles, transcript body |
+| `text.secondary` | `#A9A1BA` | subtitles, metadata |
+| `text.muted` | `#716A83` | timestamps, placeholders |
+| `accent` | `#AC94F1` | selection, links, focus ring |
+| `status.working` | `#E97DB6` | running agent |
+| `status.attention` | `#E8B737` | agent waiting on the user |
+| `status.done` | `#57D184` | completed |
+| `status.error` | `#ED7C7C` | failed |
+| `code.bg` | `#AF9AEB` @ 10 % | inline code |
 
 Two derived tints, computed from `accent` rather than stored: `row.hover` (14 %)
 and `row.active` (22 %). Rows are otherwise transparent — they are told apart by
@@ -76,23 +72,30 @@ sidebar, the centre column and each card paint themselves once. Three coats of
 70 % is 97 %, which is no longer glass. (Both rules are pedro's, whose palette
 solved the same problem.)
 
-A light theme ships with the same token names and WCAG AA contrast pairs. Every colour is referenced by token; adding a theme must never require touching a view.
+A light theme ships with the same token names and WCAG AA contrast pairs. The
+schema, palette, 13 px toolkit base and 12 px mono base intentionally match e1;
+Kirikumo consumes the same token contract. Keeping these as serialized tokens,
+instead of view constants, leaves the three applications able to share a theme
+crate later without rewriting their views.
 
 ### Type
 
 | Role | Font | Size / line-height | Weight |
 | --- | --- | --- | --- |
-| Transcript body | UI sans (Geist / Inter) | 15 / 1.65 | 400 |
+| Toolkit base | UI sans (system / Inter) | 13 / toolkit default | 400 |
+| Transcript body | UI sans | 15 / 1.65 | 400 |
 | Session title | UI sans | 14 / 1.3 | 500 |
-| Metadata | UI sans | 11.5 / 1.3 | 400 |
-| Code / terminal | Mono (Geist Mono / JetBrains Mono) | 13 / 1.5 | 400 |
+| Metadata | UI sans | 11–12 / 1.3 | 400 |
+| Code / terminal | Mono (system mono / JetBrains Mono) | 12–13 / 1.5 | 400 |
 
 ### Geometry
 
 4 px spacing grid. Radii: window 12, **card 16** (the composer and anything else
 holding a group of controls — a card is an object on the surface and the corner
 is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
-radius, 12 px type. Sidebar default 250 px (resizable 200–400). Right panel
+radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
+188 px project rail and a flexible session list shown only for the selected
+project. Right panel
 default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
 column height.
 
@@ -101,7 +104,7 @@ column height.
 ### 3.1 Headers — there is no title bar
 
 The window has no bar of its own. Each column paints itself to the top of the
-window and carries its own 44 px header, and the three sit on one line, so the
+window and carries its own 44 px header, and the four regions sit on one line, so the
 window reads as one surface rather than as a bar laid over a layout. Nothing is
 left to the platform but the traffic lights, positioned (13, 15) to land on
 that line.
@@ -121,31 +124,39 @@ Dragging any header moves the window and a double click zooms it. A drag is a
 press that then moved, never the press alone, or every click on a control in
 the strip would carry the window off with it.
 
-### 3.2 Left sidebar
+### 3.2 Project rail and session list
 
-A tree: workspaces under the project they belong to, the way files sit under a
-folder. The project was a line on every row until 2026-09-03, which spent a line
-per row repeating what a heading says once, and left a reader scanning for
-"which project is this" with nowhere single to look.
+Two adjacent navigation levels. The rail keeps projects stable while the
+session list appears and changes with the selected project, matching the
+spatial model used by e1 and leaving the centre column exclusively for the
+active conversation. With nothing selected, the rail stands alone.
 
-- **Header** — app name (bold) + chevron, then search and `+` new session.
+- **Project rail** — app header, the `Projects` action row, then selectable
+  project rows. The selected project remains highlighted while one of its
+  sessions is open.
+- **Session list header** — `Workspace` and a `+` for a new session. The whole
+  sessions column is absent until a project is selected.
+- **Conversation search** — directly below the header, with the rail's search
+  icon focusing it and an explicit clear action. Matching is fuzzy and local
+  over the row metadata already pushed by the daemon: title, model, provider,
+  project and branch. Transcript contents remain the daemon-side N10 search;
+  filtering this list never starts a second content-search path in the view.
 - **New chat** — the first row under the header. It clears the centre column
   for a conversation aimed at whatever is selected: a project, the project of
   the selected workspace, or nothing at all.
 - **Section label** — `Projects`, small and muted, over the run of groups, with
-  a `+` beside it that registers another. The reader who has one project wants
-  the second added from the same place, and an empty state is by definition not
-  there any more once they do.
+  a `+` beside it that opens the add-project modal. The modal keeps the
+  reader-facing project name and source-folder chooser in one card; selecting
+  a folder prefills its basename, and successful registration selects the new
+  project immediately. Escape, the close control and Cancel all dismiss it.
 - **Project heading** — folder icon + project name, muted, and **selectable**:
   a project is something the reader picks *before* there is a conversation, and
-  picking one shows the home screen aimed at it. Selected only when the project
-  itself is what the centre column shows — a selected row already says which
-  project it is in, and two highlights read as two selections.
-- **Nothing registered** — a muted line under the section label, the way to add
-  one, and the `ginka project add .` command. Not a takeover of the sidebar: a
-  window with no project is still a window you can talk to (the chat runs in a
-  scratch worktree), so the list says what is missing without implying nothing
-  works until it is fixed.
+  picking one shows the home screen aimed at it. It stays highlighted while a
+  session inside it is selected, because the two highlights identify different
+  navigation levels.
+- **Nothing registered** — one muted line under the section label. The adjacent
+  `+` remains the single visual way into project registration; the CLI remains
+  available without being repeated in the empty rail.
 - **Workspace row**, indented under its project (8 px radius, selected =
   `bg.raised` fill):
   1. Agent glyph, session title, right-aligned status: relative time (`now`,
@@ -186,19 +197,28 @@ per row repeating what a heading says once, and left a reader scanning for
   ask-user cards with inline buttons. The reader's own words are a tinted
   bubble, right-aligned within the column. A finished answer carries a copy
   action; a turn that succeeded prints no outcome of its own, because being
-  answered is how a turn says it worked.
+  answered is how a turn says it worked. A delegated agent is one bordered
+  parent card rather than a second conversation: its reasoning, messages and
+  tool lifecycle sit beneath the original brief, with explicit working,
+  completed and failed words and glyphs. The fold retains at most 300 steps;
+  the view shows the newest 12 and states how many earlier steps are hidden.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.
 - **Composer** — one card: a multi-line auto-growing input with the
   `Do anything…` placeholder, and beneath it the attachment button on the left,
-  then the agent chip (which says when the agent is missing or signed out),
-  the account chip when that agent has more than one login — its label and
-  the tightest rate-limit window as *percent · reset*, the number printed and
-  *at the wall* a word beside it, never a colour alone (`docs/accounts.md`
-  §11) — the mode chip, and the circular send button — which becomes a stop button while a
-  session is working. `@` file mentions and `/` slash commands with an inline
-  filtered menu. `↩` sends, `⇧↩` is a newline; sending while busy enqueues.
+  then the model, effort and tier controls, the mode and agent chips, the
+  account chip when that agent has more than one login, and a separate usage
+  chip for the chosen login's tightest rate-limit window. The model chip also
+  prints the selected effort when that model supports it, so a collapsed
+  picker still says what the next turn will run. The percentage is
+  printed and *at the wall* appears as a word beside it, never as colour alone
+  (`docs/accounts.md` §11). While a session is working, the circular action is
+  Stop when the draft is empty and Send as soon as a follow-up has been typed;
+  that send steers or queues according to the driver's existing policy. `@`
+  file mentions and `/` slash commands have an inline filtered menu. `↩`
+  sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
+  available.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on
@@ -239,15 +259,22 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 | Charts (Reports) | `gpui-component` charts |
 | Embedded browser (M5) | `gpui-component` `webview` crate |
 
-The model picker renders the provider catalogue's labels and supported option
-metadata, never a view-owned model list. A live catalogue wins over the static
-offline fallback. The last valid model chosen per provider is restored; when a
+The model picker is a searchable popover with a provider rail. It renders only
+installed, usable CLI catalogues and their supported option metadata, never a
+view-owned model list. A live catalogue wins over the driver's static offline
+fallback. (Codex exposes `model/list`; Claude currently needs its stable alias
+fallback because its CLI exposes no equivalent catalogue operation.) The last
+valid model chosen per provider is restored; when a
 later catalogue removes that id, the chip quietly returns to provider default.
 Effort and tier chips appear only when the selected model advertises choices.
 On an existing conversation they update the options used by its next turn;
 the daemon asks the driver whether the provider thread can absorb that change.
 When it cannot, the same row adopts a replacement session whose first turn is
 given a bounded digest of the conversation so far.
+
+Usage is a separate composer chip and therefore remains visible even when a
+provider has only one login. Turn events push new readings into it immediately;
+clicking it requests a fresh reading. It is never refreshed by a timer.
 
 ## 5. What we build ourselves
 

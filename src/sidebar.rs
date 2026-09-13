@@ -19,7 +19,10 @@ use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::{Icon, IconName, StyledExt as _, h_flex, v_flex};
+use gpui_component::input::{Input, InputState};
+use gpui_component::{
+    Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
+};
 
 /// Emitted when the user picks a row.
 ///
@@ -69,10 +72,14 @@ pub struct SessionSidebar {
     /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
     /// them.
     account: Option<(String, Option<String>)>,
+    /// The session-list search field, owned by the shell so its events can
+    /// update this view without putting decision logic in the binary crate.
+    search: Entity<InputState>,
+    search_query: String,
 }
 
 impl SessionSidebar {
-    pub fn new(rows: Vec<SessionRow>) -> Self {
+    pub fn new(rows: Vec<SessionRow>, search: Entity<InputState>) -> Self {
         Self {
             projects: Vec::new(),
             rows,
@@ -81,6 +88,16 @@ impl SessionSidebar {
             unlisted: 0,
             archived_open: true,
             account: None,
+            search,
+            search_query: String::new(),
+        }
+    }
+
+    /// Apply the current conversation query from the search input.
+    pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.search_query != query {
+            self.search_query = query;
+            cx.notify();
         }
     }
 
@@ -142,6 +159,11 @@ impl SessionSidebar {
     /// Which project a new chat would belong to.
     pub fn selected_project(&self) -> Option<&ProjectName> {
         self.selected_project.as_ref()
+    }
+
+    /// Whether the contextual sessions column should be visible.
+    pub fn has_project_selection(&self) -> bool {
+        self.selected_project.is_some()
     }
 
     /// The rows as they stand, for the palette to offer.
@@ -206,7 +228,7 @@ impl SessionSidebar {
     /// Above the list rather than beside the composer: starting a new one is
     /// the first thing a reader does with this window, and a control they have
     /// to find inside the last conversation is a control they do not find.
-    fn new_chat(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn new_chat(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
         h_flex()
             .id("new-chat")
@@ -234,7 +256,7 @@ impl SessionSidebar {
             }))
     }
 
-    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -256,9 +278,20 @@ impl SessionSidebar {
             )
             .child(div().flex_1())
             .child(
-                Icon::new(IconName::Search)
-                    .size_4()
-                    .text_color(tokens.colors().text_muted),
+                div()
+                    .id("focus-session-search")
+                    .p_1()
+                    .rounded(px(tokens.radius.control()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size_4()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search.read(cx).focus_handle(cx).focus(window, cx);
+                    })),
             )
             .child(
                 div()
@@ -276,7 +309,7 @@ impl SessionSidebar {
     }
 
     /// A small muted label over a run of rows.
-    fn section(&self, label: String, cx: &App) -> impl IntoElement {
+    fn section(&self, label: String, cx: &App) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
         div()
             .w_full()
@@ -293,7 +326,7 @@ impl SessionSidebar {
     /// Next to the heading rather than only in the empty state: a reader with
     /// one project registered wants the second one added from the same place,
     /// and an empty state is by definition not there any more once they do.
-    fn projects_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn projects_section(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -328,12 +361,11 @@ impl SessionSidebar {
         project: ProjectName,
         label: SharedString,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
-        // Only when the project itself is what the centre column is showing:
-        // a selected row already says which project it is in, and two things
-        // highlighted at once reads as two selections.
-        let selected = self.selected.is_none() && self.selected_project.as_ref() == Some(&project);
+        // The project rail and the session list are separate navigation
+        // levels, so both stay selected while a conversation is open.
+        let selected = self.selected_project.as_ref() == Some(&project);
         h_flex()
             .id(SharedString::from(format!("project:{}", project.0)))
             .w_full()
@@ -362,6 +394,42 @@ impl SessionSidebar {
                     })
                     .truncate()
                     .child(label),
+            )
+    }
+
+    /// Header for the session list beside the project rail.
+    fn workspace_header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        h_flex()
+            .w_full()
+            .h(px(44.))
+            .px_3()
+            .items_center()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .font_semibold()
+                    .text_color(tokens.colors().text_primary)
+                    .child(rust_i18n::t!("sidebar.workspace").to_string()),
+            )
+            .child(
+                div()
+                    .id("workspace-new-chat")
+                    .p_1()
+                    .rounded(px(tokens.radius.control()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .child(
+                        Icon::new(IconName::Plus)
+                            .size_4()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SidebarEvent::NewChatRequested);
+                    })),
             )
     }
 
@@ -564,51 +632,17 @@ impl SessionSidebar {
 
     /// First run: nothing is registered yet.
     ///
-    /// A line under the section heading rather than a takeover of the whole
-    /// sidebar: a window with no project is still a window you can talk to —
-    /// the chat above runs in a scratch worktree — so the list says what is
-    /// missing without implying nothing works until it is fixed.
+    /// A quiet line under the section heading. The adjacent plus is the one
+    /// way into the modal, so this state does not repeat it as another button.
     fn no_projects(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
-        v_flex()
+        div()
             .w_full()
-            .px_2p5()
+            .px_3()
             .py_1p5()
-            .gap_2()
-            .items_start()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors().text_muted)
-                    .child(rust_i18n::t!("sidebar.empty.title").to_string()),
-            )
-            .child(
-                div()
-                    .id("add-project-empty")
-                    .px_2()
-                    .py_1()
-                    .rounded(px(tokens.radius.row))
-                    .bg(tokens.colors().accent.opacity(0.22))
-                    .text_xs()
-                    .text_color(tokens.colors().text_primary)
-                    .cursor_pointer()
-                    .child(rust_i18n::t!("sidebar.empty.add").to_string())
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(SidebarEvent::AddProjectRequested);
-                    })),
-            )
-            // The command stays: a window is not the only way in, and a reader
-            // who prefers the terminal should not have to guess the name.
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded(px(tokens.radius.row))
-                    .bg(tokens.colors().code_bg)
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .child(rust_i18n::t!("sidebar.empty.hint").to_string()),
-            )
+            .text_xs()
+            .text_color(tokens.colors().text_muted)
+            .child(rust_i18n::t!("sidebar.empty.title").to_string())
     }
 
     /// The plan label `docs/ui.md` §3.2 reserves: the login in use, and its
@@ -671,7 +705,7 @@ impl SessionSidebar {
 
 impl Render for SessionSidebar {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
+        let tokens = Tokens::global(cx).clone();
         let border = tokens.colors().border_subtle;
         let sidebar_bg = tokens.colors().bg_sidebar;
 
@@ -680,6 +714,7 @@ impl Render for SessionSidebar {
             .iter()
             .enumerate()
             .filter(|(_, row)| !row.archived)
+            .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
             .map(|(index, row)| (index, row.clone()))
             .collect();
         // Stable: equal ranks keep their insertion order.
@@ -687,7 +722,7 @@ impl Render for SessionSidebar {
         // Grouped under their projects, which is also what orders the projects:
         // the one with an agent working in it rises the way a row does.
         let active_rows: Vec<SessionRow> = active.iter().map(|(_, row)| row.clone()).collect();
-        let groups = tree(&self.projects, &active_rows)
+        let mut groups = tree(&self.projects, &active_rows)
             .into_iter()
             .map(|mut group| {
                 // `tree` numbers rows within what it was given; a row element
@@ -700,66 +735,171 @@ impl Render for SessionSidebar {
                 group
             })
             .collect::<Vec<_>>();
+        if let Some(project) = &self.selected_project {
+            groups.retain(|group| &group.name == project);
+        }
 
+        let selected_project_name = self.selected_project.clone();
         let archived: Vec<(usize, SessionRow)> = self
             .rows
             .iter()
             .enumerate()
             .filter(|(_, row)| row.archived)
+            .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
+            .filter(|(_, row)| {
+                selected_project_name.as_ref().is_none_or(|selected| {
+                    row.workspace
+                        .parts()
+                        .is_some_and(|(project, _)| &project == selected)
+                })
+            })
             .map(|(index, row)| (index, row.clone()))
             .collect();
         let archived_count = archived.len();
-        let nothing_registered = groups.is_empty();
+        let no_matching_sessions =
+            groups.iter().all(|group| group.rows.is_empty()) && archived_count == 0;
 
-        v_flex()
+        let project_rows = self.projects.clone();
+        let selected_project = selected_project_name.is_some();
+
+        h_flex()
             .size_full()
-            .bg(sidebar_bg)
             .border_r_1()
             .border_color(border)
-            .child(self.header(cx))
-            .child(self.new_chat(cx))
             .child(
                 v_flex()
-                    .id("session-list")
-                    .flex_1()
-                    .px_1p5()
-                    .gap_0p5()
-                    .overflow_y_scroll()
-                    .child(self.projects_section(cx))
-                    .when(nothing_registered, |this| this.child(self.no_projects(cx)))
-                    .children(groups.into_iter().flat_map(|group| {
-                        let mut elements = vec![
-                            self.project_header(group.name, group.project, cx)
-                                .into_any_element(),
-                        ];
-                        elements.extend(group.rows.iter().map(|(index, row)| {
-                            self.session_row(*index, row, cx).into_any_element()
-                        }));
-                        elements
-                    }))
-                    .when(archived_count > 0, |this| {
-                        this.child(div().h_2())
-                            .child(self.archived_header(cx))
-                            .when(self.archived_open, |this| {
-                                this.children(archived.iter().map(|(index, row)| {
-                                    self.archived_row(*index, row, cx).into_any_element()
-                                }))
-                                .child(
-                                    div()
-                                        .px_2p5()
-                                        .py_1p5()
-                                        .text_xs()
-                                        .text_color(Tokens::global(cx).colors().text_muted)
-                                        // The count is a placeholder until the
-                                        // archived list is paged (M1).
-                                        .child(
-                                            rust_i18n::t!("sidebar.show_more", count = 25)
-                                                .to_string(),
-                                        ),
-                                )
+                    .w(px(188.))
+                    .h_full()
+                    .flex_shrink_0()
+                    .bg(sidebar_bg)
+                    .border_r_1()
+                    .border_color(border)
+                    .child(self.header(cx))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .px_1p5()
+                            .gap_0p5()
+                            .overflow_y_scrollbar()
+                            .child(self.projects_section(cx))
+                            .when(project_rows.is_empty(), |this| {
+                                this.child(self.no_projects(cx))
                             })
-                    }),
+                            .children(project_rows.into_iter().map(|project| {
+                                self.project_header(project.name, project.label, cx)
+                            })),
+                    ),
             )
-            .child(self.footer(cx))
+            .when(selected_project, |this| {
+                this.child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .bg(tokens.colors().bg_window.opacity(0.34))
+                        .child(self.workspace_header(cx))
+                        .child(
+                            h_flex()
+                                .h(px(36.))
+                                .mx_2()
+                                .mt_2()
+                                .px_2()
+                                .gap_2()
+                                .items_center()
+                                .rounded(px(tokens.radius.control()))
+                                .bg(tokens.colors().row_hover())
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                                .when(!self.search_query.is_empty(), |this| {
+                                    this.child(
+                                        div()
+                                            .id("clear-session-search")
+                                            .p_1()
+                                            .rounded(px(tokens.radius.control()))
+                                            .cursor_pointer()
+                                            .hover(|this| this.bg(tokens.colors().row_active()))
+                                            .child(
+                                                Icon::new(IconName::Close)
+                                                    .size_3()
+                                                    .text_color(tokens.colors().text_muted),
+                                            )
+                                            .on_click(cx.listener(|this, _, window, cx| {
+                                                this.search.update(cx, |search, cx| {
+                                                    search.set_value("", window, cx)
+                                                });
+                                            })),
+                                    )
+                                }),
+                        )
+                        .child(self.new_chat(cx))
+                        .child(
+                            v_flex()
+                                .id("session-list")
+                                .flex_1()
+                                .min_h_0()
+                                .px_1p5()
+                                .gap_0p5()
+                                .overflow_y_scroll()
+                                .when(no_matching_sessions, |this| {
+                                    this.child(
+                                        div()
+                                            .px_3()
+                                            .py_2()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(if self.search_query.trim().is_empty() {
+                                                rust_i18n::t!("sidebar.sessions.empty").to_string()
+                                            } else {
+                                                rust_i18n::t!("sidebar.sessions.no_match")
+                                                    .to_string()
+                                            }),
+                                    )
+                                })
+                                .children(groups.into_iter().flat_map(|group| {
+                                    let mut elements = Vec::new();
+                                    if !selected_project {
+                                        elements.push(
+                                            self.project_header(group.name, group.project, cx)
+                                                .into_any_element(),
+                                        );
+                                    }
+                                    elements.extend(group.rows.iter().map(|(index, row)| {
+                                        self.session_row(*index, row, cx).into_any_element()
+                                    }));
+                                    elements
+                                }))
+                                .when(archived_count > 0, |this| {
+                                    this.child(div().h_2())
+                                        .child(self.archived_header(cx))
+                                        .when(self.archived_open, |this| {
+                                            this.children(archived.iter().map(|(index, row)| {
+                                                self.archived_row(*index, row, cx)
+                                                    .into_any_element()
+                                            }))
+                                            .child(
+                                                div()
+                                                    .px_2p5()
+                                                    .py_1p5()
+                                                    .text_xs()
+                                                    .text_color(tokens.colors().text_muted)
+                                                    .child(
+                                                        rust_i18n::t!(
+                                                            "sidebar.show_more",
+                                                            count = 25
+                                                        )
+                                                        .to_string(),
+                                                    ),
+                                            )
+                                        })
+                                }),
+                        )
+                        .child(self.footer(cx)),
+                )
+            })
     }
 }

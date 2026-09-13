@@ -281,10 +281,12 @@ most left?" — and the answer is no, for three reasons that are each sufficient
   person makes, with the gauges in view, is the setup they have today made
   legible; a daemon that rotates logins is a different product.
 
-What Ginka does instead: puts the gauge next to the choice. The account chip
-shows the tightest window of the chosen account; the picker shows the same for
-every account of the provider; the sidebar footer, which the UI spec already
-reserves for a plan label, shows the account in use and its headroom. A person
+What Ginka does instead: puts the gauge next to the choice. A separate composer
+usage chip shows the tightest window even when there is only one login; the
+account picker shows the same for every account of the provider; the sidebar
+footer, which the UI spec already reserves for a plan label, shows the account
+in use and its headroom. The usage chip follows pushed readings after turns and
+refreshes explicitly when clicked, never on a timer. A person
 who sees "5h · 92 % · resets in 40m" beside "Work" and "5h · 12 %" beside
 "Personal" needs no router.
 

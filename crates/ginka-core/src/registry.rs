@@ -18,6 +18,15 @@ use std::path::{Path, PathBuf};
 /// workspace, no branches, git features off. That is a supported way to work,
 /// not an error — plenty of useful agent tasks happen outside a repository.
 pub fn register_project(conn: &Connection, path: &Path) -> Result<Project> {
+    register_project_as(conn, path, None)
+}
+
+/// Register a folder with an optional reader-facing label.
+///
+/// The immutable project key still derives from the canonical folder. The
+/// label is presentation metadata chosen in the add-project dialog and may be
+/// changed later without re-keying workspaces.
+pub fn register_project_as(conn: &Connection, path: &Path, label: Option<&str>) -> Result<Project> {
     let path = path
         .canonicalize()
         .with_context(|| format!("resolving {}", path.display()))?;
@@ -40,7 +49,10 @@ pub fn register_project(conn: &Connection, path: &Path) -> Result<Project> {
         },
         name,
         path: root,
-        label: None,
+        label: label
+            .map(str::trim)
+            .filter(|label| !label.is_empty())
+            .map(str::to_string),
         sort_order: next_sort_order(conn)?,
         kind,
     };
@@ -291,6 +303,22 @@ mod tests {
         // No remote was added, so CI and PR features have nothing to query.
         assert_eq!(project.has_origin, Some(false));
         assert_eq!(list_projects(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn a_project_can_keep_the_name_chosen_in_the_add_dialog() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("comet");
+        repository(&root);
+
+        let conn = db::open_in_memory().unwrap();
+        let project = register_project_as(&conn, &root, Some("Client website")).unwrap();
+
+        assert_eq!(
+            project.name.0, "comet",
+            "the stable key still comes from disk"
+        );
+        assert_eq!(project.label.as_deref(), Some("Client website"));
     }
 
     #[test]

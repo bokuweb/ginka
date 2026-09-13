@@ -219,7 +219,12 @@ impl Fixture {
 
         let root = work.path().join("comet");
         support::repository(&root);
-        service.handle(Request::AddProject { path: root }).unwrap();
+        service
+            .handle(Request::AddProject {
+                path: root,
+                label: None,
+            })
+            .unwrap();
         let workspace = match service
             .handle(Request::CreateWorkspace {
                 project: ProjectName("comet".into()),
@@ -1570,7 +1575,12 @@ fn every_agent_is_handed_ginkas_bridge_and_the_servers_the_user_listed() {
     .with_cli("/opt/ginka/bin/ginka");
     let root = work.path().join("comet");
     support::repository(&root);
-    service.handle(Request::AddProject { path: root }).unwrap();
+    service
+        .handle(Request::AddProject {
+            path: root,
+            label: None,
+        })
+        .unwrap();
     let workspace = match service
         .handle(Request::CreateWorkspace {
             project: ProjectName("comet".into()),

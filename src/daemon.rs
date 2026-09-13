@@ -385,8 +385,8 @@ impl DaemonLink {
     /// The registered project comes back so the caller can aim the next chat
     /// at what the reader just added, rather than at whatever was selected
     /// before they went looking for a folder.
-    pub async fn add_project(&self, path: PathBuf) -> Option<Project> {
-        match self.ask(Request::AddProject { path }).await {
+    pub async fn add_project(&self, path: PathBuf, label: Option<String>) -> Option<Project> {
+        match self.ask(Request::AddProject { path, label }).await {
             Some(Response::Project { project }) => Some(project),
             _ => None,
         }

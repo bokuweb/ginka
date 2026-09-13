@@ -23,6 +23,21 @@ pub const HEADER_HEIGHT: Pixels = px(44.);
 /// sidebar is closed.
 pub const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 
+/// Width of the always-present project navigation rail.
+pub const PROJECT_RAIL_WIDTH: Pixels = px(188.);
+
+/// Width of the navigator for its current selection state.
+///
+/// The session column is contextual: before a project is selected the rail
+/// stands alone and the new-session surface gets the remaining room.
+pub fn navigator_width(project_selected: bool, expanded: Pixels) -> Pixels {
+    if project_selected {
+        expanded
+    } else {
+        PROJECT_RAIL_WIDTH
+    }
+}
+
 /// The panels the user can open and close.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Panel {
@@ -63,7 +78,13 @@ impl Layout {
             sidebar_open: settings.sidebar_open,
             right_open: settings.right_panel_open,
             dock_open: settings.terminal_dock_open,
-            sidebar_width: settings.sidebar_width,
+            // Widths saved before the project rail existed describe a single
+            // column and cannot fit the new two-pane navigator.
+            sidebar_width: if settings.sidebar_width < 420.0 {
+                520.0
+            } else {
+                settings.sidebar_width
+            },
             right_width: settings.right_panel_width,
             dock_height: settings.terminal_dock_height,
         }
@@ -207,6 +228,22 @@ mod tests {
     }
 
     #[test]
+    fn a_legacy_single_sidebar_width_expands_for_the_project_rail() {
+        let settings = AppSettings {
+            sidebar_width: 250.0,
+            ..AppSettings::default()
+        };
+        let layout = Layout::from_settings(&settings);
+        assert_eq!(layout.size(Panel::Sidebar), px(520.));
+    }
+
+    #[test]
+    fn the_session_column_appears_only_after_a_project_is_selected() {
+        assert_eq!(navigator_width(false, px(520.)), PROJECT_RAIL_WIDTH);
+        assert_eq!(navigator_width(true, px(520.)), px(520.));
+    }
+
+    #[test]
     fn closing_every_panel_is_allowed() {
         // The centre column is not a panel, so there is no empty-window state
         // to guard against -- unlike VS Code, we have nothing to fall back to.
@@ -272,7 +309,7 @@ mod tests {
         let mut settings = all_open();
         let mut layout = Layout::from_settings(&settings);
         layout.toggle(Panel::RightPanel);
-        layout.set_size(Panel::Sidebar, px(312.));
+        layout.set_size(Panel::Sidebar, px(512.));
         layout.set_size(Panel::TerminalDock, px(180.));
         layout.write_into(&mut settings);
         ginka_core::settings::save(&path, &settings).unwrap();
@@ -281,7 +318,7 @@ mod tests {
         let restored = Layout::from_settings(&reloaded);
         assert_eq!(restored, layout);
         assert!(!restored.is_open(Panel::RightPanel));
-        assert_eq!(restored.size(Panel::Sidebar), px(312.));
+        assert_eq!(restored.size(Panel::Sidebar), px(512.));
         assert_eq!(restored.size(Panel::TerminalDock), px(180.));
     }
 

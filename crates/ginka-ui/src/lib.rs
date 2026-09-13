@@ -12,9 +12,11 @@ rust_i18n::i18n!("../../locales", fallback = "en");
 
 pub mod accounts;
 pub mod assets;
+pub mod composer;
 pub mod editor;
 pub mod home;
 pub mod layout;
+pub mod models;
 pub mod palette;
 pub mod reports;
 pub mod surface;

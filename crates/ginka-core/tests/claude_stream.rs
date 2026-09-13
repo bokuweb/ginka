@@ -6,6 +6,7 @@
 
 use ginka_core::driver::{ActivityKind, AgentEvent, ClaudeStream, DriverError};
 use ginka_protocol::model::SessionState;
+use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
 
 fn events(lines: &[&str]) -> Vec<AgentEvent> {
     let mut stream = ClaudeStream::default();
@@ -79,6 +80,84 @@ fn a_tool_use_becomes_a_normalized_call() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_subagents_work_stays_under_the_agent_call_that_spawned_it() {
+    let events = events(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"agent-1","name":"Agent","input":{"description":"Review correctness"}}]}}"#,
+        r#"{"type":"assistant","parent_tool_use_id":"agent-1","message":{"id":"message-1","content":[{"type":"thinking","thinking":"Start with the reducer."},{"type":"text","text":"I will inspect the state transitions."},{"type":"tool_use","id":"read-1","name":"Read","input":{"file_path":"src/state.rs"}}]}}"#,
+        r#"{"type":"user","parent_tool_use_id":"agent-1","message":{"content":[{"type":"tool_result","tool_use_id":"read-1","content":"done","is_error":false}]}}"#,
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"agent-1","content":"No regressions found.","is_error":false}]}}"#,
+    ]);
+
+    assert_eq!(
+        events,
+        [
+            AgentEvent::SubagentStarted {
+                id: "agent-1".into(),
+                title: "Review correctness".into(),
+            },
+            AgentEvent::SubagentStep {
+                parent_id: "agent-1".into(),
+                step: SubagentStep::new(
+                    "message-1:thinking",
+                    SubagentStepKind::Reasoning,
+                    "Start with the reducer.",
+                ),
+            },
+            AgentEvent::SubagentStep {
+                parent_id: "agent-1".into(),
+                step: SubagentStep::new(
+                    "message-1:text",
+                    SubagentStepKind::Message,
+                    "I will inspect the state transitions.",
+                ),
+            },
+            AgentEvent::SubagentStep {
+                parent_id: "agent-1".into(),
+                step: SubagentStep::new("read-1", SubagentStepKind::Tool, "src/state.rs")
+                    .with_status(SubagentStepStatus::Running),
+            },
+            AgentEvent::SubagentStep {
+                parent_id: "agent-1".into(),
+                step: SubagentStep::new("read-1", SubagentStepKind::Tool, "")
+                    .with_status(SubagentStepStatus::Completed),
+            },
+            AgentEvent::SubagentFinished {
+                id: "agent-1".into(),
+                summary: Some("No regressions found.".into()),
+                failed: false,
+            },
+        ]
+    );
+}
+
+#[test]
+fn an_orphan_child_message_is_not_promoted_into_the_parent_transcript() {
+    let events = events(&[
+        r#"{"type":"assistant","parent_tool_use_id":"missing-agent","message":{"id":"message-1","content":[{"type":"text","text":"private child output"}]}}"#,
+    ]);
+
+    assert!(events.is_empty());
+}
+
+#[test]
+fn the_turn_result_settles_a_subagent_whose_report_never_arrived() {
+    let events = events(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"agent-1","name":"Agent","input":{"description":"Review correctness"}}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"Done."}"#,
+    ]);
+
+    assert_eq!(
+        events[1],
+        AgentEvent::SubagentFinished {
+            id: "agent-1".into(),
+            summary: None,
+            failed: false,
+        }
+    );
+    assert!(matches!(events[2], AgentEvent::TurnEnd { turn: 1 }));
 }
 
 #[test]

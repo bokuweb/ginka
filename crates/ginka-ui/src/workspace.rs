@@ -13,6 +13,8 @@ use ginka_protocol::model::{
 use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 use std::path::PathBuf;
 
 /// The sidebar's rows, under the project they belong to.
@@ -53,9 +55,8 @@ impl ProjectGroup {
 pub struct ProjectRow {
     /// What every request naming this project carries.
     pub name: ProjectName,
-    /// What the row says. The daemon's own name for it: it is already a slug
-    /// of the directory the user pointed at, and a second display name would
-    /// be one more thing to keep in step with it.
+    /// What the row says. This is the optional name chosen in the add-project
+    /// dialog, falling back to the stable key for older registrations.
     pub label: SharedString,
     /// Where it is *on the daemon's host* (`docs/roadmap.md` §4.1), shown
     /// under the label so two checkouts of one repository can be told apart.
@@ -71,12 +72,53 @@ impl ProjectRow {
     pub fn from_project(project: &Project) -> Self {
         Self {
             name: project.name.clone(),
-            label: project.name.0.clone().into(),
+            label: project
+                .label
+                .clone()
+                .unwrap_or_else(|| project.name.0.clone())
+                .into(),
             path: project.path.to_string_lossy().to_string().into(),
             default_branch: project.default_branch.clone().into(),
             kind: project.kind,
         }
     }
+}
+
+/// A complete add-project dialog submission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectDraft {
+    /// Human-readable name shown in the project rail.
+    pub label: String,
+    /// Source folder registered with the daemon.
+    pub path: PathBuf,
+}
+
+/// Why the add-project dialog cannot be submitted yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectDraftError {
+    /// The display name is empty after trimming whitespace.
+    MissingName,
+    /// No source folder has been chosen.
+    MissingSource,
+}
+
+/// Validate and normalize values from the add-project dialog.
+///
+/// The name is checked before the source so Return from the focused name field
+/// reports the field the user is currently editing.
+pub fn validate_project_draft(
+    name: &str,
+    path: Option<PathBuf>,
+) -> Result<ProjectDraft, ProjectDraftError> {
+    let label = name.trim();
+    if label.is_empty() {
+        return Err(ProjectDraftError::MissingName);
+    }
+    let path = path.ok_or(ProjectDraftError::MissingSource)?;
+    Ok(ProjectDraft {
+        label: label.to_string(),
+        path,
+    })
 }
 
 /// The sidebar's tree: every registered project, with the workspaces in it.
@@ -500,9 +542,75 @@ impl SessionRow {
     }
 }
 
+/// Whether a sidebar row fuzzy-matches visible conversation metadata.
+///
+/// Search covers the title, model, provider, project and branch independently;
+/// joining them first would let a query cross field boundaries that are not
+/// visible next to each other.
+pub fn session_matches(row: &SessionRow, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let fields = [
+        row.title.as_ref(),
+        row.model.as_deref().unwrap_or_default(),
+        row.agent.label(),
+        row.origin.as_ref(),
+        row.branch.as_ref(),
+    ];
+    fields.into_iter().any(|field| {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut buffer = Vec::new();
+        let haystack = nucleo_matcher::Utf32Str::new(field, &mut buffer);
+        pattern.score(haystack, &mut matcher).is_some()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_draft_requires_a_name_and_source_folder() {
+        assert_eq!(
+            validate_project_draft("   ", Some(PathBuf::from("/tmp/comet"))),
+            Err(ProjectDraftError::MissingName)
+        );
+        assert_eq!(
+            validate_project_draft("Comet", None),
+            Err(ProjectDraftError::MissingSource)
+        );
+    }
+
+    #[test]
+    fn a_project_draft_trims_the_display_name_before_submission() {
+        assert_eq!(
+            validate_project_draft("  Comet  ", Some(PathBuf::from("/tmp/comet"))),
+            Ok(ProjectDraft {
+                label: "Comet".into(),
+                path: PathBuf::from("/tmp/comet"),
+            })
+        );
+    }
+
+    #[test]
+    fn a_project_row_prefers_the_dialog_s_display_name_to_its_stable_key() {
+        let mut project = Project {
+            name: ProjectName("comet-checkout".into()),
+            path: PathBuf::from("/tmp/comet-checkout"),
+            default_branch: "main".into(),
+            label: Some("Comet".into()),
+            sort_order: 0,
+            kind: ProjectKind::Git,
+            has_origin: Some(true),
+        };
+        assert_eq!(ProjectRow::from_project(&project).label, "Comet");
+
+        project.label = None;
+        assert_eq!(ProjectRow::from_project(&project).label, "comet-checkout");
+    }
 
     #[test]
     fn attention_sort_puts_running_work_first_and_is_stable() {
@@ -517,6 +625,21 @@ mod tests {
             .collect();
         assert_eq!(idle[0].title, "Repository Story Creation");
         assert_eq!(idle[1].title, "Local First");
+    }
+
+    #[test]
+    fn sidebar_search_matches_title_model_provider_and_branch() {
+        let mut row = SessionRow::samples().remove(0);
+        row.model = Some("gpt-5.6-sol".into());
+        row.agent = Agent::Codex;
+        row.branch = "feature/usage-meter".into();
+
+        assert!(session_matches(&row, "story"));
+        assert!(session_matches(&row, "gpt56"), "fuzzy model match");
+        assert!(session_matches(&row, "CODEX"));
+        assert!(session_matches(&row, "usgmtr"), "fuzzy branch match");
+        assert!(session_matches(&row, "  "));
+        assert!(!session_matches(&row, "sonnet"));
     }
 
     #[test]

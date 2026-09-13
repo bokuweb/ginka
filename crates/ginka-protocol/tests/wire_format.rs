@@ -5,7 +5,7 @@
 //! change for a daemon and a UI that ship separately, so the JSON is asserted
 //! literally rather than only round-tripped.
 
-use ginka_protocol::event::ActivityItem;
+use ginka_protocol::event::{ActivityItem, SubagentStep, SubagentStepKind, SubagentStepStatus};
 use ginka_protocol::event::{AgentEvent, DaemonEvent, Usage};
 use ginka_protocol::model::{
     AgentStatus, FileContent, FileImage, ProjectKind, SessionState, TranscriptPayload,
@@ -35,6 +35,30 @@ fn a_request_is_tagged_by_method() {
             "branch": "bright-harbor",
             "base": null,
         })
+    );
+}
+
+#[test]
+fn adding_a_project_keeps_its_optional_display_name_on_the_wire() {
+    let request = Request::AddProject {
+        path: "/work/comet".into(),
+        label: Some("Client website".into()),
+    };
+    assert_eq!(
+        wire(&request),
+        json!({
+            "method": "add_project",
+            "path": "/work/comet",
+            "label": "Client website",
+        })
+    );
+    let old = json!({ "method": "add_project", "path": "/work/comet" });
+    assert_eq!(
+        serde_json::from_value::<Request>(old).unwrap(),
+        Request::AddProject {
+            path: "/work/comet".into(),
+            label: None,
+        }
     );
 }
 
@@ -269,6 +293,29 @@ fn agent_events_are_tagged_by_kind() {
                 },
             },
             "tool_result",
+        ),
+        (
+            AgentEvent::SubagentStarted {
+                id: "agent_1".into(),
+                title: "Review correctness".into(),
+            },
+            "subagent_started",
+        ),
+        (
+            AgentEvent::SubagentStep {
+                parent_id: "agent_1".into(),
+                step: SubagentStep::new("read_1", SubagentStepKind::Tool, "Read src/lib.rs")
+                    .with_status(SubagentStepStatus::Running),
+            },
+            "subagent_step",
+        ),
+        (
+            AgentEvent::SubagentFinished {
+                id: "agent_1".into(),
+                summary: Some("No regressions".into()),
+                failed: false,
+            },
+            "subagent_finished",
         ),
         (
             AgentEvent::AskUser {
