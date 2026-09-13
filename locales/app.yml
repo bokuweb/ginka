@@ -76,6 +76,25 @@ project.add.failed:
   en: Ginka could not add this project
   ja: プロジェクトを追加できませんでした
 
+composer.branch.search:
+  en: Search or create a branch
+  ja: ブランチを検索または作成
+composer.branch.create:
+  en: "Create %{branch}"
+  ja: "%{branch} を作成"
+composer.branch.current:
+  en: Current
+  ja: 現在
+composer.branch.checked_out:
+  en: "In another worktree · %{path}"
+  ja: "別のワークツリーで使用中 · %{path}"
+composer.branch.empty:
+  en: No matching branches
+  ja: 一致するブランチはありません
+composer.branch.loading:
+  en: Reading branches…
+  ja: ブランチを読み込み中…
+
 status.working:
   en: Working
   ja: 実行中

@@ -15,9 +15,9 @@ use ginka_core::Paths;
 use std::path::PathBuf;
 
 use ginka_protocol::model::{
-    Account, AgentStatus, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent, FileEntry,
-    PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo, TranscriptEntry,
-    WorkspaceSummary,
+    Account, AgentStatus, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent,
+    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SlashCommand, TerminalInfo,
+    TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, SessionId, TerminalId, WorkspaceId};
@@ -664,6 +664,39 @@ impl DaemonLink {
             text,
         })
         .await;
+    }
+
+    /// Read local branches and which worktree, if any, currently holds each.
+    pub async fn branches(&self, workspace: &WorkspaceId) -> Result<Vec<BranchInfo>, String> {
+        match self
+            .ask_result(Request::ListBranches {
+                workspace: workspace.clone(),
+            })
+            .await?
+        {
+            Response::Branches { branches } => Ok(branches),
+            _ => Err("the daemon returned the wrong response for branch listing".into()),
+        }
+    }
+
+    /// Switch a workspace without changing its immutable workspace id.
+    pub async fn checkout_branch(
+        &self,
+        workspace: &WorkspaceId,
+        branch: String,
+        create: bool,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::CheckoutBranch {
+                workspace: workspace.clone(),
+                branch,
+                create,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            _ => Err("the daemon returned the wrong response for branch checkout".into()),
+        }
     }
 
     /// Ask the daemon one question and keep its refusal, for the callers

@@ -60,6 +60,8 @@ actions!(
 enum Picker {
     /// Which project — or none at all — the next chat runs in.
     Project,
+    /// Which local branch the current workspace has checked out.
+    Branch,
     /// Which agent runs the next prompt.
     Agent,
     /// Which of that agent's models it runs on.
@@ -246,6 +248,16 @@ pub struct Shell {
     model_query: Entity<InputState>,
     /// A copied query keeps filtering in the testable `ginka-ui` layer.
     model_filter: String,
+    /// Search or new-branch text in the branch popover.
+    branch_query: Entity<InputState>,
+    /// A copied query keeps branch filtering in the testable `ginka-ui` layer.
+    branch_filter: String,
+    /// The branches most recently read from git through the daemon.
+    branches: Vec<ginka_protocol::model::BranchInfo>,
+    /// A branch listing or checkout refusal shown in the open popover.
+    branch_error: Option<String>,
+    /// Set while branch state is being read or changed.
+    branch_busy: bool,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -426,6 +438,22 @@ impl Shell {
                     cx.notify();
                 }
             });
+        let branch_query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.branch.search").to_string())
+                .submit_on_enter(true)
+        });
+        let branch_query_changed = cx.subscribe(
+            &branch_query,
+            |this, query, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.branch_filter = query.read(cx).value().to_string();
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift: false, .. } => this.take_branch_choice(cx),
+                _ => {}
+            },
+        );
         let submitted = cx.subscribe_in(
             &composer,
             window,
@@ -664,6 +692,11 @@ impl Shell {
             composer,
             model_query,
             model_filter: String::new(),
+            branch_query,
+            branch_filter: String::new(),
+            branches: Vec::new(),
+            branch_error: None,
+            branch_busy: false,
             paths,
             settings,
             session,
@@ -675,6 +708,7 @@ impl Shell {
                 submitted,
                 committing,
                 model_query_changed,
+                branch_query_changed,
                 sidebar_search_changed,
             ],
         }
@@ -3045,6 +3079,9 @@ impl Shell {
         if picker == Picker::Model {
             return self.model_picker_panel(cx);
         }
+        if picker == Picker::Branch {
+            return self.branch_picker_panel(cx);
+        }
         let tokens = Tokens::global(cx);
 
         let rows: Vec<AnyElement> = match picker {
@@ -3093,6 +3130,7 @@ impl Shell {
                 rows
             }
             Picker::Agent => self.agent_rows(cx),
+            Picker::Branch => unreachable!("the searchable branch panel returns above"),
             // The provider's logins, each with its headroom or its state:
             // the numbers beside the choice are what make a router
             // unnecessary (`docs/accounts.md` §7).
@@ -3456,6 +3494,246 @@ impl Shell {
                                 .overflow_y_scrollbar()
                                 .children(rows),
                         ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Open the branch picker and read git's current branch ownership.
+    fn open_branch_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.picker == Some(Picker::Branch) {
+            self.picker = None;
+            cx.notify();
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.picker = Some(Picker::Branch);
+        self.branch_filter.clear();
+        self.branches.clear();
+        self.branch_error = None;
+        self.branch_busy = true;
+        self.branch_query
+            .update(cx, |query, cx| query.set_value("", window, cx));
+        self.branch_query
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.branches(&workspace).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.branch_busy = false;
+                match result {
+                    Ok(branches) => this.branches = branches,
+                    Err(error) => this.branch_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Take Return in the branch search as create or the best selectable match.
+    fn take_branch_choice(&mut self, cx: &mut Context<Self>) {
+        let Some(submission) =
+            ginka_ui::branches::branch_submission(&self.branches, &self.branch_filter)
+        else {
+            return;
+        };
+        match submission {
+            ginka_ui::branches::BranchSubmission::KeepCurrent => {
+                self.picker = None;
+                cx.notify();
+            }
+            ginka_ui::branches::BranchSubmission::Switch(branch) => {
+                self.choose_branch(branch, false, cx)
+            }
+            ginka_ui::branches::BranchSubmission::Create(branch) => {
+                self.choose_branch(branch, true, cx)
+            }
+        }
+    }
+
+    /// Switch or create the branch named by the picker.
+    fn choose_branch(&mut self, branch: String, create: bool, cx: &mut Context<Self>) {
+        if self.branch_busy {
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.branch_busy = true;
+        self.branch_error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.checkout_branch(&workspace, branch, create).await },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                this.branch_busy = false;
+                match result {
+                    Ok(()) => {
+                        this.picker = None;
+                        this.branch_filter.clear();
+                    }
+                    Err(error) => this.branch_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Searchable local branches plus an inline create action.
+    fn branch_picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let options = ginka_ui::branches::matching_branches(&self.branches, &self.branch_filter);
+        let create = ginka_ui::branches::new_branch_candidate(&self.branches, &self.branch_filter);
+        let mut rows: Vec<AnyElement> = Vec::new();
+
+        for option in options {
+            let name = option.branch.name.clone();
+            match option.availability {
+                ginka_ui::branches::BranchAvailability::Current => {
+                    rows.push(self.picker_row(
+                        SharedString::from(format!("branch-option:{name}")),
+                        name,
+                        Some(rust_i18n::t!("composer.branch.current").to_string()),
+                        true,
+                        cx.listener(|this, _, _, cx| {
+                            this.picker = None;
+                            cx.notify();
+                        }),
+                        cx,
+                    ));
+                }
+                ginka_ui::branches::BranchAvailability::Available => {
+                    let picked = name.clone();
+                    rows.push(self.picker_row(
+                        SharedString::from(format!("branch-option:{name}")),
+                        name,
+                        None,
+                        false,
+                        cx.listener(move |this, _, _, cx| {
+                            this.choose_branch(picked.clone(), false, cx)
+                        }),
+                        cx,
+                    ));
+                }
+                ginka_ui::branches::BranchAvailability::CheckedOutAt(path) => {
+                    rows.push(
+                        h_flex()
+                            .id(SharedString::from(format!("branch-option:{name}")))
+                            .w_full()
+                            .h(px(30.))
+                            .px(px(9.))
+                            .gap(px(8.))
+                            .items_center()
+                            .rounded(px(tokens.radius.row))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .truncate()
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .truncate()
+                                    .child(
+                                        rust_i18n::t!(
+                                            "composer.branch.checked_out",
+                                            path = path.display().to_string()
+                                        )
+                                        .to_string(),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
+                }
+            }
+        }
+
+        if let Some(branch) = create {
+            let picked = branch.clone();
+            rows.push(self.picker_row(
+                SharedString::from("branch-option:create"),
+                rust_i18n::t!("composer.branch.create", branch = branch).to_string(),
+                None,
+                false,
+                cx.listener(move |this, _, _, cx| this.choose_branch(picked.clone(), true, cx)),
+                cx,
+            ));
+        }
+
+        if rows.is_empty() && self.branch_busy {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.branch.loading").to_string())
+                    .into_any_element(),
+            );
+        } else if rows.is_empty() && self.branch_error.is_none() {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.branch.empty").to_string())
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            v_flex()
+                .w_full()
+                .max_h(px(360.))
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().popover())
+                .border_1()
+                .border_color(tokens.colors().border_strong)
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    div()
+                        .p_2()
+                        .border_b_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(Input::new(&self.branch_query)),
+                )
+                .children(self.branch_error.clone().map(|error| {
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
+                .child(
+                    v_flex()
+                        .p_1()
+                        .gap_0p5()
+                        .overflow_y_scrollbar()
+                        .children(rows),
                 )
                 .into_any_element(),
         )
@@ -4968,6 +5246,12 @@ impl Shell {
             .project_label()
             .unwrap_or_else(|| rust_i18n::t!("composer.context.project").to_string().into());
         let chosen = self.project_label().is_some();
+        let branch = self
+            .session
+            .as_ref()
+            .map(|session| session.branch.clone())
+            .filter(|branch| !branch.is_empty());
+        let branch_picker = branch.is_some();
 
         h_flex()
             .w_full()
@@ -5017,8 +5301,22 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .gap_1p5()
+                    .id("branch-chip")
+                    .h(px(22.))
+                    .px(px(6.))
+                    .gap(px(5.))
                     .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .when(self.picker == Some(Picker::Branch), |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .when(branch_picker, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_branch_picker(window, cx)
+                            }))
+                    })
                     .child(
                         Icon::empty()
                             .path(ginka_ui::assets::icon::GIT_BRANCH)
@@ -5029,13 +5327,15 @@ impl Shell {
                         div()
                             .text_size(px(11.))
                             .text_color(tokens.colors().text_muted)
-                            .child(
-                                self.session
-                                    .as_ref()
-                                    .map(|session| session.branch.clone())
-                                    .unwrap_or_else(|| "—".into()),
-                            ),
-                    ),
+                            .child(branch.unwrap_or_else(|| "—".into())),
+                    )
+                    .when(branch_picker, |this| {
+                        this.child(
+                            Icon::new(IconName::ChevronDown)
+                                .size(px(11.))
+                                .text_color(tokens.colors().text_muted),
+                        )
+                    }),
             )
     }
 
