@@ -181,6 +181,8 @@ pub struct Shell {
     /// Where a chat that has no workspace yet would run. `None` means no
     /// project, which is a scratch worktree rather than nowhere.
     target_project: Option<ProjectName>,
+    /// A project-search hit to open after the sidebar finishes switching workspaces.
+    pending_file_open: Option<(WorkspaceId, String)>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -364,6 +366,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenFile(path) => {
                     this.open_file(path.clone(), false, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenWorkspaceFile { workspace, path } => {
+                    this.open_workspace_file(workspace.clone(), path.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::OpenDefinition { workspace, target } => {
                     this.open_definition(workspace, target.clone(), window, cx)
                 }
@@ -466,6 +471,13 @@ impl Shell {
                                 == Some(ginka_ui::surface::Surface::Files)
                         {
                             this.find_files(String::new(), cx);
+                        }
+                        if let Some((workspace, path)) = this.pending_file_open.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.open_file(path, false, window, cx);
+                            } else {
+                                this.pending_file_open = Some((workspace, path));
+                            }
                         }
                         cx.notify();
                     }
@@ -740,6 +752,7 @@ impl Shell {
             add_project: None,
             projects: Vec::new(),
             target_project: None,
+            pending_file_open: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -1242,6 +1255,11 @@ impl Shell {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
+        let scope = self.surfaces.read(cx).file_search_scope();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let target = scope.target(workspace.clone(), project);
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         if query.trim().is_empty() {
@@ -1255,6 +1273,29 @@ impl Shell {
                     .await;
                 surfaces.update(cx, |surfaces, cx| {
                     surfaces.set_file_tree(requested_workspace, files, truncated, cx);
+                });
+            })
+            .detach();
+            return;
+        }
+        if let ginka_ui::file_search::FileSearchTarget::Project(project) = target {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_project_search(project.clone(), query.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_project = project.clone();
+                let requested_query = query.clone();
+                let (files, matches) = cx
+                    .background_spawn(async move { link.search_project(&project, &query).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_project_matches(
+                        requested_project,
+                        requested_query,
+                        files,
+                        matches,
+                        cx,
+                    );
                 });
             })
             .detach();
@@ -1276,6 +1317,23 @@ impl Shell {
             });
         })
         .detach();
+    }
+
+    /// Open a project-search hit, switching the centre column when necessary.
+    fn open_workspace_file(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+            self.open_file(path, false, window, cx);
+            return;
+        }
+        self.pending_file_open = Some((workspace.clone(), path));
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
     }
 
     /// Read a file and show it in the files surface.

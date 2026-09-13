@@ -462,6 +462,12 @@ surface.files.pending:
 surface.files.search:
   en: Find a file, or a line in one
   ja: ファイル名または内容を検索
+surface.files.scope.workspace:
+  en: This workspace
+  ja: このワークスペース
+surface.files.scope.project:
+  en: All workspaces
+  ja: 全ワークスペース
 surface.files.binary:
   en: This file is not text.
   ja: このファイルはテキストではありません。

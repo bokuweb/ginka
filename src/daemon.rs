@@ -488,6 +488,28 @@ impl DaemonLink {
         }
     }
 
+    /// Literal source hits across every active workspace in a project.
+    pub async fn search_project(
+        &self,
+        project: &ginka_protocol::ProjectName,
+        query: &str,
+    ) -> (
+        Vec<ginka_protocol::model::WorkspaceFileMatch>,
+        Vec<ginka_protocol::model::WorkspaceContentMatch>,
+    ) {
+        match self
+            .ask(Request::SearchProject {
+                project: project.clone(),
+                query: query.to_string(),
+                limit: None,
+            })
+            .await
+        {
+            Some(Response::WorkspaceMatches { files, matches }) => (files, matches),
+            _ => (Vec::new(), Vec::new()),
+        }
+    }
+
     /// One of a workspace's files, as text.
     pub async fn read_file(&self, workspace: &WorkspaceId, path: &str) -> Option<FileContent> {
         match self

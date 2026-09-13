@@ -257,6 +257,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_project_search",
+            description: "Find literal source lines across every active workspace in a project.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["project", "query"],
+            }),
+        },
+        Tool {
             name: "ginka_read_file",
             description: "Read one of a workspace's files.",
             schema: json!({
@@ -485,6 +498,11 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             query: text("query")?,
             limit: None,
         },
+        "ginka_project_search" => Request::SearchProject {
+            project: ProjectName(text("project")?),
+            query: text("query")?,
+            limit: number("limit").map(|limit| limit as u32),
+        },
         "ginka_read_file" => Request::ReadFile {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
@@ -676,6 +694,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_project_search_crosses_the_mcp_boundary() {
+        let request = request_for(
+            "ginka_project_search",
+            &json!({"project": "comet", "query": "needle", "limit": 17}),
+        )
+        .unwrap();
+        assert_eq!(
+            request,
+            Request::SearchProject {
+                project: ProjectName("comet".into()),
+                query: "needle".into(),
+                limit: Some(17),
+            }
+        );
     }
 
     #[test]

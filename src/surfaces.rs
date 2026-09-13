@@ -5,15 +5,17 @@
 //! changed. The rest are placeholders until M3 and M4. M4 turns this into a
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
-use ginka_protocol::WorkspaceId;
 use ginka_protocol::model::{
     ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind, Skill, SkillScope,
+    WorkspaceContentMatch, WorkspaceFileMatch,
 };
+use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
     language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
 };
+use ginka_ui::file_search::FileSearchScope;
 use ginka_ui::file_tree::{FileTree, TreeRowKind};
 use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
@@ -90,6 +92,14 @@ pub struct SurfacePanel {
     file_tree_truncated: bool,
     /// The lines that contain what was typed, if any do.
     matches: Vec<ContentMatch>,
+    /// Whether the finder reads this worktree or every active one in its project.
+    file_search_scope: FileSearchScope,
+    /// Project-wide hits, tagged with the worktree that owns each path.
+    project_matches: Vec<WorkspaceContentMatch>,
+    /// Project-wide fuzzy path hits, tagged with their owning worktree.
+    project_files: Vec<WorkspaceFileMatch>,
+    /// Identity of the latest project request, rejecting older async answers.
+    project_search: Option<(ProjectName, String)>,
     /// Open file paths and the tab currently in front.
     file_tabs: FileTabs,
     /// The independently editable buffer behind each open tab.
@@ -140,6 +150,11 @@ pub enum SurfaceEvent {
     FindFiles(String),
     /// Read a file and show it.
     OpenFile(String),
+    /// Select another workspace and open one of its project-search hits.
+    OpenWorkspaceFile {
+        workspace: WorkspaceId,
+        path: String,
+    },
     /// Open and select a definition returned by the active language server.
     OpenDefinition {
         workspace: WorkspaceId,
@@ -203,6 +218,10 @@ impl SurfacePanel {
             file_tree: FileTree::default(),
             file_tree_truncated: false,
             matches: Vec::new(),
+            file_search_scope: FileSearchScope::default(),
+            project_matches: Vec::new(),
+            project_files: Vec::new(),
+            project_search: None,
             file_tabs: FileTabs::default(),
             file_buffers: Vec::new(),
             browsing_files: true,
@@ -344,6 +363,58 @@ impl SurfacePanel {
         }
     }
 
+    /// Current content-search scope selected by the reader.
+    pub fn file_search_scope(&self) -> FileSearchScope {
+        self.file_search_scope
+    }
+
+    /// Mark a project query current before its asynchronous answer arrives.
+    pub fn begin_project_search(
+        &mut self,
+        project: ProjectName,
+        query: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.project_search = Some((project, query));
+        self.files.clear();
+        self.matches.clear();
+        self.project_matches.clear();
+        self.project_files.clear();
+        cx.notify();
+    }
+
+    /// Accept project hits only while they still describe the visible query.
+    pub fn set_project_matches(
+        &mut self,
+        project: ProjectName,
+        query: String,
+        files: Vec<WorkspaceFileMatch>,
+        matches: Vec<WorkspaceContentMatch>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_search.as_ref() != Some(&(project, query)) {
+            return;
+        }
+        self.project_files = files;
+        self.project_matches = matches;
+        cx.notify();
+    }
+
+    fn set_file_search_scope(&mut self, scope: FileSearchScope, cx: &mut Context<Self>) {
+        if self.file_search_scope == scope {
+            return;
+        }
+        self.file_search_scope = scope;
+        self.files.clear();
+        self.matches.clear();
+        self.project_matches.clear();
+        self.project_files.clear();
+        self.project_search = None;
+        let query = self.finder.read(cx).value().to_string();
+        cx.emit(SurfaceEvent::FindFiles(query));
+        cx.notify();
+    }
+
     /// Mark the workspace and path whose asynchronous read is current.
     ///
     /// Returns whether the daemon must be asked. `from_history` restores the
@@ -405,6 +476,9 @@ impl SurfacePanel {
         self.file_buffers.clear();
         self.files.clear();
         self.matches.clear();
+        self.project_matches.clear();
+        self.project_files.clear();
+        self.project_search = None;
         self.tree_files.clear();
         self.tree_workspace = None;
         self.file_tree = FileTree::default();
@@ -1958,12 +2032,43 @@ impl SurfacePanel {
             .flex_1()
             .min_h_0()
             .child(
-                div()
+                v_flex()
                     .w_full()
                     .p_2()
+                    .gap_1()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(Input::new(&self.finder)),
+                    .child(Input::new(&self.finder))
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("file-search-workspace")
+                                    .ghost()
+                                    .when(
+                                        self.file_search_scope == FileSearchScope::Workspace,
+                                        |this| this.bg(tokens.colors().row_hover()),
+                                    )
+                                    .child(
+                                        rust_i18n::t!("surface.files.scope.workspace").to_string(),
+                                    )
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_file_search_scope(FileSearchScope::Workspace, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("file-search-project")
+                                    .ghost()
+                                    .when(
+                                        self.file_search_scope == FileSearchScope::Project,
+                                        |this| this.bg(tokens.colors().row_hover()),
+                                    )
+                                    .child(rust_i18n::t!("surface.files.scope.project").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.set_file_search_scope(FileSearchScope::Project, cx)
+                                    })),
+                            ),
+                    ),
             )
             .children(
                 (!self.file_tabs.paths().is_empty()
@@ -2061,6 +2166,9 @@ impl SurfacePanel {
         if self.finder.read(cx).value().trim().is_empty() {
             return self.file_tree(cx).into_any_element();
         }
+        if self.file_search_scope == FileSearchScope::Project {
+            return self.project_file_list(cx).into_any_element();
+        }
         v_flex()
             .id("file-list")
             .flex_1()
@@ -2147,6 +2255,104 @@ impl SurfacePanel {
                     .child(rust_i18n::t!("surface.files.empty").to_string())
             }))
             .into_any_element()
+    }
+
+    fn project_file_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
+        v_flex()
+            .id("project-file-list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py_1()
+            .children(self.project_files.iter().map(|hit| {
+                let workspace = hit.workspace.clone();
+                let path = hit.path.clone();
+                h_flex()
+                    .id(SharedString::from(format!(
+                        "project-file:{}:{}",
+                        hit.workspace, hit.path
+                    )))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SurfaceEvent::OpenWorkspaceFile {
+                            workspace: workspace.clone(),
+                            path: path.clone(),
+                        })
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(format!("{} · {}", hit.workspace, hit.path)),
+                    )
+            }))
+            .children((!self.project_matches.is_empty()).then(|| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .mt_2()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.files.matches").to_string())
+            }))
+            .children(self.project_matches.iter().map(|hit| {
+                let workspace = hit.workspace.clone();
+                let path = hit.path.clone();
+                v_flex()
+                    .id(SharedString::from(format!(
+                        "project-match:{}:{}:{}",
+                        hit.workspace, hit.path, hit.line
+                    )))
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .gap_0p5()
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SurfaceEvent::OpenWorkspaceFile {
+                            workspace: workspace.clone(),
+                            path: path.clone(),
+                        })
+                    }))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(format!("{} · {}:{}", hit.workspace, hit.path, hit.line)),
+                    )
+                    .child(
+                        div()
+                            .font_family(mono.clone())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(hit.text.clone()),
+                    )
+            }))
+            .children(
+                (self.project_files.is_empty() && self.project_matches.is_empty()).then(|| {
+                    div()
+                        .w_full()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.files.empty").to_string())
+                }),
+            )
     }
 
     /// The empty-query explorer, folded from the daemon's bounded catalogue.

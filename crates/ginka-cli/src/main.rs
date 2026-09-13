@@ -238,6 +238,14 @@ enum ProjectCommand {
     },
     /// List registered projects.
     List,
+    /// Find literal source lines across every active workspace.
+    Search {
+        project: String,
+        query: String,
+        /// Maximum hits across all workspaces.
+        #[arg(long)]
+        limit: Option<u32>,
+    },
     /// Forget a project. Its files are left alone.
     Remove { project: String },
 }
@@ -680,6 +688,15 @@ fn request_for(command: Command) -> Result<Request> {
             label,
         },
         Command::Project(ProjectCommand::List) => Request::ListProjects,
+        Command::Project(ProjectCommand::Search {
+            project,
+            query,
+            limit,
+        }) => Request::SearchProject {
+            project: ProjectName(project),
+            query,
+            limit,
+        },
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
             project: ProjectName(project),
         },
@@ -1277,6 +1294,14 @@ fn print(response: Response, patch: bool) {
         Response::Matches { matches } => {
             for hit in matches {
                 println!("{}:{}: {}", hit.path, hit.line, hit.text);
+            }
+        }
+        Response::WorkspaceMatches { files, matches } => {
+            for hit in files {
+                println!("{}:{}", hit.workspace, hit.path);
+            }
+            for hit in matches {
+                println!("{}:{}:{}: {}", hit.workspace, hit.path, hit.line, hit.text);
             }
         }
         Response::Terminal { terminal } => println!("{terminal}"),
