@@ -120,11 +120,14 @@ impl AgentDriver for ClaudeDriver {
         // does not go stale every time a model ships.
         ["opus", "sonnet", "haiku"]
             .into_iter()
-            .map(|id| ProviderModel {
-                id: id.to_string(),
-                label: id.to_string(),
-            })
+            .map(|id| ProviderModel::new(id, id))
             .collect()
+    }
+
+    fn apply_options(&self, _before: &SessionOptions, _after: &SessionOptions) -> OptionOutcome {
+        // A resumed turn can carry a different model/effort while retaining
+        // the provider's session id.
+        OptionOutcome::Absorbed
     }
 
     fn program(&self) -> &str {

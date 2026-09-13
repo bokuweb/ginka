@@ -69,6 +69,18 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_archive",
+            description: "Archive a workspace without deleting it, or restore it to active work.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "restore": {"type": "boolean", "description": "Restore instead of archive"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_agents",
             description: "Which coding agents this machine has, and whether they are signed in.",
             schema: json!({"type": "object", "properties": {}}),
@@ -96,6 +108,8 @@ pub fn tools() -> Vec<Tool> {
                     "agent": {"type": "string", "description": "A driver id: claude, codex"},
                     "prompt": {"type": "string"},
                     "model": {"type": "string"},
+                    "reasoning_effort": {"type": "string", "description": "A value advertised for the selected model"},
+                    "service_tier": {"type": "string", "description": "A value advertised for the selected model"},
                     "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands sandboxed or refused) otherwise"},
                     "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's default otherwise"},
                 },
@@ -143,6 +157,33 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"session": {"type": "string"}, "text": {"type": "string"}},
                 "required": ["session", "text"],
+            }),
+        },
+        Tool {
+            name: "ginka_session_respond",
+            description: "Answer a question, plan or permission request inside a running turn. Use the request id from the transcript event.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "request_id": {"type": "string"},
+                    "response": {"type": "string"}
+                },
+                "required": ["session", "request_id", "response"],
+            }),
+        },
+        Tool {
+            name: "ginka_session_options",
+            description: "Replace the model, reasoning effort and service tier used by later turns. Omitted values select provider defaults. The response says whether the provider thread absorbed the change or needs a restart.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "model": {"type": "string"},
+                    "reasoning_effort": {"type": "string"},
+                    "service_tier": {"type": "string"}
+                },
+                "required": ["session"],
             }),
         },
         Tool {
@@ -218,6 +259,20 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"workspace": workspace, "path": {"type": "string"}},
                 "required": ["workspace", "path"],
+            }),
+        },
+        Tool {
+            name: "ginka_write_file",
+            description: "Save an existing UTF-8 workspace file. Pass the revision returned by ginka_read_file so a newer edit is never overwritten silently.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "text": {"type": "string"},
+                    "expected_revision": {"type": "string"},
+                },
+                "required": ["workspace", "path", "text", "expected_revision"],
             }),
         },
         Tool {
@@ -316,6 +371,10 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             branch: text("branch")?,
             base: maybe("base"),
         },
+        "ginka_workspace_archive" => Request::ArchiveWorkspace {
+            workspace: WorkspaceId(text("workspace")?),
+            archived: !flag("restore"),
+        },
         "ginka_agents" => Request::ListAgents,
         "ginka_accounts" => Request::Accounts,
         "ginka_sessions" => Request::ListSessions {
@@ -327,6 +386,8 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             agent: text("agent")?,
             prompt: text("prompt")?,
             model: maybe("model"),
+            reasoning_effort: maybe("reasoning_effort"),
+            service_tier: maybe("service_tier"),
             account: maybe("account").map(ginka_protocol::AccountId),
             access_mode: match maybe("access") {
                 Some(word) => Some(ginka_protocol::AccessMode::parse(&word).ok_or_else(|| {
@@ -376,6 +437,17 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             session: SessionId(text("session")?),
             text: text("text")?,
         },
+        "ginka_session_respond" => Request::RespondToAgent {
+            session: SessionId(text("session")?),
+            request_id: text("request_id")?,
+            response: text("response")?,
+        },
+        "ginka_session_options" => Request::UpdateSessionOptions {
+            session: SessionId(text("session")?),
+            model: maybe("model"),
+            reasoning_effort: maybe("reasoning_effort"),
+            service_tier: maybe("service_tier"),
+        },
         "ginka_session_cancel" => Request::CancelSession {
             session: SessionId(text("session")?),
         },
@@ -412,6 +484,12 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_read_file" => Request::ReadFile {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
+        },
+        "ginka_write_file" => Request::WriteFile {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            text: text("text")?,
+            expected_revision: text("expected_revision")?,
         },
         "ginka_branches" => Request::ListBranches {
             workspace: WorkspaceId(text("workspace")?),
@@ -512,12 +590,15 @@ mod tests {
                 "branch": "harbor",
                 "workspace": "comet/harbor",
                 "session": "s-1",
+                "request_id": "ask-1",
+                "response": "yes",
                 "agent": "claude",
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
                 "query": "needle",
                 "path": "src/main.rs",
+                "expected_revision": "abc123",
                 "checkpoint": "c-1",
                 "prefix": "attempt",
                 "agents": ["claude", "codex:gpt-5"],
@@ -577,6 +658,120 @@ mod tests {
                 source: ChangeSource::SinceCheckpoint { .. },
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn a_workspace_archive_can_be_reversed() {
+        let archive = request_for(
+            "ginka_workspace_archive",
+            &json!({"workspace": "comet/harbor"}),
+        )
+        .unwrap();
+        let restore = request_for(
+            "ginka_workspace_archive",
+            &json!({"workspace": "comet/harbor", "restore": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            archive,
+            Request::ArchiveWorkspace { archived: true, .. }
+        ));
+        assert!(matches!(
+            restore,
+            Request::ArchiveWorkspace {
+                archived: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn session_model_options_cross_the_mcp_boundary() {
+        let request = request_for(
+            "ginka_session_start",
+            &json!({
+                "workspace": "comet/harbor",
+                "agent": "codex",
+                "prompt": "go",
+                "model": "gpt-next",
+                "reasoning_effort": "high",
+                "service_tier": "priority"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::StartSession {
+                reasoning_effort: Some(ref effort),
+                service_tier: Some(ref tier),
+                ..
+            } if effort == "high" && tier == "priority"
+        ));
+    }
+
+    #[test]
+    fn existing_session_options_cross_the_mcp_boundary() {
+        let request = request_for(
+            "ginka_session_options",
+            &json!({
+                "session": "session-1",
+                "model": "gpt-next",
+                "reasoning_effort": "high",
+                "service_tier": "priority"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::UpdateSessionOptions {
+                model: Some(ref model),
+                reasoning_effort: Some(ref effort),
+                service_tier: Some(ref tier),
+                ..
+            } if model == "gpt-next" && effort == "high" && tier == "priority"
+        ));
+    }
+
+    #[test]
+    fn an_interaction_response_crosses_the_mcp_boundary() {
+        let request = request_for(
+            "ginka_session_respond",
+            &json!({
+                "session": "session-1",
+                "request_id": "ask-1",
+                "response": "SQLite"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::RespondToAgent {
+                ref request_id,
+                ref response,
+                ..
+            } if request_id == "ask-1" && response == "SQLite"
+        ));
+    }
+
+    #[test]
+    fn a_file_save_crosses_the_mcp_boundary_with_its_revision() {
+        let request = request_for(
+            "ginka_write_file",
+            &json!({
+                "workspace": "comet/harbor",
+                "path": "src/main.rs",
+                "text": "fn main() {}\n",
+                "expected_revision": "abc123"
+            }),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::WriteFile {
+                ref expected_revision,
+                ..
+            } if expected_revision == "abc123"
         ));
     }
 

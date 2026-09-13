@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// The contract version this build speaks. A mismatch fails the handshake
 /// loudly: a client and daemon that disagree about the wire will otherwise
 /// half-work, which is far harder to diagnose than a refusal.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Largest message either side will accept. Attachments travel over this
 /// socket, so the cap has to clear the largest upload the daemon takes — and
@@ -40,7 +40,10 @@ pub enum ClientMessage {
     },
     /// A request expecting exactly one [`ServerMessage::Response`] or
     /// [`ServerMessage::Error`] with the same `id`.
-    Request { id: RequestId, payload: Request },
+    Request {
+        id: RequestId,
+        payload: Box<Request>,
+    },
     /// Replay the event stream from after `after`.
     ///
     /// Sent immediately after connecting by a client that has state to catch
@@ -71,7 +74,10 @@ pub enum ServerMessage {
     /// something better than "could not connect".
     Rejected { reason: HandshakeRejection },
     /// A successful answer to the request with this `id`.
-    Response { id: RequestId, payload: Response },
+    Response {
+        id: RequestId,
+        payload: Box<Response>,
+    },
     /// A failed answer. Kept separate from [`ServerMessage::Response`] because
     /// `Result` serialises as `{"Ok":…}`/`{"Err":…}`, which is a Rust detail no
     /// other client should have to know about.

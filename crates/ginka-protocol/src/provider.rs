@@ -56,6 +56,7 @@ impl std::fmt::Display for ProviderKind {
 
 /// What a session is allowed to do without asking. Ours, not a vendor's: every
 /// driver maps it onto whatever its CLI calls the same idea.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccessMode {
@@ -95,9 +96,12 @@ impl AccessMode {
 }
 
 /// One selectable value inside a model — an effort level, a service tier.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderOption {
+    /// The value passed to the provider.
     pub id: String,
+    /// The human-readable picker label.
     pub label: String,
 }
 
@@ -111,14 +115,19 @@ impl ProviderOption {
 }
 
 /// One model a provider offers, with the options that apply to it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderModel {
+    /// The model id passed to the provider.
     pub id: String,
+    /// The human-readable picker label.
     pub label: String,
     /// The provider's own default. At most one model in a catalogue sets it;
     /// `default_of` falls back to the first when none does.
     pub is_default: bool,
+    /// Reasoning levels accepted by this model, in picker order.
     pub reasoning_efforts: Vec<ProviderOption>,
+    /// Service tiers accepted by this model, in picker order.
     pub service_tiers: Vec<ProviderOption>,
 }
 
@@ -204,6 +213,7 @@ impl SessionOptions {
 }
 
 /// A driver's answer to "can you apply this without being restarted?".
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OptionOutcome {

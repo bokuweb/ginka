@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use ginka_protocol::provider::ProviderKind;
+use ginka_protocol::provider::{ProviderKind, ProviderModel};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,10 @@ pub struct AppSettings {
     pub last_workspace: Option<String>,
     /// BCP-47 tag; `None` follows the system locale.
     pub locale: Option<String>,
+    /// Last explicitly selected model per provider, restored by the composer.
+    pub recent_models: BTreeMap<String, String>,
+    /// Last non-default effort and tier per provider/model pair.
+    pub recent_model_options: BTreeMap<String, RecentModelOptions>,
 }
 
 impl Default for AppSettings {
@@ -42,8 +46,95 @@ impl Default for AppSettings {
             terminal_dock_height: 220.0,
             last_workspace: None,
             locale: None,
+            recent_models: BTreeMap::new(),
+            recent_model_options: BTreeMap::new(),
         }
     }
+}
+
+impl AppSettings {
+    /// Remember a model choice for the next conversation on `provider`.
+    pub fn remember_model(&mut self, provider: impl Into<String>, model: impl Into<String>) {
+        self.recent_models.insert(provider.into(), model.into());
+    }
+
+    /// Return a provider to choosing its own model.
+    pub fn forget_model(&mut self, provider: &str) {
+        self.recent_models.remove(provider);
+    }
+
+    /// The remembered model only while the provider still advertises it.
+    ///
+    /// Catalogues change independently of the app. Returning `None` for a
+    /// removed id lets the provider choose its current default instead of
+    /// repeatedly launching a model that no longer exists.
+    pub fn recent_model<'a>(&'a self, provider: &str, models: &[ProviderModel]) -> Option<&'a str> {
+        self.recent_models
+            .get(provider)
+            .filter(|recent| {
+                models
+                    .iter()
+                    .any(|model| model.id.as_str() == recent.as_str())
+            })
+            .map(String::as_str)
+    }
+
+    /// Remember effort and tier for one provider/model pair.
+    pub fn remember_model_options(
+        &mut self,
+        provider: &str,
+        model: &str,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) {
+        self.recent_model_options.insert(
+            model_options_key(provider, model),
+            RecentModelOptions {
+                reasoning_effort,
+                service_tier,
+            },
+        );
+    }
+
+    /// Recent options filtered against what this catalogue still accepts.
+    pub fn recent_model_options(
+        &self,
+        provider: &str,
+        model: &ProviderModel,
+    ) -> RecentModelOptions {
+        let Some(recent) = self
+            .recent_model_options
+            .get(&model_options_key(provider, &model.id))
+        else {
+            return RecentModelOptions::default();
+        };
+        RecentModelOptions {
+            reasoning_effort: recent
+                .reasoning_effort
+                .as_ref()
+                .filter(|effort| model.supports_reasoning_effort(effort))
+                .cloned(),
+            service_tier: recent
+                .service_tier
+                .as_ref()
+                .filter(|tier| model.supports_service_tier(tier))
+                .cloned(),
+        }
+    }
+}
+
+/// Recent non-default choices for one provider/model pair.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecentModelOptions {
+    /// Last reasoning level selected for the model.
+    pub reasoning_effort: Option<String>,
+    /// Last service tier selected for the model.
+    pub service_tier: Option<String>,
+}
+
+fn model_options_key(provider: &str, model: &str) -> String {
+    format!("{provider}/{model}")
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -256,6 +347,40 @@ mod tests {
         };
         save(&path, &settings).unwrap();
         assert_eq!(load::<AppSettings>(&path), settings);
+    }
+
+    #[test]
+    fn the_recent_model_is_kept_per_provider() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let mut settings = AppSettings::default();
+        settings.remember_model("codex", "gpt-next");
+        settings.remember_model_options(
+            "codex",
+            "gpt-next",
+            Some("high".into()),
+            Some("priority".into()),
+        );
+        save(&path, &settings).unwrap();
+
+        let loaded: AppSettings = load(&path);
+        assert_eq!(loaded.recent_models.get("codex"), Some(&"gpt-next".into()));
+        assert_eq!(loaded.recent_models.get("claude"), None);
+        assert_eq!(
+            loaded.recent_model("codex", &[ProviderModel::new("gpt-next", "Next")]),
+            Some("gpt-next")
+        );
+        assert_eq!(
+            loaded.recent_model("codex", &[ProviderModel::new("gpt-newer", "Newer")]),
+            None,
+            "a stale id returns to the provider default"
+        );
+        let model = ProviderModel::new("gpt-next", "Next").with_reasoning_efforts([
+            ginka_protocol::provider::ProviderOption::new("high", "High"),
+        ]);
+        let options = loaded.recent_model_options("codex", &model);
+        assert_eq!(options.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(options.service_tier, None, "removed options are ignored");
     }
 
     #[test]

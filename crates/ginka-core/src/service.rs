@@ -22,7 +22,7 @@ use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
 };
-use ginka_protocol::provider::AccessMode;
+use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
@@ -352,6 +352,20 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
+            Request::ArchiveWorkspace {
+                workspace,
+                archived,
+            } => {
+                if !project::set_archived(&self.conn(), &workspace, archived).map_err(failed)? {
+                    return Err(RpcError::not_found(format!(
+                        "no workspace named {workspace}"
+                    )));
+                }
+                if let Some((project, _)) = workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
 
             Request::ListAgents => Ok(Response::Agents {
                 agents: self.agents(),
@@ -422,6 +436,8 @@ impl Service {
                 agent,
                 prompt,
                 model,
+                reasoning_effort,
+                service_tier,
                 account,
                 access_mode,
                 origin,
@@ -430,10 +446,18 @@ impl Service {
                 &agent,
                 prompt,
                 model,
+                reasoning_effort,
+                service_tier,
                 account,
                 access_mode.unwrap_or_default(),
                 origin,
             ),
+            Request::UpdateSessionOptions {
+                session,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => self.update_session_options(&session, model, reasoning_effort, service_tier),
             Request::CloseSessionOrigin { session } => {
                 self.session(&session)?;
                 if !session::close_origin(&self.conn(), &session).map_err(failed)? {
@@ -452,13 +476,15 @@ impl Service {
             } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
             Request::RespondToAgent {
-                session, response, ..
+                session,
+                request_id,
+                response,
             } => {
-                // Every driver this build ships runs its vendor's
-                // non-interactive mode, which never asks a question mid-turn.
-                // An answer is therefore a follow-up like any other; drivers
-                // that can interrupt a turn will override this.
-                self.send_message(&session, response)
+                self.session(&session)?;
+                self.sessions
+                    .respond(&session, &request_id, &response)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
             }
             Request::RenameSession { session, title } => {
                 if !session::rename(&self.conn(), &session, &title).map_err(failed)? {
@@ -804,6 +830,18 @@ impl Service {
                     file: crate::files::read(&worktree.path, &path).map_err(failed)?,
                 })
             }
+            Request::WriteFile {
+                workspace,
+                path,
+                text,
+                expected_revision,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::FileContent {
+                    file: crate::files::write(&worktree.path, &path, &text, &expected_revision)
+                        .map_err(failed)?,
+                })
+            }
             Request::WorkspaceTerminals { workspace } => Ok(Response::Terminals {
                 terminals: self.terminals.list(&workspace),
             }),
@@ -1064,6 +1102,8 @@ impl Service {
         agent: &str,
         prompt: String,
         model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
         account: Option<ginka_protocol::AccountId>,
         access_mode: AccessMode,
         origin: Option<SessionOrigin>,
@@ -1087,6 +1127,8 @@ impl Service {
             agent: driver.id().to_string(),
             account: account.clone(),
             model: model.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            service_tier: service_tier.clone(),
             state: SessionState::Starting,
             // What this conversation is about, taken from what was asked. The
             // user can rename it; nothing else writes it, because the agent's
@@ -1101,7 +1143,7 @@ impl Service {
         };
         session::insert(&self.conn(), &session).map_err(failed)?;
         self.events.emit(DaemonEvent::SessionStarted {
-            session: session.clone(),
+            session: Box::new(session.clone()),
         });
 
         // The agent reads files, not URIs: an attachment the user mentioned
@@ -1109,6 +1151,8 @@ impl Service {
         // the reference, so the window can still draw the attachment.
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&prompt))
             .with_model(model)
+            .with_reasoning_effort(reasoning_effort)
+            .with_service_tier(service_tier)
             .with_access_mode(access_mode)
             .with_mcp_servers(self.mcp_servers(&worktree.path));
         for (key, value) in crate::account::env_layer(
@@ -1123,6 +1167,128 @@ impl Service {
             .start(session.id.clone(), driver, spec)
             .map_err(failed)?;
         Ok(Response::Session { session })
+    }
+
+    /// Apply provider options to later turns without losing the vendor thread
+    /// when its transport can carry them on resume.
+    fn update_session_options(
+        &mut self,
+        id: &SessionId,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) -> Result<Response, RpcError> {
+        let mut stored = self.session(id)?;
+        let before = SessionOptions {
+            model: stored.model.clone(),
+            reasoning_effort: stored.reasoning_effort.clone(),
+            service_tier: stored.service_tier.clone(),
+            access_mode: stored.access_mode,
+            account: Some(stored.account.clone()),
+        };
+        let after = SessionOptions {
+            model: model.clone(),
+            reasoning_effort: reasoning_effort.clone(),
+            service_tier: service_tier.clone(),
+            ..before.clone()
+        };
+        if before == after {
+            return Ok(Response::SessionOptionsApplied {
+                session: stored,
+                outcome: OptionOutcome::Absorbed,
+            });
+        }
+
+        let driver = self.driver(&stored.agent)?;
+        let outcome = if SessionOptions::forces_restart(&before, &after) {
+            OptionOutcome::RestartRequired
+        } else {
+            driver.apply_options(&before, &after)
+        };
+        if outcome.absorbed() {
+            let updated_at = now();
+            let changed = session::update_provider_options(
+                &self.conn(),
+                id,
+                model.as_deref(),
+                reasoning_effort.as_deref(),
+                service_tier.as_deref(),
+                updated_at,
+            )
+            .map_err(failed)?;
+            if !changed {
+                return Err(RpcError::not_found(format!("session {id}")));
+            }
+            stored.model = model;
+            stored.reasoning_effort = reasoning_effort;
+            stored.service_tier = service_tier;
+            stored.updated_at = updated_at;
+            self.events.emit(DaemonEvent::SessionOptionsChanged {
+                session: Box::new(stored.clone()),
+            });
+        } else {
+            stored =
+                self.replace_session_for_options(&stored, model, reasoning_effort, service_tier)?;
+        }
+        Ok(Response::SessionOptionsApplied {
+            session: stored,
+            outcome,
+        })
+    }
+
+    /// Replace a provider thread that cannot absorb an option change.
+    ///
+    /// The normalized transcript is copied and summarized into a one-shot
+    /// handoff, so the first turn of the replacement starts a fresh vendor
+    /// thread without losing what the conversation was about.
+    fn replace_session_for_options(
+        &mut self,
+        original: &Session,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+    ) -> Result<Session, RpcError> {
+        let created_at = now().max(original.created_at.saturating_add(1));
+        let replacement = Session {
+            id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+            workspace: original.workspace.clone(),
+            agent: original.agent.clone(),
+            account: original.account.clone(),
+            model,
+            reasoning_effort,
+            service_tier,
+            state: SessionState::Idle,
+            title: original.title.clone(),
+            summary: None,
+            vendor_session_id: None,
+            access_mode: original.access_mode,
+            origin: original.origin.clone(),
+            created_at,
+            updated_at: created_at,
+        };
+        {
+            let mut conn = self.conn();
+            let tx = conn.transaction().map_err(failed)?;
+            if original.origin.is_some() {
+                session::close_origin(&tx, &original.id).map_err(failed)?;
+            }
+            session::insert(&tx, &replacement).map_err(failed)?;
+            session::copy_transcript(&tx, &original.id, &replacement.id, None).map_err(failed)?;
+            let carried = session::transcript(&tx, &replacement.id, None, None).map_err(failed)?;
+            let digest =
+                crate::handoff::digest(&carried, &original.agent, crate::handoff::DEFAULT_BUDGET);
+            if !digest.is_empty() {
+                session::set_handoff(&tx, &replacement.id, &digest).map_err(failed)?;
+            }
+            tx.commit().map_err(failed)?;
+        }
+        if self.sessions.is_running(&original.id) {
+            self.sessions.cancel(&original.id);
+        }
+        self.events.emit(DaemonEvent::SessionStarted {
+            session: Box::new(replacement.clone()),
+        });
+        Ok(replacement)
     }
 
     /// Copy a conversation up to a point, to carry on from there.
@@ -1157,6 +1323,10 @@ impl Service {
             }
         };
         let moved = !same_agent || account != original.account;
+        let keeps_model_options = same_agent
+            && model
+                .as_ref()
+                .is_none_or(|model| original.model.as_ref() == Some(model));
 
         let now = now();
         let fork = Session {
@@ -1170,6 +1340,12 @@ impl Service {
                 None if same_agent => original.model.clone(),
                 None => None,
             },
+            reasoning_effort: keeps_model_options
+                .then_some(original.reasoning_effort.clone())
+                .flatten(),
+            service_tier: keeps_model_options
+                .then_some(original.service_tier.clone())
+                .flatten(),
             // What the agent may touch is a property of the conversation,
             // and the fork is the same conversation. Where it came from is
             // not: the thread that started the original keeps talking to
@@ -1210,7 +1386,7 @@ impl Service {
             }
         }
         self.events.emit(DaemonEvent::SessionStarted {
-            session: fork.clone(),
+            session: Box::new(fork.clone()),
         });
         Ok(Response::Session { session: fork })
     }
@@ -1229,6 +1405,8 @@ impl Service {
         };
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone())
+            .with_reasoning_effort(stored.reasoning_effort.clone())
+            .with_service_tier(stored.service_tier.clone())
             // The mode the conversation was started in: a resume that
             // widened it would be the change N2 reserves for a new session.
             .with_access_mode(stored.access_mode)
@@ -1518,6 +1696,8 @@ impl Service {
                 agent: attempt.agent.clone(),
                 prompt: prompt.to_string(),
                 model: attempt.model.clone(),
+                reasoning_effort: None,
+                service_tier: None,
                 account: attempt.account.clone(),
                 access_mode: None,
                 origin: None,

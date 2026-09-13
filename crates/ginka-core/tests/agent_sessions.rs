@@ -7,7 +7,10 @@
 
 mod support;
 
-use ginka_core::driver::{Registry, claude::ClaudeDriver};
+use ginka_core::driver::{
+    AgentDriver, CommandSpec, ParseState, Registry, SessionSpec, claude::ClaudeDriver,
+    codex::CodexDriver,
+};
 use ginka_core::service::{EventSink, Service};
 use ginka_core::{Paths, db};
 use ginka_protocol::event::DaemonEvent;
@@ -34,6 +37,144 @@ impl Recorder {
 impl EventSink for Recorder {
     fn emit(&self, event: DaemonEvent) {
         self.events.lock().unwrap().push(event);
+    }
+}
+
+/// Codex's test transport with the opposite N2 answer, so the replacement
+/// path is exercised without a live provider.
+struct RestartDriver {
+    inner: CodexDriver,
+}
+
+/// A scripted transport that can pause on a normalized question and accepts
+/// the answer on the same input stream. The shipped CLI transports do not
+/// expose this yet; this pins the daemon contract without a live vendor.
+struct ResponseDriver {
+    inner: ClaudeDriver,
+}
+
+impl ResponseDriver {
+    fn new(program: &str, script: &std::path::Path) -> Self {
+        Self {
+            inner: ClaudeDriver::with_program(program)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        }
+    }
+}
+
+impl AgentDriver for ResponseDriver {
+    fn id(&self) -> &'static str {
+        "response-agent"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Response agent"
+    }
+
+    fn models(&self) -> Vec<ginka_protocol::ProviderModel> {
+        self.inner.models()
+    }
+
+    fn program(&self) -> &str {
+        self.inner.program()
+    }
+
+    fn probe_command(&self) -> CommandSpec {
+        self.inner.probe_command()
+    }
+
+    fn parse_version(&self, output: &str) -> Option<String> {
+        self.inner.parse_version(output)
+    }
+
+    fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
+        self.inner.start_command(spec)
+    }
+
+    fn resume_command(&self, spec: &SessionSpec, vendor_session_id: &str) -> CommandSpec {
+        self.inner.resume_command(spec, vendor_session_id)
+    }
+
+    fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent> {
+        if let Some(question) = line.strip_prefix("GINKA_ASK ") {
+            return vec![AgentEvent::AskUser {
+                id: "ask-1".into(),
+                question: question.into(),
+                options: vec!["SQLite".into(), "Postgres".into()],
+            }];
+        }
+        self.inner.parse_line(line, state)
+    }
+
+    fn supports_steer(&self) -> bool {
+        self.inner.supports_steer()
+    }
+
+    fn encode_user_message(&self, text: &str) -> Option<String> {
+        self.inner.encode_user_message(text)
+    }
+
+    fn supports_responses(&self) -> bool {
+        true
+    }
+
+    fn encode_response(&self, _request_id: &str, response: &str) -> Option<String> {
+        self.inner.encode_user_message(response)
+    }
+}
+
+impl RestartDriver {
+    fn new(program: &str, script: &std::path::Path) -> Self {
+        Self {
+            inner: CodexDriver::with_program(program)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        }
+    }
+}
+
+impl AgentDriver for RestartDriver {
+    fn id(&self) -> &'static str {
+        "restart-codex"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Restart Codex"
+    }
+
+    fn models(&self) -> Vec<ginka_protocol::ProviderModel> {
+        self.inner.models()
+    }
+
+    fn program(&self) -> &str {
+        self.inner.program()
+    }
+
+    fn probe_command(&self) -> CommandSpec {
+        self.inner.probe_command()
+    }
+
+    fn parse_version(&self, output: &str) -> Option<String> {
+        self.inner.parse_version(output)
+    }
+
+    fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
+        self.inner.start_command(spec)
+    }
+
+    fn resume_command(&self, spec: &SessionSpec, vendor_session_id: &str) -> CommandSpec {
+        self.inner.resume_command(spec, vendor_session_id)
+    }
+
+    fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<ginka_protocol::AgentEvent> {
+        self.inner.parse_line(line, state)
+    }
+
+    fn apply_options(
+        &self,
+        _before: &ginka_protocol::SessionOptions,
+        _after: &ginka_protocol::SessionOptions,
+    ) -> ginka_protocol::OptionOutcome {
+        ginka_protocol::OptionOutcome::RestartRequired
     }
 }
 
@@ -71,6 +212,8 @@ impl Fixture {
             ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
                 .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
         ));
+        drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, &script)));
+        drivers.insert(Arc::new(ResponseDriver::new(FAKE_AGENT, &script)));
         let mut service = Service::new(paths, db::open_in_memory().unwrap(), recorder.clone())
             .with_drivers(drivers);
 
@@ -114,6 +257,8 @@ impl Fixture {
                 agent: agent.into(),
                 prompt: prompt.into(),
                 model: None,
+                reasoning_effort: None,
+                service_tier: None,
                 account: None,
                 access_mode: None,
                 origin: None,
@@ -142,6 +287,21 @@ impl Fixture {
                     .state
             }
             other => panic!("expected sessions, got {other:?}"),
+        }
+    }
+
+    fn wait_for_state(&mut self, id: &SessionId, wanted: SessionState) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let state = self.state(id);
+            if state == wanted {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the session never reached {wanted:?}; last state was {state:?}"
+            );
+            std::thread::sleep(Duration::from_millis(20));
         }
     }
 
@@ -333,6 +493,55 @@ fn a_session_records_the_prompt_and_the_agents_answer() {
         )),
         "the turn boundary is recorded: {transcript:?}"
     );
+}
+
+#[test]
+fn a_response_is_delivered_only_to_the_request_the_agent_is_waiting_on() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "response-agent",
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"interactive-1"}"#,
+            "GINKA_ASK Which database?",
+            "#read",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"using {stdin}"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"interactive-1"}"#,
+        ]
+        .join("\n"),
+        "choose the storage",
+    );
+    fixture.wait_for_state(&session, SessionState::AwaitingInput);
+
+    let wrong = fixture
+        .service
+        .handle(Request::RespondToAgent {
+            session: session.clone(),
+            request_id: "some-other-request".into(),
+            response: "Redis".into(),
+        })
+        .expect_err("a stale card must not become an ordinary follow-up");
+    assert_eq!(wrong.code, "failed");
+    assert_eq!(fixture.state(&session), SessionState::AwaitingInput);
+
+    assert_eq!(
+        fixture.ask(Request::RespondToAgent {
+            session: session.clone(),
+            request_id: "ask-1".into(),
+            response: "SQLite".into(),
+        }),
+        Response::Ack
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let transcript = fixture.transcript(&session);
+    assert!(transcript.iter().any(|entry| matches!(
+        entry,
+        TranscriptPayload::Response {
+            request_id,
+            text,
+        } if request_id == "ask-1" && text == "SQLite"
+    )));
+    assert_eq!(spoken(&transcript), "using SQLite");
 }
 
 #[test]
@@ -582,6 +791,8 @@ fn two_agents_run_in_two_workspaces_at_once() {
             agent: "claude".into(),
             prompt: "second workspace".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             account: None,
             access_mode: None,
             origin: None,
@@ -1062,6 +1273,8 @@ fn a_sessions_access_mode_is_kept_and_a_follow_up_runs_under_it() {
         agent: "codex".into(),
         prompt: "look only".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         account: None,
         access_mode: Some(ginka_protocol::AccessMode::ReadOnly),
         origin: None,
@@ -1096,6 +1309,8 @@ fn a_sessions_access_mode_is_kept_and_a_follow_up_runs_under_it() {
         agent: "codex".into(),
         prompt: "just edit".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         account: None,
         access_mode: None,
         origin: None,
@@ -1109,6 +1324,212 @@ fn a_sessions_access_mode_is_kept_and_a_follow_up_runs_under_it() {
         !told.contains("--sandbox") && !told.contains("--full-auto"),
         "{told}"
     );
+}
+
+#[test]
+fn a_sessions_reasoning_and_tier_are_kept_and_reused_on_follow_up() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-options"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "think carefully".into(),
+        model: Some("gpt-next".into()),
+        reasoning_effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+        account: None,
+        access_mode: None,
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(session.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(session.service_tier.as_deref(), Some("priority"));
+    let told = spoken(&fixture.wait_for_said(&session.id, "think carefully"));
+    assert!(told.contains("model_reasoning_effort=\"high\""), "{told}");
+    assert!(told.contains("service_tier=\"priority\""), "{told}");
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "continue".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "continue"));
+    let second = &told[told.find("resume t-options").expect("resumed")..];
+    assert!(
+        second.contains("model_reasoning_effort=\"high\""),
+        "{second}"
+    );
+    assert!(second.contains("service_tier=\"priority\""), "{second}");
+}
+
+#[test]
+fn absorbed_options_update_the_next_turn_of_an_existing_session() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-update-options"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            "#sleep 300",
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "begin".into(),
+        model: Some("gpt-old".into()),
+        reasoning_effort: Some("low".into()),
+        service_tier: None,
+        account: None,
+        access_mode: None,
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    fixture.wait_for_said(&session.id, "begin");
+
+    let updated = match fixture.ask(Request::UpdateSessionOptions {
+        session: session.id.clone(),
+        model: Some("gpt-next".into()),
+        reasoning_effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+    }) {
+        Response::SessionOptionsApplied { session, outcome } => {
+            assert_eq!(outcome, ginka_protocol::OptionOutcome::Absorbed);
+            session
+        }
+        other => panic!("expected updated options, got {other:?}"),
+    };
+    assert_eq!(updated.model.as_deref(), Some("gpt-next"));
+    assert_eq!(updated.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(updated.service_tier.as_deref(), Some("priority"));
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "continue with the new options".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "continue with the new options"));
+    let second = &told[told.find("resume t-update-options").expect("resumed")..];
+    assert!(second.contains("--model gpt-next"), "{second}");
+    assert!(
+        second.contains("model_reasoning_effort=\"high\""),
+        "{second}"
+    );
+    assert!(second.contains("service_tier=\"priority\""), "{second}");
+
+    let reset = match fixture.ask(Request::UpdateSessionOptions {
+        session: session.id.clone(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+    }) {
+        Response::SessionOptionsApplied { session, outcome } => {
+            assert_eq!(outcome, ginka_protocol::OptionOutcome::Absorbed);
+            session
+        }
+        other => panic!("expected reset options, got {other:?}"),
+    };
+    assert_eq!(reset.model, None);
+    assert_eq!(reset.reasoning_effort, None);
+    assert_eq!(reset.service_tier, None);
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "continue with provider defaults".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "continue with provider defaults"));
+    let third = &told[told.rfind("resume t-update-options").expect("resumed")..];
+    assert!(!third.contains("--model"), "{third}");
+    assert!(!third.contains("model_reasoning_effort"), "{third}");
+    assert!(!third.contains("service_tier"), "{third}");
+}
+
+#[test]
+fn restart_required_replaces_the_session_and_hands_its_context_forward() {
+    let mut fixture = Fixture::new();
+    let origin = ginka_protocol::model::SessionOrigin {
+        connector: "test-chat".into(),
+        channel: "channel-1".into(),
+        thread: "thread-1".into(),
+    };
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"old-provider-thread"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let original = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "restart-codex".into(),
+        prompt: "remember the original task".into(),
+        model: Some("gpt-old".into()),
+        reasoning_effort: Some("low".into()),
+        service_tier: None,
+        account: None,
+        access_mode: None,
+        origin: Some(origin.clone()),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert!(matches!(
+        fixture.settle(&original.id),
+        SessionState::Idle | SessionState::Finished
+    ));
+
+    let replacement = match fixture.ask(Request::UpdateSessionOptions {
+        session: original.id.clone(),
+        model: Some("gpt-next".into()),
+        reasoning_effort: Some("high".into()),
+        service_tier: Some("priority".into()),
+    }) {
+        Response::SessionOptionsApplied { session, outcome } => {
+            assert_eq!(outcome, ginka_protocol::OptionOutcome::RestartRequired);
+            session
+        }
+        other => panic!("expected a replacement session, got {other:?}"),
+    };
+    assert_ne!(replacement.id, original.id);
+    assert_eq!(replacement.vendor_session_id, None);
+    assert_eq!(replacement.model.as_deref(), Some("gpt-next"));
+    assert_eq!(replacement.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(replacement.service_tier.as_deref(), Some("priority"));
+    let active = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: Some(origin),
+    }) {
+        Response::Sessions { sessions } => sessions,
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    assert_eq!(active.len(), 1);
+    assert_eq!(active[0].id, replacement.id);
+
+    fixture.ask(Request::SendMessage {
+        session: replacement.id.clone(),
+        text: "continue after replacement".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&replacement.id, "continue after replacement"));
+    assert!(!told.contains("resume old-provider-thread"), "{told}");
+    assert!(told.contains("remember the original task"), "{told}");
+    assert!(told.contains("continue after replacement"), "{told}");
+    assert!(told.contains("--model gpt-next"), "{told}");
 }
 
 #[test]
@@ -1167,6 +1588,8 @@ fn every_agent_is_handed_ginkas_bridge_and_the_servers_the_user_listed() {
             agent: "codex".into(),
             prompt: "hello".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             account: None,
             access_mode: None,
             origin: None,
@@ -1436,6 +1859,8 @@ fn starting_a_session_in_a_workspace_that_does_not_exist_is_not_found() {
             agent: "claude".into(),
             prompt: "hello".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             account: None,
             access_mode: None,
             origin: None,
@@ -1454,6 +1879,8 @@ fn asking_for_an_agent_this_build_does_not_have_names_the_ones_it_does() {
             agent: "telepath".into(),
             prompt: "hello".into(),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             account: None,
             access_mode: None,
             origin: None,
@@ -1810,6 +2237,8 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         agent: "claude".into(),
         prompt: "where are you".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         account: Some(ginka_protocol::AccountId("claude-work".into())),
         access_mode: None,
         origin: None,
@@ -1877,6 +2306,8 @@ fn a_login_of_one_provider_cannot_run_another_providers_agent() {
         agent: "claude".into(),
         prompt: "hello".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         account: Some(ginka_protocol::AccountId("codex-work".into())),
         access_mode: None,
         origin: None,
@@ -1889,6 +2320,8 @@ fn a_login_of_one_provider_cannot_run_another_providers_agent() {
         agent: "claude".into(),
         prompt: "hello".into(),
         model: None,
+        reasoning_effort: None,
+        service_tier: None,
         account: Some(ginka_protocol::AccountId("nonesuch".into())),
         access_mode: None,
         origin: None,

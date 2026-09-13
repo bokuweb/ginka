@@ -24,6 +24,7 @@ pub mod git;
 pub mod handoff;
 pub mod i18n;
 pub mod logging;
+pub mod lsp;
 pub mod mcp;
 pub mod paths;
 pub mod project;

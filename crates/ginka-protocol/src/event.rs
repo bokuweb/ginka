@@ -48,7 +48,13 @@ pub enum AgentEvent {
     /// The agent proposed a plan and wants it approved before acting.
     PlanProposal { id: String, plan: String },
     /// The agent wants to do something its access mode does not allow.
-    Permission { request: String },
+    Permission {
+        /// Correlates the decision with the paused transport request.
+        #[serde(default)]
+        id: String,
+        /// A human-readable description of the operation awaiting approval.
+        request: String,
+    },
     /// A steered message reached the running turn.
     SteerAccepted,
     /// It did not, and the caller has to fall back to the queue.
@@ -114,7 +120,9 @@ pub enum DaemonEvent {
     },
     /// A session was created; carries the whole record so a client that has
     /// never seen it does not have to ask.
-    SessionStarted { session: Session },
+    SessionStarted { session: Box<Session> },
+    /// A conversation's provider options changed for its later turns.
+    SessionOptionsChanged { session: Box<Session> },
     /// Something was added to a transcript: a prompt the user sent, or an
     /// event a driver produced.
     ///

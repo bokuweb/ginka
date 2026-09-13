@@ -259,6 +259,8 @@ mod tests {
             agent: agent.into(),
             account: AccountId(agent.into()),
             model: Some("opus".into()),
+            reasoning_effort: None,
+            service_tier: None,
             state: SessionState::Finished,
             title: None,
             summary: None,

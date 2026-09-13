@@ -55,6 +55,11 @@ pub enum Request {
         workspace: WorkspaceId,
         pinned: bool,
     },
+    /// Archive or restore a workspace without deleting its worktree or history.
+    ArchiveWorkspace {
+        workspace: WorkspaceId,
+        archived: bool,
+    },
 
     /// Which agents this machine has, and whether they are usable.
     ///
@@ -105,6 +110,12 @@ pub enum Request {
         agent: String,
         prompt: String,
         model: Option<String>,
+        /// Provider reasoning level, when the selected model accepts one.
+        #[serde(default)]
+        reasoning_effort: Option<String>,
+        /// Provider service tier, when the selected model accepts one.
+        #[serde(default)]
+        service_tier: Option<String>,
         /// Which login to run on; the provider's default when absent.
         account: Option<AccountId>,
         /// What the agent may do without asking. `Ask` when absent.
@@ -114,6 +125,17 @@ pub enum Request {
         /// Recorded on the session and never changed.
         #[serde(default)]
         origin: Option<SessionOrigin>,
+    },
+    /// Change the provider options used by later turns of a conversation.
+    ///
+    /// These three fields are the complete desired provider option set;
+    /// `null` selects the provider default. The driver decides whether its
+    /// transport can keep the vendor session or needs a restart.
+    UpdateSessionOptions {
+        session: SessionId,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
     },
     /// Ask the same question in several worktrees at once.
     ///
@@ -133,8 +155,9 @@ pub enum Request {
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
-    /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser) or approve a
-    /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal).
+    /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser), approve a
+    /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal), or resolve a
+    /// [`Permission`](crate::event::AgentEvent::Permission) request.
     RespondToAgent {
         session: SessionId,
         /// The `id` from the event being answered.
@@ -364,6 +387,17 @@ pub enum Request {
         workspace: WorkspaceId,
         path: String,
     },
+    /// Save an existing text file if it still matches the revision read.
+    WriteFile {
+        /// Workspace whose worktree contains the file.
+        workspace: WorkspaceId,
+        /// Path relative to the worktree root.
+        path: String,
+        /// Complete replacement contents.
+        text: String,
+        /// The opaque revision returned by [`Request::ReadFile`].
+        expected_revision: String,
+    },
 
     /// The shells already running in a workspace.
     ///
@@ -467,6 +501,12 @@ pub enum Response {
     },
     Session {
         session: Session,
+    },
+    /// Provider options were applied to this session. When the outcome says a
+    /// restart was required, `session` is the context-preserving replacement.
+    SessionOptionsApplied {
+        session: Session,
+        outcome: crate::provider::OptionOutcome,
     },
     Transcript {
         entries: Vec<TranscriptEntry>,
@@ -606,6 +646,8 @@ mod tests {
                 agent: "claude".into(),
                 prompt: "write the test first".into(),
                 model: Some("opus".into()),
+                reasoning_effort: None,
+                service_tier: None,
                 account: Some(AccountId("claude-work".into())),
                 access_mode: Some(AccessMode::Auto),
                 origin: Some(SessionOrigin {

@@ -214,6 +214,8 @@ mod tests {
             agent: "claude".into(),
             account: ginka_protocol::AccountId("claude".into()),
             model: None,
+            reasoning_effort: None,
+            service_tier: None,
             state: SessionState::Running,
             title: None,
             summary: None,

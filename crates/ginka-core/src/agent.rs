@@ -21,7 +21,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -186,6 +186,10 @@ struct Running {
     /// their input as they work. Cleared when the turn ends, which closes the
     /// agent's input and lets it exit (§3.3 N1).
     steer: Arc<Mutex<Option<async_channel::Sender<String>>>>,
+    /// Interaction ids raised by this turn and not answered yet.
+    requests: Arc<Mutex<HashSet<String>>>,
+    /// The live transport owns the response encoding contract.
+    driver: Arc<dyn AgentDriver>,
     /// Set when the user cancelled, so the exit is not reported as a failure.
     cancelled: Arc<AtomicBool>,
     /// Dropping this would detach the turn; it is kept so the supervisor owns
@@ -313,6 +317,65 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Answer a question, plan or permission request inside a running turn.
+    ///
+    /// The request id is checked before anything is written, so clicking a
+    /// stale card can never turn into an unrelated follow-up.
+    pub fn respond(&self, session: &SessionId, request_id: &str, response: &str) -> Result<()> {
+        let (sender, requests, driver) = {
+            let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            let entry = running
+                .get(session)
+                .with_context(|| format!("session {session} has no running turn"))?;
+            let sender = entry
+                .steer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone()
+                .context("the running transport cannot receive responses")?;
+            (sender, entry.requests.clone(), entry.driver.clone())
+        };
+
+        if !requests
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(request_id)
+        {
+            anyhow::bail!("request {request_id} is not waiting for an answer");
+        }
+        let line = driver
+            .encode_response(request_id, response)
+            .context("the running transport cannot encode responses")?;
+        let state = {
+            let mut open = requests.lock().unwrap_or_else(|e| e.into_inner());
+            open.remove(request_id);
+            if open.is_empty() {
+                SessionState::Running
+            } else {
+                SessionState::AwaitingInput
+            }
+        };
+        self.context.set_state(session, state, None);
+        if let Err(error) = sender.try_send(line) {
+            requests
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(request_id.to_string());
+            self.context
+                .set_state(session, SessionState::AwaitingInput, None);
+            return Err(error)
+                .context("the running transport stopped before receiving the response");
+        }
+        self.context.record(
+            session,
+            TranscriptPayload::Response {
+                request_id: request_id.to_string(),
+                text: response.to_string(),
+            },
+        )?;
+        Ok(())
+    }
+
     /// Stop a session's process tree.
     ///
     /// Marking it cancelled first is what keeps the exit from being reported
@@ -360,7 +423,11 @@ impl Supervisor {
         let queued = self.queued.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
 
-        let mut child = match spawn(&command, &spec, driver.supports_steer()) {
+        let mut child = match spawn(
+            &command,
+            &spec,
+            driver.supports_steer() || driver.supports_responses(),
+        ) {
             Ok(child) => child,
             Err(error) => {
                 tracing::error!(%error, agent = driver.id(), "could not start the agent");
@@ -381,11 +448,13 @@ impl Supervisor {
         // channel is the supervisor's end of that pipe; dropping it closes the
         // agent's input, which is how the turn is ended.
         let steer: Arc<Mutex<Option<async_channel::Sender<String>>>> = Arc::new(Mutex::new(None));
-        if driver.supports_steer()
+        if (driver.supports_steer() || driver.supports_responses())
             && let Some(mut stdin) = child.stdin.take()
         {
             let (sender, lines) = async_channel::unbounded::<String>();
-            if let Some(first) = driver.encode_user_message(&spec.agent_prompt()) {
+            if driver.supports_steer()
+                && let Some(first) = driver.encode_user_message(&spec.agent_prompt())
+            {
                 let _ = sender.try_send(first);
             }
             *steer.lock().unwrap_or_else(|e| e.into_inner()) = Some(sender);
@@ -405,6 +474,8 @@ impl Supervisor {
             })
             .detach();
         }
+        let requests = Arc::new(Mutex::new(HashSet::new()));
+        let response_driver = driver.clone();
 
         let task = smol::spawn({
             let session = session.clone();
@@ -414,6 +485,7 @@ impl Supervisor {
             // it; the session's count is what the transcript is numbered by.
             let turns_so_far = self.context.turns_completed(&session);
             let steer = steer.clone();
+            let requests = requests.clone();
             async move {
                 let state = pump(
                     &context,
@@ -425,6 +497,7 @@ impl Supervisor {
                         turns_so_far,
                         cancelled: &cancelled,
                         steer: &steer,
+                        requests: &requests,
                     },
                 )
                 .await;
@@ -453,18 +526,25 @@ impl Supervisor {
                         running,
                         queued,
                     };
-                    let vendor = {
+                    let stored = {
                         let conn = context.conn.lock().unwrap_or_else(|e| e.into_inner());
-                        session::get(&conn, &session)
-                            .ok()
-                            .flatten()
-                            .and_then(|stored| stored.vendor_session_id)
+                        session::get(&conn, &session).ok().flatten()
                     };
                     let mut next_spec = spec.clone();
                     next_spec.prompt = prompt;
                     // Whatever the first turn was told, this one was not
                     // forked from anywhere.
                     next_spec.preamble = None;
+                    // An option change may have landed while this turn was
+                    // running. The queued turn is built from the authoritative
+                    // session row rather than the previous process's flags.
+                    if let Some(stored) = &stored {
+                        next_spec.model = stored.model.clone();
+                        next_spec.reasoning_effort = stored.reasoning_effort.clone();
+                        next_spec.service_tier = stored.service_tier.clone();
+                        next_spec.access_mode = stored.access_mode;
+                    }
+                    let vendor = stored.and_then(|stored| stored.vendor_session_id);
                     supervisor.run_turn(session, driver, next_spec, vendor);
                 }
             }
@@ -478,6 +558,8 @@ impl Supervisor {
                 Running {
                     pid,
                     steer,
+                    requests,
+                    driver: response_driver,
                     cancelled,
                     _task: task,
                 },
@@ -500,6 +582,8 @@ struct Turn<'a> {
     cancelled: &'a AtomicBool,
     /// The way into the turn while it runs, cleared when it ends.
     steer: &'a Mutex<Option<async_channel::Sender<String>>>,
+    /// Interaction ids this turn is blocked on.
+    requests: &'a Mutex<HashSet<String>>,
 }
 
 async fn pump(
@@ -514,6 +598,7 @@ async fn pump(
         turns_so_far,
         cancelled,
         steer,
+        requests,
     } = turn;
     context.set_state(session, SessionState::Running, None);
 
@@ -562,11 +647,21 @@ async fn pump(
                         context.record_plan(session, usage);
                         continue;
                     }
+                    AgentEvent::AskUser { id, .. }
+                    | AgentEvent::PlanProposal { id, .. }
+                    | AgentEvent::Permission { id, .. } => {
+                        requests
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(id.clone());
+                        context.set_state(session, SessionState::AwaitingInput, None);
+                    }
                     AgentEvent::TurnEnd { turn } => {
                         // Nothing more can be steered into a turn that has
                         // ended, and dropping the sender closes the agent's
                         // input so it can exit.
                         steer.lock().unwrap_or_else(|e| e.into_inner()).take();
+                        requests.lock().unwrap_or_else(|e| e.into_inner()).clear();
                         let label = if last_text.trim().is_empty() {
                             format!("turn {turn}")
                         } else {

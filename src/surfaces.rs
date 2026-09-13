@@ -5,13 +5,37 @@
 //! changed. The rest are placeholders until M3 and M4. M4 turns this into a
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
+use ginka_protocol::WorkspaceId;
 use ginka_protocol::model::{ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind};
 use ginka_ui::Tokens;
+use ginka_ui::editor::{
+    FileTabs, PreviewKind, SaveState, image_data_url, language_for_path, markdown_preview,
+    preview_kind, save_state, saved_selection_reference,
+};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::{Icon, IconName, h_flex, v_flex};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::{
+    Editor, EditorState, Input, InputEvent, InputState, Replace, Search, TabSize, Textarea,
+    TextareaState,
+};
+use gpui_component::text::TextView;
+use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
+
+struct FileBuffer {
+    workspace: WorkspaceId,
+    file: FileContent,
+    editor: Option<Entity<EditorState>>,
+    complaint: Option<SharedString>,
+    previewing: bool,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum FileOpenMode {
+    Visit,
+    History,
+}
 
 pub struct SurfacePanel {
     open: Option<Surface>,
@@ -53,8 +77,14 @@ pub struct SurfacePanel {
     files: Vec<FileEntry>,
     /// The lines that contain what was typed, if any do.
     matches: Vec<ContentMatch>,
-    /// The file being read, if one was opened.
-    showing: Option<FileContent>,
+    /// Open file paths and the tab currently in front.
+    file_tabs: FileTabs,
+    /// The independently editable buffer behind each open tab.
+    file_buffers: Vec<FileBuffer>,
+    /// Whether the finder is in front while open tabs remain behind it.
+    browsing_files: bool,
+    /// Workspace and path whose asynchronous read may replace the panel next.
+    opening: Option<(WorkspaceId, String, FileOpenMode)>,
     /// What the work cost and where each login stands, as the shell last
     /// read it. `None` until the Reports surface has been opened.
     usage: Option<ginka_ui::reports::UsageReport>,
@@ -82,6 +112,17 @@ pub enum SurfaceEvent {
     FindFiles(String),
     /// Read a file and show it.
     OpenFile(String),
+    /// Reload a closed file selected by back/forward history.
+    OpenFileFromHistory(String),
+    /// Save an editor buffer against the revision it was opened from.
+    SaveFile {
+        workspace: WorkspaceId,
+        path: String,
+        text: String,
+        expected_revision: String,
+    },
+    /// Add an editor selection's exact source location to the chat draft.
+    AddFileReference(String),
     /// Put a file into the next commit, or take it back out.
     Stage { path: String, staged: bool },
     /// Throw away a file's uncommitted work.
@@ -110,7 +151,10 @@ impl SurfacePanel {
             finder,
             files: Vec::new(),
             matches: Vec::new(),
-            showing: None,
+            file_tabs: FileTabs::default(),
+            file_buffers: Vec::new(),
+            browsing_files: true,
+            opening: None,
             open: None,
             changes: None,
             expanded: None,
@@ -176,9 +220,262 @@ impl SurfacePanel {
         }
     }
 
-    /// Show a file that has been read.
-    pub fn set_file(&mut self, file: Option<FileContent>, cx: &mut Context<Self>) {
-        self.showing = file;
+    /// Mark the workspace and path whose asynchronous read is current.
+    ///
+    /// Returns whether the daemon must be asked. `from_history` restores the
+    /// target without turning that reload into a new visit.
+    pub fn begin_file_open(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        from_history: bool,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self
+            .file_buffers
+            .iter()
+            .any(|buffer| buffer.workspace == workspace && buffer.file.path == path)
+        {
+            if from_history {
+                self.file_tabs.restore(path);
+            } else {
+                self.file_tabs.open(path);
+            }
+            self.browsing_files = false;
+            cx.notify();
+            return false;
+        }
+        let mode = if from_history {
+            FileOpenMode::History
+        } else {
+            FileOpenMode::Visit
+        };
+        self.opening = Some((workspace, path, mode));
+        cx.notify();
+        true
+    }
+
+    /// Forget a file and any in-flight read when its workspace leaves screen.
+    pub fn clear_file(&mut self, cx: &mut Context<Self>) {
+        self.file_tabs.clear();
+        self.file_buffers.clear();
+        self.browsing_files = true;
+        self.opening = None;
+        cx.notify();
+    }
+
+    /// Show a current file read and make complete text files editable.
+    pub fn set_file(
+        &mut self,
+        workspace: WorkspaceId,
+        worktree: std::path::PathBuf,
+        path: String,
+        file: Option<FileContent>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((opening_workspace, opening_path, mode)) = self.opening.as_ref() else {
+            return;
+        };
+        if opening_workspace != &workspace || opening_path != &path {
+            return;
+        }
+        let mode = *mode;
+        self.opening = None;
+        let Some(file) = file else {
+            cx.notify();
+            return;
+        };
+        let editor = (!file.binary && !file.truncated).then(|| {
+            let editor = cx.new(|cx| {
+                EditorState::new(window, cx)
+                    .language(language_for_path(&file.path))
+                    .folding(true)
+                    .tab_size(TabSize {
+                        tab_size: 4,
+                        ..Default::default()
+                    })
+                    .default_value(file.text.clone())
+            });
+            let lsp = crate::lsp::EditorLspBinding::default();
+            let lsp_for_changes = lsp.clone();
+            cx.subscribe(&editor, move |_, editor, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let text = editor.read(cx).value().to_string();
+                    let (version, server) = lsp_for_changes.change_target();
+                    if let Some(server) = server {
+                        cx.background_spawn(async move {
+                            if let Err(error) =
+                                smol::unblock(move || server.change(version, text)).await
+                            {
+                                tracing::debug!(%error, "language-server change was not delivered");
+                            }
+                        })
+                        .detach();
+                    }
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.observe(&editor, |_, _, cx| cx.notify()).detach();
+            crate::lsp::attach(
+                editor.clone(),
+                lsp,
+                worktree,
+                file.path.clone(),
+                file.text.clone(),
+                window,
+                cx,
+            );
+            editor
+        });
+        self.file_buffers.push(FileBuffer {
+            workspace,
+            file,
+            editor,
+            complaint: None,
+            previewing: false,
+        });
+        let path = self
+            .file_buffers
+            .last()
+            .expect("a file buffer was just inserted")
+            .file
+            .path
+            .clone();
+        match mode {
+            FileOpenMode::Visit => self.file_tabs.open(path),
+            FileOpenMode::History => self.file_tabs.restore(path),
+        }
+        self.browsing_files = false;
+        cx.notify();
+    }
+
+    /// Accept the daemon's new revision after a successful save.
+    pub fn set_file_saved(
+        &mut self,
+        workspace: &WorkspaceId,
+        file: FileContent,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| &buffer.workspace == workspace && buffer.file.path == file.path)
+        {
+            buffer.file = file;
+            buffer.complaint = None;
+            cx.notify();
+        }
+    }
+
+    /// Keep the editor intact and explain why its save was refused.
+    pub fn set_file_save_error(
+        &mut self,
+        workspace: &WorkspaceId,
+        path: &str,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| &buffer.workspace == workspace && buffer.file.path == path)
+        {
+            buffer.complaint = Some(error.into());
+            cx.notify();
+        }
+    }
+
+    fn active_file(&self) -> Option<&FileBuffer> {
+        let path = self.file_tabs.active()?;
+        self.file_buffers
+            .iter()
+            .find(|buffer| buffer.file.path == path)
+    }
+
+    fn focus_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.file_tabs.focus(path);
+        self.browsing_files = false;
+        cx.notify();
+    }
+
+    fn browse_files(&mut self, cx: &mut Context<Self>) {
+        self.browsing_files = true;
+        cx.notify();
+    }
+
+    fn toggle_file_preview(&mut self, path: &str, cx: &mut Context<Self>) {
+        if let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path && preview_kind(&buffer.file).is_some())
+        {
+            buffer.previewing = !buffer.previewing;
+            cx.notify();
+        }
+    }
+
+    fn go_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.file_tabs.go_back() {
+            self.browsing_files = false;
+            if !self
+                .file_buffers
+                .iter()
+                .any(|buffer| buffer.file.path == path)
+            {
+                cx.emit(SurfaceEvent::OpenFileFromHistory(path));
+            }
+            cx.notify();
+        }
+    }
+
+    fn go_forward(&mut self, cx: &mut Context<Self>) {
+        if let Some(path) = self.file_tabs.go_forward() {
+            self.browsing_files = false;
+            if !self
+                .file_buffers
+                .iter()
+                .any(|buffer| buffer.file.path == path)
+            {
+                cx.emit(SurfaceEvent::OpenFileFromHistory(path));
+            }
+            cx.notify();
+        }
+    }
+
+    fn close_file(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        let state = buffer
+            .editor
+            .as_ref()
+            .map(|editor| save_state(&buffer.file, &editor.read(cx).value()))
+            .unwrap_or(SaveState::ReadOnly);
+        if !self.file_tabs.close(path, state) {
+            self.file_tabs.focus(path);
+            self.browsing_files = false;
+            if let Some(buffer) = self
+                .file_buffers
+                .iter_mut()
+                .find(|buffer| buffer.file.path == path)
+            {
+                buffer.complaint = Some(
+                    rust_i18n::t!("surface.files.close_dirty")
+                        .to_string()
+                        .into(),
+                );
+            }
+            cx.notify();
+            return;
+        }
+        self.file_buffers.retain(|buffer| buffer.file.path != path);
+        self.browsing_files = self.file_tabs.active().is_none();
         cx.notify();
     }
 
@@ -1139,9 +1436,6 @@ impl SurfacePanel {
 
     /// The files surface: a finder over the worktree, and what it opens.
     ///
-    /// Read-only, and honestly so — the editor is M4. What it is for now is
-    /// the question a diff raises and cannot answer: what does the rest of
-    /// this file look like.
     fn files(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
@@ -1157,10 +1451,93 @@ impl SurfacePanel {
                     .border_color(tokens.colors().border_subtle)
                     .child(Input::new(&self.finder)),
             )
-            .child(match &self.showing {
-                Some(file) => self.file_view(file, mono, cx).into_any_element(),
-                None => self.file_list(cx).into_any_element(),
+            .children(
+                (!self.file_tabs.paths().is_empty()
+                    || self.file_tabs.can_go_back()
+                    || self.file_tabs.can_go_forward())
+                .then(|| self.file_tab_strip(cx)),
+            )
+            .child(match (self.browsing_files, self.active_file()) {
+                (false, Some(buffer)) => self.file_view(buffer, mono, cx).into_any_element(),
+                _ => self.file_list(cx).into_any_element(),
             })
+    }
+
+    fn file_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let active = self.file_tabs.active().map(str::to_owned);
+        h_flex()
+            .id("file-tabs")
+            .w_full()
+            .flex_shrink_0()
+            .overflow_x_scroll()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(
+                Button::new("file-history-back")
+                    .label(rust_i18n::t!("surface.files.history.back").to_string())
+                    .ghost()
+                    .compact()
+                    .disabled(!self.file_tabs.can_go_back())
+                    .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
+            )
+            .child(
+                Button::new("file-history-forward")
+                    .label(rust_i18n::t!("surface.files.history.forward").to_string())
+                    .ghost()
+                    .compact()
+                    .disabled(!self.file_tabs.can_go_forward())
+                    .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
+            )
+            .child(
+                Button::new("browse-files")
+                    .label(rust_i18n::t!("surface.files.browse").to_string())
+                    .ghost()
+                    .compact()
+                    .on_click(cx.listener(|this, _, _, cx| this.browse_files(cx))),
+            )
+            .children(self.file_tabs.paths().iter().map(|path| {
+                let focusing = path.clone();
+                let closing = path.clone();
+                let label = std::path::Path::new(path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(path)
+                    .to_string();
+                h_flex()
+                    .id(SharedString::from(format!("file-tab:{path}")))
+                    .gap_1()
+                    .when(active.as_deref() == Some(path), |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .child(
+                        Button::new(SharedString::from(format!("focus-file-tab:{path}")))
+                            .ghost()
+                            .compact()
+                            .max_w(px(150.))
+                            .label(label)
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.focus_file(&focusing, cx)),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("close-file-tab:{path}")))
+                            .ghost()
+                            .compact()
+                            .accessibility_label(
+                                rust_i18n::t!("surface.files.close", path = path.clone())
+                                    .to_string(),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_file(&closing, cx);
+                            }))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            ),
+                    )
+            }))
     }
 
     /// What matched, as a list of paths.
@@ -1257,11 +1634,78 @@ impl SurfacePanel {
     /// One file, as it is on disk.
     fn file_view(
         &self,
-        file: &FileContent,
+        buffer: &FileBuffer,
         mono: SharedString,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let file = &buffer.file;
+        let editor_text = buffer
+            .editor
+            .as_ref()
+            .map(|editor| editor.read(cx).value().to_string());
+        let state = editor_text
+            .as_deref()
+            .map(|text| save_state(file, text))
+            .unwrap_or(SaveState::ReadOnly);
+        let preview = editor_text
+            .as_deref()
+            .and_then(|text| markdown_preview(file, text, buffer.previewing));
+        let save = (state == SaveState::Dirty).then(|| {
+            let workspace = buffer.workspace.clone();
+            let path = file.path.clone();
+            let expected_revision = file.revision.clone();
+            let text = editor_text.clone().unwrap_or_default();
+            cx.listener(move |_, _: &ClickEvent, _, cx| {
+                cx.emit(SurfaceEvent::SaveFile {
+                    workspace: workspace.clone(),
+                    path: path.clone(),
+                    text: text.clone(),
+                    expected_revision: expected_revision.clone(),
+                });
+            })
+        });
+        let selection = buffer.editor.as_ref().map(|editor| {
+            let disabled = {
+                let editor = editor.read(cx);
+                saved_selection_reference(file, &editor.value(), editor.selected_range()).is_none()
+            };
+            let editor = editor.clone();
+            let file = file.clone();
+            (
+                disabled,
+                cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    let reference = {
+                        let editor = editor.read(cx);
+                        saved_selection_reference(&file, &editor.value(), editor.selected_range())
+                    };
+                    if let Some(reference) = reference {
+                        cx.emit(SurfaceEvent::AddFileReference(reference));
+                    }
+                }),
+            )
+        });
+        let find = buffer.editor.as_ref().map(|editor| {
+            let editor = editor.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                editor.focus_handle(cx).focus(window, cx);
+                window.dispatch_action(Box::new(Search), cx);
+            }
+        });
+        let replace = buffer.editor.as_ref().map(|editor| {
+            let editor = editor.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                editor.focus_handle(cx).focus(window, cx);
+                window.dispatch_action(Box::new(Replace), cx);
+            }
+        });
+        let preview_toggle = (preview_kind(file) == Some(PreviewKind::Markdown)).then(|| {
+            if buffer.previewing {
+                rust_i18n::t!("surface.files.edit").to_string()
+            } else {
+                rust_i18n::t!("surface.files.preview").to_string()
+            }
+        });
         v_flex()
             .flex_1()
             .min_h_0()
@@ -1285,8 +1729,7 @@ impl SurfacePanel {
                             .cursor_pointer()
                             .hover(|this| this.bg(tokens.colors().row_hover()))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.showing = None;
-                                cx.notify();
+                                this.browse_files(cx);
                             }))
                             .child(rust_i18n::t!("surface.files.back").to_string()),
                     )
@@ -1297,33 +1740,138 @@ impl SurfacePanel {
                             .text_color(tokens.colors().text_secondary)
                             .truncate()
                             .child(file.path.clone()),
-                    ),
-            )
-            .child(
-                v_flex()
-                    .id("file-content")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_scroll()
-                    .p_3()
-                    .font_family(mono)
-                    .text_xs()
-                    .text_color(tokens.colors().text_primary)
-                    .children(file.binary.then(|| {
-                        div()
-                            .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.files.binary").to_string())
+                    )
+                    .child(
+                        Button::new("save-file")
+                            .label(rust_i18n::t!("surface.files.save").to_string())
+                            .ghost()
+                            .compact()
+                            .disabled(state != SaveState::Dirty)
+                            .when_some(save, |this, save| this.on_click(save)),
+                    )
+                    .children(preview_toggle.map(|label| {
+                        let path = file.path.clone();
+                        Button::new("toggle-file-preview")
+                            .label(label)
+                            .ghost()
+                            .compact()
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_file_preview(&path, cx)
+                            }))
+                    }))
+                    .children((!buffer.previewing).then_some(find).flatten().map(|find| {
+                        Button::new("find-in-file")
+                            .label(rust_i18n::t!("surface.files.find").to_string())
+                            .ghost()
+                            .compact()
+                            .on_click(find)
                     }))
                     .children(
-                        (!file.binary).then(|| div().whitespace_normal().child(file.text.clone())),
+                        (!buffer.previewing)
+                            .then_some(replace)
+                            .flatten()
+                            .map(|replace| {
+                                Button::new("replace-in-file")
+                                    .label(rust_i18n::t!("surface.files.replace").to_string())
+                                    .ghost()
+                                    .compact()
+                                    .on_click(replace)
+                            }),
                     )
-                    .children(file.truncated.then(|| {
-                        div()
-                            .pt_2()
-                            .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.files.truncated").to_string())
-                    })),
+                    .children((!buffer.previewing).then_some(selection).flatten().map(
+                        |(disabled, selection)| {
+                            Button::new("add-file-selection")
+                                .label(rust_i18n::t!("surface.files.add_selection").to_string())
+                                .ghost()
+                                .compact()
+                                .disabled(disabled)
+                                .on_click(selection)
+                        },
+                    )),
             )
+            .children(buffer.complaint.as_ref().map(|complaint| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(complaint.clone())
+            }))
+            .child(if let Some(markdown) = preview {
+                div()
+                    .id("file-preview")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .p_4()
+                    .child(
+                        TextView::markdown(
+                            SharedString::from(format!("file-preview:{}", file.path)),
+                            markdown,
+                        )
+                        .markdown_mdx(),
+                    )
+                    .into_any_element()
+            } else if let Some(image_url) = image_data_url(file) {
+                div()
+                    .id("file-image-preview")
+                    .flex_1()
+                    .min_h_0()
+                    .p_4()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        img(SharedString::from(image_url))
+                            .size_full()
+                            .object_fit(ObjectFit::Contain),
+                    )
+                    .into_any_element()
+            } else {
+                match &buffer.editor {
+                    Some(editor) => div()
+                        .id("file-content")
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            Editor::new(editor)
+                                .aria_label(
+                                    rust_i18n::t!("surface.files.editor", path = file.path.clone())
+                                        .to_string(),
+                                )
+                                .font_family(mono)
+                                .text_size(px(12.))
+                                .size_full(),
+                        )
+                        .into_any_element(),
+                    None => v_flex()
+                        .id("file-content")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_scroll()
+                        .p_3()
+                        .font_family(mono)
+                        .text_xs()
+                        .text_color(tokens.colors().text_primary)
+                        .children(file.binary.then(|| {
+                            div()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("surface.files.binary").to_string())
+                        }))
+                        .children(
+                            (!file.binary)
+                                .then(|| div().whitespace_normal().child(file.text.clone())),
+                        )
+                        .children(file.truncated.then(|| {
+                            div()
+                                .pt_2()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("surface.files.truncated").to_string())
+                        }))
+                        .into_any_element(),
+                }
+            })
     }
 }
 

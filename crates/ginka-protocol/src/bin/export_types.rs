@@ -14,8 +14,9 @@ use ginka_protocol::event::{AgentEvent, DaemonEvent, Usage};
 use ginka_protocol::handshake::Handshake;
 use ginka_protocol::ids::{AccountId, CheckpointId, ProjectName, SessionId, WorkspaceId};
 use ginka_protocol::model::{
-    Account, BranchStatus, Checkpoint, ConnectorState, PlanSnapshot, Project, ProjectKind, Session,
-    SessionOrigin, SessionState, TranscriptEntry, TranscriptPayload, WorkspaceSummary, Worktree,
+    Account, BranchStatus, Checkpoint, ConnectorState, FileContent, FileImage, PlanSnapshot,
+    Project, ProjectKind, Session, SessionOrigin, SessionState, TranscriptEntry, TranscriptPayload,
+    WorkspaceSummary, Worktree,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ts_rs::{Config, TS};
@@ -52,6 +53,8 @@ fn main() {
         TranscriptEntry::export_all(&config),
         TranscriptPayload::export_all(&config),
         Checkpoint::export_all(&config),
+        FileImage::export_all(&config),
+        FileContent::export_all(&config),
         WorkspaceSummary::export_all(&config),
         AgentEvent::export_all(&config),
         Usage::export_all(&config),
@@ -74,5 +77,5 @@ fn main() {
     if failures > 0 {
         std::process::exit(1);
     }
-    println!("exported {} protocol types into {directory}", 28 - failures);
+    println!("exported {} protocol types into {directory}", 30 - failures);
 }

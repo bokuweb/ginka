@@ -155,8 +155,10 @@ per row repeating what a heading says once, and left a reader scanning for
      A workspace is named after the branch it was cut on, so this line appears
      when an agent has checked out something else inside the worktree — which
      is exactly when it matters.
-- **Archived section** — collapsible header, one-line rows (glyph, title, age),
-  `Show N more` footer.
+- **Archived section** — collapsible header, one-line rows (glyph, title, age).
+  Archive is durable workspace metadata: restoring a row returns it to its
+  project without recreating the worktree or conversation. `Show N more` is a
+  paging affordance once the archived list exceeds the first page.
 - **Footer** — avatar, user name, and the account in use with its headroom —
   the plan label this line used to reserve, now attached to the login it
   describes (`docs/accounts.md` §11).
@@ -216,7 +218,7 @@ per row repeating what a heading says once, and left a reader scanning for
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file and read it; editing is M4), **Editor**, **Browser** (M5), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading). Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (find a file, keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, and add a saved selection's exact line location to chat; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close). Installed local language servers provide hover, same-file definition jumps and diagnostics; missing or failed servers leave the editor in syntax-only mode. **Editor** is the later full code surface with a tree and cross-file navigation. **Browser** lands in M5. **Reports** shows usage by day, agent and account, with each account's rate-limit windows and the age of the reading. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. Empty state is a centred title, one line of help, and a stacked list of large surface buttons. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
 
 ## 4. Component mapping
 
@@ -236,6 +238,16 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 | Agent status glyphs | ours (see §5) |
 | Charts (Reports) | `gpui-component` charts |
 | Embedded browser (M5) | `gpui-component` `webview` crate |
+
+The model picker renders the provider catalogue's labels and supported option
+metadata, never a view-owned model list. A live catalogue wins over the static
+offline fallback. The last valid model chosen per provider is restored; when a
+later catalogue removes that id, the chip quietly returns to provider default.
+Effort and tier chips appear only when the selected model advertises choices.
+On an existing conversation they update the options used by its next turn;
+the daemon asks the driver whether the provider thread can absorb that change.
+When it cannot, the same row adopts a replacement session whose first turn is
+given a bounded digest of the conversation so far.
 
 ## 5. What we build ourselves
 
