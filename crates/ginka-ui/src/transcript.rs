@@ -67,7 +67,11 @@ pub enum Block {
         answered: bool,
     },
     /// A turn boundary. A checkpoint was taken here.
-    TurnEnd { turn: u32 },
+    TurnEnd {
+        turn: u32,
+        /// The inclusive transcript position copied by a fork from here.
+        seq: u64,
+    },
     /// How the session ended.
     Outcome {
         state: SessionState,
@@ -202,7 +206,7 @@ impl Transcript {
                 self.answer(request_id);
                 self.blocks.push(Block::User { text: text.clone() });
             }
-            TranscriptPayload::Agent { event } => self.fold(event),
+            TranscriptPayload::Agent { event } => self.fold(event, entry.seq),
         }
         Applied::Added
     }
@@ -225,7 +229,7 @@ impl Transcript {
         last
     }
 
-    fn fold(&mut self, event: &AgentEvent) {
+    fn fold(&mut self, event: &AgentEvent, seq: u64) {
         match event {
             AgentEvent::TextDelta { text } => self.append_text(text),
             AgentEvent::Reasoning { text } => self.append_reasoning(text),
@@ -284,7 +288,7 @@ impl Transcript {
             // and the account's windows belong to the account chip.
             AgentEvent::Usage { usage } => self.usage = *usage,
             AgentEvent::PlanUsage { .. } => {}
-            AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn }),
+            AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn, seq }),
             AgentEvent::SessionResult { state, summary } => self.blocks.push(Block::Outcome {
                 state: *state,
                 summary: summary.clone(),
@@ -1104,13 +1108,21 @@ mod tests {
         assert_eq!(
             transcript.blocks(),
             &[
-                Block::TurnEnd { turn: 1 },
+                Block::TurnEnd { turn: 1, seq: 1 },
                 Block::Outcome {
                     state: SessionState::Finished,
                     summary: Some("done".into()),
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_turn_boundary_keeps_the_transcript_position_used_by_a_fork() {
+        let mut transcript = Transcript::new();
+        transcript.apply(&agent(1, AgentEvent::TurnEnd { turn: 3 }));
+
+        assert_eq!(transcript.blocks(), &[Block::TurnEnd { turn: 3, seq: 1 }]);
     }
 
     /// A frame at 120Hz, which is what the reveal is driven by.

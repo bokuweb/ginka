@@ -32,7 +32,9 @@ use gpui::*;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Icon, IconName, InteractiveElementExt as _, StyledExt as _, h_flex,
+    Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
+    button::Button,
+    h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
@@ -139,6 +141,14 @@ const TERMINAL_COLUMNS: u16 = 100;
 /// as the reader scrolling away.
 const NEARLY_THE_FOOT: f32 = 24.;
 
+/// The turn-level handoff choice currently expanded in the transcript.
+struct ForkMenu {
+    turn: u32,
+    seq: u64,
+    busy: bool,
+    error: Option<String>,
+}
+
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
@@ -227,6 +237,8 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// A turn whose conversation can be continued by another agent.
+    forking: Option<ForkMenu>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
     /// The command palette, while it is open: what is typed into it, the
@@ -401,6 +413,7 @@ impl Shell {
                         this.start_fresh = false;
                         this.checkpoints = Vec::new();
                         this.rewinding = None;
+                        this.forking = None;
                         // The shells belong to the workspace, not to the
                         // window: a different workspace is a different strip.
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
@@ -687,6 +700,7 @@ impl Shell {
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
+            forking: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
@@ -867,6 +881,7 @@ impl Shell {
         self.commands.clear();
         self.checkpoints = Vec::new();
         self.rewinding = None;
+        self.forking = None;
         // The shells belong to the workspace that is no longer on screen.
         self.terminals = ginka_ui::terminal::TerminalTabs::new();
         self.composer
@@ -1059,6 +1074,7 @@ impl Shell {
     /// worse record than one that shows the work being undone.
     fn rewind(&mut self, checkpoint: ginka_protocol::CheckpointId, cx: &mut Context<Self>) {
         self.rewinding = None;
+        self.forking = None;
         cx.notify();
         let link = self.link.clone();
         cx.spawn(async move |_, cx| {
@@ -2591,7 +2607,7 @@ impl Shell {
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.
-            TranscriptBlock::TurnEnd { turn } => self.turn_rule(*turn, cx),
+            TranscriptBlock::TurnEnd { turn, seq } => self.turn_rule(*turn, *seq, cx),
             // A turn that worked says so by being answered. Only an outcome
             // the user has to do something about is worth a line of its own.
             TranscriptBlock::Outcome { state, summary } => match state {
@@ -2622,16 +2638,75 @@ impl Shell {
         }
     }
 
-    /// The rule between turns, and the way back to one.
+    /// Copy the conversation through `after` onto another agent and show it.
+    fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let Some(menu) = self.forking.as_mut() else {
+            return;
+        };
+        if menu.busy {
+            return;
+        }
+        menu.busy = true;
+        menu.error = None;
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requesting = link.clone();
+            let result = cx
+                .background_spawn(
+                    async move { requesting.fork_session(&session, after, agent).await },
+                )
+                .await;
+            match result {
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        if let Some(menu) = this.forking.as_mut() {
+                            menu.busy = false;
+                            menu.error = Some(
+                                rust_i18n::t!("transcript.fork.failed", error = error).to_string(),
+                            );
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(fork) => {
+                    this.update(cx, |this, cx| {
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.session_state = Some(fork.state);
+                        this.checkpoints.clear();
+                        this.rewinding = None;
+                        this.forking = None;
+                        this.chosen_agent = None;
+                        this.chosen_model = None;
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = None;
+                        this.chosen_account = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    if let Ok(Some(showing)) = pull_rows(&this, &link, cx).await
+                        && showing == fork.id
+                    {
+                        let _ = pull_transcript(&this, &link, showing, cx).await;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The rule between turns, and the ways to rewind or continue elsewhere.
     ///
-    /// waku's idea, and the reason checkpoints exist: a position in a
-    /// transcript maps to a working tree, so "put it back to how it was three
-    /// turns ago" is an operation rather than an apology. Offered in two steps
-    /// because it is destructive — work written since is removed — and a single
-    /// click that quietly rewrites the worktree is not something to discover by
-    /// accident. What it replaces is snapshotted first, so even a rewind the
-    /// user regrets is reachable.
-    fn turn_rule(&self, turn: u32, cx: &mut Context<Self>) -> AnyElement {
+    /// A transcript position maps both to a checkpointed working tree and to
+    /// the inclusive event range a fork copies. Rewind is confirmed because it
+    /// changes files; a fork is additive and can run immediately.
+    fn turn_rule(&self, turn: u32, seq: u64, cx: &mut Context<Self>) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let checkpoint = self
             .checkpoints
@@ -2639,6 +2714,38 @@ impl Shell {
             .find(|checkpoint| checkpoint.turn == turn)
             .map(|checkpoint| checkpoint.id.clone());
         let asking = self.rewinding == Some(turn);
+        let current_agent = self
+            .session
+            .as_ref()
+            .map(|row| row.agent.driver_id())
+            .unwrap_or_default();
+        let targets = ginka_ui::handoff::fork_targets(&self.agents, current_agent);
+        let has_targets = !targets.is_empty();
+        let (fork_open, fork_busy, fork_error) = self
+            .forking
+            .as_ref()
+            .filter(|menu| menu.turn == turn && menu.seq == seq)
+            .map(|menu| (true, menu.busy, menu.error.clone()))
+            .unwrap_or((false, false, None));
+        let target_buttons = targets.into_iter().map(|agent| {
+            let id = agent.id.clone();
+            Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+                .disabled(fork_busy)
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .text_color(tokens.colors().text_primary)
+                .when(!fork_busy, |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
+                        )
+                })
+                .child(agent.display_name.clone())
+                .into_any_element()
+        });
         let rule = || {
             div()
                 .h(px(1.))
@@ -2724,6 +2831,58 @@ impl Shell {
                                     }))
                                     .child(rust_i18n::t!("transcript.rewind.no").to_string()),
                             )
+                    }))
+            }))
+            .children(has_targets.then(|| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new(SharedString::from(format!("fork-menu-{turn}")))
+                            .disabled(fork_busy)
+                            .px(px(7.))
+                            .py(px(2.))
+                            .rounded(px(tokens.radius.row))
+                            .text_xs()
+                            .text_color(if fork_open {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_muted.opacity(0.7)
+                            })
+                            .when(!fork_busy, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .tooltip(rust_i18n::t!("transcript.fork.hint").to_string())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.rewinding = None;
+                                        this.forking =
+                                            if this.forking.as_ref().is_some_and(|menu| {
+                                                menu.turn == turn && menu.seq == seq
+                                            }) {
+                                                None
+                                            } else {
+                                                Some(ForkMenu {
+                                                    turn,
+                                                    seq,
+                                                    busy: false,
+                                                    error: None,
+                                                })
+                                            };
+                                        cx.notify();
+                                    }))
+                            })
+                            .child(if fork_busy {
+                                rust_i18n::t!("transcript.fork.working").to_string()
+                            } else {
+                                rust_i18n::t!("transcript.fork.label").to_string()
+                            }),
+                    )
+                    .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
+                    .children(fork_error.map(|error| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(error)
                     }))
             }))
             .child(rule())

@@ -15,6 +15,7 @@ pub mod assets;
 pub mod branches;
 pub mod composer;
 pub mod editor;
+pub mod handoff;
 pub mod home;
 pub mod layout;
 pub mod models;

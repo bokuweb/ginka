@@ -666,6 +666,28 @@ impl DaemonLink {
         .await;
     }
 
+    /// Copy a conversation through a transcript position onto another agent.
+    pub async fn fork_session(
+        &self,
+        session: &SessionId,
+        after: u64,
+        agent: String,
+    ) -> Result<Session, String> {
+        match self
+            .ask_result(Request::ForkSession {
+                session: session.clone(),
+                after: Some(after),
+                agent: Some(agent),
+                model: None,
+                account: None,
+            })
+            .await?
+        {
+            Response::Session { session } => Ok(session),
+            _ => Err("the daemon returned the wrong response for a session fork".into()),
+        }
+    }
+
     /// Read local branches and which worktree, if any, currently holds each.
     pub async fn branches(&self, workspace: &WorkspaceId) -> Result<Vec<BranchInfo>, String> {
         match self

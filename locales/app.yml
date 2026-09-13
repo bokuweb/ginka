@@ -302,6 +302,18 @@ transcript.rewind.yes:
 transcript.rewind.no:
   en: Keep
   ja: やめる
+transcript.fork.label:
+  en: Fork
+  ja: フォーク
+transcript.fork.hint:
+  en: Continue from this turn with another agent
+  ja: このターンから別のエージェントで続ける
+transcript.fork.working:
+  en: Forking…
+  ja: フォーク中…
+transcript.fork.failed:
+  en: "Could not fork: %{error}"
+  ja: "フォークできませんでした: %{error}"
 transcript.plan.approve:
   en: Approve
   ja: 承認する

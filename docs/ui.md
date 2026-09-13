@@ -202,6 +202,10 @@ active conversation. With nothing selected, the rail stands alone.
   tool lifecycle sit beneath the original brief, with explicit working,
   completed and failed words and glyphs. The fold retains at most 300 steps;
   the view shows the newest 12 and states how many earlier steps are hidden.
+  Each completed turn exposes a compact *Fork* action when another installed,
+  signed-in agent is available. Choosing one copies the transcript through
+  that exact turn and continues in the same workspace with the receiving
+  agent; the turn's transcript sequence, not its visual index, is the boundary.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.
