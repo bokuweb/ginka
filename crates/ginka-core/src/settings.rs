@@ -35,7 +35,7 @@ impl Default for AppSettings {
             appearance: Appearance::System,
             // The defaults in docs/ui.md §2.
             sidebar_open: true,
-            sidebar_width: 250.0,
+            sidebar_width: 520.0,
             // Closed until they have something in them: the right panel's
             // surfaces and the terminal both land in M3, and two empty panels
             // either side of the conversation is a worse first impression than

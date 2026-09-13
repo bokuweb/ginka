@@ -1,5 +1,5 @@
-//! The window shell: title bar plus the three resizable columns of
-//! `docs/ui.md` §1.
+//! The window shell: project/session navigation plus the conversation and
+//! resizable surfaces of `docs/ui.md` §1.
 //!
 //! The centre column carries the transcript, the composer, the context bar and
 //! the terminal dock. The transcript and composer are live: the composer starts
@@ -31,6 +31,7 @@ use gpui_component::{
     Icon, IconName, InteractiveElementExt as _, StyledExt as _, h_flex,
     input::{Input, InputEvent, InputState, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
+    scroll::ScrollableElement as _,
     v_flex,
 };
 use std::sync::Arc;
@@ -234,6 +235,10 @@ pub struct Shell {
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
     composer: Entity<TextareaState>,
+    /// Search text for the model catalogue popover.
+    model_query: Entity<InputState>,
+    /// A copied query keeps filtering in the testable `ginka-ui` layer.
+    model_filter: String,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -390,6 +395,17 @@ impl Shell {
                 // every chat surface the user already has works this way.
                 .submit_on_enter(true)
         });
+        let model_query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.model.search").to_string())
+        });
+        let model_query_changed =
+            cx.subscribe(&model_query, |this, query, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.model_filter = query.read(cx).value().to_string();
+                    cx.notify();
+                }
+            });
         let submitted = cx.subscribe_in(
             &composer,
             window,
@@ -625,12 +641,20 @@ impl Shell {
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             composer,
+            model_query,
+            model_filter: String::new(),
             paths,
             settings,
             session,
             sidebar,
             surfaces,
-            _subscriptions: vec![appearance, selection, submitted, committing],
+            _subscriptions: vec![
+                appearance,
+                selection,
+                submitted,
+                committing,
+                model_query_changed,
+            ],
         }
     }
 
@@ -2655,6 +2679,7 @@ impl Shell {
         let access_chip = self.access_chip_button(cx);
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
+        let usage_chip = self.usage_chip_button(cx);
         let new_session = self.new_session_button(cx);
 
         v_flex()
@@ -2700,6 +2725,7 @@ impl Shell {
                             .children(access_chip)
                             .child(agent_chip)
                             .children(account_chip)
+                            .children(usage_chip)
                             .child(if working {
                                 // An agent that cannot be stopped is one the
                                 // user has to wait out. The composer keeps
@@ -2769,8 +2795,11 @@ impl Shell {
     /// still allowed — the user may be signing in in another window, and a
     /// picker that refuses the pick is not a picker.
     fn picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let tokens = Tokens::global(cx);
         let picker = self.picker?;
+        if picker == Picker::Model {
+            return self.model_picker_panel(cx);
+        }
+        let tokens = Tokens::global(cx);
 
         let rows: Vec<AnyElement> = match picker {
             // Every project, then the two things that are not one: registering
@@ -2881,85 +2910,7 @@ impl Shell {
                     )
                 })
                 .collect(),
-            Picker::Model => {
-                let mut rows = vec![self.picker_row(
-                    "model-option:default",
-                    rust_i18n::t!("composer.option.provider_default").to_string(),
-                    None,
-                    self.model_to_start().is_none(),
-                    cx.listener(|this, _, _, cx| {
-                        if !this.starting_new_session() {
-                            this.update_existing_session_options(None, None, None, cx);
-                        } else {
-                            this.chosen_model = None;
-                            this.chosen_reasoning_effort = None;
-                            this.chosen_service_tier = None;
-                            if let Some(agent) = this.agent_to_start() {
-                                this.settings.forget_model(&agent);
-                                this.persist();
-                            }
-                        }
-                        this.picker = None;
-                        cx.notify();
-                    }),
-                    cx,
-                )];
-                rows.extend(self.models().into_iter().map(|model| {
-                    let picked = model.id.clone();
-                    let chosen = self.model_to_start().as_deref() == Some(model.id.as_str());
-                    let note = (!model.reasoning_efforts.is_empty()).then(|| {
-                        model
-                            .reasoning_efforts
-                            .iter()
-                            .map(|option| option.label.as_str())
-                            .collect::<Vec<_>>()
-                            .join(" · ")
-                    });
-                    self.picker_row(
-                        SharedString::from(format!("model-option:{}", model.id)),
-                        model.label,
-                        note,
-                        chosen,
-                        cx.listener(move |this, _, _, cx| {
-                            if !this.starting_new_session() {
-                                let model =
-                                    this.models().into_iter().find(|model| model.id == picked);
-                                let recent = model
-                                    .as_ref()
-                                    .and_then(|model| {
-                                        this.agent_to_start().map(|agent| {
-                                            this.settings.recent_model_options(&agent, model)
-                                        })
-                                    })
-                                    .unwrap_or_default();
-                                this.update_existing_session_options(
-                                    Some(picked.clone()),
-                                    recent.reasoning_effort,
-                                    recent.service_tier,
-                                    cx,
-                                );
-                                this.picker = None;
-                                cx.notify();
-                                return;
-                            }
-                            this.chosen_model = Some(picked.clone());
-                            if let Some(agent) = this.agent_to_start() {
-                                this.settings.remember_model(agent.clone(), picked.clone());
-                                if let Some(model) = this.selected_model() {
-                                    let recent = this.settings.recent_model_options(&agent, &model);
-                                    this.chosen_reasoning_effort = recent.reasoning_effort;
-                                    this.chosen_service_tier = recent.service_tier;
-                                }
-                                this.persist();
-                            }
-                            this.picker = None;
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                }));
-                rows
-            }
+            Picker::Model => unreachable!("the searchable model panel returns above"),
             Picker::ReasoningEffort => {
                 let mut rows = vec![self.picker_row(
                     "effort-option:default",
@@ -3102,6 +3053,205 @@ impl Shell {
                 .children(rows)
                 .into_any_element(),
         )
+    }
+
+    /// Searchable model catalogue, grouped by the CLI that advertised it.
+    ///
+    /// Providers are switchable only before a conversation starts. Once a
+    /// vendor session exists, changing its model remains possible when that
+    /// driver supports it, but moving the conversation is the explicit
+    /// handoff flow rather than a surprising side effect of this popover.
+    fn model_picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let mut providers: Vec<AgentStatus> = ginka_ui::models::available_providers(&self.agents)
+            .into_iter()
+            .cloned()
+            .collect();
+        if !self.starting_new_session() {
+            let current = self.agent_to_start()?;
+            providers.retain(|provider| provider.id == current);
+        }
+        let active_id = self
+            .agent_to_start()
+            .filter(|id| providers.iter().any(|provider| provider.id == *id))
+            .or_else(|| providers.first().map(|provider| provider.id.clone()))?;
+        let active = providers.iter().find(|provider| provider.id == active_id)?;
+        let models = ginka_ui::models::matching_models(active, &self.model_filter);
+        let active_display_name = active.display_name.clone();
+
+        let provider_tabs = providers.into_iter().map(|provider| {
+            let id = provider.id.clone();
+            let label = provider.display_name.clone();
+            let initial = label.chars().next().unwrap_or('?').to_string();
+            let selected = id == active_id;
+            div()
+                .id(SharedString::from(format!("model-provider:{id}")))
+                .size(px(38.))
+                .rounded(px(tokens.radius.control()))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(12.))
+                .font_medium()
+                .text_color(if selected {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .when(selected, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
+                .cursor_pointer()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.chosen_agent = Some(id.clone());
+                    this.chosen_model = None;
+                    this.chosen_reasoning_effort = None;
+                    this.chosen_service_tier = None;
+                    this.chosen_account = None;
+                    this.model_filter.clear();
+                    this.model_query
+                        .update(cx, |query, cx| query.set_value("", window, cx));
+                    this.sync_footer(cx);
+                    cx.notify();
+                }))
+                .child(initial)
+        });
+
+        let default_provider = active_id.clone();
+        let mut rows = vec![self.picker_row(
+            "model-option:default",
+            rust_i18n::t!("composer.option.provider_default").to_string(),
+            Some(active_display_name),
+            self.model_to_start().is_none(),
+            cx.listener(move |this, _, _, cx| {
+                if this.starting_new_session() {
+                    this.chosen_agent = Some(default_provider.clone());
+                }
+                this.choose_model(None, cx);
+            }),
+            cx,
+        )];
+        rows.extend(models.into_iter().map(|model| {
+            let provider = active_id.clone();
+            let picked = model.id.clone();
+            let chosen = self.model_to_start().as_deref() == Some(model.id.as_str());
+            let note = (!model.reasoning_efforts.is_empty()).then(|| {
+                model
+                    .reasoning_efforts
+                    .iter()
+                    .map(|option| option.label.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            });
+            self.picker_row(
+                SharedString::from(format!("model-option:{}:{}", provider, model.id)),
+                model.label,
+                note,
+                chosen,
+                cx.listener(move |this, _, _, cx| {
+                    if this.starting_new_session() {
+                        this.chosen_agent = Some(provider.clone());
+                        this.chosen_account = None;
+                    }
+                    this.choose_model(Some(picked.clone()), cx);
+                }),
+                cx,
+            )
+        }));
+        if rows.len() == 1 && !self.model_filter.trim().is_empty() {
+            rows.push(
+                div()
+                    .px_3()
+                    .py_4()
+                    .text_size(px(12.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("composer.model.empty").to_string())
+                    .into_any_element(),
+            );
+        }
+
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(360.))
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().popover())
+                .border_1()
+                .border_color(tokens.colors().border_strong)
+                .shadow_lg()
+                .overflow_hidden()
+                .child(
+                    v_flex()
+                        .h_full()
+                        .w(px(58.))
+                        .p_2()
+                        .gap_2()
+                        .items_center()
+                        .border_r_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .children(provider_tabs),
+                )
+                .child(
+                    v_flex()
+                        .h_full()
+                        .flex_1()
+                        .child(
+                            div()
+                                .p_2()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(Input::new(&self.model_query)),
+                        )
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .p_1()
+                                .gap_0p5()
+                                .overflow_y_scrollbar()
+                                .children(rows),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Apply a model choice and preserve the most recent valid effort/tier.
+    fn choose_model(&mut self, picked: Option<String>, cx: &mut Context<Self>) {
+        if !self.starting_new_session() {
+            let recent = picked
+                .as_ref()
+                .and_then(|picked| self.models().into_iter().find(|model| model.id == *picked))
+                .and_then(|model| {
+                    self.agent_to_start()
+                        .map(|agent| self.settings.recent_model_options(&agent, &model))
+                })
+                .unwrap_or_default();
+            self.update_existing_session_options(
+                picked,
+                recent.reasoning_effort,
+                recent.service_tier,
+                cx,
+            );
+        } else {
+            self.chosen_model = picked.clone();
+            self.chosen_reasoning_effort = None;
+            self.chosen_service_tier = None;
+            if let Some(agent) = self.agent_to_start() {
+                if let Some(picked) = picked {
+                    self.settings.remember_model(agent.clone(), picked);
+                    if let Some(model) = self.selected_model() {
+                        let recent = self.settings.recent_model_options(&agent, &model);
+                        self.chosen_reasoning_effort = recent.reasoning_effort;
+                        self.chosen_service_tier = recent.service_tier;
+                    }
+                } else {
+                    self.settings.forget_model(&agent);
+                }
+                self.persist();
+            }
+        }
+        self.picker = None;
+        cx.notify();
     }
 
     /// One option in an open picker.
@@ -3697,6 +3847,67 @@ impl Shell {
         )
     }
 
+    /// The active login's tightest usage window, even when there is only one
+    /// login and therefore no account picker chip.
+    ///
+    /// Turn events update this passively. Clicking asks the daemon for an
+    /// explicit fresh reading; there is deliberately no background quota
+    /// polling (`docs/accounts.md` §7).
+    fn usage_chip_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let account = self.account_to_start()?;
+        if account.signed_in == Some(false) {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let headroom = ginka_ui::accounts::headroom(
+            ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
+            crate::daemon::now(),
+        );
+        let exhausted = headroom.as_ref().is_some_and(|headroom| headroom.exhausted);
+        let label = match headroom.as_ref() {
+            Some(headroom) if headroom.exhausted => format!(
+                "{} · {}",
+                headroom.summary(),
+                rust_i18n::t!("composer.account.at_wall")
+            ),
+            Some(headroom) => headroom.summary(),
+            None => rust_i18n::t!("composer.usage.unknown").to_string(),
+        };
+        let account = account.id.clone();
+
+        Some(
+            h_flex()
+                .id("usage-chip")
+                .h(px(28.))
+                .px(px(9.))
+                .gap(px(6.))
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .text_size(px(12.))
+                .text_color(if exhausted {
+                    tokens.colors().status_attention
+                } else {
+                    tokens.colors().text_secondary
+                })
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .tooltip(|window, cx| {
+                    Tooltip::new(rust_i18n::t!("composer.usage.refresh").to_string())
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let link = this.link.clone();
+                    let account = account.clone();
+                    cx.background_spawn(async move {
+                        let _ = link.refresh_plan(&account).await;
+                    })
+                    .detach();
+                }))
+                .child(label),
+        )
+    }
+
     /// The agent picker's rows: every agent this machine has, then a way to
     /// add a login for the chosen one, so the first second login is
     /// reachable before there is an account chip to open.
@@ -4055,7 +4266,18 @@ impl Shell {
                 .bg(tokens.colors().row_hover())
                 .cursor_pointer()
                 .hover(|this| this.bg(tokens.colors().row_active()))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Model, cx)))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    if this.picker == Some(Picker::Model) {
+                        this.picker = None;
+                    } else {
+                        this.picker = Some(Picker::Model);
+                        this.model_filter.clear();
+                        this.model_query
+                            .update(cx, |query, cx| query.set_value("", window, cx));
+                        this.model_query.read(cx).focus_handle(cx).focus(window, cx);
+                    }
+                    cx.notify();
+                }))
                 .child(
                     div()
                         .text_size(px(12.))
@@ -4849,7 +5071,7 @@ impl Render for Shell {
                             this.child(
                                 resizable_panel()
                                     .size(sidebar_width)
-                                    .size_range(px(200.)..px(400.))
+                                    .size_range(px(420.)..px(720.))
                                     .child(
                                         // The column runs to the top of the
                                         // window and carries the window's own
