@@ -341,6 +341,8 @@ pub struct SessionRow {
     /// Relative time, shown when the row is not running.
     pub age: SharedString,
     pub archived: bool,
+    /// Whether semantic search is ready for agents started in this worktree.
+    pub indexed: bool,
 }
 
 impl SessionRow {
@@ -377,6 +379,7 @@ impl SessionRow {
                 .unwrap_or_default()
                 .into(),
             archived: summary.worktree.archived,
+            indexed: summary.indexed,
         }
     }
 
@@ -456,6 +459,7 @@ impl SessionRow {
             state,
             age: age.into(),
             archived,
+            indexed: false,
         }
     }
 
@@ -739,6 +743,7 @@ mod tests {
             status: BranchStatus::default(),
             session,
             last_commit_at: Some(900_000),
+            indexed: false,
         }
     }
 
@@ -781,6 +786,13 @@ mod tests {
         summary.worktree.archived = true;
         let row = SessionRow::from_summary(&summary, 1_000_000);
         assert!(row.archived);
+    }
+
+    #[test]
+    fn semantic_index_state_reaches_the_composer_row() {
+        let mut summary = summary(None);
+        summary.indexed = true;
+        assert!(SessionRow::from_summary(&summary, 1_000_000).indexed);
     }
 
     #[test]

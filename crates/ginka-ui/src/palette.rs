@@ -25,6 +25,8 @@ pub enum Command {
     ShowSurface(Surface),
     /// Start another shell in the dock.
     NewTerminal,
+    /// Build or refresh semantic search for the selected workspace.
+    IndexWorkspace,
     /// Select a workspace in the sidebar.
     Switch(WorkspaceId),
 }
@@ -44,7 +46,11 @@ pub struct Entry {
 ///
 /// Workspaces come last: they are the longest run and the one the user is most
 /// likely to reach by typing a name rather than by reading the list.
-pub fn entries(layout: &Layout, rows: &[SessionRow]) -> Vec<Entry> {
+pub fn entries(
+    layout: &Layout,
+    rows: &[SessionRow],
+    workspace_indexed: Option<bool>,
+) -> Vec<Entry> {
     let mut all = Vec::new();
     for panel in Panel::ALL {
         let open = layout.is_open(*panel);
@@ -73,6 +79,18 @@ pub fn entries(layout: &Layout, rows: &[SessionRow]) -> Vec<Entry> {
         hint: None,
         command: Command::NewTerminal,
     });
+    if let Some(indexed) = workspace_indexed {
+        all.push(Entry {
+            id: "workspace:index".into(),
+            label: if indexed {
+                rust_i18n::t!("palette.workspace.reindex").to_string()
+            } else {
+                rust_i18n::t!("palette.workspace.index").to_string()
+            },
+            hint: None,
+            command: Command::IndexWorkspace,
+        });
+    }
     for row in rows {
         all.push(Entry {
             id: format!("workspace:{}", row.workspace.0),
@@ -136,7 +154,7 @@ mod tests {
         // An entry that would do nothing is worse than no entry: the reader
         // has to try it to find out.
         let mut layout = layout();
-        let opened = entries(&layout, &[]);
+        let opened = entries(&layout, &[], None);
         let sidebar = opened
             .iter()
             .find(|entry| entry.command == Command::TogglePanel(Panel::Sidebar))
@@ -144,7 +162,7 @@ mod tests {
         let before = sidebar.label.clone();
 
         layout.toggle(Panel::Sidebar);
-        let after = entries(&layout, &[]);
+        let after = entries(&layout, &[], None);
         let sidebar = after
             .iter()
             .find(|entry| entry.command == Command::TogglePanel(Panel::Sidebar))
@@ -154,7 +172,7 @@ mod tests {
 
     #[test]
     fn every_surface_and_panel_is_reachable_by_typing() {
-        let all = entries(&layout(), &[]);
+        let all = entries(&layout(), &[], None);
         for panel in Panel::ALL {
             assert!(
                 all.iter()
@@ -172,7 +190,7 @@ mod tests {
 
     #[test]
     fn typing_part_of_a_name_finds_the_entry() {
-        let all = entries(&layout(), &[]);
+        let all = entries(&layout(), &[], None);
         let found = filter(all, "termi");
         assert!(
             found
@@ -187,13 +205,35 @@ mod tests {
 
     #[test]
     fn nothing_typed_is_the_whole_list_in_its_own_order() {
-        let all = entries(&layout(), &[]);
+        let all = entries(&layout(), &[], None);
         assert_eq!(filter(all.clone(), "   "), all);
     }
 
     #[test]
     fn a_query_that_matches_nothing_answers_with_nothing() {
-        let all = entries(&layout(), &[]);
+        let all = entries(&layout(), &[], None);
         assert!(filter(all, "zzzzzzzz").is_empty());
+    }
+
+    #[test]
+    fn indexing_is_offered_only_for_a_workspace_and_changes_word_when_ready() {
+        let without_workspace = entries(&layout(), &[], None);
+        assert!(
+            !without_workspace
+                .iter()
+                .any(|entry| entry.command == Command::IndexWorkspace)
+        );
+
+        let unindexed = entries(&layout(), &[], Some(false));
+        let index = unindexed
+            .iter()
+            .find(|entry| entry.command == Command::IndexWorkspace)
+            .unwrap();
+        let indexed = entries(&layout(), &[], Some(true));
+        let reindex = indexed
+            .iter()
+            .find(|entry| entry.command == Command::IndexWorkspace)
+            .unwrap();
+        assert_ne!(index.label, reindex.label);
     }
 }

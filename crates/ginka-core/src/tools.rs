@@ -36,6 +36,11 @@ pub const ZVEC_GREP_SERVER: &str = "zvec_grep";
 /// Where `zg index` keeps a workspace's index, under the worktree root.
 pub const ZVEC_GREP_INDEX_DIR: &str = ".zvec-grep";
 
+/// Whether a worktree has the on-disk index `zg` and its MCP server consume.
+pub fn is_indexed(worktree: &Path) -> bool {
+    worktree.join(ZVEC_GREP_INDEX_DIR).is_dir()
+}
+
 /// One MCP server, as a driver puts it on an agent's command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct McpServer {
@@ -159,7 +164,7 @@ pub fn servers_for(
     }
     if settings.zvec_grep
         && let Some(zg) = zg
-        && worktree.join(ZVEC_GREP_INDEX_DIR).is_dir()
+        && is_indexed(worktree)
         && !settings.servers.contains_key(ZVEC_GREP_SERVER)
     {
         servers.push(McpServer {

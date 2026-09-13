@@ -1617,6 +1617,7 @@ impl Service {
         let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
             .unwrap_or_default();
         WorkspaceSummary {
+            indexed: crate::tools::is_indexed(&worktree.path),
             worktree,
             status,
             session,

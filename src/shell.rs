@@ -270,6 +270,10 @@ pub struct Shell {
     branch_error: Option<String>,
     /// Set while branch state is being read or changed.
     branch_busy: bool,
+    /// Set while the daemon is opening the semantic-index terminal.
+    index_starting: bool,
+    /// Why the most recent indexing request could not start.
+    index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
     /// Dropping these stops the app following the system appearance and the
@@ -414,6 +418,8 @@ impl Shell {
                         this.checkpoints = Vec::new();
                         this.rewinding = None;
                         this.forking = None;
+                        this.index_starting = false;
+                        this.index_error = None;
                         // The shells belong to the workspace, not to the
                         // window: a different workspace is a different strip.
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
@@ -711,6 +717,8 @@ impl Shell {
             branches: Vec::new(),
             branch_error: None,
             branch_busy: false,
+            index_starting: false,
+            index_error: None,
             paths,
             settings,
             session,
@@ -882,6 +890,8 @@ impl Shell {
         self.checkpoints = Vec::new();
         self.rewinding = None;
         self.forking = None;
+        self.index_starting = false;
+        self.index_error = None;
         // The shells belong to the workspace that is no longer on screen.
         self.terminals = ginka_ui::terminal::TerminalTabs::new();
         self.composer
@@ -1314,6 +1324,46 @@ impl Shell {
                 })
                 .ok();
             }
+        })
+        .detach();
+    }
+
+    /// Start or refresh semantic indexing in a visible daemon terminal.
+    fn index_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.index_starting {
+            return;
+        }
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        if !self.layout.is_open(Panel::TerminalDock) {
+            self.toggle(Panel::TerminalDock, cx);
+        }
+        let (rows, cols) = self.dock_size();
+        self.index_starting = true;
+        self.index_error = None;
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
+
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.index_workspace(&workspace, rows, cols).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.index_starting = false;
+                match result {
+                    Ok(terminal) => {
+                        let title = this.terminals.tabs().len() + 1;
+                        this.terminals
+                            .open(terminal, format!("shell {title}"), rows, cols);
+                        this.adopt_terminals(cx);
+                    }
+                    Err(error) => this.index_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -1836,7 +1886,11 @@ impl Shell {
         };
         let rows = self.sidebar.read(cx).rows().to_vec();
         ginka_ui::palette::filter(
-            ginka_ui::palette::entries(&self.layout, &rows),
+            ginka_ui::palette::entries(
+                &self.layout,
+                &rows,
+                self.session.as_ref().map(|row| row.indexed),
+            ),
             &palette.typed,
         )
     }
@@ -1896,6 +1950,7 @@ impl Shell {
                 }
                 self.open_terminal(window, cx);
             }
+            Command::IndexWorkspace => self.index_workspace(window, cx),
             Command::Switch(workspace) => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
@@ -5411,6 +5466,23 @@ impl Shell {
             .map(|session| session.branch.clone())
             .filter(|branch| !branch.is_empty());
         let branch_picker = branch.is_some();
+        let indexed = self.session.as_ref().map(|session| session.indexed);
+        let index_label = if self.index_starting {
+            rust_i18n::t!("composer.index.starting").to_string()
+        } else if indexed == Some(true) {
+            rust_i18n::t!("composer.index.ready").to_string()
+        } else if self.index_error.is_some() {
+            rust_i18n::t!("composer.index.failed").to_string()
+        } else {
+            rust_i18n::t!("composer.index.action").to_string()
+        };
+        let index_colour = if self.index_error.is_some() {
+            tokens.colors().status_error
+        } else if indexed == Some(true) {
+            tokens.colors().status_done
+        } else {
+            tokens.colors().text_muted
+        };
 
         h_flex()
             .w_full()
@@ -5460,41 +5532,72 @@ impl Shell {
             )
             .child(
                 h_flex()
-                    .id("branch-chip")
-                    .h(px(22.))
-                    .px(px(6.))
-                    .gap(px(5.))
+                    .gap_1()
                     .items_center()
-                    .rounded(px(tokens.radius.row))
-                    .when(self.picker == Some(Picker::Branch), |this| {
-                        this.bg(tokens.colors().row_active())
-                    })
-                    .when(branch_picker, |this| {
-                        this.cursor_pointer()
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_branch_picker(window, cx)
-                            }))
-                    })
-                    .child(
-                        Icon::empty()
-                            .path(ginka_ui::assets::icon::GIT_BRANCH)
-                            .size_3()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .child(
-                        div()
+                    .children(indexed.map(|ready| {
+                        Button::new("workspace-index")
+                            .disabled(self.index_starting)
+                            .h(px(22.))
+                            .px(px(6.))
+                            .rounded(px(tokens.radius.row))
                             .text_size(px(11.))
-                            .text_color(tokens.colors().text_muted)
-                            .child(branch.unwrap_or_else(|| "—".into())),
-                    )
-                    .when(branch_picker, |this| {
-                        this.child(
-                            Icon::new(IconName::ChevronDown)
-                                .size(px(11.))
-                                .text_color(tokens.colors().text_muted),
-                        )
-                    }),
+                            .text_color(index_colour)
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .tooltip(self.index_error.clone().map_or_else(
+                                || {
+                                    if ready {
+                                        rust_i18n::t!("palette.workspace.reindex").to_string()
+                                    } else {
+                                        rust_i18n::t!("palette.workspace.index").to_string()
+                                    }
+                                },
+                                |error| {
+                                    rust_i18n::t!("composer.index.error", error = error).to_string()
+                                },
+                            ))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.index_workspace(window, cx)),
+                            )
+                            .child(index_label)
+                    }))
+                    .child(
+                        h_flex()
+                            .id("branch-chip")
+                            .h(px(22.))
+                            .px(px(6.))
+                            .gap(px(5.))
+                            .items_center()
+                            .rounded(px(tokens.radius.row))
+                            .when(self.picker == Some(Picker::Branch), |this| {
+                                this.bg(tokens.colors().row_active())
+                            })
+                            .when(branch_picker, |this| {
+                                this.cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_branch_picker(window, cx)
+                                    }))
+                            })
+                            .child(
+                                Icon::empty()
+                                    .path(ginka_ui::assets::icon::GIT_BRANCH)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(branch.unwrap_or_else(|| "—".into())),
+                            )
+                            .when(branch_picker, |this| {
+                                this.child(
+                                    Icon::new(IconName::ChevronDown)
+                                        .size(px(11.))
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                            }),
+                    ),
             )
     }
 

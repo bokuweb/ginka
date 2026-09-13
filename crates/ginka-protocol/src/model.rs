@@ -880,6 +880,9 @@ pub struct WorkspaceSummary {
     pub session: Option<Session>,
     /// Unix seconds of the worktree's HEAD commit, for the "last activity" line.
     pub last_commit_at: Option<i64>,
+    /// Whether zvec-grep's index directory exists in this worktree.
+    #[serde(default)]
+    pub indexed: bool,
 }
 
 impl WorkspaceSummary {
@@ -983,8 +986,25 @@ mod tests {
             },
             session: None,
             last_commit_at: None,
+            indexed: false,
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn an_older_workspace_summary_defaults_to_not_indexed() {
+        let json = serde_json::to_value(WorkspaceSummary {
+            worktree: worktree(),
+            status: BranchStatus::default(),
+            session: None,
+            last_commit_at: None,
+            indexed: false,
+        })
+        .unwrap();
+        let mut object = json.as_object().unwrap().clone();
+        object.remove("indexed");
+        let summary: WorkspaceSummary = serde_json::from_value(object.into()).unwrap();
+        assert!(!summary.indexed);
     }
 }

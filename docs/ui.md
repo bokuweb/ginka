@@ -236,6 +236,9 @@ active conversation. With nothing selected, the rail stands alone.
   fuzzily filters them, switches an available branch without changing the
   workspace id, and creates the typed branch when it does not exist. A branch
   held by another worktree stays visible with its path but cannot be selected.
+  Beside it, an explicit *Indexed* or *Index workspace* word reports whether
+  semantic search is ready. Activating it starts `zg index` in the workspace's
+  daemon-owned terminal, opening the dock so progress and failures stay visible.
 - **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their

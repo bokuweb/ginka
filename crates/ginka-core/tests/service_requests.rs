@@ -113,6 +113,25 @@ fn adding_a_project_registers_it_and_announces_the_change() {
 }
 
 #[test]
+fn workspace_summaries_report_the_daemon_hosts_semantic_index_state() {
+    let mut fixture = Fixture::new();
+    fixture.with_project();
+
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(!listed[0].indexed);
+
+    std::fs::create_dir(fixture.repo().join(ginka_core::tools::ZVEC_GREP_INDEX_DIR)).unwrap();
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(listed[0].indexed);
+}
+
+#[test]
 fn adding_a_project_keeps_the_display_name_across_the_service_boundary() {
     let mut fixture = Fixture::new();
     let root = fixture.work.path().join("client-checkout");

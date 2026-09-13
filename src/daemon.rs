@@ -622,6 +622,26 @@ impl DaemonLink {
         }
     }
 
+    /// Start zvec-grep indexing in a daemon-owned terminal.
+    pub async fn index_workspace(
+        &self,
+        workspace: &WorkspaceId,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId, String> {
+        match self
+            .ask_result(Request::IndexWorkspace {
+                workspace: workspace.clone(),
+                rows,
+                cols,
+            })
+            .await?
+        {
+            Response::Terminal { terminal } => Ok(terminal),
+            _ => Err("the daemon returned the wrong response for workspace indexing".into()),
+        }
+    }
+
     /// Send keystrokes to a terminal.
     pub async fn write_terminal(&self, terminal: &TerminalId, data: String) {
         self.ask(Request::WriteTerminal {
