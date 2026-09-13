@@ -222,13 +222,16 @@ active conversation. With nothing selected, the rail stands alone.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on
-  the left, branch on the right. The project is a chip rather than a label
+  the left, branch chip on the right. The project is a chip rather than a label
   because it is a choice — it opens the same list the sidebar offers, plus
   *New project…* and *Work without a project*, so a chat can be aimed without
   going to the sidebar and a project can be registered from the middle of the
   window where the reader already is. Choosing one starts a new conversation
   rather than moving the one on screen: an answer belongs to the worktree it
-  was produced in.
+  was produced in. The branch chip reads local branches through the daemon,
+  fuzzily filters them, switches an available branch without changing the
+  workspace id, and creates the typed branch when it does not exist. A branch
+  held by another worktree stays visible with its path but cannot be selected.
 - **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
