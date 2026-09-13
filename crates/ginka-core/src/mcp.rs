@@ -239,7 +239,11 @@ pub fn tools() -> Vec<Tool> {
             description: "Find files in a workspace by path.",
             schema: json!({
                 "type": "object",
-                "properties": {"workspace": workspace, "query": {"type": "string"}},
+                "properties": {
+                    "workspace": workspace,
+                    "query": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
                 "required": ["workspace"],
             }),
         },
@@ -474,7 +478,7 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_files" => Request::WorkspaceFiles {
             workspace: WorkspaceId(text("workspace")?),
             query: maybe("query"),
-            limit: None,
+            limit: number("limit").map(|limit| limit as u32),
         },
         "ginka_search" => Request::SearchContent {
             workspace: WorkspaceId(text("workspace")?),
@@ -656,6 +660,19 @@ mod tests {
             since,
             Request::WorkspaceChanges {
                 source: ChangeSource::SinceCheckpoint { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_file_catalogue_limit_crosses_the_mcp_boundary() {
+        let request =
+            request_for("ginka_files", &json!({"workspace": "w", "limit": 2001})).unwrap();
+        assert!(matches!(
+            request,
+            Request::WorkspaceFiles {
+                limit: Some(2001),
                 ..
             }
         ));

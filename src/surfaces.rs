@@ -14,6 +14,7 @@ use ginka_ui::editor::{
     FileTabs, PreviewKind, SaveState, image_data_url, language_for_path, markdown_preview,
     preview_kind, save_state, saved_selection_reference,
 };
+use ginka_ui::file_tree::{FileTree, TreeRowKind};
 use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
@@ -78,6 +79,14 @@ pub struct SurfacePanel {
     finder: Entity<InputState>,
     /// The paths that match it, best first.
     files: Vec<FileEntry>,
+    /// The bounded flat catalogue folded into the explorer tree.
+    tree_files: Vec<FileEntry>,
+    /// Workspace whose asynchronous tree response may replace the catalogue.
+    tree_workspace: Option<WorkspaceId>,
+    /// Directory expansion retained while a search replaces the explorer.
+    file_tree: FileTree,
+    /// Whether the worktree had more files than the explorer retains.
+    file_tree_truncated: bool,
     /// The lines that contain what was typed, if any do.
     matches: Vec<ContentMatch>,
     /// Open file paths and the tab currently in front.
@@ -181,6 +190,10 @@ impl SurfacePanel {
         Self {
             finder,
             files: Vec::new(),
+            tree_files: Vec::new(),
+            tree_workspace: None,
+            file_tree: FileTree::default(),
+            file_tree_truncated: false,
             matches: Vec::new(),
             file_tabs: FileTabs::default(),
             file_buffers: Vec::new(),
@@ -282,6 +295,38 @@ impl SurfacePanel {
         }
     }
 
+    /// Hand the panel the bounded catalogue behind its hierarchy.
+    pub fn set_file_tree(
+        &mut self,
+        workspace: WorkspaceId,
+        files: Vec<FileEntry>,
+        truncated: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.tree_workspace.as_ref() != Some(&workspace) {
+            return;
+        }
+        if self.tree_files != files || self.file_tree_truncated != truncated {
+            self.tree_files = files;
+            self.file_tree_truncated = truncated;
+            cx.notify();
+        }
+    }
+
+    /// Clear search-only rows as soon as the empty query restores the tree.
+    pub fn begin_file_tree(&mut self, workspace: WorkspaceId, cx: &mut Context<Self>) {
+        self.tree_workspace = Some(workspace);
+        self.files.clear();
+        self.matches.clear();
+        cx.notify();
+    }
+
+    /// Expand or collapse one directory without losing descendant state.
+    fn toggle_file_directory(&mut self, path: &str, cx: &mut Context<Self>) {
+        self.file_tree.toggle(path);
+        cx.notify();
+    }
+
     /// Hand the panel the lines that matched what was typed.
     pub fn set_matches(&mut self, matches: Vec<ContentMatch>, cx: &mut Context<Self>) {
         if self.matches != matches {
@@ -329,6 +374,12 @@ impl SurfacePanel {
     pub fn clear_file(&mut self, cx: &mut Context<Self>) {
         self.file_tabs.clear();
         self.file_buffers.clear();
+        self.files.clear();
+        self.matches.clear();
+        self.tree_files.clear();
+        self.tree_workspace = None;
+        self.file_tree = FileTree::default();
+        self.file_tree_truncated = false;
         self.browsing_files = true;
         self.opening = None;
         cx.notify();
@@ -1932,6 +1983,9 @@ impl SurfacePanel {
     fn file_list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
+        if self.finder.read(cx).value().trim().is_empty() {
+            return self.file_tree(cx).into_any_element();
+        }
         v_flex()
             .id("file-list")
             .flex_1()
@@ -2016,6 +2070,120 @@ impl SurfacePanel {
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
                     .child(rust_i18n::t!("surface.files.empty").to_string())
+            }))
+            .into_any_element()
+    }
+
+    /// The empty-query explorer, folded from the daemon's bounded catalogue.
+    fn file_tree(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let rows = self.file_tree.rows(&self.tree_files);
+        let empty = rows.is_empty();
+        v_flex()
+            .id("workspace-file-tree")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .py_1()
+            .children(self.file_tree_truncated.then(|| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(
+                        rust_i18n::t!(
+                            "surface.files.tree.truncated",
+                            limit = ginka_ui::file_tree::TREE_FILE_LIMIT
+                        )
+                        .to_string(),
+                    )
+            }))
+            .children(rows.into_iter().map(|row| {
+                let path = row.path.clone();
+                let id = SharedString::from(format!("file-tree:{}", row.path));
+                let indent = px(8. + row.depth as f32 * 14.);
+                match row.kind {
+                    TreeRowKind::Directory => {
+                        Button::new(id)
+                            .ghost()
+                            .w_full()
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .pl(indent)
+                                    .gap_1p5()
+                                    .child(
+                                        Icon::new(if row.expanded {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_3()
+                                        .text_color(tokens.colors().text_muted),
+                                    )
+                                    .child(
+                                        Icon::new(if row.expanded {
+                                            IconName::FolderOpen
+                                        } else {
+                                            IconName::Folder
+                                        })
+                                        .size_4()
+                                        .text_color(tokens.colors().text_secondary),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_w_0()
+                                            .text_sm()
+                                            .text_color(tokens.colors().text_secondary)
+                                            .truncate()
+                                            .child(row.name),
+                                    ),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle_file_directory(&path, cx)
+                            }))
+                            .into_any_element()
+                    }
+                    TreeRowKind::File => Button::new(id)
+                        .ghost()
+                        .w_full()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .pl(indent + px(18.))
+                                .gap_1p5()
+                                .child(
+                                    Icon::new(IconName::File)
+                                        .size_4()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .truncate()
+                                        .child(row.name),
+                                ),
+                        )
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
+                        }))
+                        .into_any_element(),
+                }
+            }))
+            .children(empty.then(|| {
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.files.tree.empty").to_string())
             }))
     }
 

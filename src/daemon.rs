@@ -613,6 +613,25 @@ impl DaemonLink {
         }
     }
 
+    /// The bounded catalogue used to build the workspace file tree.
+    pub async fn file_tree(&self, workspace: &WorkspaceId) -> (Vec<FileEntry>, bool) {
+        let limit = ginka_ui::file_tree::TREE_FILE_LIMIT;
+        let files = match self
+            .ask(Request::WorkspaceFiles {
+                workspace: workspace.clone(),
+                query: None,
+                // Ask for one sentinel beyond the UI bound so truncation is
+                // visible rather than silently presenting a complete tree.
+                limit: Some((limit + 1) as u32),
+            })
+            .await
+        {
+            Some(Response::Files { files }) => files,
+            _ => Vec::new(),
+        };
+        ginka_ui::file_tree::bounded_catalogue(files, limit)
+    }
+
     /// The commands this workspace offers after `/`.
     pub async fn commands(&self, workspace: &WorkspaceId, query: &str) -> Vec<SlashCommand> {
         match self

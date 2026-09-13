@@ -458,6 +458,12 @@ impl Shell {
                         {
                             this.refresh_skills(cx);
                         }
+                        if changed_workspace
+                            && this.surfaces.read(cx).open_surface()
+                                == Some(ginka_ui::surface::Surface::Files)
+                        {
+                            this.find_files(String::new(), cx);
+                        }
                         cx.notify();
                     }
                 },
@@ -1235,6 +1241,22 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        if query.trim().is_empty() {
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.begin_file_tree(workspace.clone(), cx)
+            });
+            cx.spawn(async move |_, cx| {
+                let requested_workspace = workspace.clone();
+                let (files, truncated) = cx
+                    .background_spawn(async move { link.file_tree(&workspace).await })
+                    .await;
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_tree(requested_workspace, files, truncated, cx);
+                });
+            })
+            .detach();
+            return;
+        }
         cx.spawn(async move |_, cx| {
             let (found, matched) = cx
                 .background_spawn(async move {

@@ -540,6 +540,12 @@ surface.files.editor:
 surface.files.empty:
   en: Nothing matches
   ja: 一致するものはありません
+surface.files.tree.empty:
+  en: This workspace has no files yet.
+  ja: このワークスペースにはまだファイルがありません。
+surface.files.tree.truncated:
+  en: "Showing the first %{limit} files. Search to reach files outside the tree."
+  ja: "先頭%{limit}件を表示しています。ツリー外のファイルは検索してください。"
 surface.git.pending:
   en: The git surface lands in M3.
   ja: git サーフェスは M3 で実装されます。
