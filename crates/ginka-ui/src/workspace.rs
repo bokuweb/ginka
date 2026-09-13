@@ -13,6 +13,8 @@ use ginka_protocol::model::{
 use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use gpui::SharedString;
 use gpui_component::Icon;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher};
 use std::path::PathBuf;
 
 /// The sidebar's rows, under the project they belong to.
@@ -500,6 +502,32 @@ impl SessionRow {
     }
 }
 
+/// Whether a sidebar row fuzzy-matches visible conversation metadata.
+///
+/// Search covers the title, model, provider, project and branch independently;
+/// joining them first would let a query cross field boundaries that are not
+/// visible next to each other.
+pub fn session_matches(row: &SessionRow, query: &str) -> bool {
+    let query = query.trim();
+    if query.is_empty() {
+        return true;
+    }
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let fields = [
+        row.title.as_ref(),
+        row.model.as_deref().unwrap_or_default(),
+        row.agent.label(),
+        row.origin.as_ref(),
+        row.branch.as_ref(),
+    ];
+    fields.into_iter().any(|field| {
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let mut buffer = Vec::new();
+        let haystack = nucleo_matcher::Utf32Str::new(field, &mut buffer);
+        pattern.score(haystack, &mut matcher).is_some()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +545,21 @@ mod tests {
             .collect();
         assert_eq!(idle[0].title, "Repository Story Creation");
         assert_eq!(idle[1].title, "Local First");
+    }
+
+    #[test]
+    fn sidebar_search_matches_title_model_provider_and_branch() {
+        let mut row = SessionRow::samples().remove(0);
+        row.model = Some("gpt-5.6-sol".into());
+        row.agent = Agent::Codex;
+        row.branch = "feature/usage-meter".into();
+
+        assert!(session_matches(&row, "story"));
+        assert!(session_matches(&row, "gpt56"), "fuzzy model match");
+        assert!(session_matches(&row, "CODEX"));
+        assert!(session_matches(&row, "usgmtr"), "fuzzy branch match");
+        assert!(session_matches(&row, "  "));
+        assert!(!session_matches(&row, "sonnet"));
     }
 
     #[test]

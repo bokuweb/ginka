@@ -14,6 +14,12 @@ sidebar.workspace:
 sidebar.sessions.empty:
   en: No sessions in this project
   ja: このプロジェクトにはセッションがありません
+sidebar.sessions.search:
+  en: Search conversations…
+  ja: 会話を検索…
+sidebar.sessions.no_match:
+  en: No conversations match this search
+  ja: 一致する会話はありません
 sidebar.archived:
   en: Archived
   ja: アーカイブ

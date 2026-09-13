@@ -19,6 +19,7 @@ use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::input::{Input, InputState};
 use gpui_component::{
     Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
@@ -71,10 +72,14 @@ pub struct SessionSidebar {
     /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
     /// them.
     account: Option<(String, Option<String>)>,
+    /// The session-list search field, owned by the shell so its events can
+    /// update this view without putting decision logic in the binary crate.
+    search: Entity<InputState>,
+    search_query: String,
 }
 
 impl SessionSidebar {
-    pub fn new(rows: Vec<SessionRow>) -> Self {
+    pub fn new(rows: Vec<SessionRow>, search: Entity<InputState>) -> Self {
         Self {
             projects: Vec::new(),
             rows,
@@ -83,6 +88,16 @@ impl SessionSidebar {
             unlisted: 0,
             archived_open: true,
             account: None,
+            search,
+            search_query: String::new(),
+        }
+    }
+
+    /// Apply the current conversation query from the search input.
+    pub fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
+        if self.search_query != query {
+            self.search_query = query;
+            cx.notify();
         }
     }
 
@@ -258,9 +273,20 @@ impl SessionSidebar {
             )
             .child(div().flex_1())
             .child(
-                Icon::new(IconName::Search)
-                    .size_4()
-                    .text_color(tokens.colors().text_muted),
+                div()
+                    .id("focus-session-search")
+                    .p_1()
+                    .rounded(px(tokens.radius.control()))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .child(
+                        Icon::new(IconName::Search)
+                            .size_4()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.search.read(cx).focus_handle(cx).focus(window, cx);
+                    })),
             )
             .child(
                 div()
@@ -717,6 +743,7 @@ impl Render for SessionSidebar {
             .iter()
             .enumerate()
             .filter(|(_, row)| !row.archived)
+            .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
             .map(|(index, row)| (index, row.clone()))
             .collect();
         // Stable: equal ranks keep their insertion order.
@@ -747,6 +774,7 @@ impl Render for SessionSidebar {
             .iter()
             .enumerate()
             .filter(|(_, row)| row.archived)
+            .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
             .filter(|(_, row)| {
                 selected_project_name.as_ref().is_none_or(|selected| {
                     row.workspace
@@ -757,7 +785,8 @@ impl Render for SessionSidebar {
             .map(|(index, row)| (index, row.clone()))
             .collect();
         let archived_count = archived.len();
-        let nothing_registered = groups.is_empty();
+        let no_matching_sessions =
+            groups.iter().all(|group| group.rows.is_empty()) && archived_count == 0;
 
         let project_rows = self.projects.clone();
         let selected_project = selected_project_name.is_some();
@@ -798,6 +827,43 @@ impl Render for SessionSidebar {
                     .h_full()
                     .bg(tokens.colors().bg_window.opacity(0.34))
                     .child(self.workspace_header(cx))
+                    .child(
+                        h_flex()
+                            .h(px(36.))
+                            .mx_2()
+                            .mt_2()
+                            .px_2()
+                            .gap_2()
+                            .items_center()
+                            .rounded(px(tokens.radius.control()))
+                            .bg(tokens.colors().row_hover())
+                            .child(
+                                Icon::new(IconName::Search)
+                                    .size_3p5()
+                                    .text_color(tokens.colors().text_muted),
+                            )
+                            .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                            .when(!self.search_query.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .id("clear-session-search")
+                                        .p_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_active()))
+                                        .child(
+                                            Icon::new(IconName::Close)
+                                                .size_3()
+                                                .text_color(tokens.colors().text_muted),
+                                        )
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.search.update(cx, |search, cx| {
+                                                search.set_value("", window, cx)
+                                            });
+                                        })),
+                                )
+                            }),
+                    )
                     .child(self.new_chat(cx))
                     .child(
                         v_flex()
@@ -807,14 +873,18 @@ impl Render for SessionSidebar {
                             .px_1p5()
                             .gap_0p5()
                             .overflow_y_scroll()
-                            .when(nothing_registered, |this| {
+                            .when(no_matching_sessions, |this| {
                                 this.child(
                                     div()
                                         .px_3()
                                         .py_2()
                                         .text_xs()
                                         .text_color(tokens.colors().text_muted)
-                                        .child(rust_i18n::t!("sidebar.sessions.empty").to_string()),
+                                        .child(if self.search_query.trim().is_empty() {
+                                            rust_i18n::t!("sidebar.sessions.empty").to_string()
+                                        } else {
+                                            rust_i18n::t!("sidebar.sessions.no_match").to_string()
+                                        }),
                                 )
                             })
                             .children(groups.into_iter().flat_map(|group| {

@@ -1,8 +1,9 @@
 # MonoCode capability map
 
 This is a behavioural inventory of [MonoCode](https://github.com/hardbeat920/monocode),
-not an implementation source. It was read at release 0.1.44, commit
-[`36d6d28`](https://github.com/hardbeat920/monocode/commit/36d6d28f50ec8ba1d7e12729e1f9a54cf383751f).
+not an implementation source. It was first read at release 0.1.44 and reviewed
+again through main commit
+[`2f70390`](https://github.com/hardbeat920/monocode/commit/2f703901ee9e3433715edae110191fbc5acdf807).
 Ginka implements the requirements in its own architecture: a daemon owns all
 durable state, every capability crosses the shared protocol, and a workspace is
 the worktree-sized task identity.
@@ -18,9 +19,9 @@ The statuses describe Ginka at 2026-09-13:
 | Area | MonoCode capability | Ginka status / interpretation |
 | --- | --- | --- |
 | Providers | Claude Code, Codex, Cursor, Grok Build, OpenCode, Pi, omp and fx; installed-CLI discovery; provider enable/disable; default and custom models | **Partial.** Claude and Codex run today. The searchable provider/model popover reads the driver catalogues; Codex uses live `model/list`, both drivers retain an offline fallback, and recent model/effort/tier choices are restored. Provider settings UI and ACP-backed drivers are M4/M5. |
-| Conversations | Streaming sessions, resume, rename, delete, archive, pin, filters, folders, multi-select, recent-session restoration | **Partial.** Streaming/resume/rename/delete are done. Workspace archive is the first parity slice; filters and folders are M4 candidates. |
+| Conversations | Streaming sessions, resume, rename, delete, archive, pin, filters, folders, multi-select, recent-session restoration | **Partial.** Streaming/resume/rename/delete and workspace archive are done. The sidebar fuzzily searches title, model, provider, project and branch; folders and advanced filters remain M4 candidates. |
 | Parallel work | Multiple tabs and windows, split conversation panes, background agents and subagents | **Partial.** Ginka runs concurrent workspace sessions and fan-out. Split transcript panes and reported subagents remain planned. |
-| Composer | Multiline drafts, drag/drop/paste attachments, image preview, `@file`, `/command`, provider skills, plan mode, context compacting | **Partial.** Durable drafts, uploads, bounded file mentions and merged commands exist; attachment UI, plan approval and compact controls remain. |
+| Composer | Multiline drafts, drag/drop/paste attachments, image preview, `@file`, `/command`, provider skills, plan mode, context compacting | **Partial.** Durable drafts, uploads, bounded file mentions and merged commands exist. While a turn runs, an empty draft offers Stop and a written draft offers Send through the existing steer-or-queue policy. Attachment UI, plan approval and compact controls remain. |
 | Follow-ups | Steer a running turn or queue messages; edit, remove, reorder and force-send queued prompts | **Partial.** The tested steer-or-queue policy exists. Queue management UI remains. |
 | Interactive input | Permission approvals, agent questions, plan review/edit/approve, nested-agent input routing | **Partial.** The daemon now tracks open request ids, pauses the session, delivers a typed response into the live transport, persists the resolution, and rejects stale cards; UI, CLI, MCP and Slack share that path. A scripted transport pins the loop, while shipping drivers still do not raise native mid-turn requests. |
 | Transcript | Markdown and code, reasoning/tool activity, tool diffs, failed-tool details, task lists, copy, quote-to-chat, prompt outline, search | **Partial.** Markdown/activity folding and daemon-side search exist. Task lists, quote-to-chat, in-page jump and prompt outline remain. |

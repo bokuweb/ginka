@@ -271,8 +271,21 @@ impl Shell {
         // The centre column shows whichever row the sidebar has selected; until
         // selection is wired up that is simply the first.
         let session = rows.first().cloned();
-        let sidebar = cx.new(|_| SessionSidebar::new(rows));
+        let sidebar_search = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
+        });
+        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone()));
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
+
+        let sidebar_search_changed =
+            cx.subscribe(&sidebar_search, |this, query, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = query.read(cx).value().to_string();
+                    this.sidebar
+                        .update(cx, |sidebar, cx| sidebar.set_search_query(value, cx));
+                }
+            });
 
         let committing = cx.subscribe_in(
             &surfaces,
@@ -654,6 +667,7 @@ impl Shell {
                 submitted,
                 committing,
                 model_query_changed,
+                sidebar_search_changed,
             ],
         }
     }
@@ -2672,6 +2686,8 @@ impl Shell {
         // borrow held across the whole composer.
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
+        let primary_action =
+            ginka_ui::composer::primary_action(working, self.composer.read(cx).value().as_ref());
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
         let effort_chip = self.reasoning_effort_chip_button(cx);
@@ -2726,56 +2742,58 @@ impl Shell {
                             .child(agent_chip)
                             .children(account_chip)
                             .children(usage_chip)
-                            .child(if working {
-                                // An agent that cannot be stopped is one the
-                                // user has to wait out. The composer keeps
-                                // working: what is typed while it runs is
-                                // queued, not lost.
-                                div()
-                                    .id("stop")
-                                    .size(px(30.))
-                                    .rounded_full()
-                                    .bg(tokens.colors().bg_raised)
-                                    .border_1()
-                                    .border_color(tokens.colors().border_strong)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_active()))
-                                    .tooltip(|window, cx| {
-                                        Tooltip::new(rust_i18n::t!("composer.stop").to_string())
-                                            .build(window, cx)
-                                    })
-                                    .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-                                    .child(
-                                        div()
-                                            .size(px(9.))
-                                            .rounded(px(2.5))
-                                            .bg(tokens.colors().text_primary),
-                                    )
-                                    .into_any_element()
-                            } else {
-                                div()
-                                    .id("send")
-                                    .size(px(30.))
-                                    .rounded_full()
-                                    .bg(tokens.colors().text_primary)
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().accent))
-                                    .on_click(
-                                        cx.listener(|this, _, window, cx| this.submit(window, cx)),
-                                    )
-                                    .child(
-                                        Icon::new(IconName::ArrowUp)
-                                            .size_4()
-                                            .text_color(tokens.colors().bg_window),
-                                    )
-                                    .into_any_element()
-                            }),
+                            .child(
+                                if primary_action == ginka_ui::composer::PrimaryAction::Stop {
+                                    // With no follow-up waiting, stopping is the
+                                    // one useful action on a running turn. As
+                                    // soon as there is a draft this place turns
+                                    // back into Send for steer-or-queue.
+                                    div()
+                                        .id("stop")
+                                        .size(px(30.))
+                                        .rounded_full()
+                                        .bg(tokens.colors().bg_raised)
+                                        .border_1()
+                                        .border_color(tokens.colors().border_strong)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_active()))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new(rust_i18n::t!("composer.stop").to_string())
+                                                .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
+                                        .child(
+                                            div()
+                                                .size(px(9.))
+                                                .rounded(px(2.5))
+                                                .bg(tokens.colors().text_primary),
+                                        )
+                                        .into_any_element()
+                                } else {
+                                    div()
+                                        .id("send")
+                                        .size(px(30.))
+                                        .rounded_full()
+                                        .bg(tokens.colors().text_primary)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().accent))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.submit(window, cx)
+                                        }))
+                                        .child(
+                                            Icon::new(IconName::ArrowUp)
+                                                .size_4()
+                                                .text_color(tokens.colors().bg_window),
+                                        )
+                                        .into_any_element()
+                                },
+                            ),
                     ),
             )
             .child(
@@ -4245,15 +4263,16 @@ impl Shell {
             return None;
         }
         let tokens = Tokens::global(cx);
-        let label = self
+        let selected = self
             .model_to_start()
-            .and_then(|chosen| {
-                models
-                    .iter()
-                    .find(|model| model.id == chosen)
-                    .map(|model| model.label.clone())
-            })
+            .and_then(|chosen| models.iter().find(|model| model.id == chosen));
+        let label = selected
+            .map(|model| model.label.clone())
             .unwrap_or_else(|| rust_i18n::t!("composer.model.default").to_string());
+        let effort = self.model_options_to_start().0;
+        let effort_label = selected
+            .and_then(|model| ginka_ui::models::effort_label(model, effort.as_deref()))
+            .map(str::to_string);
 
         Some(
             h_flex()
@@ -4284,6 +4303,12 @@ impl Shell {
                         .text_color(tokens.colors().text_secondary)
                         .child(label),
                 )
+                .children(effort_label.map(|effort| {
+                    div()
+                        .text_size(px(11.))
+                        .text_color(tokens.colors().text_muted)
+                        .child(effort)
+                }))
                 .child(
                     Icon::new(IconName::ChevronDown)
                         .size(px(12.))

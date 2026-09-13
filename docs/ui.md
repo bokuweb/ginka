@@ -132,6 +132,11 @@ by e1 and leaving the centre column exclusively for the active conversation.
   project rows. The selected project remains highlighted while one of its
   sessions is open.
 - **Session list header** — `Workspace` and a `+` for a new session.
+- **Conversation search** — directly below the header, with the rail's search
+  icon focusing it and an explicit clear action. Matching is fuzzy and local
+  over the row metadata already pushed by the daemon: title, model, provider,
+  project and branch. Transcript contents remain the daemon-side N10 search;
+  filtering this list never starts a second content-search path in the view.
 - **New chat** — the first row under the header. It clears the centre column
   for a conversation aimed at whatever is selected: a project, the project of
   the selected workspace, or nothing at all.
@@ -197,11 +202,16 @@ by e1 and leaving the centre column exclusively for the active conversation.
   `Do anything…` placeholder, and beneath it the attachment button on the left,
   then the model, effort and tier controls, the mode and agent chips, the
   account chip when that agent has more than one login, and a separate usage
-  chip for the chosen login's tightest rate-limit window. The percentage is
+  chip for the chosen login's tightest rate-limit window. The model chip also
+  prints the selected effort when that model supports it, so a collapsed
+  picker still says what the next turn will run. The percentage is
   printed and *at the wall* appears as a word beside it, never as colour alone
-  (`docs/accounts.md` §11). The circular send button becomes a stop button while a
-  session is working. `@` file mentions and `/` slash commands with an inline
-  filtered menu. `↩` sends, `⇧↩` is a newline; sending while busy enqueues.
+  (`docs/accounts.md` §11). While a session is working, the circular action is
+  Stop when the draft is empty and Send as soon as a follow-up has been typed;
+  that send steers or queues according to the driver's existing policy. `@`
+  file mentions and `/` slash commands have an inline filtered menu. `↩`
+  sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
+  available.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on
