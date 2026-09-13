@@ -97,6 +97,9 @@ pub enum Applied {
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     blocks: Vec<Block>,
+    /// Drawable block for each stored sequence position. Hidden bookkeeping
+    /// entries are `None`; positions are one-based while this vector is zero-based.
+    positions: Vec<Option<usize>>,
     cursor: u64,
     usage: Usage,
 }
@@ -115,6 +118,16 @@ impl Transcript {
     /// What the window draws.
     pub fn blocks(&self) -> &[Block] {
         &self.blocks
+    }
+
+    /// Resolve one persisted transcript position to the block that folded it.
+    pub fn block_index_for_seq(&self, seq: u64) -> Option<usize> {
+        usize::try_from(seq)
+            .ok()
+            .and_then(|seq| seq.checked_sub(1))
+            .and_then(|index| self.positions.get(index))
+            .copied()
+            .flatten()
     }
 
     /// The newest question or plan still waiting for an answer.
@@ -198,16 +211,19 @@ impl Transcript {
         }
         self.cursor = entry.seq;
 
-        match &entry.payload {
+        let block = match &entry.payload {
             TranscriptPayload::User { text } => {
-                self.blocks.push(Block::User { text: text.clone() })
+                self.blocks.push(Block::User { text: text.clone() });
+                Some(self.blocks.len() - 1)
             }
             TranscriptPayload::Response { request_id, text } => {
                 self.answer(request_id);
                 self.blocks.push(Block::User { text: text.clone() });
+                Some(self.blocks.len() - 1)
             }
             TranscriptPayload::Agent { event } => self.fold(event, entry.seq),
-        }
+        };
+        self.positions.push(block);
         Applied::Added
     }
 
@@ -229,32 +245,38 @@ impl Transcript {
         last
     }
 
-    fn fold(&mut self, event: &AgentEvent, seq: u64) {
+    fn fold(&mut self, event: &AgentEvent, seq: u64) -> Option<usize> {
         match event {
             AgentEvent::TextDelta { text } => self.append_text(text),
             AgentEvent::Reasoning { text } => self.append_reasoning(text),
             // The driver already normalized the call into one shape; the block
             // keeps the kind as its label and the title as the line the reader
             // scans.
-            AgentEvent::ToolCall { activity } => self.blocks.push(Block::Tool {
-                id: activity.id.clone().unwrap_or_default(),
-                name: activity.kind_str().to_string(),
-                input: activity.title.clone(),
-                output: None,
-                is_error: false,
-            }),
+            AgentEvent::ToolCall { activity } => {
+                self.blocks.push(Block::Tool {
+                    id: activity.id.clone().unwrap_or_default(),
+                    name: activity.kind_str().to_string(),
+                    input: activity.title.clone(),
+                    output: None,
+                    is_error: false,
+                });
+                Some(self.blocks.len() - 1)
+            }
             AgentEvent::ToolResult { activity } => self.attach_result(
                 activity.id.as_deref().unwrap_or_default(),
                 activity.detail.as_deref().unwrap_or_default(),
                 activity.failed,
             ),
-            AgentEvent::SubagentStarted { id, title } => self.blocks.push(Block::Subagent {
-                id: id.clone(),
-                title: title.clone(),
-                steps: Vec::new(),
-                summary: None,
-                is_error: false,
-            }),
+            AgentEvent::SubagentStarted { id, title } => {
+                self.blocks.push(Block::Subagent {
+                    id: id.clone(),
+                    title: title.clone(),
+                    steps: Vec::new(),
+                    summary: None,
+                    is_error: false,
+                });
+                Some(self.blocks.len() - 1)
+            }
             AgentEvent::SubagentStep { parent_id, step } => {
                 self.attach_subagent_step(parent_id, step)
             }
@@ -267,32 +289,50 @@ impl Transcript {
                 id,
                 question,
                 options,
-            } => self.blocks.push(Block::Question {
-                id: id.clone(),
-                question: question.clone(),
-                options: options.clone(),
-                answered: false,
-            }),
-            AgentEvent::PlanProposal { id, plan } => self.blocks.push(Block::Plan {
-                id: id.clone(),
-                plan: plan.clone(),
-                answered: false,
-            }),
-            AgentEvent::Permission { id, request } => self.blocks.push(Block::Question {
-                id: id.clone(),
-                question: request.clone(),
-                options: Vec::new(),
-                answered: false,
-            }),
+            } => {
+                self.blocks.push(Block::Question {
+                    id: id.clone(),
+                    question: question.clone(),
+                    options: options.clone(),
+                    answered: false,
+                });
+                Some(self.blocks.len() - 1)
+            }
+            AgentEvent::PlanProposal { id, plan } => {
+                self.blocks.push(Block::Plan {
+                    id: id.clone(),
+                    plan: plan.clone(),
+                    answered: false,
+                });
+                Some(self.blocks.len() - 1)
+            }
+            AgentEvent::Permission { id, request } => {
+                self.blocks.push(Block::Question {
+                    id: id.clone(),
+                    question: request.clone(),
+                    options: Vec::new(),
+                    answered: false,
+                });
+                Some(self.blocks.len() - 1)
+            }
             // Accounting belongs in the context bar, not in the conversation,
             // and the account's windows belong to the account chip.
-            AgentEvent::Usage { usage } => self.usage = *usage,
-            AgentEvent::PlanUsage { .. } => {}
-            AgentEvent::TurnEnd { turn } => self.blocks.push(Block::TurnEnd { turn: *turn, seq }),
-            AgentEvent::SessionResult { state, summary } => self.blocks.push(Block::Outcome {
-                state: *state,
-                summary: summary.clone(),
-            }),
+            AgentEvent::Usage { usage } => {
+                self.usage = *usage;
+                None
+            }
+            AgentEvent::PlanUsage { .. } => None,
+            AgentEvent::TurnEnd { turn } => {
+                self.blocks.push(Block::TurnEnd { turn: *turn, seq });
+                Some(self.blocks.len() - 1)
+            }
+            AgentEvent::SessionResult { state, summary } => {
+                self.blocks.push(Block::Outcome {
+                    state: *state,
+                    summary: summary.clone(),
+                });
+                Some(self.blocks.len() - 1)
+            }
             // A shape this build does not understand is shown, not dropped: it
             // is how a vendor's format change first reaches a reader (R6).
             AgentEvent::Unsupported { shape } => {
@@ -305,7 +345,7 @@ impl Transcript {
             | AgentEvent::SteerAccepted
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::AgentTitle { .. }
-            | AgentEvent::ProcessExited { .. } => {}
+            | AgentEvent::ProcessExited { .. } => None,
         }
     }
 
@@ -332,21 +372,33 @@ impl Transcript {
     }
 
     /// Grow the open assistant paragraph, or start one.
-    fn append_text(&mut self, text: &str) {
+    fn append_text(&mut self, text: &str) -> Option<usize> {
         match self.blocks.last_mut() {
-            Some(Block::Assistant { text: existing }) => existing.push_str(text),
-            _ => self.blocks.push(Block::Assistant {
-                text: text.to_string(),
-            }),
+            Some(Block::Assistant { text: existing }) => {
+                existing.push_str(text);
+                Some(self.blocks.len() - 1)
+            }
+            _ => {
+                self.blocks.push(Block::Assistant {
+                    text: text.to_string(),
+                });
+                Some(self.blocks.len() - 1)
+            }
         }
     }
 
-    fn append_reasoning(&mut self, text: &str) {
+    fn append_reasoning(&mut self, text: &str) -> Option<usize> {
         match self.blocks.last_mut() {
-            Some(Block::Reasoning { text: existing }) => existing.push_str(text),
-            _ => self.blocks.push(Block::Reasoning {
-                text: text.to_string(),
-            }),
+            Some(Block::Reasoning { text: existing }) => {
+                existing.push_str(text);
+                Some(self.blocks.len() - 1)
+            }
+            _ => {
+                self.blocks.push(Block::Reasoning {
+                    text: text.to_string(),
+                });
+                Some(self.blocks.len() - 1)
+            }
         }
     }
 
@@ -357,26 +409,34 @@ impl Transcript {
     /// long session. A result with no call is still shown: losing output
     /// because the call was in a page we have not fetched would be worse than
     /// an unattached card.
-    fn attach_result(&mut self, id: &str, output: &str, is_error: bool) {
-        let matching = self.blocks.iter_mut().rev().find(
+    fn attach_result(&mut self, id: &str, output: &str, is_error: bool) -> Option<usize> {
+        let matching = self.blocks.iter().rposition(
             |block| matches!(block, Block::Tool { id: call, output: None, .. } if call == id),
         );
         match matching {
-            Some(Block::Tool {
-                output: slot,
-                is_error: failed,
-                ..
-            }) => {
+            Some(index) => {
+                let Block::Tool {
+                    output: slot,
+                    is_error: failed,
+                    ..
+                } = &mut self.blocks[index]
+                else {
+                    unreachable!()
+                };
                 *slot = Some(output.to_string());
                 *failed = is_error;
+                Some(index)
             }
-            _ => self.blocks.push(Block::Tool {
-                id: id.to_string(),
-                name: String::new(),
-                input: String::new(),
-                output: Some(output.to_string()),
-                is_error,
-            }),
+            None => {
+                self.blocks.push(Block::Tool {
+                    id: id.to_string(),
+                    name: String::new(),
+                    input: String::new(),
+                    output: Some(output.to_string()),
+                    is_error,
+                });
+                Some(self.blocks.len() - 1)
+            }
         }
     }
 
@@ -384,14 +444,13 @@ impl Transcript {
     const MAX_SUBAGENT_STEPS: usize = 300;
 
     /// Merge a delegated tool lifecycle update instead of adding a second row.
-    fn attach_subagent_step(&mut self, parent_id: &str, step: &SubagentStep) {
-        let Some(Block::Subagent { steps, .. }) = self
+    fn attach_subagent_step(&mut self, parent_id: &str, step: &SubagentStep) -> Option<usize> {
+        let index = self
             .blocks
-            .iter_mut()
-            .rev()
-            .find(|block| matches!(block, Block::Subagent { id, .. } if id == parent_id))
-        else {
-            return;
+            .iter()
+            .rposition(|block| matches!(block, Block::Subagent { id, .. } if id == parent_id))?;
+        let Block::Subagent { steps, .. } = &mut self.blocks[index] else {
+            unreachable!()
         };
         if let Some(existing) = steps.iter_mut().find(|existing| existing.id == step.id) {
             let text = (!step.text.is_empty()).then(|| step.text.clone());
@@ -400,33 +459,39 @@ impl Transcript {
             if let Some(text) = text {
                 existing.text = text;
             }
-            return;
+            return Some(index);
         }
         steps.push(step.clone());
         if steps.len() > Self::MAX_SUBAGENT_STEPS {
             steps.remove(0);
         }
+        Some(index)
     }
 
     /// Settle the delegated row without allowing its report to rename it.
-    fn finish_subagent(&mut self, id: &str, summary: Option<String>, failed: bool) {
-        let Some(Block::Subagent {
+    fn finish_subagent(
+        &mut self,
+        id: &str,
+        summary: Option<String>,
+        failed: bool,
+    ) -> Option<usize> {
+        let index = self.blocks.iter().rposition(
+            |block| matches!(block, Block::Subagent { id: parent, .. } if parent == id),
+        )?;
+        let Block::Subagent {
             summary: output,
             is_error,
             ..
-        }) = self
-            .blocks
-            .iter_mut()
-            .rev()
-            .find(|block| matches!(block, Block::Subagent { id: parent, .. } if parent == id))
+        } = &mut self.blocks[index]
         else {
-            return;
+            unreachable!()
         };
         // `Some("")` is a completed run whose provider had no report. Keeping
         // completion separate from visible text prevents the activity line
         // from claiming the child is still working forever.
         *output = Some(summary.unwrap_or_default());
         *is_error = failed;
+        Some(index)
     }
 }
 
@@ -1123,6 +1188,34 @@ mod tests {
         transcript.apply(&agent(1, AgentEvent::TurnEnd { turn: 3 }));
 
         assert_eq!(transcript.blocks(), &[Block::TurnEnd { turn: 3, seq: 1 }]);
+    }
+
+    #[test]
+    fn stored_positions_map_to_the_drawable_block_that_folded_them() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            text(1, "hel"),
+            text(2, "lo"),
+            user(3, "question"),
+            agent(
+                4,
+                AgentEvent::ToolCall {
+                    activity: ActivityItem::from_tool(Some("t".into()), "Bash", &json!({})),
+                },
+            ),
+            agent(
+                5,
+                AgentEvent::ToolResult {
+                    activity: completed("t", "answer", false),
+                },
+            ),
+        ]);
+
+        assert_eq!(transcript.block_index_for_seq(1), Some(0));
+        assert_eq!(transcript.block_index_for_seq(2), Some(0));
+        assert_eq!(transcript.block_index_for_seq(3), Some(1));
+        assert_eq!(transcript.block_index_for_seq(5), Some(2));
+        assert_eq!(transcript.block_index_for_seq(99), None);
     }
 
     /// A frame at 120Hz, which is what the reveal is driven by.

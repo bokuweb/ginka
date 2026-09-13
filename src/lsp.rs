@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use ginka_core::lsp::{LanguageServer, discover};
+use ginka_ui::editor::{DefinitionTarget, definition_target};
 use gpui::{App, AppContext as _, Entity, Task, Window};
 use gpui_component::input::{DefinitionProvider, EditorState, HoverProvider, Rope, RopeExt as _};
 use std::path::PathBuf;
@@ -13,6 +14,7 @@ use std::time::Duration;
 #[derive(Clone)]
 struct EditorLanguageServer {
     server: Arc<LanguageServer>,
+    worktree: PathBuf,
 }
 
 /// Shared state between editor change events and asynchronous LSP startup.
@@ -20,6 +22,34 @@ struct EditorLanguageServer {
 pub struct EditorLspBinding {
     server: Arc<Mutex<Option<Arc<LanguageServer>>>>,
     version: Arc<AtomicI32>,
+}
+
+/// Workspace document and host callback attached to one editor.
+pub struct EditorLspDocument {
+    worktree: PathBuf,
+    path: String,
+    text: String,
+    show_definition: ShowDefinitionHandler,
+}
+
+/// Host callback used when a definition belongs in another file tab.
+pub type ShowDefinitionHandler = Rc<dyn Fn(DefinitionTarget, &mut App)>;
+
+impl EditorLspDocument {
+    /// Describe one editor document before its optional server is discovered.
+    pub fn new(
+        worktree: PathBuf,
+        path: String,
+        text: String,
+        show_definition: ShowDefinitionHandler,
+    ) -> Self {
+        Self {
+            worktree,
+            path,
+            text,
+            show_definition,
+        }
+    }
 }
 
 impl EditorLspBinding {
@@ -60,13 +90,20 @@ impl DefinitionProvider for EditorLanguageServer {
         let position = text.offset_to_position(offset);
         let server = self.server.clone();
         let current = server.document_uri().clone();
+        let worktree = self.worktree.clone();
         cx.background_spawn(async move {
             let definitions = smol::unblock(move || server.definitions(position)).await?;
-            // The editor can jump within its own buffer. Cross-file locations
-            // need the file-tab navigation adapter, which is a separate slice.
             Ok(definitions
                 .into_iter()
-                .filter(|location| location.target_uri == current)
+                .filter(|location| {
+                    location.target_uri == current
+                        || definition_target(
+                            &worktree,
+                            &location.target_uri.to_string(),
+                            location.target_selection_range,
+                        )
+                        .is_some()
+                })
                 .collect())
         })
     }
@@ -76,28 +113,37 @@ impl DefinitionProvider for EditorLanguageServer {
 pub fn attach<T: 'static>(
     editor: Entity<EditorState>,
     binding: EditorLspBinding,
-    worktree: PathBuf,
-    path: String,
-    text: String,
+    document: EditorLspDocument,
     window: &mut Window,
     cx: &mut gpui::Context<T>,
 ) {
     let editor = editor.downgrade();
     cx.spawn_in(window, async move |_, cx| {
+        let EditorLspDocument {
+            mut worktree,
+            path,
+            text,
+            show_definition,
+        } = document;
         let search_path = std::env::var_os("PATH");
+        let server_worktree = worktree.clone();
         let started = cx
             .background_spawn(async move {
                 smol::unblock(move || {
-                    let Some(launch) = discover(&worktree, &path, search_path.as_deref())? else {
+                    let Some(launch) = discover(&server_worktree, &path, search_path.as_deref())?
+                    else {
                         return Ok(None);
                     };
-                    LanguageServer::start(&launch, &text).map(Some)
+                    LanguageServer::start(&launch, &text).map(|server| Some((server, launch.root)))
                 })
                 .await
             })
             .await;
         let server = match started {
-            Ok(Some(server)) => server,
+            Ok(Some((server, canonical_worktree))) => {
+                worktree = canonical_worktree;
+                server
+            }
             Ok(None) => return,
             Err(error) => {
                 tracing::warn!(%error, "language server unavailable; keeping syntax-only editor");
@@ -110,10 +156,26 @@ pub fn attach<T: 'static>(
             .expect("language-server slot poisoned") = Some(server.clone());
         let provider = Rc::new(EditorLanguageServer {
             server: server.clone(),
+            worktree: worktree.clone(),
         });
+        let current_uri = server.document_uri().to_string();
         let current = match editor.update_in(cx, |editor, _, cx| {
             editor.lsp_mut().hover_provider = Some(provider.clone());
             editor.lsp_mut().definition_provider = Some(provider);
+            editor.lsp_mut().show_document = Some(Rc::new(move |params, _, cx| {
+                if params.uri.to_string() == current_uri {
+                    return false;
+                }
+                if let Some(range) = params.selection
+                    && let Some(target) =
+                        definition_target(&worktree, &params.uri.to_string(), range)
+                {
+                    show_definition(target, cx);
+                }
+                // A target in another document must not fall through to the
+                // toolkit's same-buffer cursor movement.
+                true
+            }));
             editor.refresh(cx);
             editor.value().to_string()
         }) {

@@ -249,6 +249,63 @@ surface.reports.by_agent:
 surface.reports.by_day:
   en: By day
   ja: 日別
+surface.skills.pending:
+  en: Discover and manage the reusable instructions installed for your agents.
+  ja: エージェントにインストールされた再利用可能な指示を確認・管理します。
+surface.skills.reading:
+  en: Reading skills…
+  ja: Skillsを読み込んでいます…
+surface.skills.empty:
+  en: No skills are installed for this project or user.
+  ja: このプロジェクトまたはユーザー用のSkillはインストールされていません。
+surface.skills.search:
+  en: Search skills, descriptions and paths
+  ja: Skill、説明、パスを検索
+surface.skills.filter.all:
+  en: All scopes
+  ja: すべての範囲
+surface.skills.filter.any_state:
+  en: Any state
+  ja: すべての状態
+surface.skills.filter.count:
+  en: "%{visible} of %{total}"
+  ja: "%{visible} / %{total}"
+surface.skills.no_matches:
+  en: No skills match these filters.
+  ja: 条件に一致するSkillはありません。
+surface.skills.copy_path:
+  en: Copy path
+  ja: パスをコピー
+surface.skills.retry:
+  en: Try again
+  ja: 再試行
+surface.skills.error:
+  en: "Skills could not be updated: %{error}"
+  ja: "Skillsを更新できませんでした: %{error}"
+surface.skills.enable:
+  en: Enable
+  ja: 有効にする
+surface.skills.disable:
+  en: Disable
+  ja: 無効にする
+surface.skills.changing:
+  en: Changing…
+  ja: 変更中…
+surface.skills.enabled:
+  en: enabled
+  ja: 有効
+surface.skills.disabled:
+  en: disabled
+  ja: 無効
+surface.skills.scope.user:
+  en: user
+  ja: ユーザー
+surface.skills.scope.project:
+  en: project
+  ja: プロジェクト
+surface.skills.truncated:
+  en: The scan limit was reached. Some skills may not be shown.
+  ja: 検索上限に達したため、一部のSkillが表示されていない可能性があります。
 composer.context.worktree:
   en: Worktree
   ja: ワークツリー
@@ -258,6 +315,30 @@ composer.context.project:
 composer.context.no_project:
   en: No project
   ja: プロジェクトなし
+transcript.search.placeholder:
+  en: Find in conversation
+  ja: 会話内を検索
+transcript.search.searching:
+  en: Searching…
+  ja: 検索中…
+transcript.search.failed:
+  en: Search failed
+  ja: 検索失敗
+transcript.search.previous:
+  en: Previous match (Shift+Enter)
+  ja: 前の一致（Shift+Enter）
+transcript.search.next:
+  en: Next match (Enter)
+  ja: 次の一致（Enter）
+transcript.search.close:
+  en: Close find
+  ja: 検索を閉じる
+palette.transcript.find:
+  en: Find in conversation
+  ja: 会話内を検索
+palette.transcript.find.hint:
+  en: ⌘F
+  ja: ⌘F
 composer.project.pick:
   en: Choose where this runs
   ja: 実行する場所を選ぶ
@@ -381,6 +462,12 @@ surface.files.pending:
 surface.files.search:
   en: Find a file, or a line in one
   ja: ファイル名または内容を検索
+surface.files.scope.workspace:
+  en: This workspace
+  ja: このワークスペース
+surface.files.scope.project:
+  en: All workspaces
+  ja: 全ワークスペース
 surface.files.binary:
   en: This file is not text.
   ja: このファイルはテキストではありません。
@@ -459,6 +546,12 @@ surface.files.editor:
 surface.files.empty:
   en: Nothing matches
   ja: 一致するものはありません
+surface.files.tree.empty:
+  en: This workspace has no files yet.
+  ja: このワークスペースにはまだファイルがありません。
+surface.files.tree.truncated:
+  en: "Showing the first %{limit} files. Search to reach files outside the tree."
+  ja: "先頭%{limit}件を表示しています。ツリー外のファイルは検索してください。"
 surface.git.pending:
   en: The git surface lands in M3.
   ja: git サーフェスは M3 で実装されます。
