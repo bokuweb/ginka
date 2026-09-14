@@ -243,7 +243,7 @@ active conversation. With nothing selected, the rail stands alone.
   Beside it, an explicit *Indexed* or *Index workspace* word reports whether
   semantic search is ready. Activating it starts `zg index` in the workspace's
   daemon-owned terminal, opening the dock so progress and failures stay visible.
-- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; remembers its height per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
+- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; its visibility and height are remembered per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
 > surfaces land in M3, and two empty panels either side of the conversation is
@@ -302,7 +302,7 @@ Four things are not in any library and are load-bearing for the product's identi
 ## 6. Interaction rules
 
 - **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch session, `⌘⌥←/→` cycle surfaces.
-- **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size and the whole arrangement persists to `app.json`, so a restart restores what the user left. The centre column is not a panel and cannot be closed.
+- **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size. Sidebar visibility and width are global navigation preferences; right-panel visibility/width, terminal visibility/height and the active surface persist by immutable workspace id in `app.json`, so switching or restarting restores what that workspace last showed. The centre column is not a panel and cannot be closed.
 - **Focus is explicit.** A visible ring on the focused pane; `⌘K` never steals focus from a running terminal without returning it.
 - **No blocking modals** except destructive confirmations (delete worktree, force push).
 - **Never auto-scroll away from a user-scrolled transcript.** Pin-to-bottom only while already at the bottom.

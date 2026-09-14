@@ -130,6 +130,8 @@ pub struct SurfacePanel {
 
 /// Emitted when the panel wants the shell to do something only it can.
 pub enum SurfaceEvent {
+    /// The visible right-panel surface changed and should be remembered.
+    SurfaceShown(Surface),
     /// Commit the workspace's work with this message.
     ///
     /// `only_staged` when the reader has staged something: having said which
@@ -792,6 +794,7 @@ impl SurfacePanel {
     /// Show a surface, which is what the palette does when it is asked for
     /// one.
     pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        let changed = self.open != Some(surface);
         self.open = Some(surface);
         // A finder that opens empty is one the user has to type into before it
         // says anything; the start of the list is what a picker shows before
@@ -804,7 +807,18 @@ impl SurfacePanel {
             self.skill_error = None;
             cx.emit(SurfaceEvent::RefreshSkills);
         }
+        if changed {
+            cx.emit(SurfaceEvent::SurfaceShown(surface));
+        }
         cx.notify();
+    }
+
+    /// Restore one workspace's selected surface without treating it as a click.
+    pub fn restore_surface(&mut self, surface: Option<Surface>, cx: &mut Context<Self>) {
+        if self.open != surface {
+            self.open = surface;
+            cx.notify();
+        }
     }
 
     /// Which surface is showing, so the shell knows what to keep fetching.

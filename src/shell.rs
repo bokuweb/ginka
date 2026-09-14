@@ -345,6 +345,9 @@ impl Shell {
             &surfaces,
             window,
             |this, _, event, window, cx| match event {
+                crate::surfaces::SurfaceEvent::SurfaceShown(surface) => {
+                    this.persist_surface(*surface)
+                }
                 crate::surfaces::SurfaceEvent::Commit {
                     message,
                     only_staged,
@@ -423,10 +426,19 @@ impl Shell {
                         let selected = sidebar.read(cx).selected_row().cloned();
                         let changed_workspace = this.session.as_ref().map(|row| &row.workspace)
                             != selected.as_ref().map(|row| &row.workspace);
+                        if changed_workspace {
+                            this.remember_workspace_view(cx);
+                        }
                         this.session = selected;
                         if changed_workspace {
+                            if let Some(workspace) =
+                                this.session.as_ref().map(|row| row.workspace.clone())
+                            {
+                                this.restore_workspace_view(&workspace, cx);
+                            }
                             this.surfaces
                                 .update(cx, |surfaces, cx| surfaces.clear_file(cx));
+                            this.save_settings();
                         }
                         // A row says which project it is in, and the composer's
                         // chip and the next new chat both read that back.
@@ -920,6 +932,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.remember_workspace_view(cx);
+        self.save_settings();
         self.sidebar
             .update(cx, |sidebar, cx| sidebar.aim_at(project.clone(), cx));
         self.target_project = project;
@@ -963,14 +977,25 @@ impl Shell {
     fn adopt(&mut self, row: SessionRow, cx: &mut Context<Self>) {
         let changed_workspace =
             self.session.as_ref().map(|current| &current.workspace) != Some(&row.workspace);
+        if changed_workspace {
+            self.remember_workspace_view(cx);
+        }
         self.sidebar.update(cx, |sidebar, cx| {
             sidebar.adopt_workspace(row.workspace.clone(), cx)
         });
         self.target_project = Some(ProjectName(row.origin.to_string()));
         self.session = Some(row);
         if changed_workspace {
+            let workspace = self
+                .session
+                .as_ref()
+                .expect("a workspace was just adopted")
+                .workspace
+                .clone();
+            self.restore_workspace_view(&workspace, cx);
             self.surfaces
                 .update(cx, |surfaces, cx| surfaces.clear_file(cx));
+            self.save_settings();
         }
         cx.notify();
     }
@@ -1980,10 +2005,60 @@ impl Shell {
     /// If this ever shows up in a profile, debounce it -- do not move it off the
     /// toggle, or the state stops matching what the user sees.
     fn persist(&mut self) {
-        self.layout.write_into(&mut self.settings);
+        if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            self.layout
+                .write_workspace_into(&workspace, &mut self.settings);
+        } else {
+            self.layout.write_into(&mut self.settings);
+        }
+        self.save_settings();
+    }
+
+    fn save_settings(&self) {
         if let Err(error) = settings::save(&self.paths.app_settings(), &self.settings) {
             tracing::warn!(%error, "could not persist the panel layout");
         }
+    }
+
+    /// Capture the workspace-owned panels and selected surface before leaving.
+    fn remember_workspace_view(&mut self, cx: &App) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.layout
+            .write_workspace_into(&workspace, &mut self.settings);
+        if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
+            saved.active_surface = self
+                .surfaces
+                .read(cx)
+                .open_surface()
+                .map(|surface| surface.key().to_string());
+        }
+    }
+
+    /// Restore the panels and selected surface belonging to the new workspace.
+    fn restore_workspace_view(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
+        self.layout = Layout::for_workspace(&self.settings, Some(workspace));
+        let surface = self
+            .settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.active_surface.as_deref())
+            .and_then(ginka_ui::surface::Surface::from_key);
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.restore_surface(surface, cx));
+    }
+
+    fn persist_surface(&mut self, surface: ginka_ui::surface::Surface) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        self.layout
+            .write_workspace_into(&workspace, &mut self.settings);
+        if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
+            saved.active_surface = Some(surface.key().to_string());
+        }
+        self.save_settings();
     }
 
     /// Store the sizes a divider drag produced.

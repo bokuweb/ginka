@@ -35,6 +35,25 @@ impl Surface {
         }
     }
 
+    /// Stable lowercase value stored in per-workspace app settings.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Git => "git",
+            Self::Files => "files",
+            Self::Reports => "reports",
+            Self::Skills => "skills",
+        }
+    }
+
+    /// Restore a stored key, ignoring surfaces a newer build may have added.
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|surface| surface.key() == key)
+    }
+
     pub fn icon(self) -> Icon {
         match self {
             Self::Terminal => Icon::new(IconName::SquareTerminal),
@@ -71,5 +90,13 @@ mod tests {
             assert!(!surface.label().is_empty());
             assert!(!surface.availability().is_empty());
         }
+    }
+
+    #[test]
+    fn stored_surface_keys_round_trip_and_unknown_values_are_ignored() {
+        for surface in Surface::ALL {
+            assert_eq!(Surface::from_key(surface.key()), Some(*surface));
+        }
+        assert_eq!(Surface::from_key("future-surface"), None);
     }
 }
