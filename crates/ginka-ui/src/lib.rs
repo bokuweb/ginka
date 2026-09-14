@@ -21,6 +21,7 @@ pub mod handoff;
 pub mod home;
 pub mod layout;
 pub mod models;
+pub mod navigation;
 pub mod palette;
 pub mod reports;
 pub mod search;

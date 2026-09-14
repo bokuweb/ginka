@@ -29,6 +29,10 @@ pub enum Command {
     IndexWorkspace,
     /// Find persisted text in the open conversation.
     FindTranscript,
+    /// Return to the previous project or session visit.
+    NavigateBack,
+    /// Return to the next project or session visit.
+    NavigateForward,
     /// Select a workspace in the sidebar.
     Switch(WorkspaceId),
 }
@@ -53,6 +57,8 @@ pub fn entries(
     rows: &[SessionRow],
     workspace_indexed: Option<bool>,
     session_open: bool,
+    can_go_back: bool,
+    can_go_forward: bool,
 ) -> Vec<Entry> {
     let mut all = Vec::new();
     for panel in Panel::ALL {
@@ -74,6 +80,22 @@ pub fn entries(
             label: rust_i18n::t!("palette.surface", surface = surface.label()).to_string(),
             hint: None,
             command: Command::ShowSurface(*surface),
+        });
+    }
+    if can_go_back {
+        all.push(Entry {
+            id: "navigation:back".into(),
+            label: rust_i18n::t!("palette.navigation.back").to_string(),
+            hint: Some("⌘[".into()),
+            command: Command::NavigateBack,
+        });
+    }
+    if can_go_forward {
+        all.push(Entry {
+            id: "navigation:forward".into(),
+            label: rust_i18n::t!("palette.navigation.forward").to_string(),
+            hint: Some("⌘]".into()),
+            command: Command::NavigateForward,
         });
     }
     all.push(Entry {
@@ -165,7 +187,7 @@ mod tests {
         // An entry that would do nothing is worse than no entry: the reader
         // has to try it to find out.
         let mut layout = layout();
-        let opened = entries(&layout, &[], None, false);
+        let opened = entries(&layout, &[], None, false, false, false);
         let sidebar = opened
             .iter()
             .find(|entry| entry.command == Command::TogglePanel(Panel::Sidebar))
@@ -173,7 +195,7 @@ mod tests {
         let before = sidebar.label.clone();
 
         layout.toggle(Panel::Sidebar);
-        let after = entries(&layout, &[], None, false);
+        let after = entries(&layout, &[], None, false, false, false);
         let sidebar = after
             .iter()
             .find(|entry| entry.command == Command::TogglePanel(Panel::Sidebar))
@@ -183,7 +205,7 @@ mod tests {
 
     #[test]
     fn every_surface_and_panel_is_reachable_by_typing() {
-        let all = entries(&layout(), &[], None, false);
+        let all = entries(&layout(), &[], None, false, false, false);
         for panel in Panel::ALL {
             assert!(
                 all.iter()
@@ -200,8 +222,29 @@ mod tests {
     }
 
     #[test]
+    fn history_commands_are_offered_only_when_they_can_move() {
+        let still = entries(&layout(), &[], None, false, false, false);
+        assert!(!still.iter().any(|entry| matches!(
+            entry.command,
+            Command::NavigateBack | Command::NavigateForward
+        )));
+
+        let backwards = entries(&layout(), &[], None, false, true, false);
+        assert!(
+            backwards
+                .iter()
+                .any(|entry| entry.command == Command::NavigateBack)
+        );
+        assert!(
+            !backwards
+                .iter()
+                .any(|entry| entry.command == Command::NavigateForward)
+        );
+    }
+
+    #[test]
     fn typing_part_of_a_name_finds_the_entry() {
-        let all = entries(&layout(), &[], None, false);
+        let all = entries(&layout(), &[], None, false, false, false);
         let found = filter(all, "termi");
         assert!(
             found
@@ -216,31 +259,31 @@ mod tests {
 
     #[test]
     fn nothing_typed_is_the_whole_list_in_its_own_order() {
-        let all = entries(&layout(), &[], None, false);
+        let all = entries(&layout(), &[], None, false, false, false);
         assert_eq!(filter(all.clone(), "   "), all);
     }
 
     #[test]
     fn a_query_that_matches_nothing_answers_with_nothing() {
-        let all = entries(&layout(), &[], None, false);
+        let all = entries(&layout(), &[], None, false, false, false);
         assert!(filter(all, "zzzzzzzz").is_empty());
     }
 
     #[test]
     fn indexing_is_offered_only_for_a_workspace_and_changes_word_when_ready() {
-        let without_workspace = entries(&layout(), &[], None, false);
+        let without_workspace = entries(&layout(), &[], None, false, false, false);
         assert!(
             !without_workspace
                 .iter()
                 .any(|entry| entry.command == Command::IndexWorkspace)
         );
 
-        let unindexed = entries(&layout(), &[], Some(false), false);
+        let unindexed = entries(&layout(), &[], Some(false), false, false, false);
         let index = unindexed
             .iter()
             .find(|entry| entry.command == Command::IndexWorkspace)
             .unwrap();
-        let indexed = entries(&layout(), &[], Some(true), false);
+        let indexed = entries(&layout(), &[], Some(true), false, false, false);
         let reindex = indexed
             .iter()
             .find(|entry| entry.command == Command::IndexWorkspace)
@@ -251,12 +294,12 @@ mod tests {
     #[test]
     fn conversation_search_is_offered_only_when_a_session_is_open() {
         assert!(
-            !entries(&layout(), &[], None, false)
+            !entries(&layout(), &[], None, false, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::FindTranscript)
         );
         assert!(
-            entries(&layout(), &[], None, true)
+            entries(&layout(), &[], None, true, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::FindTranscript)
         );

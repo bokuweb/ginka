@@ -110,7 +110,10 @@ left to the platform but the traffic lights, positioned (13, 15) to land on
 that line.
 
 - **Leading column** — room for the traffic lights, then the sidebar toggle and
-  the back/forward history. It is the sidebar's header while there is a
+  the back/forward history. History spans project homes and workspace
+  conversations, drops its forward branch after a new visit, retains the most
+  recent 100 destinations, and skips projects or active workspaces that no
+  longer exist. It is the sidebar's header while there is a
   sidebar, and moves onto the centre column when the sidebar is closed, because
   the lights do not move with it.
 - **Centre column** — the agent glyph, the conversation's title and its
@@ -304,7 +307,7 @@ Four things are not in any library and are load-bearing for the product's identi
 
 ## 6. Interaction rules
 
-- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, and `⌘⌥←/→` cycle surfaces. Session numbers follow the same attention-first stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
+- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, `⌘[` / `⌘]` moves through project/session history (`Ctrl+Alt+↑/↓` elsewhere), and `⌘⌥←/→` cycles surfaces. Session numbers follow the same attention-first stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
 - **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size. Sidebar visibility and width are global navigation preferences; right-panel visibility/width, terminal visibility/height and the active surface persist by immutable workspace id in `app.json`, so switching or restarting restores what that workspace last showed. The centre column is not a panel and cannot be closed.
 - **Focus is explicit.** A visible ring on the focused pane; `⌘K` never steals focus from a running terminal without returning it.
 - **No blocking modals** except destructive confirmations (delete worktree, force push).

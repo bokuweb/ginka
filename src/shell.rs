@@ -21,6 +21,7 @@ use ginka_ui::home;
 use ginka_ui::layout::{
     HEADER_HEIGHT, Layout, PROJECT_RAIL_WIDTH, Panel, TRAFFIC_LIGHT_INSET, navigator_width,
 };
+use ginka_ui::navigation::NavigationHistory;
 use ginka_ui::transcript::{
     Activity, Applied, Block as TranscriptBlock, Reveal, Transcript, head_of,
 };
@@ -54,13 +55,24 @@ actions!(
         TogglePalette,
         FindTranscript,
         NextSurface,
-        PreviousSurface
+        PreviousSurface,
+        NavigateBack,
+        NavigateForward
     ]
 );
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = shell, no_json)]
 struct SwitchSession(usize);
+
+/// One place the title-bar history can revisit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NavigationTarget {
+    /// The new-chat home, optionally aimed at a registered project.
+    Home(Option<ProjectName>),
+    /// A workspace and its current conversation.
+    Workspace(WorkspaceId),
+}
 
 /// What the composer is offering a choice of.
 ///
@@ -128,6 +140,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-left", PreviousSurface, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-left", PreviousSurface, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-up", NavigateBack, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-]", NavigateForward, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-down", NavigateForward, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-1", SwitchSession(0), Some(CONTEXT)),
         #[cfg(target_os = "macos")]
@@ -325,6 +345,8 @@ pub struct Shell {
     /// Whether the transcript is still following the answer. Dropped by the
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
+    /// Project/session visits addressed by the title-bar arrows.
+    navigation: NavigationHistory<NavigationTarget>,
     composer: Entity<TextareaState>,
     /// Search text for the model catalogue popover.
     model_query: Entity<InputState>,
@@ -481,6 +503,12 @@ impl Shell {
                             this.remember_workspace_view(cx);
                         }
                         this.session = selected;
+                        if let Some(workspace) =
+                            this.session.as_ref().map(|row| row.workspace.clone())
+                        {
+                            this.navigation
+                                .visit(NavigationTarget::Workspace(workspace));
+                        }
                         if changed_workspace {
                             if let Some(workspace) =
                                 this.session.as_ref().map(|row| row.workspace.clone())
@@ -822,6 +850,7 @@ impl Shell {
             forking: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
+            navigation: NavigationHistory::new(NavigationTarget::Home(None)),
             composer,
             model_query,
             model_filter: String::new(),
@@ -983,6 +1012,8 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.navigation
+            .visit(NavigationTarget::Home(project.clone()));
         self.remember_workspace_view(cx);
         self.save_settings();
         self.sidebar
@@ -1035,6 +1066,8 @@ impl Shell {
             sidebar.adopt_workspace(row.workspace.clone(), cx)
         });
         self.target_project = Some(ProjectName(row.origin.to_string()));
+        self.navigation
+            .visit(NavigationTarget::Workspace(row.workspace.clone()));
         self.session = Some(row);
         if changed_workspace {
             let workspace = self
@@ -2241,6 +2274,68 @@ impl Shell {
         self.cycle_surface(false, cx);
     }
 
+    /// Whether a recorded destination still exists in the daemon's latest list.
+    fn navigation_target_available(
+        target: &NavigationTarget,
+        projects: &[ProjectRow],
+        rows: &[SessionRow],
+    ) -> bool {
+        match target {
+            NavigationTarget::Home(None) => true,
+            NavigationTarget::Home(Some(project)) => {
+                projects.iter().any(|candidate| &candidate.name == project)
+            }
+            NavigationTarget::Workspace(workspace) => rows
+                .iter()
+                .any(|row| &row.workspace == workspace && !row.archived),
+        }
+    }
+
+    /// Whether the two title-bar history directions can reach a live target.
+    fn navigation_capabilities(&self, cx: &App) -> (bool, bool) {
+        let rows = self.sidebar.read(cx).rows();
+        let available = |target: &NavigationTarget| {
+            Self::navigation_target_available(target, &self.projects, rows)
+        };
+        (
+            self.navigation.can_go_back_where(available),
+            self.navigation.can_go_forward_where(available),
+        )
+    }
+
+    /// Move through project/session visits, skipping removed or archived workspaces.
+    fn navigate_history(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let projects = self.projects.clone();
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let available =
+            |target: &NavigationTarget| Self::navigation_target_available(target, &projects, &rows);
+        let target = if backwards {
+            self.navigation.back_where(available)
+        } else {
+            self.navigation.forward_where(available)
+        };
+        match target {
+            Some(NavigationTarget::Home(project)) => self.start_new_chat(project, window, cx),
+            Some(NavigationTarget::Workspace(workspace)) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx)),
+            None => {}
+        }
+    }
+
+    fn on_navigate_back(&mut self, _: &NavigateBack, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_history(true, window, cx);
+    }
+
+    fn on_navigate_forward(
+        &mut self,
+        _: &NavigateForward,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.navigate_history(false, window, cx);
+    }
+
     fn on_switch_session(
         &mut self,
         action: &SwitchSession,
@@ -2428,6 +2523,7 @@ impl Shell {
             return Vec::new();
         };
         let rows = self.sidebar.read(cx).rows().to_vec();
+        let (can_go_back, can_go_forward) = self.navigation_capabilities(cx);
         ginka_ui::palette::filter(
             ginka_ui::palette::entries(
                 &self.layout,
@@ -2437,6 +2533,8 @@ impl Shell {
                     .as_ref()
                     .and_then(|row| row.session.as_ref())
                     .is_some(),
+                can_go_back,
+                can_go_forward,
             ),
             &palette.typed,
         )
@@ -2499,6 +2597,8 @@ impl Shell {
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
             Command::FindTranscript => self.on_find_transcript(&FindTranscript, window, cx),
+            Command::NavigateBack => self.navigate_history(true, window, cx),
+            Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
@@ -2586,8 +2686,7 @@ impl Shell {
     /// centre column when the sidebar is closed, because the lights do not
     /// move with it.
     fn window_controls(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tokens = Tokens::global(cx);
-        let muted = tokens.colors().text_muted;
+        let (can_go_back, can_go_forward) = self.navigation_capabilities(cx);
 
         let strip = h_flex()
             .id("window-controls")
@@ -2602,8 +2701,28 @@ impl Shell {
                 IconName::PanelLeftOpen,
                 cx,
             ))
-            .child(Icon::new(IconName::ArrowLeft).size_4().text_color(muted))
-            .child(Icon::new(IconName::ArrowRight).size_4().text_color(muted));
+            .child(
+                Button::new("navigation-back")
+                    .ghost()
+                    .compact()
+                    .disabled(!can_go_back)
+                    .tooltip(rust_i18n::t!("navigation.back").to_string())
+                    .child(Icon::new(IconName::ArrowLeft).size_4())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.navigate_history(true, window, cx)),
+                    ),
+            )
+            .child(
+                Button::new("navigation-forward")
+                    .ghost()
+                    .compact()
+                    .disabled(!can_go_forward)
+                    .tooltip(rust_i18n::t!("navigation.forward").to_string())
+                    .child(Icon::new(IconName::ArrowRight).size_4())
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.navigate_history(false, window, cx)),
+                    ),
+            );
 
         self.draggable(strip, cx)
     }
@@ -6745,6 +6864,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
+            .on_action(cx.listener(Self::on_navigate_back))
+            .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))
             .size_full()
             // No background here: `Root` already paints the translucent window

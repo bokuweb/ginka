@@ -42,6 +42,19 @@ sidebar.footer.device:
   en: Local
   ja: ローカル
 
+navigation.back:
+  en: Go back
+  ja: 戻る
+navigation.forward:
+  en: Go forward
+  ja: 進む
+palette.navigation.back:
+  en: Go back in navigation history
+  ja: ナビゲーション履歴を戻る
+palette.navigation.forward:
+  en: Go forward in navigation history
+  ja: ナビゲーション履歴を進む
+
 project.add.title:
   en: Create a project
   ja: プロジェクトを作成
