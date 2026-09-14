@@ -1529,6 +1529,50 @@ impl Shell {
         self.composer.focus_handle(cx).focus(window, cx);
     }
 
+    /// Append a transcript message to the draft as a Markdown quote.
+    fn quote_in_composer(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).value();
+        let draft = ginka_ui::composer::append_quote(&draft, message);
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+    }
+
+    /// Actions shared by the readable messages in a transcript.
+    fn message_actions(
+        &self,
+        index: usize,
+        role: &'static str,
+        message: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let copied = message.to_string();
+        let quoted = message.to_string();
+        h_flex()
+            .gap_1()
+            .child(
+                Button::new(SharedString::from(format!("copy-{role}-{index}")))
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("transcript.copy.tooltip").to_string())
+                    .child(rust_i18n::t!("transcript.copy").to_string())
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
+                    }),
+            )
+            .child(
+                Button::new(SharedString::from(format!("quote-{role}-{index}")))
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("transcript.quote.tooltip").to_string())
+                    .child(rust_i18n::t!("transcript.quote").to_string())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.quote_in_composer(&quoted, window, cx)
+                    })),
+            )
+            .into_any_element()
+    }
+
     /// Start a shell in the workspace on screen.
     ///
     /// Sized for the dock as it is now, and focused, because someone who
@@ -3212,27 +3256,31 @@ impl Shell {
         };
 
         match block {
-            TranscriptBlock::User { text } => h_flex()
-                .w_full()
-                .justify_end()
-                .child(
-                    div()
-                        // Never the full measure: a message that fills the
-                        // column is indistinguishable from the agent's reply.
-                        .max_w(px(TRANSCRIPT_MEASURE * 0.8))
-                        .px(px(13.))
-                        .py(px(9.))
-                        .rounded(px(tokens.radius.panel + 2.))
-                        // Tinted rather than another grey box: the reader's
-                        // own words are the one thing on screen that is not
-                        // the agent's.
-                        .bg(tokens.colors().row_active())
-                        .text_size(px(15.))
-                        .line_height(px(25.))
-                        .text_color(tokens.colors().text_primary)
-                        .child(text.clone()),
-                )
-                .into_any_element(),
+            TranscriptBlock::User { text } => {
+                v_flex()
+                    .w_full()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            // Never the full measure: a message that fills the
+                            // column is indistinguishable from the agent's reply.
+                            .max_w(px(TRANSCRIPT_MEASURE * 0.8))
+                            .px(px(13.))
+                            .py(px(9.))
+                            .rounded(px(tokens.radius.panel + 2.))
+                            // Tinted rather than another grey box: the reader's
+                            // own words are the one thing on screen that is not
+                            // the agent's.
+                            .bg(tokens.colors().row_active())
+                            .text_size(px(15.))
+                            .line_height(px(25.))
+                            .text_color(tokens.colors().text_primary)
+                            .child(text.clone()),
+                    )
+                    .child(self.message_actions(index, "user", text, cx))
+                    .into_any_element()
+            }
             TranscriptBlock::Assistant { text } => {
                 // Agents answer in markdown — headings, lists, fenced code —
                 // and reading it raw is reading the punctuation instead of the
@@ -3243,6 +3291,7 @@ impl Shell {
                 let (formatted, writing) = ginka_ui::transcript::settled(text);
                 v_flex()
                     .w_full()
+                    .gap_1()
                     .text_size(px(15.))
                     .line_height(px(25.))
                     .text_color(tokens.colors().text_primary)
@@ -3251,6 +3300,7 @@ impl Shell {
                             .selectable(true)
                     }))
                     .children((!writing.is_empty()).then(|| div().child(writing.to_string())))
+                    .child(self.message_actions(index, "assistant", text, cx))
                     .into_any_element()
             }
             TranscriptBlock::Reasoning { text } => prose(text, tokens.colors().text_muted)

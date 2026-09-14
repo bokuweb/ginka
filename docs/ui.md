@@ -195,8 +195,11 @@ active conversation. With nothing selected, the rail stands alone.
   paragraphs, inline code chips, fenced code with tree-sitter highlighting,
   tool-call cards, reasoning blocks (dimmed), diff sidecars, plan-approval and
   ask-user cards with inline buttons. The reader's own words are a tinted
-  bubble, right-aligned within the column. A finished answer carries a copy
-  action; a turn that succeeded prints no outcome of its own, because being
+  bubble, right-aligned within the column. User messages and visible answers
+  carry compact copy and quote actions. Quote normalizes the complete visible
+  message into a Markdown blockquote at the end of the existing draft, leaves
+  a blank line for the reply, and returns focus to the composer. A turn that
+  succeeded prints no outcome of its own, because being
   answered is how a turn says it worked. A delegated agent is one bordered
   parent card rather than a second conversation: its reasoning, messages and
   tool lifecycle sit beneath the original brief, with explicit working,

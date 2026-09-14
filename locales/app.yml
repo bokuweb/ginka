@@ -417,8 +417,17 @@ transcript.plan.reject:
   en: Not this
   ja: 却下する
 transcript.copy:
-  en: Copy the answer
-  ja: 返答をコピー
+  en: Copy
+  ja: コピー
+transcript.copy.tooltip:
+  en: Copy this message
+  ja: このメッセージをコピー
+transcript.quote:
+  en: Quote
+  ja: 引用
+transcript.quote.tooltip:
+  en: Quote this message in chat
+  ja: このメッセージをチャットに引用
 transcript.thinking:
   en: Thinking…
   ja: 考えています…
