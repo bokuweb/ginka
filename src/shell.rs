@@ -40,6 +40,7 @@ use gpui_component::{
     scroll::ScrollableElement as _,
     v_flex,
 };
+use serde::Deserialize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +57,10 @@ actions!(
         PreviousSurface
     ]
 );
+
+#[derive(Action, Clone, PartialEq, Eq, Deserialize)]
+#[action(namespace = shell, no_json)]
+struct SwitchSession(usize);
 
 /// What the composer is offering a choice of.
 ///
@@ -123,6 +128,42 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-left", PreviousSurface, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-left", PreviousSurface, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-1", SwitchSession(0), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-2", SwitchSession(1), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-3", SwitchSession(2), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-4", SwitchSession(3), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-5", SwitchSession(4), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-6", SwitchSession(5), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-7", SwitchSession(6), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-8", SwitchSession(7), Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-9", SwitchSession(8), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-1", SwitchSession(0), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-2", SwitchSession(1), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-3", SwitchSession(2), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-4", SwitchSession(3), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-5", SwitchSession(4), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-6", SwitchSession(5), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-7", SwitchSession(6), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-8", SwitchSession(7), Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-9", SwitchSession(8), Some(CONTEXT)),
     ]);
 }
 
@@ -2154,6 +2195,16 @@ impl Shell {
 
     fn on_previous_surface(&mut self, _: &PreviousSurface, _: &mut Window, cx: &mut Context<Self>) {
         self.cycle_surface(false, cx);
+    }
+
+    fn on_switch_session(
+        &mut self,
+        action: &SwitchSession,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_shortcut(action.0, cx));
     }
 
     /// Open find-in-page for the persisted conversation on screen.
@@ -6644,6 +6695,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
+            .on_action(cx.listener(Self::on_switch_session))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.

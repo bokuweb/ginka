@@ -16,7 +16,7 @@
 
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
-use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
+use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputState};
@@ -178,6 +178,20 @@ impl SessionSidebar {
         }
         self.adopt_workspace(workspace.clone(), cx);
         cx.emit(SidebarEvent::Selected);
+    }
+
+    /// Select one of the first nine rows currently visible in the session list.
+    pub fn select_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project.as_ref() else {
+            return;
+        };
+        let Some(workspace) = session_shortcuts(&self.rows, project, &self.search_query)
+            .get(index)
+            .cloned()
+        else {
+            return;
+        };
+        self.select_workspace(&workspace, cx);
     }
 
     /// Move the selection without announcing it.
