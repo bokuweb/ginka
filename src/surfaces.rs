@@ -131,7 +131,7 @@ pub struct SurfacePanel {
 /// Emitted when the panel wants the shell to do something only it can.
 pub enum SurfaceEvent {
     /// The visible right-panel surface changed and should be remembered.
-    SurfaceShown(Surface),
+    SurfaceShown(Option<Surface>),
     /// Commit the workspace's work with this message.
     ///
     /// `only_staged` when the reader has staged something: having said which
@@ -808,9 +808,17 @@ impl SurfacePanel {
             cx.emit(SurfaceEvent::RefreshSkills);
         }
         if changed {
-            cx.emit(SurfaceEvent::SurfaceShown(surface));
+            cx.emit(SurfaceEvent::SurfaceShown(Some(surface)));
         }
         cx.notify();
+    }
+
+    /// Return to the chooser so another surface can be opened with a pointer.
+    fn show_chooser(&mut self, cx: &mut Context<Self>) {
+        if self.open.take().is_some() {
+            cx.emit(SurfaceEvent::SurfaceShown(None));
+            cx.notify();
+        }
     }
 
     /// Restore one workspace's selected surface without treating it as a click.
@@ -847,7 +855,7 @@ impl SurfacePanel {
     /// The window has no title bar (`docs/ui.md` §3.1), so this is the right
     /// column's own header and it is the same height as the other two — three
     /// strips at three heights would read as three windows.
-    fn toolbar(&self, cx: &App) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -857,9 +865,12 @@ impl SurfacePanel {
             .justify_between()
             .items_center()
             .child(
-                Icon::new(IconName::Plus)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
+                Button::new("choose-surface")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("surface.choose").to_string())
+                    .on_click(cx.listener(|this, _, _, cx| this.show_chooser(cx))),
             )
             .child(
                 h_flex()

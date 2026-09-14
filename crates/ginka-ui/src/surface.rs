@@ -54,6 +54,24 @@ impl Surface {
             .find(|surface| surface.key() == key)
     }
 
+    /// The surface after `current`, wrapping to the first surface.
+    pub fn next(current: Option<Self>) -> Self {
+        let index = current
+            .and_then(|current| Self::ALL.iter().position(|surface| *surface == current))
+            .map_or(0, |index| (index + 1) % Self::ALL.len());
+        Self::ALL[index]
+    }
+
+    /// The surface before `current`, wrapping to the last surface.
+    pub fn previous(current: Option<Self>) -> Self {
+        let index = current
+            .and_then(|current| Self::ALL.iter().position(|surface| *surface == current))
+            .map_or(Self::ALL.len() - 1, |index| {
+                (index + Self::ALL.len() - 1) % Self::ALL.len()
+            });
+        Self::ALL[index]
+    }
+
     pub fn icon(self) -> Icon {
         match self {
             Self::Terminal => Icon::new(IconName::SquareTerminal),
@@ -98,5 +116,19 @@ mod tests {
             assert_eq!(Surface::from_key(surface.key()), Some(*surface));
         }
         assert_eq!(Surface::from_key("future-surface"), None);
+    }
+
+    #[test]
+    fn cycling_wraps_in_both_directions() {
+        assert_eq!(Surface::next(Some(Surface::Terminal)), Surface::Git);
+        assert_eq!(Surface::next(Some(Surface::Skills)), Surface::Terminal);
+        assert_eq!(Surface::previous(Some(Surface::Terminal)), Surface::Skills);
+        assert_eq!(Surface::previous(Some(Surface::Git)), Surface::Terminal);
+    }
+
+    #[test]
+    fn cycling_an_empty_panel_starts_at_the_nearest_end() {
+        assert_eq!(Surface::next(None), Surface::Terminal);
+        assert_eq!(Surface::previous(None), Surface::Skills);
     }
 }

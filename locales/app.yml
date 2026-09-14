@@ -621,6 +621,9 @@ surface.empty.title:
 surface.empty.hint:
   en: Choose what to show in the right panel.
   ja: 右パネルに表示するものを選んでください。
+surface.choose:
+  en: Choose another surface
+  ja: 別のサーフェスを選ぶ
 
 cli.agent.ready:
   en: ready

@@ -51,7 +51,9 @@ actions!(
         ToggleRightPanel,
         ToggleTerminalDock,
         TogglePalette,
-        FindTranscript
+        FindTranscript,
+        NextSurface,
+        PreviousSurface
     ]
 );
 
@@ -113,6 +115,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-f", FindTranscript, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-f", FindTranscript, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-right", NextSurface, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-right", NextSurface, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-left", PreviousSurface, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-alt-left", PreviousSurface, Some(CONTEXT)),
     ]);
 }
 
@@ -2049,14 +2059,14 @@ impl Shell {
             .update(cx, |surfaces, cx| surfaces.restore_surface(surface, cx));
     }
 
-    fn persist_surface(&mut self, surface: ginka_ui::surface::Surface) {
+    fn persist_surface(&mut self, surface: Option<ginka_ui::surface::Surface>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
         self.layout
             .write_workspace_into(&workspace, &mut self.settings);
         if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
-            saved.active_surface = Some(surface.key().to_string());
+            saved.active_surface = surface.map(|surface| surface.key().to_string());
         }
         self.save_settings();
     }
@@ -2122,6 +2132,28 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         self.toggle(Panel::RightPanel, cx);
+    }
+
+    fn cycle_surface(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if !self.layout.is_open(Panel::RightPanel) {
+            self.toggle(Panel::RightPanel, cx);
+        }
+        let current = self.surfaces.read(cx).open_surface();
+        let surface = if forward {
+            ginka_ui::surface::Surface::next(current)
+        } else {
+            ginka_ui::surface::Surface::previous(current)
+        };
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.show(surface, cx));
+    }
+
+    fn on_next_surface(&mut self, _: &NextSurface, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_surface(true, cx);
+    }
+
+    fn on_previous_surface(&mut self, _: &PreviousSurface, _: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_surface(false, cx);
     }
 
     /// Open find-in-page for the persisted conversation on screen.
@@ -6610,6 +6642,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .on_action(cx.listener(Self::on_toggle_palette))
             .on_action(cx.listener(Self::on_find_transcript))
+            .on_action(cx.listener(Self::on_next_surface))
+            .on_action(cx.listener(Self::on_previous_surface))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
