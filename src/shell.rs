@@ -2070,6 +2070,20 @@ impl Shell {
     /// bytes: what a terminal *is* is a program reading the bytes a keyboard
     /// produced.
     fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        if event.keystroke.modifiers.shift
+            && matches!(event.keystroke.key.as_str(), "pageup" | "pagedown")
+        {
+            let direction = if event.keystroke.key == "pageup" {
+                1
+            } else {
+                -1
+            };
+            if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+                screen.scroll(direction * i32::from(screen.rows().saturating_sub(1).max(1)));
+                cx.notify();
+            }
+            return;
+        }
         let Some(terminal) = self.terminals.active_id() else {
             return;
         };
@@ -2079,6 +2093,31 @@ impl Shell {
         let link = self.link.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
+    }
+
+    /// Browse terminal history without sending wheel movement to the pty.
+    fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+        let pixels = f32::from(event.delta.pixel_delta(px(17.)).y);
+        if pixels == 0.0 {
+            return;
+        }
+        cx.stop_propagation();
+        let lines = (pixels.abs() / 17.0).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
+        if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+            let before = screen.display_offset();
+            screen.scroll(lines);
+            if screen.display_offset() != before {
+                cx.notify();
+            }
+        }
+    }
+
+    /// Jump from terminal history to the newest output.
+    fn terminal_to_live(&mut self, cx: &mut Context<Self>) {
+        if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+            screen.scroll_to_live();
+            cx.notify();
+        }
     }
 
     /// Leave a comment on a line of the diff.
@@ -6881,6 +6920,11 @@ impl Shell {
     fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let active = self.terminals.active_index();
+        let history_offset = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.display_offset())
+            .unwrap_or(0);
 
         v_flex()
             .size_full()
@@ -6988,7 +7032,21 @@ impl Shell {
                                     .text_color(tokens.colors().text_muted),
                             )
                     }))
-                    .child(div().flex_1()),
+                    .child(div().flex_1())
+                    .children((history_offset > 0).then(|| {
+                        Button::new("terminal-live")
+                            .ghost()
+                            .compact()
+                            .tooltip(rust_i18n::t!("terminal.history.live.tooltip").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.terminal_to_live(cx)))
+                            .child(
+                                rust_i18n::t!(
+                                    "terminal.history.lines_back",
+                                    count = history_offset
+                                )
+                                .to_string(),
+                            )
+                    })),
             )
             .child(match self.terminals.active() {
                 Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
@@ -7043,6 +7101,11 @@ impl Shell {
             .font_family(mono)
             .text_size(px(12.5))
             .line_height(px(17.))
+            .on_scroll_wheel(
+                cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
+                    this.scroll_terminal(event, cx)
+                }),
+            )
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
             )

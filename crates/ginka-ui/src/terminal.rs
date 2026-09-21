@@ -13,10 +13,10 @@
 // carry — bell, title changes, clipboard requests — are for a terminal
 // application to act on, and this screen only draws.
 use alacritty_terminal::event::VoidListener;
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::index::{Column, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
+use alacritty_terminal::term::{Config, Term, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use ginka_protocol::TerminalId;
 use ginka_protocol::model::TerminalInfo;
@@ -292,6 +292,23 @@ impl TerminalScreen {
         self.cols
     }
 
+    /// Number of history lines above the live viewport currently displayed.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Move through bounded terminal history; positive lines move backward.
+    pub fn scroll(&mut self, lines: i32) {
+        if lines != 0 {
+            self.term.scroll_display(Scroll::Delta(lines));
+        }
+    }
+
+    /// Return directly to the live output at the bottom of history.
+    pub fn scroll_to_live(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
     /// Feed it what the shell printed.
     pub fn feed(&mut self, data: &str) {
         self.parser.advance(&mut self.term, data.as_bytes());
@@ -328,7 +345,8 @@ impl TerminalScreen {
         for line in 0..self.rows as usize {
             let mut row = Vec::with_capacity(self.cols as usize);
             for column in 0..self.cols as usize {
-                let point = Point::new(Line(line as i32), Column(column));
+                let point =
+                    viewport_to_point(display_offset, Point::<usize>::new(line, Column(column)));
                 let cell = &self.term.grid()[point];
                 row.push(ScreenCell {
                     text: cell.c,
@@ -701,6 +719,21 @@ mod tests {
         screen.resize(4, 20);
         assert_eq!(screen.cols(), 20);
         assert_eq!(screen.rows_of_cells()[0].len(), 20);
+    }
+
+    #[test]
+    fn scrollback_can_be_browsed_and_returns_to_the_live_screen() {
+        let mut screen = TerminalScreen::new(3, 20);
+        screen.feed("one\r\ntwo\r\nthree\r\nfour\r\nfive");
+        assert!(!screen.text().contains("one"));
+
+        screen.scroll(10);
+        assert!(screen.display_offset() > 0);
+        assert!(screen.text().contains("one"));
+
+        screen.scroll_to_live();
+        assert_eq!(screen.display_offset(), 0);
+        assert!(screen.text().contains("five"));
     }
 
     #[test]

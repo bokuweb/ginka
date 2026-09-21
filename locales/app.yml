@@ -619,6 +619,12 @@ terminal.close.confirm:
 terminal.close.short:
   en: Close?
   ja: 閉じる？
+terminal.history.lines_back:
+  en: "%{count} lines back"
+  ja: "%{count} 行前"
+terminal.history.live.tooltip:
+  en: Return to live terminal output
+  ja: ターミナルの最新出力に戻る
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…
