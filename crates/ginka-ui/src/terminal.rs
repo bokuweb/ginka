@@ -593,13 +593,31 @@ impl TerminalTabs {
     }
 
     /// Show a tab that is already open.
+    ///
+    /// While split, a hidden tab replaces the focused pane instead of
+    /// collapsing the other pane. The tab strip is shared by both panes, so
+    /// the focused pane is the only unambiguous destination for that choice.
     pub fn focus(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.armed_close = None;
+            let previous = self.active_id();
             self.active = index;
-            let id = &self.tabs[index].id;
-            if self.split.as_ref().is_some_and(|split| !split.contains(id)) {
-                self.split = None;
+            let id = self.tabs[index].id.clone();
+            if self
+                .split
+                .as_ref()
+                .is_some_and(|split| !split.contains(&id))
+            {
+                let pane = self.split.as_ref().and_then(|split| {
+                    previous
+                        .as_ref()
+                        .and_then(|previous| split.iter().position(|id| id == previous))
+                });
+                if let Some(pane) = pane {
+                    self.split.as_mut().expect("the split was read above")[pane] = id;
+                } else {
+                    self.split = None;
+                }
             }
         }
     }
@@ -949,6 +967,26 @@ mod tests {
 
         tabs.close(&left);
         assert_eq!(tabs.split_ids(), None);
+        assert_eq!(tabs.active_id(), Some(right));
+    }
+
+    #[test]
+    fn selecting_a_hidden_tab_replaces_only_the_focused_split_pane() {
+        let mut tabs = TerminalTabs::new();
+        let spare = TerminalId("spare".into());
+        let left = TerminalId("left".into());
+        let right = TerminalId("right".into());
+        tabs.open(spare.clone(), "spare".into(), 24, 40);
+        tabs.open(left.clone(), "left".into(), 24, 40);
+        tabs.open_split(right.clone(), "right".into(), 24, 40);
+
+        tabs.focus(0);
+        assert_eq!(tabs.split_ids(), Some([left.clone(), spare.clone()]));
+        assert_eq!(tabs.active_id(), Some(spare.clone()));
+
+        tabs.focus_id(&left);
+        tabs.focus_id(&right);
+        assert_eq!(tabs.split_ids(), Some([right.clone(), spare]));
         assert_eq!(tabs.active_id(), Some(right));
     }
 
