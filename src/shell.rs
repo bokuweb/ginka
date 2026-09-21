@@ -235,6 +235,12 @@ struct TranscriptSearch {
     error: Option<String>,
 }
 
+/// One daemon-owned upload waiting in the composer, plus an optional local thumbnail.
+struct ComposerAttachment {
+    attachment: Attachment,
+    preview_url: Option<String>,
+}
+
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
@@ -299,7 +305,7 @@ pub struct Shell {
     /// The commands offered for the `/` being typed, if one is.
     commands: Vec<ginka_protocol::model::SlashCommand>,
     /// Files already copied into the daemon store for the next ordinary prompt.
-    attachments: Vec<Attachment>,
+    attachments: Vec<ComposerAttachment>,
     /// Whether selected files are currently being read and uploaded.
     attachment_busy: bool,
     /// Why the most recent selected file could not be attached.
@@ -1016,7 +1022,14 @@ impl Shell {
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.display().to_string());
-                        uploaded.push(link.upload_attachment(name, bytes).await?);
+                        let preview_url = ginka_core::files::preview_image(&bytes).map(|image| {
+                            format!("data:{};base64,{}", image.media_type, image.data_base64)
+                        });
+                        let attachment = link.upload_attachment(name, bytes).await?;
+                        uploaded.push(ComposerAttachment {
+                            attachment,
+                            preview_url,
+                        });
                     }
                     Ok::<_, String>(uploaded)
                 })
@@ -1043,7 +1056,7 @@ impl Shell {
     /// client must not delete content another draft may already reference.
     fn remove_attachment(&mut self, reference: &str, cx: &mut Context<Self>) {
         self.attachments
-            .retain(|attachment| attachment.reference != reference);
+            .retain(|attachment| attachment.attachment.reference != reference);
         self.attachment_error = None;
         cx.notify();
     }
@@ -2060,7 +2073,7 @@ impl Shell {
         let references = self
             .attachments
             .iter()
-            .map(|attachment| attachment.reference.as_str())
+            .map(|attachment| attachment.attachment.reference.as_str())
             .collect::<Vec<_>>();
         let Some(text) = ginka_ui::composer::submission(&draft, &references) else {
             return;
@@ -4198,10 +4211,10 @@ impl Shell {
             .attachments
             .iter()
             .map(|attachment| {
-                let reference = attachment.reference.clone();
+                let reference = attachment.attachment.reference.clone();
                 Button::new(SharedString::from(format!(
                     "remove-attachment-{}",
-                    attachment.reference
+                    attachment.attachment.reference
                 )))
                 .ghost()
                 .compact()
@@ -4210,12 +4223,23 @@ impl Shell {
                     h_flex()
                         .gap_1()
                         .items_center()
+                        .children(attachment.preview_url.clone().map(|preview_url| {
+                            div()
+                                .size(px(36.))
+                                .rounded(px(tokens.radius.row))
+                                .overflow_hidden()
+                                .child(
+                                    img(SharedString::from(preview_url))
+                                        .size_full()
+                                        .object_fit(ObjectFit::Cover),
+                                )
+                        }))
                         .child(
                             div()
                                 .max_w(px(180.))
                                 .truncate()
                                 .text_xs()
-                                .child(attachment.name.clone()),
+                                .child(attachment.attachment.name.clone()),
                         )
                         .child(Icon::new(IconName::Close).size_3()),
                 )

@@ -236,8 +236,11 @@ active conversation. With nothing selected, the rail stands alone.
   that send steers or queues according to the driver's existing policy. The
   attachment button selects several files, uploads their bytes into the
   daemon-owned store, and shows removable filename chips without putting
-  opaque references into the editable draft. An attachment by itself is a
-  sendable prompt; upload errors stay beside the chips. `@`
+  opaque references into the editable draft. PNG, JPEG, GIF and WebP bytes up
+  to 4 MiB carry a local thumbnail in that chip; format detection uses the
+  signature rather than the filename, and every other file remains a filename
+  chip. An attachment by itself is a sendable prompt; upload errors stay beside
+  the chips. `@`
   file mentions and `/` slash commands have an inline filtered menu. `↩`
   sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
   available.

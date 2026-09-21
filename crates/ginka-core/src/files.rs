@@ -160,7 +160,7 @@ fn content(path: &str, inside: &Path) -> Result<FileContent> {
         .seek(SeekFrom::Start(0))
         .with_context(|| format!("reading {path}"))?;
 
-    if let Some(media_type) = image_type {
+    if image_type.is_some() {
         let (revision, bytes) =
             image_content(&mut source).with_context(|| format!("reading {path}"))?;
         let Some(bytes) = bytes else {
@@ -179,10 +179,7 @@ fn content(path: &str, inside: &Path) -> Result<FileContent> {
             revision,
             binary: true,
             truncated: false,
-            image: Some(FileImage {
-                media_type: media_type.to_string(),
-                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
-            }),
+            image: preview_image(&bytes),
         });
     }
 
@@ -218,6 +215,22 @@ fn content(path: &str, inside: &Path) -> Result<FileContent> {
         binary: false,
         truncated,
         image: None,
+    })
+}
+
+/// Build a controlled inline preview for recognized, bounded image bytes.
+///
+/// Detection uses the file signature rather than a caller-supplied extension
+/// or MIME type. The same rule serves workspace files and composer uploads so
+/// neither view attempts to decode arbitrary binary content as an image.
+pub fn preview_image(bytes: &[u8]) -> Option<FileImage> {
+    if bytes.len() > IMAGE_PREVIEW_LIMIT {
+        return None;
+    }
+    let media_type = image_media_type(bytes)?;
+    Some(FileImage {
+        media_type: media_type.to_string(),
+        data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
     })
 }
 
@@ -525,6 +538,23 @@ mod tests {
         );
         assert!(read.binary);
         assert!(!read.truncated);
+    }
+
+    #[test]
+    fn raw_image_bytes_use_the_same_safe_preview_rule_as_workspace_files() {
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00];
+        let preview = preview_image(&png).expect("a PNG signature is previewable");
+        assert_eq!(preview.media_type, "image/png");
+        assert_eq!(
+            base64::Engine::decode(
+                &base64::engine::general_purpose::STANDARD,
+                preview.data_base64,
+            )
+            .unwrap(),
+            png
+        );
+        assert!(preview_image(&[0x00, 0x01, 0x02]).is_none());
+        assert!(preview_image(&vec![0x89; IMAGE_PREVIEW_LIMIT + 1]).is_none());
     }
 
     #[test]
