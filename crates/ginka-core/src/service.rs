@@ -113,7 +113,12 @@ impl Service {
         }
         Self {
             cli,
-            sessions: Supervisor::new(conn.clone(), events.clone(), settings.checkpoint_limit),
+            sessions: Supervisor::new(
+                conn.clone(),
+                events.clone(),
+                settings.checkpoint_limit,
+                crate::blob::BlobStore::new(paths.blobs()),
+            ),
             paths,
             terminals: crate::terminal::Terminals::new(events.clone()),
             conn,

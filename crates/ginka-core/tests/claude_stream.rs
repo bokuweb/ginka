@@ -220,6 +220,37 @@ fn structured_tool_output_is_flattened_into_readable_text() {
 }
 
 #[test]
+fn a_screenshot_result_keeps_its_complete_data_url_for_daemon_externalization() {
+    let mut stream = ClaudeStream::default();
+    stream
+        .push_line(
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"shot","name":"Screenshot","input":{}}]}}"#,
+        )
+        .unwrap();
+    let data = "A".repeat(20_000);
+    let result = serde_json::json!({
+        "type": "user",
+        "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": "shot",
+            "content": [{
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": data}
+            }]
+        }]}
+    })
+    .to_string();
+
+    let events = stream.push_line(&result).unwrap();
+    let AgentEvent::ToolResult { activity } = &events[0] else {
+        panic!("expected the screenshot result")
+    };
+    let detail = activity.detail.as_deref().unwrap();
+    assert!(detail.starts_with("data:image/png;base64,"));
+    assert!(detail.len() > ginka_protocol::event::ActivityItem::MAX_DETAIL_BYTES);
+}
+
+#[test]
 fn usage_is_reported_with_its_cache_split_intact() {
     let events = events(&[
         r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10,"output_tokens":20,"cache_read_input_tokens":5,"cache_creation_input_tokens":7}}}"#,

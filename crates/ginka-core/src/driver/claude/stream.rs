@@ -288,7 +288,16 @@ impl ClaudeStream {
                 .and_then(|id| self.pending.remove(id))
                 .unwrap_or_else(|| ActivityItem::from_tool(id.clone(), "tool", &Value::Null));
 
-            activity.complete_with(&flatten_content(block.get("content")), failed);
+            if let Some(image) = image_data_url(block.get("content")) {
+                // Kept whole only until the daemon transcript boundary turns
+                // it into a content-addressed reference. Applying the normal
+                // tool-detail bound here would corrupt the base64 first.
+                activity.detail = Some(image);
+                activity.failed = failed;
+                activity.complete = true;
+            } else {
+                activity.complete_with(&flatten_content(block.get("content")), failed);
+            }
             events.push(AgentEvent::ToolResult { activity });
         }
         Ok(events)
@@ -495,4 +504,25 @@ fn flatten_content(content: Option<&Value>) -> String {
             .join("\n"),
         _ => String::new(),
     }
+}
+
+/// Normalize Claude's image result block into the source shape the blob store
+/// accepts at the transcript boundary.
+fn image_data_url(content: Option<&Value>) -> Option<String> {
+    let [block] = content?.as_array()?.as_slice() else {
+        return None;
+    };
+    if block.get("type").and_then(Value::as_str) != Some("image") {
+        return None;
+    }
+    let source = block.get("source")?;
+    if source.get("type").and_then(Value::as_str) != Some("base64") {
+        return None;
+    }
+    let media_type = source.get("media_type").and_then(Value::as_str)?;
+    let data = source.get("data").and_then(Value::as_str)?;
+    if !media_type.starts_with("image/") || data.is_empty() {
+        return None;
+    }
+    Some(format!("data:{media_type};base64,{data}"))
 }

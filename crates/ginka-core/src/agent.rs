@@ -38,13 +38,28 @@ const STDERR_KEPT: usize = 4096;
 struct Shared {
     conn: Arc<Mutex<Connection>>,
     events: Arc<dyn EventSink>,
+    /// Provider-emitted binary payloads, owned by the daemon host.
+    blobs: crate::blob::BlobStore,
     /// How many checkpoints a workspace keeps, from the daemon's settings.
     checkpoint_limit: u32,
 }
 
 impl Shared {
     /// Append to the transcript and push the event to every client.
-    fn record(&self, session: &SessionId, payload: TranscriptPayload) -> Result<u64> {
+    fn record(&self, session: &SessionId, mut payload: TranscriptPayload) -> Result<u64> {
+        if let TranscriptPayload::Agent { event } = &mut payload
+            && let Err(error) = self.blobs.externalize_event(event)
+        {
+            // A malformed provider payload is worth surfacing in the log, but
+            // dropping the whole transcript entry would hide more than it
+            // protects. The ordinary transcript bounds still apply.
+            tracing::warn!(%error, session = %session, "could not externalize provider payload");
+            if let AgentEvent::ToolCall { activity } | AgentEvent::ToolResult { activity } = event
+                && let Some(detail) = activity.detail.clone()
+            {
+                activity.complete_with(&detail, activity.failed);
+            }
+        }
         let at = now();
         let seq = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -214,11 +229,13 @@ impl Supervisor {
         conn: Arc<Mutex<Connection>>,
         events: Arc<dyn EventSink>,
         checkpoint_limit: u32,
+        blobs: crate::blob::BlobStore,
     ) -> Self {
         Self {
             context: Shared {
                 conn,
                 events,
+                blobs,
                 checkpoint_limit,
             },
             running: Arc::new(Mutex::new(HashMap::new())),
