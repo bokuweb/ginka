@@ -6960,6 +6960,7 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let mono = cx.theme_mono_font();
         let rows = screen.rows_of_cells();
+        let worktree = self.session.as_ref().map(|row| row.path.clone());
 
         v_flex()
             .id("terminal-screen")
@@ -6975,32 +6976,71 @@ impl Shell {
             .on_key_down(
                 cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
             )
-            .children(rows.into_iter().map(|row| {
-                h_flex().children(row.into_iter().map(|cell| {
-                    div()
-                        .when(cell.cursor, |this| {
-                            this.bg(tokens.colors().text_primary)
-                                .text_color(tokens.colors().bg_terminal)
-                        })
-                        .when(!cell.cursor, |this| {
-                            this.text_color(
-                                cell.foreground
-                                    .map(|colour| terminal_colour(colour, &tokens))
-                                    .unwrap_or(tokens.colors().text_primary),
+            .children(rows.into_iter().enumerate().map(|(row_index, row)| {
+                let text = row.iter().map(|cell| cell.text).collect::<String>();
+                let links = worktree
+                    .as_deref()
+                    .map(|root| ginka_ui::terminal::file_links(&text, root))
+                    .unwrap_or_default();
+                let mut elements = Vec::new();
+                let mut column = 0;
+                while column < row.len() {
+                    if let Some(link) = links.iter().find(|link| link.columns.start == column) {
+                        let end = link.columns.end.min(row.len());
+                        let path = link.path.clone();
+                        let click_link = link.clone();
+                        let location = match (link.line, link.column) {
+                            (Some(line), Some(column)) => {
+                                format!("{}:{line}:{column}", link.path)
+                            }
+                            (Some(line), None) => format!("{}:{line}", link.path),
+                            _ => link.path.clone(),
+                        };
+                        let label =
+                            rust_i18n::t!("terminal.open_file", location = location).to_string();
+                        elements.push(
+                            Button::new(SharedString::from(format!(
+                                "terminal-file:{row_index}:{column}"
+                            )))
+                            .text()
+                            .h(px(17.))
+                            .p_0()
+                            .accessibility_label(label)
+                            .child(
+                                h_flex().children(
+                                    row[column..end]
+                                        .iter()
+                                        .cloned()
+                                        .map(|cell| terminal_cell(cell, &tokens, true)),
+                                ),
                             )
-                            .when_some(cell.background, |this, colour| {
-                                this.bg(terminal_colour(colour, &tokens))
-                            })
-                        })
-                        .when(cell.bold, |this| this.font_semibold())
-                        .when(cell.italic, |this| this.italic())
-                        .child(if cell.text == ' ' {
-                            // A space with no width is a hole in a painted bar.
-                            SharedString::from("\u{00a0}")
-                        } else {
-                            SharedString::from(cell.text.to_string())
-                        })
-                }))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(range) = click_link.selection_range()
+                                    && let Some(workspace) =
+                                        this.session.as_ref().map(|row| row.workspace.clone())
+                                {
+                                    this.open_definition(
+                                        &workspace,
+                                        ginka_ui::editor::DefinitionTarget {
+                                            path: path.clone(),
+                                            range,
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    this.open_file(path.clone(), false, window, cx);
+                                }
+                            }))
+                            .into_any_element(),
+                        );
+                        column = end;
+                    } else {
+                        elements.push(terminal_cell(row[column].clone(), &tokens, false));
+                        column += 1;
+                    }
+                }
+                h_flex().children(elements)
             }))
     }
 
@@ -7064,6 +7104,42 @@ fn terminal_colour(colour: ginka_ui::terminal::TerminalColor, tokens: &Tokens) -
             _ => colors.text_primary,
         },
     }
+}
+
+/// Draw one terminal cell without giving the view ownership of terminal state.
+fn terminal_cell(
+    cell: ginka_ui::terminal::ScreenCell,
+    tokens: &Tokens,
+    linked: bool,
+) -> AnyElement {
+    div()
+        .when(cell.cursor, |this| {
+            this.bg(tokens.colors().text_primary)
+                .text_color(tokens.colors().bg_terminal)
+        })
+        .when(!cell.cursor, |this| {
+            this.text_color(
+                cell.foreground
+                    .map(|colour| terminal_colour(colour, tokens))
+                    .unwrap_or(tokens.colors().text_primary),
+            )
+            .when_some(cell.background, |this, colour| {
+                this.bg(terminal_colour(colour, tokens))
+            })
+            .when(linked, |this| {
+                this.text_color(tokens.colors().accent).underline()
+            })
+        })
+        .when(cell.bold, |this| this.font_semibold())
+        .when(cell.italic, |this| this.italic())
+        .when(cell.underline, |this| this.underline())
+        .child(if cell.text == ' ' {
+            // A space with no width is a hole in a painted bar.
+            SharedString::from("\u{00a0}")
+        } else {
+            SharedString::from(cell.text.to_string())
+        })
+        .into_any_element()
 }
 
 /// What a keystroke sends to a shell.

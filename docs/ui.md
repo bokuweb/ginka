@@ -266,7 +266,7 @@ active conversation. With nothing selected, the rail stands alone.
   Beside it, an explicit *Indexed* or *Index workspace* word reports whether
   semantic search is ready. Activating it starts `zg index` in the workspace's
   daemon-owned terminal, opening the dock so progress and failures stay visible.
-- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; its visibility and height are remembered per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
+- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; its visibility and height are remembered per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking. Workspace-relative file locations and absolute locations beneath the daemon-host worktree are underlined links; activating one opens the Files editor at its optional line and column. Links are buttons so keyboard focus and the visible focus ring work without a mouse. Parent traversal, URLs and absolute paths outside the worktree stay plain terminal text.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
 > surfaces land in M3, and two empty panels either side of the conversation is

@@ -20,6 +20,141 @@ use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use ginka_protocol::TerminalId;
 use ginka_protocol::model::TerminalInfo;
+use std::ops::Range;
+use std::path::{Component, Path};
+
+/// A workspace file location recognized in one terminal row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalFileLink {
+    /// Character columns occupied by the clickable text in the rendered row.
+    pub columns: Range<usize>,
+    /// Slash-separated path relative to the workspace root.
+    pub path: String,
+    /// One-based line number, when the terminal printed one.
+    pub line: Option<u32>,
+    /// One-based column number, when the terminal printed one.
+    pub column: Option<u32>,
+}
+
+impl TerminalFileLink {
+    /// Convert the printed one-based position into an editor selection.
+    pub fn selection_range(&self) -> Option<lsp_types::Range> {
+        let line = self.line?.saturating_sub(1);
+        let character = self.column.unwrap_or(1).saturating_sub(1);
+        Some(lsp_types::Range::new(
+            lsp_types::Position::new(line, character),
+            lsp_types::Position::new(line, character.saturating_add(1)),
+        ))
+    }
+}
+
+/// Find safe workspace file locations in a row of terminal text.
+///
+/// Absolute paths are accepted only beneath `worktree`; relative paths may
+/// not contain a parent component. The conservative filename check avoids
+/// turning ordinary shell words and URLs into misleading links.
+pub fn file_links(line: &str, worktree: &Path) -> Vec<TerminalFileLink> {
+    let characters = line.chars().collect::<Vec<_>>();
+    let mut links = Vec::new();
+    let mut cursor = 0;
+    while cursor < characters.len() {
+        while cursor < characters.len() && characters[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        let token_start = cursor;
+        while cursor < characters.len() && !characters[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        let token_end = cursor;
+        if token_start == token_end {
+            continue;
+        }
+
+        let mut start = token_start;
+        let mut end = token_end;
+        while start < end && matches!(characters[start], '(' | '[' | '{' | '<' | '"' | '\'') {
+            start += 1;
+        }
+        while start < end
+            && matches!(
+                characters[end - 1],
+                ')' | ']' | '}' | '>' | '"' | '\'' | ',' | ';'
+            )
+        {
+            end -= 1;
+        }
+        if start == end {
+            continue;
+        }
+
+        let candidate = characters[start..end].iter().collect::<String>();
+        if let Some((path, line, column)) = parse_file_location(&candidate, worktree) {
+            links.push(TerminalFileLink {
+                columns: start..end,
+                path,
+                line,
+                column,
+            });
+        }
+    }
+    links
+}
+
+fn parse_file_location(
+    candidate: &str,
+    worktree: &Path,
+) -> Option<(String, Option<u32>, Option<u32>)> {
+    if candidate.contains("://") {
+        return None;
+    }
+    let (without_last, last) = numeric_suffix(candidate);
+    let (raw_path, line, column) = match (without_last, last) {
+        (Some(without_last), Some(last)) => {
+            let (without_line, previous) = numeric_suffix(without_last);
+            match (without_line, previous) {
+                (Some(path), Some(line)) => (path, Some(line), Some(last)),
+                _ => (without_last, Some(last), None),
+            }
+        }
+        _ => (candidate, None, None),
+    };
+    if line == Some(0) || column == Some(0) {
+        return None;
+    }
+
+    let raw_path = Path::new(raw_path);
+    let relative = if raw_path.is_absolute() {
+        raw_path.strip_prefix(worktree).ok()?
+    } else {
+        raw_path
+    };
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let filename = parts.last()?;
+    if parts.len() == 1 && !filename.contains('.') {
+        return None;
+    }
+    Some((parts.join("/"), line, column))
+}
+
+fn numeric_suffix(value: &str) -> (Option<&str>, Option<u32>) {
+    let Some((before, suffix)) = value.rsplit_once(':') else {
+        return (None, None);
+    };
+    match suffix.parse::<u32>() {
+        Ok(number) => (Some(before), Some(number)),
+        Err(_) => (None, None),
+    }
+}
 
 /// One character on the screen, with how it should be drawn.
 #[derive(Debug, Clone, PartialEq)]
@@ -323,6 +458,64 @@ impl TerminalTabs {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn terminal_locations_keep_the_file_line_and_column() {
+        let links = file_links(
+            "error at crates/ginka-core/src/git.rs:124:9",
+            Path::new("/work/ginka"),
+        );
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].path, "crates/ginka-core/src/git.rs");
+        assert_eq!(links[0].line, Some(124));
+        assert_eq!(links[0].column, Some(9));
+        assert_eq!(
+            links[0].selection_range(),
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(123, 8),
+                lsp_types::Position::new(123, 9),
+            ))
+        );
+        assert_eq!(
+            &"error at crates/ginka-core/src/git.rs:124:9"
+                .chars()
+                .collect::<Vec<_>>()[links[0].columns.clone()]
+            .iter()
+            .collect::<String>(),
+            "crates/ginka-core/src/git.rs:124:9"
+        );
+    }
+
+    #[test]
+    fn an_absolute_terminal_location_is_made_workspace_relative() {
+        let links = file_links(
+            "/work/ginka/src/main.rs:12 failed",
+            Path::new("/work/ginka"),
+        );
+
+        assert_eq!(links[0].path, "src/main.rs");
+        assert_eq!(links[0].line, Some(12));
+        assert_eq!(links[0].column, None);
+    }
+
+    #[test]
+    fn terminal_locations_never_escape_the_workspace() {
+        let root = Path::new("/work/ginka");
+        assert!(file_links("../secret.txt:1", root).is_empty());
+        assert!(file_links("/work/elsewhere/secret.txt:1", root).is_empty());
+        assert!(file_links("https://example.test/main.rs:1", root).is_empty());
+    }
+
+    #[test]
+    fn punctuation_around_a_terminal_location_is_not_part_of_its_path() {
+        let links = file_links("failed (./src/main.rs:7:2),", Path::new("/work/ginka"));
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].path, "src/main.rs");
+        assert_eq!(links[0].columns, 8..25);
+    }
 
     #[test]
     fn what_the_shell_prints_lands_on_the_screen() {

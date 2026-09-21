@@ -607,6 +607,9 @@ surface.git.pending:
 terminal.open:
   en: Open a terminal here
   ja: ここでターミナルを開く
+terminal.open_file:
+  en: "Open %{location}"
+  ja: "%{location} を開く"
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…

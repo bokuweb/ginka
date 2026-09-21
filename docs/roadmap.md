@@ -418,7 +418,7 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
 - [x] Terminal tabs; reattach with replay
 - [ ] Terminal splits, scrollback search
-- [ ] File-path detection in terminal and chat output → click opens the file
+- [ ] File-path detection in terminal and chat output → click opens the file. Terminal locations are linked: relative paths and absolute paths beneath the worktree open the Files editor at their optional one-based line/column, while URLs, parent traversal and paths on another host are never treated as workspace files. Transcript output remains
 - [ ] Selection → "add to chat" / "add to terminal"
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
 - [x] Intra-line word diff
