@@ -222,7 +222,11 @@ active conversation. With nothing selected, the rail stands alone.
   compact *Prompts (N)* strip expands into a bounded, numbered outline of
   top-level user prompts; choosing one reveals its folded block. Answers to an
   inline question or plan are not promoted into separate outline turns. The
-  same toggle is available from the command palette.
+  same toggle is available from the command palette. Workspace file locations
+  in settled assistant prose, including inline-code locations, are links into
+  the Files editor at the optional line and column. They use the terminal's
+  worktree-bound detector; ordinary web links still open normally, and fenced
+  code is not rewritten.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.

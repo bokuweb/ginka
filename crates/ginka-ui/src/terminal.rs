@@ -72,13 +72,13 @@ pub fn file_links(line: &str, worktree: &Path) -> Vec<TerminalFileLink> {
 
         let mut start = token_start;
         let mut end = token_end;
-        while start < end && matches!(characters[start], '(' | '[' | '{' | '<' | '"' | '\'') {
+        while start < end && matches!(characters[start], '(' | '[' | '{' | '<' | '"' | '\'' | '`') {
             start += 1;
         }
         while start < end
             && matches!(
                 characters[end - 1],
-                ')' | ']' | '}' | '>' | '"' | '\'' | ',' | ';'
+                ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.'
             )
         {
             end -= 1;
@@ -140,10 +140,66 @@ fn parse_file_location(
         return None;
     }
     let filename = parts.last()?;
-    if parts.len() == 1 && !filename.contains('.') {
+    if parts.len() == 1 && line.is_none() && !standalone_filename(filename) {
         return None;
     }
     Some((parts.join("/"), line, column))
+}
+
+fn standalone_filename(filename: &str) -> bool {
+    if matches!(
+        filename.to_ascii_lowercase().as_str(),
+        "makefile" | "dockerfile" | "justfile" | "gemfile" | "rakefile" | "license"
+    ) {
+        return true;
+    }
+    let Some((_, extension)) = filename.rsplit_once('.') else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "rs" | "toml"
+            | "md"
+            | "json"
+            | "yml"
+            | "yaml"
+            | "js"
+            | "jsx"
+            | "ts"
+            | "tsx"
+            | "py"
+            | "go"
+            | "java"
+            | "kt"
+            | "kts"
+            | "c"
+            | "cc"
+            | "cpp"
+            | "h"
+            | "hpp"
+            | "css"
+            | "scss"
+            | "html"
+            | "htm"
+            | "sh"
+            | "zsh"
+            | "bash"
+            | "fish"
+            | "sql"
+            | "rb"
+            | "php"
+            | "swift"
+            | "ex"
+            | "exs"
+            | "erl"
+            | "hrl"
+            | "vue"
+            | "svelte"
+            | "lock"
+            | "txt"
+            | "xml"
+            | "proto"
+    )
 }
 
 fn numeric_suffix(value: &str) -> (Option<&str>, Option<u32>) {

@@ -13,7 +13,138 @@
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
 use ginka_protocol::{AgentEvent, SubagentStep, Usage};
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+use crate::terminal::{TerminalFileLink, file_links};
+
+/// Markdown prepared for display with safe workspace file targets beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedMarkdown {
+    /// Markdown source containing internal `ginka-file:` links.
+    pub markdown: String,
+    /// Targets addressed by the numeric suffix of each internal link.
+    pub targets: Vec<TerminalFileLink>,
+}
+
+impl LinkedMarkdown {
+    /// Resolve one internal href without treating arbitrary URLs as files.
+    pub fn target(&self, href: &str) -> Option<&TerminalFileLink> {
+        let index = href.strip_prefix("ginka-file:")?.parse::<usize>().ok()?;
+        self.targets.get(index)
+    }
+}
+
+/// Link safe file locations in prose while leaving fenced code untouched.
+///
+/// The detector is shared with the terminal so both surfaces enforce the same
+/// daemon-host worktree boundary. Inline-code locations become linked code;
+/// fenced output remains copyable verbatim.
+pub fn link_file_locations(markdown: &str, worktree: &Path) -> LinkedMarkdown {
+    let mut output = String::with_capacity(markdown.len());
+    let mut targets = Vec::new();
+    let mut fence: Option<char> = None;
+
+    for line in markdown.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let trimmed = body.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if fence.is_some() || marker.is_some() {
+            output.push_str(body);
+            output.push_str(newline);
+            if let Some(marker) = marker {
+                fence = match fence {
+                    Some(open) if open == marker => None,
+                    None => Some(marker),
+                    open => open,
+                };
+            }
+            continue;
+        }
+
+        let characters = body.chars().collect::<Vec<_>>();
+        let protected = markdown_link_ranges(&characters);
+        let mut copied = 0;
+        for target in file_links(body, worktree) {
+            if protected
+                .iter()
+                .any(|(start, end)| target.columns.start < *end && target.columns.end > *start)
+            {
+                continue;
+            }
+            let mut start = target.columns.start;
+            let mut end = target.columns.end;
+            let inline_code = start > copied
+                && end < characters.len()
+                && characters[start - 1] == '`'
+                && characters[end] == '`';
+            if inline_code {
+                start -= 1;
+                end += 1;
+            }
+            if start < copied {
+                continue;
+            }
+            output.extend(characters[copied..start].iter());
+            let label = characters[start..end].iter().collect::<String>();
+            let index = targets.len();
+            output.push('[');
+            output.push_str(&label.replace(']', "\\]"));
+            output.push_str("](ginka-file:");
+            output.push_str(&index.to_string());
+            output.push(')');
+            copied = end;
+            targets.push(target);
+        }
+        output.extend(characters[copied..].iter());
+        output.push_str(newline);
+    }
+
+    LinkedMarkdown {
+        markdown: output,
+        targets,
+    }
+}
+
+fn markdown_link_ranges(characters: &[char]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while cursor < characters.len() {
+        if characters[cursor] != '[' {
+            cursor += 1;
+            continue;
+        }
+        let Some(label_end) = characters[cursor + 1..]
+            .iter()
+            .position(|character| *character == ']')
+            .map(|offset| cursor + 1 + offset)
+        else {
+            break;
+        };
+        if characters.get(label_end + 1) != Some(&'(') {
+            cursor = label_end + 1;
+            continue;
+        }
+        let Some(destination_end) = characters[label_end + 2..]
+            .iter()
+            .position(|character| *character == ')')
+            .map(|offset| label_end + 2 + offset)
+        else {
+            break;
+        };
+        ranges.push((cursor, destination_end + 1));
+        cursor = destination_end + 1;
+    }
+    ranges
+}
 
 /// One drawable piece of a transcript.
 #[derive(Debug, Clone, PartialEq)]
@@ -754,6 +885,62 @@ mod tests {
     use ginka_protocol::event::ActivityItem;
     use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn prose_file_locations_become_internal_markdown_links() {
+        let linked = link_file_locations(
+            "See src/main.rs:12:3 and `crates/ginka-ui/src/lib.rs:8`.",
+            Path::new("/work/ginka"),
+        );
+
+        assert_eq!(
+            linked.markdown,
+            "See [src/main.rs:12:3](ginka-file:0) and [`crates/ginka-ui/src/lib.rs:8`](ginka-file:1)."
+        );
+        assert_eq!(linked.targets.len(), 2);
+        assert_eq!(linked.targets[0].path, "src/main.rs");
+        assert_eq!(linked.targets[0].line, Some(12));
+        assert_eq!(linked.targets[0].column, Some(3));
+        assert_eq!(linked.target("ginka-file:1").unwrap().line, Some(8));
+        assert!(linked.target("https://example.test").is_none());
+    }
+
+    #[test]
+    fn fenced_code_and_existing_markdown_links_are_not_rewritten() {
+        let source = "[docs](https://example.test/src/main.rs:1) [guide](docs/readme.md)\n\n```text\nsrc/main.rs:2\n```\n";
+        let linked = link_file_locations(source, Path::new("/work/ginka"));
+
+        assert_eq!(linked.markdown, source);
+        assert!(linked.targets.is_empty());
+    }
+
+    #[test]
+    fn transcript_file_links_share_the_terminal_workspace_boundary() {
+        let linked = link_file_locations(
+            "../secret.txt:1 /elsewhere/secret.txt:2 https://example.test/a.rs:3",
+            Path::new("/work/ginka"),
+        );
+
+        assert!(linked.targets.is_empty());
+        assert_eq!(
+            linked.markdown,
+            "../secret.txt:1 /elsewhere/secret.txt:2 https://example.test/a.rs:3"
+        );
+    }
+
+    #[test]
+    fn versions_and_domain_names_are_not_presented_as_files() {
+        let source = "Version 1.2 fixes example.com while README.md has details.";
+        let linked = link_file_locations(source, Path::new("/work/ginka"));
+
+        assert_eq!(
+            linked.markdown,
+            "Version 1.2 fixes example.com while [README.md](ginka-file:0) has details."
+        );
+        assert_eq!(linked.targets.len(), 1);
+        assert_eq!(linked.targets[0].path, "README.md");
+    }
 
     fn user(seq: u64, text: &str) -> TranscriptEntry {
         TranscriptEntry {

@@ -3752,6 +3752,17 @@ impl Shell {
                 // frame, so the line still being written is drawn as the plain
                 // text it is until its block is done.
                 let (formatted, writing) = ginka_ui::transcript::settled(text);
+                let linked = Arc::new(
+                    self.session
+                        .as_ref()
+                        .map(|row| ginka_ui::transcript::link_file_locations(formatted, &row.path))
+                        .unwrap_or_else(|| ginka_ui::transcript::LinkedMarkdown {
+                            markdown: formatted.to_string(),
+                            targets: Vec::new(),
+                        }),
+                );
+                let linked_click = linked.clone();
+                let shell = cx.entity().downgrade();
                 v_flex()
                     .w_full()
                     .gap_1()
@@ -3759,8 +3770,36 @@ impl Shell {
                     .line_height(px(25.))
                     .text_color(tokens.colors().text_primary)
                     .children((!formatted.is_empty()).then(|| {
-                        TextView::markdown(("assistant", index), formatted.to_string())
+                        TextView::markdown(("assistant", index), linked.markdown.clone())
                             .selectable(true)
+                            .on_link_click(move |href, event, window, cx| {
+                                if event.is_right_click() {
+                                    return;
+                                }
+                                let Some(target) = linked_click.target(href).cloned() else {
+                                    cx.open_url(href);
+                                    return;
+                                };
+                                let path = target.path.clone();
+                                let _ = shell.update(cx, |this, cx| {
+                                    if let Some(range) = target.selection_range()
+                                        && let Some(workspace) =
+                                            this.session.as_ref().map(|row| row.workspace.clone())
+                                    {
+                                        this.open_definition(
+                                            &workspace,
+                                            ginka_ui::editor::DefinitionTarget {
+                                                path: path.clone(),
+                                                range,
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    } else {
+                                        this.open_file(path.clone(), false, window, cx);
+                                    }
+                                });
+                            })
                     }))
                     .children((!writing.is_empty()).then(|| div().child(writing.to_string())))
                     .child(self.message_actions(index, "assistant", text, cx))
