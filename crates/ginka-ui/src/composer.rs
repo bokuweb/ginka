@@ -18,6 +18,19 @@ pub fn primary_action(working: bool, draft: &str, has_attachments: bool) -> Prim
     }
 }
 
+/// Whether the composer can accept another attachment intake request.
+///
+/// Uploads are serialized so an older completion cannot overwrite a newer
+/// draft, and an ask-user response intentionally remains text-only.
+pub fn can_accept_attachments(uploading: bool, awaiting_input: bool) -> bool {
+    !uploading && !awaiting_input
+}
+
+/// Build the stable display name used for an image pasted from the clipboard.
+pub fn pasted_image_name(ordinal: usize, extension: &str) -> String {
+    format!("pasted-image-{}.{}", ordinal.max(1), extension)
+}
+
 /// Build the prompt sent over the shared protocol from text and uploaded files.
 ///
 /// References stay outside the editable draft: the daemon owns their bytes and
@@ -85,6 +98,21 @@ mod tests {
         );
         assert_eq!(primary_action(true, "", true), PrimaryAction::Send);
         assert_eq!(primary_action(false, "", false), PrimaryAction::Send);
+    }
+
+    #[test]
+    fn attachments_are_only_accepted_while_the_composer_is_available() {
+        assert!(can_accept_attachments(false, false));
+        assert!(!can_accept_attachments(true, false));
+        assert!(!can_accept_attachments(false, true));
+        assert!(!can_accept_attachments(true, true));
+    }
+
+    #[test]
+    fn pasted_images_get_readable_numbered_names() {
+        assert_eq!(pasted_image_name(1, "png"), "pasted-image-1.png");
+        assert_eq!(pasted_image_name(3, "jpg"), "pasted-image-3.jpg");
+        assert_eq!(pasted_image_name(0, "webp"), "pasted-image-1.webp");
     }
 
     #[test]

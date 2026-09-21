@@ -234,9 +234,12 @@ active conversation. With nothing selected, the rail stands alone.
   (`docs/accounts.md` §11). While a session is working, the circular action is
   Stop when the draft is empty and Send as soon as a follow-up has been typed;
   that send steers or queues according to the driver's existing policy. The
-  attachment button selects several files, uploads their bytes into the
-  daemon-owned store, and shows removable filename chips without putting
-  opaque references into the editable draft. PNG, JPEG, GIF and WebP bytes up
+  attachment button selects several files, and files dropped anywhere on the
+  composer take the same upload path. Pasting an image while the composer has
+  focus attaches the clipboard bytes without changing an ordinary text paste.
+  Each route uploads into the daemon-owned store and shows removable filename
+  chips without putting opaque references into the editable draft. PNG, JPEG,
+  GIF and WebP bytes up
   to 4 MiB carry a local thumbnail in that chip; format detection uses the
   signature rather than the filename, and every other file remains a filename
   chip. An attachment by itself is a sendable prompt; upload errors stay beside

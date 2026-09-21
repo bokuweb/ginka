@@ -36,7 +36,7 @@ use gpui_component::{
     Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
-    input::{Input, InputEvent, InputState, Textarea, TextareaState},
+    input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState},
     resizable::{ResizableState, h_resizable, resizable_panel, v_resizable},
     scroll::ScrollableElement as _,
     v_flex,
@@ -239,6 +239,24 @@ struct TranscriptSearch {
 struct ComposerAttachment {
     attachment: Attachment,
     preview_url: Option<String>,
+}
+
+/// Upload prepared attachment bytes and build the local presentation rows.
+async fn upload_attachment_payloads(
+    link: Arc<DaemonLink>,
+    payloads: Vec<(String, Vec<u8>)>,
+) -> Result<Vec<ComposerAttachment>, String> {
+    let mut uploaded = Vec::with_capacity(payloads.len());
+    for (name, bytes) in payloads {
+        let preview_url = ginka_core::files::preview_image(&bytes)
+            .map(|image| format!("data:{};base64,{}", image.media_type, image.data_base64));
+        let attachment = link.upload_attachment(name, bytes).await?;
+        uploaded.push(ComposerAttachment {
+            attachment,
+            preview_url,
+        });
+    }
+    Ok(uploaded)
 }
 
 pub struct Shell {
@@ -980,7 +998,10 @@ impl Shell {
     /// are kept by the window, so this remains valid when the daemon runs on a
     /// different host from the client.
     fn choose_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.attachment_busy || self.session_state == Some(SessionState::AwaitingInput) {
+        if !ginka_ui::composer::can_accept_attachments(
+            self.attachment_busy,
+            self.session_state == Some(SessionState::AwaitingInput),
+        ) {
             return;
         }
         let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
@@ -1000,39 +1021,114 @@ impl Shell {
             if paths.is_empty() {
                 return;
             }
-            let Some((link, generation)) = this
-                .update(cx, |this, cx| {
-                    this.attachment_busy = true;
-                    this.attachment_error = None;
-                    this.attachment_generation = this.attachment_generation.wrapping_add(1);
-                    cx.notify();
-                    (this.link.clone(), this.attachment_generation)
-                })
-                .ok()
-            else {
-                return;
-            };
+            this.update(cx, |this, cx| this.attach_paths(paths, cx))
+                .ok();
+        })
+        .detach();
+    }
+
+    /// Read local files and copy them into the daemon-owned attachment store.
+    ///
+    /// The picker and OS drag-and-drop converge here, so both paths get the
+    /// same preview, error and stale-navigation behaviour.
+    fn attach_paths(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        if paths.is_empty()
+            || !ginka_ui::composer::can_accept_attachments(
+                self.attachment_busy,
+                self.session_state == Some(SessionState::AwaitingInput),
+            )
+        {
+            return;
+        }
+        self.attachment_busy = true;
+        self.attachment_error = None;
+        self.attachment_generation = self.attachment_generation.wrapping_add(1);
+        let generation = self.attachment_generation;
+        let link = self.link.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
             let uploaded = cx
                 .background_spawn(async move {
-                    let mut uploaded = Vec::with_capacity(paths.len());
+                    let mut payloads = Vec::with_capacity(paths.len());
                     for path in paths {
+                        let metadata = std::fs::metadata(&path)
+                            .map_err(|error| format!("{}: {error}", path.display()))?;
+                        if !metadata.is_file() {
+                            return Err(format!("{}: not a file", path.display()));
+                        }
                         let bytes = std::fs::read(&path)
                             .map_err(|error| format!("{}: {error}", path.display()))?;
                         let name = path
                             .file_name()
                             .map(|name| name.to_string_lossy().into_owned())
                             .unwrap_or_else(|| path.display().to_string());
-                        let preview_url = ginka_core::files::preview_image(&bytes).map(|image| {
-                            format!("data:{};base64,{}", image.media_type, image.data_base64)
-                        });
-                        let attachment = link.upload_attachment(name, bytes).await?;
-                        uploaded.push(ComposerAttachment {
-                            attachment,
-                            preview_url,
-                        });
+                        payloads.push((name, bytes));
                     }
-                    Ok::<_, String>(uploaded)
+                    upload_attachment_payloads(link, payloads).await
                 })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.attachment_generation != generation {
+                    return;
+                }
+                this.attachment_busy = false;
+                match uploaded {
+                    Ok(uploaded) => this.attachments.extend(uploaded),
+                    Err(error) => this.attachment_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Upload image bytes found on the system clipboard.
+    ///
+    /// This observes the same Paste action as the text area. Text-only paste
+    /// remains entirely owned by the input, while image entries become
+    /// ordinary daemon attachments.
+    fn paste_attachments(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        if !ginka_ui::composer::can_accept_attachments(
+            self.attachment_busy,
+            self.session_state == Some(SessionState::AwaitingInput),
+        ) {
+            return;
+        }
+        let Some(clipboard) = cx.read_from_clipboard() else {
+            return;
+        };
+        let first_ordinal = self.attachments.len() + 1;
+        let payloads = clipboard
+            .entries
+            .into_iter()
+            .filter_map(|entry| match entry {
+                ClipboardEntry::Image(image) if !image.bytes.is_empty() => {
+                    Some((image.format.extension().to_string(), image.bytes))
+                }
+                _ => None,
+            })
+            .enumerate()
+            .map(|(index, (extension, bytes))| {
+                (
+                    ginka_ui::composer::pasted_image_name(first_ordinal + index, &extension),
+                    bytes,
+                )
+            })
+            .collect::<Vec<_>>();
+        if payloads.is_empty() {
+            return;
+        }
+
+        self.attachment_busy = true;
+        self.attachment_error = None;
+        self.attachment_generation = self.attachment_generation.wrapping_add(1);
+        let generation = self.attachment_generation;
+        let link = self.link.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let uploaded = cx
+                .background_spawn(async move { upload_attachment_payloads(link, payloads).await })
                 .await;
             this.update(cx, |this, cx| {
                 if this.attachment_generation != generation {
@@ -4193,6 +4289,8 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
         let awaiting_input = self.session_state == Some(SessionState::AwaitingInput);
+        let accepts_attachments =
+            ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
         let primary_action = ginka_ui::composer::primary_action(
             working,
             self.composer.read(cx).value().as_ref(),
@@ -4272,6 +4370,18 @@ impl Shell {
                     } else {
                         tokens.colors().border_subtle
                     })
+                    .when(accepts_attachments, |this| {
+                        this.drag_over::<ExternalPaths>(|this, _, _, cx| {
+                            this.border_color(Tokens::global(cx).colors().accent)
+                                .bg(Tokens::global(cx).colors().row_hover())
+                        })
+                        .on_drop(cx.listener(
+                            |this, paths: &ExternalPaths, _, cx| {
+                                this.attach_paths(paths.paths().to_vec(), cx);
+                            },
+                        ))
+                    })
+                    .on_action(cx.listener(Self::paste_attachments))
                     .children((!attachment_chips.is_empty()).then(|| {
                         h_flex()
                             .w_full()
