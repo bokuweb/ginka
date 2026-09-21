@@ -853,6 +853,7 @@ impl Shell {
                                 if was_split && this.terminals.split_ids().is_none() {
                                     this.resize_terminal(cx);
                                 }
+                                this.persist();
                                 cx.notify();
                             })
                             .map_err(|_| ()),
@@ -1902,6 +1903,7 @@ impl Shell {
                             .open(terminal, format!("shell {title}"), rows, cols);
                         this.resize_terminal(cx);
                     }
+                    this.persist();
                     // The daemon is the one that names them, and it numbers
                     // them per workspace: adopting straight afterwards is how
                     // two windows agree on what a tab is called.
@@ -1919,6 +1921,7 @@ impl Shell {
         if self.terminals.split_ids().is_some() {
             self.terminals.unsplit();
             self.resize_terminal(cx);
+            self.persist();
             self.terminal_focus.focus(window, cx);
             cx.notify();
         } else {
@@ -1977,6 +1980,7 @@ impl Shell {
                         this.terminals
                             .open(terminal, format!("shell {title}"), rows, cols);
                         this.resize_terminal(cx);
+                        this.persist();
                         this.adopt_terminals(cx);
                     }
                     Err(error) => this.index_error = Some(error),
@@ -2070,6 +2074,7 @@ impl Shell {
                     this.terminals
                         .open(terminal, format!("shell {title}"), rows, cols);
                     this.resize_terminal(cx);
+                    this.persist();
                     // Adopted straight afterwards so the tab takes the name
                     // the daemon gave it, which says whose sign-in it is.
                     this.adopt_terminals(cx);
@@ -2101,6 +2106,7 @@ impl Shell {
                 if was_split && self.terminals.split_ids().is_none() {
                     self.resize_terminal(cx);
                 }
+                self.persist();
                 cx.notify();
                 let link = self.link.clone();
                 cx.background_spawn(async move { link.close_terminal(&terminal).await })
@@ -2118,6 +2124,7 @@ impl Shell {
         if was_split && self.terminals.split_ids().is_none() {
             self.resize_terminal(cx);
         }
+        self.persist();
         self.terminal_focus.focus(window, cx);
         cx.notify();
     }
@@ -2133,6 +2140,7 @@ impl Shell {
         if changed {
             self.terminal_search = None;
             self.terminals.focus_id(terminal);
+            self.persist();
         }
         self.terminal_focus.focus(window, cx);
         if changed {
@@ -2148,15 +2156,41 @@ impl Shell {
         };
         let (rows, cols) = self.dock_size();
         let link = self.link.clone();
+        let requested_workspace = workspace.clone();
         cx.spawn(async move |this, cx| {
             let running = cx
-                .background_spawn(async move { link.terminals(&workspace).await })
+                .background_spawn(async move { link.terminals(&requested_workspace).await })
                 .await;
             let fresh = this
                 .update(cx, |this, cx| {
+                    if this.session.as_ref().map(|row| &row.workspace) != Some(&workspace) {
+                        return Vec::new();
+                    }
                     let was_split = this.terminals.split_ids().is_some();
                     let fresh = this.terminals.adopt(&running, rows, cols);
-                    if was_split && this.terminals.split_ids().is_none() {
+                    let remembered = this
+                        .settings
+                        .workspace_layouts
+                        .get(&workspace.0)
+                        .map(|saved| (saved.terminal_split.clone(), saved.terminal_active.clone()))
+                        .unwrap_or_default();
+                    let active = remembered
+                        .1
+                        .as_ref()
+                        .map(|id| ginka_protocol::TerminalId(id.clone()));
+                    if let Some(split) = remembered.0.map(|ids| ids.map(ginka_protocol::TerminalId))
+                    {
+                        if !this.terminals.restore_split(split, active.as_ref())
+                            && let Some(active) = active.as_ref()
+                        {
+                            this.terminals.focus_id(active);
+                        }
+                    } else if let Some(active) = active.as_ref() {
+                        this.terminals.focus_id(active);
+                    }
+                    if (was_split && this.terminals.split_ids().is_none())
+                        || (!was_split && this.terminals.split_ids().is_some())
+                    {
                         this.resize_terminal(cx);
                     }
                     cx.notify();
@@ -2671,6 +2705,7 @@ impl Shell {
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
             self.layout
                 .write_workspace_into(&workspace, &mut self.settings);
+            self.write_terminal_arrangement(&workspace);
         } else {
             self.layout.write_into(&mut self.settings);
         }
@@ -2696,6 +2731,17 @@ impl Shell {
                 .read(cx)
                 .open_surface()
                 .map(|surface| surface.key().to_string());
+        }
+        self.write_terminal_arrangement(&workspace);
+    }
+
+    /// Store terminal ids as restorable view state, never as process ownership.
+    fn write_terminal_arrangement(&mut self, workspace: &WorkspaceId) {
+        let split = self.terminals.split_ids().map(|ids| ids.map(|id| id.0));
+        let active = self.terminals.active_id().map(|id| id.0);
+        if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
+            saved.terminal_split = split;
+            saved.terminal_active = active;
         }
     }
 

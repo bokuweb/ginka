@@ -572,6 +572,26 @@ impl TerminalTabs {
         self.split = None;
     }
 
+    /// Restore a persisted split only when both daemon terminals were adopted.
+    pub fn restore_split(&mut self, split: [TerminalId; 2], active: Option<&TerminalId>) -> bool {
+        self.split = None;
+        if split[0] == split[1]
+            || split
+                .iter()
+                .any(|id| !self.tabs.iter().any(|tab| &tab.id == id))
+        {
+            return false;
+        }
+        let fallback = split[1].clone();
+        self.split = Some(split.clone());
+        let active = active
+            .filter(|id| split.contains(id))
+            .cloned()
+            .unwrap_or(fallback);
+        self.focus_id(&active);
+        true
+    }
+
     /// Show a tab that is already open.
     pub fn focus(&mut self, index: usize) {
         if index < self.tabs.len() {
@@ -930,6 +950,23 @@ mod tests {
         tabs.close(&left);
         assert_eq!(tabs.split_ids(), None);
         assert_eq!(tabs.active_id(), Some(right));
+    }
+
+    #[test]
+    fn a_split_is_restored_only_while_both_daemon_terminals_still_exist() {
+        let mut tabs = TerminalTabs::new();
+        let left = TerminalId("left".into());
+        let right = TerminalId("right".into());
+        tabs.open(left.clone(), "shell 1".into(), 24, 80);
+        tabs.open(right.clone(), "shell 2".into(), 24, 80);
+
+        assert!(tabs.restore_split([left.clone(), right.clone()], Some(&left)));
+        assert_eq!(tabs.split_ids(), Some([left.clone(), right.clone()]));
+        assert_eq!(tabs.active_id(), Some(left));
+
+        tabs.unsplit();
+        assert!(!tabs.restore_split([TerminalId("missing".into()), right], None));
+        assert_eq!(tabs.split_ids(), None);
     }
 
     #[test]

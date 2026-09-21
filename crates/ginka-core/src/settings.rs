@@ -72,6 +72,10 @@ pub struct WorkspaceLayoutSettings {
     pub terminal_dock_height: f32,
     /// Stable lowercase name of the selected surface, if one is selected.
     pub active_surface: Option<String>,
+    /// Daemon terminal ids shown in the left and right split panes.
+    pub terminal_split: Option<[String; 2]>,
+    /// Daemon terminal id that receives keyboard input after restoration.
+    pub terminal_active: Option<String>,
 }
 
 impl Default for WorkspaceLayoutSettings {
@@ -82,6 +86,8 @@ impl Default for WorkspaceLayoutSettings {
             terminal_dock_open: false,
             terminal_dock_height: 220.0,
             active_surface: None,
+            terminal_split: None,
+            terminal_active: None,
         }
     }
 }
@@ -396,6 +402,8 @@ mod tests {
                 terminal_dock_open: false,
                 terminal_dock_height: 180.0,
                 active_surface: Some("files".into()),
+                terminal_split: None,
+                terminal_active: None,
             },
         );
         settings.workspace_layouts.insert(
@@ -406,6 +414,8 @@ mod tests {
                 terminal_dock_open: true,
                 terminal_dock_height: 300.0,
                 active_surface: Some("git".into()),
+                terminal_split: None,
+                terminal_active: None,
             },
         );
 
@@ -416,6 +426,25 @@ mod tests {
             restored.workspace_layouts["comet/main"],
             restored.workspace_layouts["comet/review"]
         );
+    }
+
+    #[test]
+    fn a_workspace_terminal_split_round_trips_as_view_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let mut settings = AppSettings::default();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                terminal_split: Some(["left".into(), "right".into()]),
+                terminal_active: Some("right".into()),
+                ..WorkspaceLayoutSettings::default()
+            },
+        );
+
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert_eq!(restored, settings);
     }
 
     #[test]
