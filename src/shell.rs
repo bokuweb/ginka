@@ -235,6 +235,14 @@ struct TranscriptSearch {
     error: Option<String>,
 }
 
+/// Find state for one daemon-owned terminal tab.
+struct TerminalSearch {
+    terminal: ginka_protocol::TerminalId,
+    query: Entity<InputState>,
+    matches: Vec<ginka_ui::terminal::TerminalSearchMatch>,
+    chosen: Option<usize>,
+}
+
 /// One daemon-owned upload waiting in the composer, plus an optional local thumbnail.
 struct ComposerAttachment {
     attachment: Attachment,
@@ -367,6 +375,8 @@ pub struct Shell {
     forking: Option<ForkMenu>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
+    /// Present while the reader is finding text in the active terminal.
+    terminal_search: Option<TerminalSearch>,
     /// The command palette, while it is open: what is typed into it, the
     /// entries that match, and which one Return would run.
     palette: Option<Palette>,
@@ -584,6 +594,7 @@ impl Shell {
                         this.index_error = None;
                         // The shells belong to the workspace, not to the
                         // window: a different workspace is a different strip.
+                        this.terminal_search = None;
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
                         if this.layout.is_open(Panel::TerminalDock) {
                             this.adopt_terminals(cx);
@@ -827,6 +838,13 @@ impl Shell {
                             .map_err(|_| ()),
                         DaemonEvent::TerminalClosed { terminal } => this
                             .update(cx, |this, cx| {
+                                if this
+                                    .terminal_search
+                                    .as_ref()
+                                    .is_some_and(|search| search.terminal == terminal)
+                                {
+                                    this.terminal_search = None;
+                                }
                                 this.terminals.close(&terminal);
                                 cx.notify();
                             })
@@ -867,6 +885,7 @@ impl Shell {
             reveal: Reveal::new(),
             palette: None,
             terminal_focus: cx.focus_handle(),
+            terminal_search: None,
             terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
             submitted: false,
@@ -1259,6 +1278,7 @@ impl Shell {
         self.index_starting = false;
         self.index_error = None;
         // The shells belong to the workspace that is no longer on screen.
+        self.terminal_search = None;
         self.terminals = ginka_ui::terminal::TerminalTabs::new();
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -1843,6 +1863,7 @@ impl Shell {
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
                     let title = this.terminals.tabs().len() + 1;
+                    this.terminal_search = None;
                     this.terminals
                         .open(terminal, format!("shell {title}"), rows, cols);
                     // The daemon is the one that names them, and it numbers
@@ -1884,6 +1905,7 @@ impl Shell {
                 match result {
                     Ok(terminal) => {
                         let title = this.terminals.tabs().len() + 1;
+                        this.terminal_search = None;
                         this.terminals
                             .open(terminal, format!("shell {title}"), rows, cols);
                         this.adopt_terminals(cx);
@@ -1975,6 +1997,7 @@ impl Shell {
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
                     let title = this.terminals.tabs().len() + 1;
+                    this.terminal_search = None;
                     this.terminals
                         .open(terminal, format!("shell {title}"), rows, cols);
                     // Adopted straight afterwards so the tab takes the name
@@ -1997,6 +2020,13 @@ impl Shell {
         match self.terminals.request_close(&terminal) {
             ginka_ui::terminal::CloseRequest::Confirm => cx.notify(),
             ginka_ui::terminal::CloseRequest::Close => {
+                if self
+                    .terminal_search
+                    .as_ref()
+                    .is_some_and(|search| search.terminal == terminal)
+                {
+                    self.terminal_search = None;
+                }
                 cx.notify();
                 let link = self.link.clone();
                 cx.background_spawn(async move { link.close_terminal(&terminal).await })
@@ -2008,6 +2038,7 @@ impl Shell {
 
     /// Bring one of the dock's shells to the front.
     fn show_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_search = None;
         self.terminals.focus(index);
         self.terminal_focus.focus(window, cx);
         cx.notify();
@@ -2118,6 +2149,113 @@ impl Shell {
             screen.scroll_to_live();
             cx.notify();
         }
+    }
+
+    /// Open find-in-terminal for the shell in front.
+    fn open_terminal_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.active_id() else {
+            return;
+        };
+        if let Some(search) = self
+            .terminal_search
+            .as_ref()
+            .filter(|search| search.terminal == terminal)
+        {
+            search.query.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("terminal.search.placeholder").to_string())
+        });
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| match event {
+            InputEvent::Change => this.search_terminal(query.read(cx).value().to_string(), cx),
+            InputEvent::PressEnter { shift, .. } => this.step_terminal_search(
+                if *shift {
+                    ginka_ui::search::Direction::Previous
+                } else {
+                    ginka_ui::search::Direction::Next
+                },
+                cx,
+            ),
+            _ => {}
+        })
+        .detach();
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        self.terminal_search = Some(TerminalSearch {
+            terminal,
+            query,
+            matches: Vec::new(),
+            chosen: None,
+        });
+        cx.notify();
+    }
+
+    /// Recompute matches after the terminal query changes.
+    fn search_terminal(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(terminal) = self
+            .terminal_search
+            .as_ref()
+            .map(|search| search.terminal.clone())
+        else {
+            return;
+        };
+        let matches = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == terminal)
+            .map(|tab| tab.screen.search(&query))
+            .unwrap_or_default();
+        let search = self
+            .terminal_search
+            .as_mut()
+            .expect("the terminal search was read above");
+        search.matches = matches;
+        search.chosen = (!search.matches.is_empty()).then_some(0);
+        self.reveal_terminal_search();
+        cx.notify();
+    }
+
+    /// Move to another terminal match, wrapping at either end.
+    fn step_terminal_search(
+        &mut self,
+        direction: ginka_ui::search::Direction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.terminal_search.as_mut() else {
+            return;
+        };
+        search.chosen = ginka_ui::search::step(search.matches.len(), search.chosen, direction);
+        self.reveal_terminal_search();
+        cx.notify();
+    }
+
+    /// Put the selected terminal match inside the viewport.
+    fn reveal_terminal_search(&mut self) {
+        let Some((terminal, found)) = self.terminal_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .map(|found| (search.terminal.clone(), found.clone()))
+        }) else {
+            return;
+        };
+        if let Some(tab) = self
+            .terminals
+            .tabs_mut()
+            .iter_mut()
+            .find(|tab| tab.id == terminal)
+        {
+            tab.screen.reveal_search_match(&found);
+        }
+    }
+
+    /// Close terminal find and return keyboard input to the shell.
+    fn close_terminal_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_search = None;
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
     }
 
     /// Leave a comment on a line of the diff.
@@ -2633,6 +2771,24 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .terminal_search
+            .as_ref()
+            .is_some_and(|search| self.terminals.active_id().as_ref() == Some(&search.terminal))
+        {
+            self.terminal_search
+                .as_ref()
+                .expect("the terminal search was just checked")
+                .query
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+            return;
+        }
+        if self.terminal_focus.is_focused(window) && self.terminals.active_id().is_some() {
+            self.open_terminal_search(window, cx);
+            return;
+        }
         if self
             .session
             .as_ref()
@@ -7033,6 +7189,16 @@ impl Shell {
                             )
                     }))
                     .child(div().flex_1())
+                    .children((!self.terminals.is_empty()).then(|| {
+                        Button::new("find-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(rust_i18n::t!("terminal.search.open").to_string())
+                            .child(Icon::new(IconName::Search).size_3())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_terminal_search(window, cx)
+                            }))
+                    }))
                     .children((history_offset > 0).then(|| {
                         Button::new("terminal-live")
                             .ghost()
@@ -7048,10 +7214,78 @@ impl Shell {
                             )
                     })),
             )
+            .children(self.terminal_search_bar(cx))
             .child(match self.terminals.active() {
                 Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
                 None => self.terminal_start(cx).into_any_element(),
             })
+    }
+
+    /// Find controls for the terminal in front.
+    fn terminal_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.terminal_search.as_ref()?;
+        if self.terminals.active_id().as_ref() != Some(&search.terminal) {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let count = search
+            .chosen
+            .map(|chosen| format!("{} / {}", chosen + 1, search.matches.len()))
+            .unwrap_or_else(|| format!("0 / {}", search.matches.len()));
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .items_center()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_terminal_search(window, cx);
+                    }
+                }))
+                .child(div().flex_1().child(Input::new(&search.query)))
+                .child(
+                    div()
+                        .min_w(px(58.))
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(count),
+                )
+                .child(
+                    Button::new("previous-terminal-match")
+                        .ghost()
+                        .disabled(search.matches.is_empty())
+                        .tooltip(rust_i18n::t!("transcript.search.previous").to_string())
+                        .child(Icon::new(IconName::ArrowUp).size_3())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.step_terminal_search(ginka_ui::search::Direction::Previous, cx)
+                        })),
+                )
+                .child(
+                    Button::new("next-terminal-match")
+                        .ghost()
+                        .disabled(search.matches.is_empty())
+                        .tooltip(rust_i18n::t!("transcript.search.next").to_string())
+                        .child(Icon::new(IconName::ArrowDown).size_3())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.step_terminal_search(ginka_ui::search::Direction::Next, cx)
+                        })),
+                )
+                .child(
+                    Button::new("close-terminal-search")
+                        .ghost()
+                        .tooltip(rust_i18n::t!("transcript.search.close").to_string())
+                        .child(Icon::new(IconName::Close).size_3())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_terminal_search(window, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// What the dock says before there is a shell in it.
@@ -7087,7 +7321,11 @@ impl Shell {
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let mono = cx.theme_mono_font();
-        let rows = screen.rows_of_cells();
+        let selected = self
+            .terminal_search
+            .as_ref()
+            .and_then(|search| search.chosen.and_then(|chosen| search.matches.get(chosen)));
+        let rows = screen.rows_of_cells_with_match(selected);
         let worktree = self.session.as_ref().map(|row| row.path.clone());
 
         v_flex()
@@ -7246,6 +7484,9 @@ fn terminal_cell(
     linked: bool,
 ) -> AnyElement {
     div()
+        .when(cell.search_match, |this| {
+            this.bg(tokens.colors().accent.opacity(0.35))
+        })
         .when(cell.cursor, |this| {
             this.bg(tokens.colors().text_primary)
                 .text_color(tokens.colors().bg_terminal)

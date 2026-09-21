@@ -625,6 +625,12 @@ terminal.history.lines_back:
 terminal.history.live.tooltip:
   en: Return to live terminal output
   ja: ターミナルの最新出力に戻る
+terminal.search.open:
+  en: Find in terminal
+  ja: ターミナル内を検索
+terminal.search.placeholder:
+  en: Find in terminal
+  ja: ターミナル内を検索
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…

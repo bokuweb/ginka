@@ -14,7 +14,7 @@
 // application to act on, and this screen only draws.
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Point};
+use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
@@ -225,6 +225,8 @@ pub struct ScreenCell {
     pub underline: bool,
     /// Whether the cursor is sitting on this cell.
     pub cursor: bool,
+    /// Whether this cell belongs to the selected terminal-search result.
+    pub search_match: bool,
 }
 
 /// A colour a terminal asked for.
@@ -241,6 +243,13 @@ pub enum TerminalColor {
 
 /// One row of the screen.
 pub type ScreenRow = Vec<ScreenCell>;
+
+/// One literal match in the terminal's live grid or bounded history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSearchMatch {
+    line: i32,
+    columns: Range<usize>,
+}
 
 /// A terminal's screen, fed by the bytes its shell prints.
 pub struct TerminalScreen {
@@ -309,6 +318,55 @@ impl TerminalScreen {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Find every line-local literal match from oldest output to newest.
+    ///
+    /// Lowercase queries ignore ASCII case; once the query contains an
+    /// uppercase character it is exact. This mirrors the terminal emulator's
+    /// smart-case convention without treating user input as a regular
+    /// expression.
+    pub fn search(&self, query: &str) -> Vec<TerminalSearchMatch> {
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+        let query = query.chars().collect::<Vec<_>>();
+        let exact = query.iter().any(|character| character.is_uppercase());
+        let grid = self.term.grid();
+        let mut matches = Vec::new();
+        for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = (0..self.cols as usize)
+                .map(|column| grid[Point::new(Line(line), Column(column))].c)
+                .collect::<Vec<_>>();
+            if row.len() < query.len() {
+                continue;
+            }
+            for start in 0..=row.len() - query.len() {
+                let candidate = &row[start..start + query.len()];
+                let found = candidate.iter().zip(&query).all(|(left, right)| {
+                    if exact {
+                        left == right
+                    } else {
+                        left.eq_ignore_ascii_case(right)
+                    }
+                });
+                if found {
+                    matches.push(TerminalSearchMatch {
+                        line,
+                        columns: start..start + query.len(),
+                    });
+                }
+            }
+        }
+        matches
+    }
+
+    /// Move the viewport far enough for a search match to be visible.
+    pub fn reveal_search_match(&mut self, found: &TerminalSearchMatch) {
+        let target = found.line.saturating_neg().max(0) as usize;
+        let current = self.display_offset();
+        self.term
+            .scroll_display(Scroll::Delta(target as i32 - current as i32));
+    }
+
     /// Feed it what the shell printed.
     pub fn feed(&mut self, data: &str) {
         self.parser.advance(&mut self.term, data.as_bytes());
@@ -338,6 +396,14 @@ impl TerminalScreen {
     /// where a background colour ends, and a shell that painted a bar across
     /// the width would lose its right-hand end.
     pub fn rows_of_cells(&self) -> Vec<ScreenRow> {
+        self.rows_of_cells_with_match(None)
+    }
+
+    /// The visible rows, marking the selected terminal-search match.
+    pub fn rows_of_cells_with_match(
+        &self,
+        selected: Option<&TerminalSearchMatch>,
+    ) -> Vec<ScreenRow> {
         let cursor = self.term.grid().cursor.point;
         let display_offset = self.term.grid().display_offset();
         let mut screen = Vec::with_capacity(self.rows as usize);
@@ -360,6 +426,9 @@ impl TerminalScreen {
                     cursor: display_offset == 0
                         && cursor.line.0 == line as i32
                         && cursor.column.0 == column,
+                    search_match: selected.is_some_and(|found| {
+                        found.line == point.line.0 && found.columns.contains(&column)
+                    }),
                 });
             }
             screen.push(row);
@@ -734,6 +803,35 @@ mod tests {
         screen.scroll_to_live();
         assert_eq!(screen.display_offset(), 0);
         assert!(screen.text().contains("five"));
+    }
+
+    #[test]
+    fn search_finds_history_with_smart_case_and_reveals_the_match() {
+        let mut screen = TerminalScreen::new(3, 20);
+        screen.feed("old needle\r\nmiddle\r\nnew NEEDLE\r\ntail");
+
+        let matches = screen.search("needle");
+        assert_eq!(matches.len(), 2, "a lowercase query ignores ASCII case");
+        assert_eq!(screen.search("NEEDLE").len(), 1, "uppercase is exact");
+
+        screen.reveal_search_match(&matches[0]);
+        assert!(screen.display_offset() > 0, "the historical hit is shown");
+        let rows = screen.rows_of_cells_with_match(Some(&matches[0]));
+        assert_eq!(
+            rows.iter()
+                .flatten()
+                .filter(|cell| cell.search_match)
+                .map(|cell| cell.text)
+                .collect::<String>(),
+            "needle"
+        );
+    }
+
+    #[test]
+    fn an_empty_terminal_search_has_no_matches() {
+        let mut screen = TerminalScreen::new(2, 10);
+        screen.feed("output");
+        assert!(screen.search("").is_empty());
     }
 
     #[test]

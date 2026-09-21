@@ -418,8 +418,9 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
 - [x] Terminal tabs; reattach with replay
 - [x] Terminal scrollback browsing by wheel and `Shift+PageUp` / `Shift+PageDown`, with a visible history offset and a keyboard-accessible return to live output
+- [x] Terminal scrollback search: `⌘F` while the terminal has focus (or its find control) searches the live grid and bounded history with smart case, highlights the selected literal match and wraps through results with Enter / Shift+Enter
 - [x] Closing a running terminal is an explicit two-step action: the first activation arms that tab and changes its accessible label, the second removes it and sends the shared close request to the daemon; moving to another tab cancels the pending close
-- [ ] Terminal splits, scrollback search
+- [ ] Terminal splits
 - [x] File-path detection in terminal and chat output → click opens the file. Terminal rows and settled assistant prose share one detector: relative paths and absolute paths beneath the worktree open the Files editor at their optional one-based line/column, while URLs, version numbers, domain names, parent traversal and paths on another host are never treated as workspace files. Inline-code locations become links without rewriting fenced code
 - [ ] Selection → "add to chat" / "add to terminal"
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
