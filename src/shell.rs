@@ -262,6 +262,8 @@ async fn upload_attachment_payloads(
 pub struct Shell {
     /// Where `app.json` lives, so a toggle can be written straight back.
     paths: Paths,
+    /// Whether daemon-host paths are paths on this window's machine too.
+    local_paths: bool,
     settings: AppSettings,
     layout: Layout,
     /// The row the centre column is showing.
@@ -416,6 +418,7 @@ impl Shell {
     ) -> Self {
         let rows: Vec<SessionRow> = Vec::new();
         let link = crate::daemon::DaemonLink::new(&paths);
+        let local_paths = link.allows_local_paths();
         // The window knows the real system appearance; the App-level default
         // applied at startup was a guess made before any window existed.
         ginka_ui::theme::apply(
@@ -436,8 +439,8 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
         });
-        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone()));
-        let surfaces = cx.new(|cx| SurfacePanel::new(window, cx));
+        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone(), local_paths));
+        let surfaces = cx.new(|cx| SurfacePanel::new(window, cx, local_paths));
 
         let sidebar_search_changed =
             cx.subscribe(&sidebar_search, |this, query, event: &InputEvent, cx| {
@@ -905,6 +908,7 @@ impl Shell {
             index_starting: false,
             index_error: None,
             paths,
+            local_paths,
             settings,
             session,
             sidebar,
@@ -927,9 +931,12 @@ impl Shell {
     /// reader who has just opened the app should not have to leave it to put
     /// something in it. The path is one
     /// this window picked, so it is a path on *this* machine — only the same
-    /// thing as a daemon-host path while the daemon is the local child process
+    /// thing as a daemon-host path while the daemon was discovered or spawned locally
     /// (`docs/roadmap.md` §4.1), which is why the picker is offered only then.
     fn open_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.local_paths {
+            return;
+        }
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("project.add.name.placeholder").to_string())
@@ -4537,17 +4544,19 @@ impl Shell {
                         )
                     })
                     .collect();
-                rows.push(self.picker_row(
-                    SharedString::from("project-option:new"),
-                    rust_i18n::t!("composer.project.new").to_string(),
-                    None,
-                    false,
-                    cx.listener(|this, _, window, cx| {
-                        this.picker = None;
-                        this.open_add_project(window, cx);
-                    }),
-                    cx,
-                ));
+                if self.local_paths {
+                    rows.push(self.picker_row(
+                        SharedString::from("project-option:new"),
+                        rust_i18n::t!("composer.project.new").to_string(),
+                        None,
+                        false,
+                        cx.listener(|this, _, window, cx| {
+                            this.picker = None;
+                            this.open_add_project(window, cx);
+                        }),
+                        cx,
+                    ));
+                }
                 rows.push(self.picker_row(
                     SharedString::from("project-option:none"),
                     rust_i18n::t!("composer.project.none").to_string(),

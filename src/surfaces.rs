@@ -110,6 +110,8 @@ pub struct SurfacePanel {
     opening: Option<(WorkspaceId, String, FileOpenMode)>,
     /// Cross-file definition to select after its buffer has been opened.
     definition: Option<(WorkspaceId, DefinitionTarget)>,
+    /// Whether daemon-host worktree paths may launch a process on this machine.
+    local_paths: bool,
     /// What the work cost and where each login stands, as the shell last
     /// read it. `None` until the Reports surface has been opened.
     usage: Option<ginka_ui::reports::UsageReport>,
@@ -186,7 +188,7 @@ pub enum SurfaceEvent {
 impl EventEmitter<SurfaceEvent> for SurfacePanel {}
 
 impl SurfacePanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, local_paths: bool) -> Self {
         let finder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.files.search").to_string())
@@ -229,6 +231,7 @@ impl SurfacePanel {
             browsing_files: true,
             opening: None,
             definition: None,
+            local_paths,
             open: None,
             changes: None,
             expanded: None,
@@ -516,6 +519,7 @@ impl SurfacePanel {
         };
         let surface = cx.entity().downgrade();
         let definition_workspace = workspace.clone();
+        let local_paths = self.local_paths;
         let editor = (!file.binary && !file.truncated).then(|| {
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
@@ -556,18 +560,20 @@ impl SurfacePanel {
                     });
                 });
             });
-            crate::lsp::attach(
-                editor.clone(),
-                lsp,
-                crate::lsp::EditorLspDocument::new(
-                    worktree,
-                    file.path.clone(),
-                    file.text.clone(),
-                    show_definition,
-                ),
-                window,
-                cx,
-            );
+            if local_paths {
+                crate::lsp::attach(
+                    editor.clone(),
+                    lsp,
+                    crate::lsp::EditorLspDocument::new(
+                        worktree,
+                        file.path.clone(),
+                        file.text.clone(),
+                        show_definition,
+                    ),
+                    window,
+                    cx,
+                );
+            }
             editor
         });
         self.file_buffers.push(FileBuffer {

@@ -27,6 +27,8 @@ use std::sync::{Arc, Mutex};
 /// A daemon connection shared by everything in the window.
 pub struct DaemonLink {
     discovery: Discovery,
+    /// Whether daemon-host paths also name files on the window's machine.
+    local_paths: bool,
     /// `None` until the first request, and again after one fails.
     client: Mutex<Option<Arc<Client>>>,
 }
@@ -54,10 +56,17 @@ pub(crate) struct SessionLaunch {
 impl DaemonLink {
     /// Build a link to the daemon that owns `paths`.
     pub fn new(paths: &Paths) -> Arc<Self> {
+        let discovery = Discovery::new(paths.daemon_handshake()).with_home(paths.root());
         Arc::new(Self {
-            discovery: Discovery::new(paths.daemon_handshake()).with_home(paths.root()),
+            local_paths: discovery.location().allows_local_paths(),
+            discovery,
             client: Mutex::new(None),
         })
+    }
+
+    /// Whether a daemon-host path may be passed to a local picker or process.
+    pub fn allows_local_paths(&self) -> bool {
+        self.local_paths
     }
 
     /// The rows the sidebar draws.
@@ -446,8 +455,8 @@ impl DaemonLink {
     /// Register a repository or folder.
     ///
     /// The path is one this window picked, so it is a path on *this* machine.
-    /// That is only the same thing as a daemon-host path while the daemon is
-    /// the local child process, which is why the picker is offered only then
+    /// That is only the same thing as a daemon-host path while the daemon was
+    /// discovered or spawned locally, which is why the picker is offered only then
     /// (`docs/roadmap.md` §4.1).
     /// The registered project comes back so the caller can aim the next chat
     /// at what the reader just added, rather than at whatever was selected
