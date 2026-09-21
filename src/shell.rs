@@ -7321,6 +7321,9 @@ impl Shell {
                                 let id = tab.id.clone();
                                 let closing = tab.id.clone();
                                 let confirming = self.terminals.close_confirmation(&tab.id);
+                                let show_label =
+                                    rust_i18n::t!("terminal.show", title = tab.title.clone())
+                                        .to_string();
                                 let close_label = if confirming {
                                     rust_i18n::t!("terminal.close.confirm").to_string()
                                 } else {
@@ -7334,25 +7337,37 @@ impl Shell {
                                     .items_center()
                                     .rounded(px(tokens.radius.row))
                                     .when(showing, |this| this.bg(tokens.colors().row_active()))
-                                    .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.show_terminal(index, window, cx)
-                                    }))
                                     .child(
-                                        Icon::new(IconName::SquareTerminal)
-                                            .size_3()
-                                            .text_color(tokens.colors().text_secondary),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if showing {
-                                                tokens.colors().text_primary
-                                            } else {
-                                                tokens.colors().text_secondary
-                                            })
-                                            .child(tab.title.clone()),
+                                        Button::new(SharedString::from(format!(
+                                            "show-terminal:{id}"
+                                        )))
+                                        .ghost()
+                                        .compact()
+                                        .accessibility_label(show_label)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.show_terminal(index, window, cx)
+                                        }))
+                                        .child(
+                                            h_flex()
+                                                .gap_2()
+                                                .items_center()
+                                                .child(
+                                                    Icon::new(IconName::SquareTerminal)
+                                                        .size_3()
+                                                        .text_color(tokens.colors().text_secondary),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(if showing {
+                                                            tokens.colors().text_primary
+                                                        } else {
+                                                            tokens.colors().text_secondary
+                                                        })
+                                                        .child(tab.title.clone()),
+                                                ),
+                                        ),
                                     )
                                     .child(
                                         Button::new(SharedString::from(format!(
@@ -7363,7 +7378,6 @@ impl Shell {
                                         .tooltip(close_label.clone())
                                         .accessibility_label(close_label)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            cx.stop_propagation();
                                             this.request_terminal_close(closing.clone(), cx)
                                         }))
                                         .child(

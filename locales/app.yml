@@ -613,6 +613,9 @@ terminal.open:
 terminal.open_file:
   en: "Open %{location}"
   ja: "%{location} を開く"
+terminal.show:
+  en: "Show terminal %{title}"
+  ja: "ターミナル %{title} を表示"
 terminal.close:
   en: Close this running terminal
   ja: 実行中のターミナルを閉じる
