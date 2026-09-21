@@ -634,6 +634,18 @@ terminal.search.open:
 terminal.search.placeholder:
   en: Find in terminal
   ja: ターミナル内を検索
+terminal.split.open:
+  en: Split terminal
+  ja: ターミナルを分割
+terminal.split.open.short:
+  en: Split
+  ja: 分割
+terminal.split.close:
+  en: Exit terminal split
+  ja: ターミナル分割を解除
+terminal.split.close.short:
+  en: Single
+  ja: 単一
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…

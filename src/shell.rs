@@ -841,6 +841,7 @@ impl Shell {
                             .map_err(|_| ()),
                         DaemonEvent::TerminalClosed { terminal } => this
                             .update(cx, |this, cx| {
+                                let was_split = this.terminals.split_ids().is_some();
                                 if this
                                     .terminal_search
                                     .as_ref()
@@ -849,6 +850,9 @@ impl Shell {
                                     this.terminal_search = None;
                                 }
                                 this.terminals.close(&terminal);
+                                if was_split && this.terminals.split_ids().is_none() {
+                                    this.resize_terminal(cx);
+                                }
                                 cx.notify();
                             })
                             .map_err(|_| ()),
@@ -1853,20 +1857,26 @@ impl Shell {
     /// Sized for the dock as it is now, and focused, because someone who
     /// opened a terminal means to type in it.
     fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_terminal_with_input(None, window, cx);
+        self.open_terminal_with_input(None, false, window, cx);
     }
 
     /// Start a shell and optionally paste initial input once the daemon owns it.
     fn open_terminal_with_input(
         &mut self,
         input: Option<String>,
+        split: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
-        let (rows, cols) = self.dock_size();
+        let (rows, mut cols) = self.dock_size();
+        if split && self.terminals.split_ids().is_none() {
+            cols = (cols / 2).max(1);
+        } else if !split && self.terminals.split_ids().is_some() {
+            cols = TERMINAL_COLUMNS;
+        }
         let link = self.link.clone();
         self.terminal_focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
@@ -1883,8 +1893,15 @@ impl Shell {
                 this.update(cx, |this, cx| {
                     let title = this.terminals.tabs().len() + 1;
                     this.terminal_search = None;
-                    this.terminals
-                        .open(terminal, format!("shell {title}"), rows, cols);
+                    if split {
+                        this.terminals
+                            .open_split(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
+                    } else {
+                        this.terminals
+                            .open(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
+                    }
                     // The daemon is the one that names them, and it numbers
                     // them per workspace: adopting straight afterwards is how
                     // two windows agree on what a tab is called.
@@ -1895,6 +1912,18 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Add a daemon terminal beside the active pane, or collapse the split.
+    fn toggle_terminal_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminals.split_ids().is_some() {
+            self.terminals.unsplit();
+            self.resize_terminal(cx);
+            self.terminal_focus.focus(window, cx);
+            cx.notify();
+        } else {
+            self.open_terminal_with_input(None, true, window, cx);
+        }
     }
 
     /// Paste an editor selection into the terminal without appending Return.
@@ -1909,7 +1938,7 @@ impl Shell {
         }
         self.terminal_focus.focus(window, cx);
         let Some(terminal) = self.terminals.active_id() else {
-            self.open_terminal_with_input(Some(selection), window, cx);
+            self.open_terminal_with_input(Some(selection), false, window, cx);
             return;
         };
         let link = self.link.clone();
@@ -1947,6 +1976,7 @@ impl Shell {
                         this.terminal_search = None;
                         this.terminals
                             .open(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
                         this.adopt_terminals(cx);
                     }
                     Err(error) => this.index_error = Some(error),
@@ -2039,6 +2069,7 @@ impl Shell {
                     this.terminal_search = None;
                     this.terminals
                         .open(terminal, format!("shell {title}"), rows, cols);
+                    this.resize_terminal(cx);
                     // Adopted straight afterwards so the tab takes the name
                     // the daemon gave it, which says whose sign-in it is.
                     this.adopt_terminals(cx);
@@ -2056,6 +2087,7 @@ impl Shell {
         terminal: ginka_protocol::TerminalId,
         cx: &mut Context<Self>,
     ) {
+        let was_split = self.terminals.split_ids().is_some();
         match self.terminals.request_close(&terminal) {
             ginka_ui::terminal::CloseRequest::Confirm => cx.notify(),
             ginka_ui::terminal::CloseRequest::Close => {
@@ -2065,6 +2097,9 @@ impl Shell {
                     .is_some_and(|search| search.terminal == terminal)
                 {
                     self.terminal_search = None;
+                }
+                if was_split && self.terminals.split_ids().is_none() {
+                    self.resize_terminal(cx);
                 }
                 cx.notify();
                 let link = self.link.clone();
@@ -2077,10 +2112,32 @@ impl Shell {
 
     /// Bring one of the dock's shells to the front.
     fn show_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let was_split = self.terminals.split_ids().is_some();
         self.terminal_search = None;
         self.terminals.focus(index);
+        if was_split && self.terminals.split_ids().is_none() {
+            self.resize_terminal(cx);
+        }
         self.terminal_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Focus one pane of a split without collapsing the pair.
+    fn focus_terminal(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.terminals.active_id().as_ref() != Some(terminal);
+        if changed {
+            self.terminal_search = None;
+            self.terminals.focus_id(terminal);
+        }
+        self.terminal_focus.focus(window, cx);
+        if changed {
+            cx.notify();
+        }
     }
 
     /// Find the shells the daemon kept running in this workspace, and replay
@@ -2097,8 +2154,13 @@ impl Shell {
                 .await;
             let fresh = this
                 .update(cx, |this, cx| {
+                    let was_split = this.terminals.split_ids().is_some();
+                    let fresh = this.terminals.adopt(&running, rows, cols);
+                    if was_split && this.terminals.split_ids().is_none() {
+                        this.resize_terminal(cx);
+                    }
                     cx.notify();
-                    this.terminals.adopt(&running, rows, cols)
+                    fresh
                 })
                 .ok()
                 .unwrap_or_default();
@@ -2131,7 +2193,12 @@ impl Shell {
     fn dock_size(&self) -> (u16, u16) {
         let height = f32::from(self.layout.size(Panel::TerminalDock));
         let rows = ((height - 40.) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
-        (rows, TERMINAL_COLUMNS)
+        let columns = if self.terminals.split_ids().is_some() {
+            (TERMINAL_COLUMNS / 2).max(1)
+        } else {
+            TERMINAL_COLUMNS
+        };
+        (rows, columns)
     }
 
     /// Send a keystroke to the shell.
@@ -2166,14 +2233,25 @@ impl Shell {
     }
 
     /// Browse terminal history without sending wheel movement to the pty.
-    fn scroll_terminal(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
+    fn scroll_terminal(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        event: &ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) {
         let pixels = f32::from(event.delta.pixel_delta(px(17.)).y);
         if pixels == 0.0 {
             return;
         }
         cx.stop_propagation();
         let lines = (pixels.abs() / 17.0).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
-        if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+        if let Some(screen) = self
+            .terminals
+            .tabs_mut()
+            .iter_mut()
+            .find(|tab| &tab.id == terminal)
+            .map(|tab| &mut tab.screen)
+        {
             let before = screen.display_offset();
             screen.scroll(lines);
             if screen.display_offset() != before {
@@ -7115,6 +7193,7 @@ impl Shell {
     fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let active = self.terminals.active_index();
+        let split = self.terminals.split_ids();
         let history_offset = self
             .terminals
             .active()
@@ -7229,6 +7308,26 @@ impl Shell {
                     }))
                     .child(div().flex_1())
                     .children((!self.terminals.is_empty()).then(|| {
+                        let label = if split.is_some() {
+                            rust_i18n::t!("terminal.split.close").to_string()
+                        } else {
+                            rust_i18n::t!("terminal.split.open").to_string()
+                        };
+                        Button::new("split-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
+                            .label(if split.is_some() {
+                                rust_i18n::t!("terminal.split.close.short").to_string()
+                            } else {
+                                rust_i18n::t!("terminal.split.open.short").to_string()
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal_split(window, cx)
+                            }))
+                    }))
+                    .children((!self.terminals.is_empty()).then(|| {
                         Button::new("find-terminal")
                             .ghost()
                             .compact()
@@ -7254,10 +7353,42 @@ impl Shell {
                     })),
             )
             .children(self.terminal_search_bar(cx))
-            .child(match self.terminals.active() {
-                Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
-                None => self.terminal_start(cx).into_any_element(),
-            })
+            .child(self.terminal_panes(cx))
+    }
+
+    /// One terminal viewport, or the two panes of an active split.
+    fn terminal_panes(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        if let Some(split) = self.terminals.split_ids() {
+            let active = self.terminals.active_id();
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .children(split.into_iter().enumerate().filter_map(|(index, id)| {
+                    let tab = self.terminals.tabs().iter().find(|tab| tab.id == id)?;
+                    Some(
+                        v_flex()
+                            .id(SharedString::from(format!("terminal-pane:{id}")))
+                            .flex_1()
+                            .min_w_0()
+                            .when(active.as_ref() == Some(&id), |this| {
+                                this.border_t_1().border_color(tokens.colors().accent)
+                            })
+                            .when(index > 0, |this| {
+                                this.border_l_1()
+                                    .border_color(tokens.colors().border_subtle)
+                            })
+                            .child(self.terminal_screen(&id, &tab.screen, cx)),
+                    )
+                }))
+                .into_any_element();
+        }
+        match self.terminals.active() {
+            Some(tab) => self
+                .terminal_screen(&tab.id, &tab.screen, cx)
+                .into_any_element(),
+            None => self.terminal_start(cx).into_any_element(),
+        }
     }
 
     /// Find controls for the terminal in front.
@@ -7355,22 +7486,26 @@ impl Shell {
     /// colour would stop wherever the text did.
     fn terminal_screen(
         &self,
+        terminal: &ginka_protocol::TerminalId,
         screen: &ginka_ui::terminal::TerminalScreen,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let mono = cx.theme_mono_font();
-        let selected = self
-            .terminal_search
-            .as_ref()
-            .and_then(|search| search.chosen.and_then(|chosen| search.matches.get(chosen)));
+        let selected = self.terminal_search.as_ref().and_then(|search| {
+            (search.terminal == *terminal)
+                .then(|| search.chosen.and_then(|chosen| search.matches.get(chosen)))
+                .flatten()
+        });
         let rows = screen.rows_of_cells_with_match(selected);
         let worktree = self.session.as_ref().map(|row| row.path.clone());
+        let active = self.terminals.active_id().as_ref() == Some(terminal);
+        let focus_terminal = terminal.clone();
+        let scroll_terminal = terminal.clone();
+        let terminal_key = terminal.clone();
 
         v_flex()
-            .id("terminal-screen")
-            .track_focus(&self.terminal_focus)
-            .key_context("Terminal")
+            .id(SharedString::from(format!("terminal-screen:{terminal}")))
             .flex_1()
             .px_2()
             .py_1()
@@ -7378,14 +7513,22 @@ impl Shell {
             .font_family(mono)
             .text_size(px(12.5))
             .line_height(px(17.))
-            .on_scroll_wheel(
-                cx.listener(|this, event: &ScrollWheelEvent, _, cx| {
-                    this.scroll_terminal(event, cx)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, window, cx| {
+                    this.focus_terminal(&focus_terminal, window, cx)
                 }),
             )
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
-            )
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                this.scroll_terminal(&scroll_terminal, event, cx)
+            }))
+            .when(active, |this| {
+                this.track_focus(&self.terminal_focus)
+                    .key_context("Terminal")
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        this.type_into_terminal(event, cx)
+                    }))
+            })
             .children(rows.into_iter().enumerate().map(|(row_index, row)| {
                 let text = row.iter().map(|cell| cell.text).collect::<String>();
                 let links = worktree
@@ -7410,7 +7553,7 @@ impl Shell {
                             rust_i18n::t!("terminal.open_file", location = location).to_string();
                         elements.push(
                             Button::new(SharedString::from(format!(
-                                "terminal-file:{row_index}:{column}"
+                                "terminal-file:{terminal_key}:{row_index}:{column}"
                             )))
                             .text()
                             .h(px(17.))

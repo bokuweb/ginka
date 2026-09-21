@@ -492,6 +492,7 @@ pub struct TerminalTabs {
     tabs: Vec<TerminalTab>,
     active: usize,
     armed_close: Option<TerminalId>,
+    split: Option<[TerminalId; 2]>,
 }
 
 impl TerminalTabs {
@@ -532,10 +533,16 @@ impl TerminalTabs {
         self.active().map(|tab| tab.id.clone())
     }
 
+    /// The two terminal ids shown side by side, from left to right.
+    pub fn split_ids(&self) -> Option<[TerminalId; 2]> {
+        self.split.clone()
+    }
+
     /// Add a shell and bring it to the front, because opening one is asking
     /// to type in it.
     pub fn open(&mut self, id: TerminalId, title: String, rows: u16, cols: u16) {
         self.armed_close = None;
+        self.split = None;
         self.tabs.push(TerminalTab {
             id,
             title,
@@ -544,11 +551,43 @@ impl TerminalTabs {
         self.active = self.tabs.len() - 1;
     }
 
+    /// Add a shell to the right of the active terminal and focus it.
+    pub fn open_split(&mut self, id: TerminalId, title: String, rows: u16, cols: u16) {
+        let Some(left) = self.active_id() else {
+            self.open(id, title, rows, cols);
+            return;
+        };
+        self.armed_close = None;
+        self.tabs.push(TerminalTab {
+            id: id.clone(),
+            title,
+            screen: TerminalScreen::new(rows, cols),
+        });
+        self.active = self.tabs.len() - 1;
+        self.split = Some([left, id]);
+    }
+
+    /// Stop showing two panes without stopping either daemon terminal.
+    pub fn unsplit(&mut self) {
+        self.split = None;
+    }
+
     /// Show a tab that is already open.
     pub fn focus(&mut self, index: usize) {
         if index < self.tabs.len() {
             self.armed_close = None;
             self.active = index;
+            let id = &self.tabs[index].id;
+            if self.split.as_ref().is_some_and(|split| !split.contains(id)) {
+                self.split = None;
+            }
+        }
+    }
+
+    /// Focus a shell by id, retaining a split when it is one of its panes.
+    pub fn focus_id(&mut self, id: &TerminalId) {
+        if let Some(index) = self.tabs.iter().position(|tab| &tab.id == id) {
+            self.focus(index);
         }
     }
 
@@ -582,6 +621,9 @@ impl TerminalTabs {
         let Some(index) = self.tabs.iter().position(|tab| &tab.id == id) else {
             return;
         };
+        if self.split.as_ref().is_some_and(|split| split.contains(id)) {
+            self.split = None;
+        }
         self.tabs.remove(index);
         self.active = index
             .saturating_sub(1)
@@ -633,6 +675,13 @@ impl TerminalTabs {
             .is_some_and(|id| !self.tabs.iter().any(|tab| &tab.id == id))
         {
             self.armed_close = None;
+        }
+        if self.split.as_ref().is_some_and(|split| {
+            split
+                .iter()
+                .any(|id| !self.tabs.iter().any(|tab| &tab.id == id))
+        }) {
+            self.split = None;
         }
         self.active = front
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
@@ -861,6 +910,26 @@ mod tests {
         tabs.open(TerminalId("two".into()), "shell 2".into(), 24, 80);
         assert_eq!(tabs.active_id(), Some(TerminalId("two".into())));
         assert_eq!(tabs.tabs().len(), 2);
+    }
+
+    #[test]
+    fn splitting_keeps_two_shells_visible_until_one_is_closed() {
+        let mut tabs = TerminalTabs::new();
+        let left = TerminalId("left".into());
+        let right = TerminalId("right".into());
+        tabs.open(left.clone(), "shell 1".into(), 24, 80);
+        tabs.open_split(right.clone(), "shell 2".into(), 24, 80);
+
+        assert_eq!(tabs.split_ids(), Some([left.clone(), right.clone()]));
+        assert_eq!(tabs.active_id(), Some(right.clone()));
+
+        tabs.focus_id(&left);
+        assert_eq!(tabs.active_id(), Some(left.clone()));
+        assert_eq!(tabs.split_ids(), Some([left.clone(), right.clone()]));
+
+        tabs.close(&left);
+        assert_eq!(tabs.split_ids(), None);
+        assert_eq!(tabs.active_id(), Some(right));
     }
 
     #[test]
