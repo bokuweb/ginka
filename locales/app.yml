@@ -646,6 +646,9 @@ terminal.split.close:
 terminal.split.close.short:
   en: Single
   ja: 単一
+terminal.split.focus_other:
+  en: Other pane
+  ja: 別のペイン
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…

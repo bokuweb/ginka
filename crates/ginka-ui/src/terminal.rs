@@ -651,6 +651,25 @@ impl TerminalTabs {
         true
     }
 
+    /// Focus the other visible split pane and report whether a split existed.
+    pub fn focus_other_pane(&mut self) -> bool {
+        let Some(split) = self.split.clone() else {
+            return false;
+        };
+        let Some(active) = self.active_id() else {
+            return false;
+        };
+        let other = if active == split[0] {
+            &split[1]
+        } else if active == split[1] {
+            &split[0]
+        } else {
+            return false;
+        };
+        self.focus_id(other);
+        true
+    }
+
     /// Whether this terminal is waiting for a second close activation.
     pub fn close_confirmation(&self, id: &TerminalId) -> bool {
         self.armed_close.as_ref() == Some(id)
@@ -1033,6 +1052,25 @@ mod tests {
         tabs.close(&spare);
         tabs.close(&TerminalId("left".into()));
         assert!(!tabs.focus_next(), "one tab has nowhere else to move");
+    }
+
+    #[test]
+    fn the_other_split_pane_can_be_focused_without_changing_the_pair() {
+        let mut tabs = TerminalTabs::new();
+        let left = TerminalId("left".into());
+        let right = TerminalId("right".into());
+        tabs.open(left.clone(), "left".into(), 24, 40);
+        tabs.open_split(right.clone(), "right".into(), 24, 40);
+
+        assert!(tabs.focus_other_pane());
+        assert_eq!(tabs.active_id(), Some(left.clone()));
+        assert_eq!(tabs.split_ids(), Some([left.clone(), right.clone()]));
+        assert!(tabs.focus_other_pane());
+        assert_eq!(tabs.active_id(), Some(right.clone()));
+        assert_eq!(tabs.split_ids(), Some([left, right]));
+
+        tabs.unsplit();
+        assert!(!tabs.focus_other_pane());
     }
 
     #[test]

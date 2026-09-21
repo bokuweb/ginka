@@ -2158,6 +2158,16 @@ impl Shell {
         }
     }
 
+    /// Move keyboard input to the other visible terminal pane.
+    fn focus_other_terminal_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminals.focus_other_pane() {
+            self.terminal_search = None;
+            self.persist();
+            self.terminal_focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
     /// Find the shells the daemon kept running in this workspace, and replay
     /// what they printed while this window was not looking.
     fn adopt_terminals(&mut self, cx: &mut Context<Self>) {
@@ -7394,6 +7404,18 @@ impl Shell {
                             )
                     }))
                     .child(div().flex_1())
+                    .children(split.is_some().then(|| {
+                        let label = rust_i18n::t!("terminal.split.focus_other").to_string();
+                        Button::new("focus-other-terminal-pane")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label.clone())
+                            .label(label)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.focus_other_terminal_pane(window, cx)
+                            }))
+                    }))
                     .children((!self.terminals.is_empty()).then(|| {
                         let label = if split.is_some() {
                             rust_i18n::t!("terminal.split.close").to_string()
