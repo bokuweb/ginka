@@ -97,6 +97,9 @@ pub enum Applied {
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     blocks: Vec<Block>,
+    /// Drawable block indexes for top-level user prompts. Interaction-card
+    /// answers are user blocks too, but are not new turns in the outline.
+    prompt_indices: Vec<usize>,
     /// Drawable block for each stored sequence position. Hidden bookkeeping
     /// entries are `None`; positions are one-based while this vector is zero-based.
     positions: Vec<Option<usize>>,
@@ -128,6 +131,19 @@ impl Transcript {
             .and_then(|index| self.positions.get(index))
             .copied()
             .flatten()
+    }
+
+    /// Top-level prompts in reading order, paired with their drawable block.
+    ///
+    /// Answers to an agent question or plan card are deliberately absent: the
+    /// outline is turn navigation, not a second rendering of every user block.
+    pub fn prompt_outline(&self) -> impl ExactSizeIterator<Item = (usize, &str)> {
+        self.prompt_indices.iter().map(|index| {
+            let Block::User { text } = &self.blocks[*index] else {
+                unreachable!("prompt indexes are recorded only for user blocks")
+            };
+            (*index, text.as_str())
+        })
     }
 
     /// The newest question or plan still waiting for an answer.
@@ -214,7 +230,9 @@ impl Transcript {
         let block = match &entry.payload {
             TranscriptPayload::User { text } => {
                 self.blocks.push(Block::User { text: text.clone() });
-                Some(self.blocks.len() - 1)
+                let index = self.blocks.len() - 1;
+                self.prompt_indices.push(index);
+                Some(index)
             }
             TranscriptPayload::Response { request_id, text } => {
                 self.answer(request_id);
@@ -493,6 +511,26 @@ impl Transcript {
         *is_error = failed;
         Some(index)
     }
+}
+
+/// Turn a prompt into the single bounded line shown by the outline.
+///
+/// The limit counts Unicode scalar values rather than bytes, so truncating a
+/// Japanese prompt cannot cut through its UTF-8 representation.
+pub fn prompt_outline_label(prompt: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let one_line = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() <= max_chars {
+        return one_line;
+    }
+    let mut label = one_line
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    label.push('…');
+    label
 }
 
 /// What the agent is doing, for the line under the transcript.
@@ -1216,6 +1254,39 @@ mod tests {
         assert_eq!(transcript.block_index_for_seq(3), Some(1));
         assert_eq!(transcript.block_index_for_seq(5), Some(2));
         assert_eq!(transcript.block_index_for_seq(99), None);
+    }
+
+    #[test]
+    fn the_prompt_outline_lists_prompts_but_not_interaction_answers() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            user(1, "First prompt"),
+            text(2, "Working"),
+            TranscriptEntry {
+                seq: 3,
+                at: 0,
+                payload: TranscriptPayload::Response {
+                    request_id: "database".into(),
+                    text: "SQLite".into(),
+                },
+            },
+            user(4, "Second prompt"),
+        ]);
+
+        assert_eq!(
+            transcript.prompt_outline().collect::<Vec<_>>(),
+            vec![(0, "First prompt"), (3, "Second prompt")]
+        );
+    }
+
+    #[test]
+    fn a_prompt_outline_label_is_one_bounded_line() {
+        assert_eq!(
+            prompt_outline_label("  Fix the tests\nthen format  ", 80),
+            "Fix the tests then format"
+        );
+        assert_eq!(prompt_outline_label("abcdefgh", 6), "abcde…");
+        assert_eq!(prompt_outline_label("abc", 0), "");
     }
 
     /// A frame at 120Hz, which is what the reveal is driven by.

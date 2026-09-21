@@ -29,6 +29,8 @@ pub enum Command {
     IndexWorkspace,
     /// Find persisted text in the open conversation.
     FindTranscript,
+    /// Show or hide the open conversation's prompt outline.
+    TogglePromptOutline,
     /// Return to the previous project or session visit.
     NavigateBack,
     /// Return to the next project or session visit.
@@ -122,6 +124,12 @@ pub fn entries(
             label: rust_i18n::t!("palette.transcript.find").to_string(),
             hint: Some(rust_i18n::t!("palette.transcript.find.hint").to_string()),
             command: Command::FindTranscript,
+        });
+        all.push(Entry {
+            id: "transcript:outline".into(),
+            label: rust_i18n::t!("palette.transcript.outline").to_string(),
+            hint: None,
+            command: Command::TogglePromptOutline,
         });
     }
     for row in rows {
@@ -302,6 +310,16 @@ mod tests {
             entries(&layout(), &[], None, true, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::FindTranscript)
+        );
+        assert!(
+            !entries(&layout(), &[], None, false, false, false)
+                .iter()
+                .any(|entry| entry.command == Command::TogglePromptOutline)
+        );
+        assert!(
+            entries(&layout(), &[], None, true, false, false)
+                .iter()
+                .any(|entry| entry.command == Command::TogglePromptOutline)
         );
     }
 }

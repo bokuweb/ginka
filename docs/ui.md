@@ -215,7 +215,11 @@ active conversation. With nothing selected, the rail stands alone.
   ⌘F (Ctrl+F elsewhere) opens daemon-side find-in-page above the transcript;
   Enter/Shift+Enter or its buttons move through open-session matches in reading
   order, show the current excerpt and count, and reveal the folded block that
-  owns the persisted sequence. The chosen block is visibly highlighted.
+  owns the persisted sequence. The chosen block is visibly highlighted. A
+  compact *Prompts (N)* strip expands into a bounded, numbered outline of
+  top-level user prompts; choosing one reveals its folded block. Answers to an
+  inline question or plan are not promoted into separate outline turns. The
+  same toggle is available from the command palette.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.

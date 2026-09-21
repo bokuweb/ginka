@@ -352,6 +352,15 @@ palette.transcript.find:
 palette.transcript.find.hint:
   en: ⌘F
   ja: ⌘F
+palette.transcript.outline:
+  en: Toggle prompt outline
+  ja: プロンプト一覧を切り替え
+transcript.outline.label:
+  en: "Prompts (%{count})"
+  ja: "プロンプト (%{count})"
+transcript.outline.tooltip:
+  en: Show or hide the prompt outline
+  ja: プロンプト一覧を表示または非表示
 composer.project.pick:
   en: Choose where this runs
   ja: 実行する場所を選ぶ

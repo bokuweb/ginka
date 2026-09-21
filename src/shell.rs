@@ -263,6 +263,8 @@ pub struct Shell {
     transcript_of: Option<SessionId>,
     /// Present while the reader is finding text in the open conversation.
     transcript_search: Option<TranscriptSearch>,
+    /// Whether the turn-sized prompt navigator is expanded above the transcript.
+    prompt_outline_open: bool,
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
@@ -819,6 +821,7 @@ impl Shell {
             transcript: Transcript::new(),
             transcript_of: None,
             transcript_search: None,
+            prompt_outline_open: false,
             agents: Vec::new(),
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -2597,6 +2600,9 @@ impl Shell {
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
             Command::FindTranscript => self.on_find_transcript(&FindTranscript, window, cx),
+            Command::TogglePromptOutline => {
+                self.prompt_outline_open = !self.prompt_outline_open;
+            }
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -2900,9 +2906,117 @@ impl Shell {
             .id("transcript")
             .flex_1()
             .min_h_0()
+            .children(self.transcript_outline(cx))
             .children(self.transcript_search_bar(cx))
             .child(scroller)
             .into_any_element()
+    }
+
+    /// A bounded list of the conversation's top-level prompts.
+    ///
+    /// The folded transcript supplies drawable block indexes, so choosing an
+    /// item uses the same scroll path as persisted search without asking the
+    /// daemon to rediscover text already on screen.
+    fn transcript_outline(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        const LABEL_CHARS: usize = 72;
+
+        let prompts = self
+            .transcript
+            .prompt_outline()
+            .enumerate()
+            .map(|(number, (block, prompt))| {
+                (
+                    number + 1,
+                    block,
+                    ginka_ui::transcript::prompt_outline_label(prompt, LABEL_CHARS),
+                )
+            })
+            .collect::<Vec<_>>();
+        if prompts.is_empty() {
+            return None;
+        }
+
+        let tokens = Tokens::global(cx).clone();
+        let count = prompts.len();
+        let open = self.prompt_outline_open;
+        let rows = open.then(|| {
+            v_flex()
+                .w_full()
+                .max_h(px(184.))
+                .px_3()
+                .pb_2()
+                .gap_0p5()
+                .overflow_y_scrollbar()
+                .children(prompts.into_iter().map(|(number, block, label)| {
+                    Button::new(SharedString::from(format!("prompt-outline-{block}")))
+                        .ghost()
+                        .w_full()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .w(px(24.))
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(number.to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(label),
+                                ),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.transcript_follows = false;
+                            this.transcript_scroll.scroll_to_top_of_item(block);
+                            cx.notify();
+                        }))
+                }))
+        });
+
+        Some(
+            v_flex()
+                .w_full()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .child(
+                    h_flex().w_full().h(px(34.)).px_3().justify_end().child(
+                        Button::new("toggle-prompt-outline")
+                            .ghost()
+                            .compact()
+                            .tooltip(rust_i18n::t!("transcript.outline.tooltip").to_string())
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .items_center()
+                                    .child(
+                                        Icon::new(if open {
+                                            IconName::ChevronDown
+                                        } else {
+                                            IconName::ChevronRight
+                                        })
+                                        .size_3(),
+                                    )
+                                    .child(
+                                        rust_i18n::t!("transcript.outline.label", count = count)
+                                            .to_string(),
+                                    ),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.prompt_outline_open = !this.prompt_outline_open;
+                                cx.notify();
+                            })),
+                    ),
+                )
+                .children(rows)
+                .into_any_element(),
+        )
     }
 
     /// Find-in-page controls above the conversation.
