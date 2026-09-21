@@ -1988,13 +1988,22 @@ impl Shell {
         .detach();
     }
 
-    /// Stop one of the dock's shells.
-    fn close_terminal(&mut self, terminal: ginka_protocol::TerminalId, cx: &mut Context<Self>) {
-        self.terminals.close(&terminal);
-        cx.notify();
-        let link = self.link.clone();
-        cx.background_spawn(async move { link.close_terminal(&terminal).await })
-            .detach();
+    /// Confirm, then stop one of the dock's running shells.
+    fn request_terminal_close(
+        &mut self,
+        terminal: ginka_protocol::TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        match self.terminals.request_close(&terminal) {
+            ginka_ui::terminal::CloseRequest::Confirm => cx.notify(),
+            ginka_ui::terminal::CloseRequest::Close => {
+                cx.notify();
+                let link = self.link.clone();
+                cx.background_spawn(async move { link.close_terminal(&terminal).await })
+                    .detach();
+            }
+            ginka_ui::terminal::CloseRequest::Missing => {}
+        }
     }
 
     /// Bring one of the dock's shells to the front.
@@ -6896,6 +6905,12 @@ impl Shell {
                                 let showing = index == active;
                                 let id = tab.id.clone();
                                 let closing = tab.id.clone();
+                                let confirming = self.terminals.close_confirmation(&tab.id);
+                                let close_label = if confirming {
+                                    rust_i18n::t!("terminal.close.confirm").to_string()
+                                } else {
+                                    rust_i18n::t!("terminal.close").to_string()
+                                };
                                 h_flex()
                                     .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
                                     .px_2()
@@ -6925,18 +6940,34 @@ impl Shell {
                                             .child(tab.title.clone()),
                                     )
                                     .child(
-                                        div()
-                                            .id(SharedString::from(format!("close-terminal:{id}")))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.close_terminal(closing.clone(), cx)
-                                            }))
-                                            .child(
+                                        Button::new(SharedString::from(format!(
+                                            "close-terminal:{id}"
+                                        )))
+                                        .ghost()
+                                        .compact()
+                                        .tooltip(close_label.clone())
+                                        .accessibility_label(close_label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.request_terminal_close(closing.clone(), cx)
+                                        }))
+                                        .child(
+                                            if confirming {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(tokens.colors().status_attention)
+                                                    .child(
+                                                        rust_i18n::t!("terminal.close.short")
+                                                            .to_string(),
+                                                    )
+                                                    .into_any_element()
+                                            } else {
                                                 Icon::new(IconName::Close)
                                                     .size_3()
-                                                    .text_color(tokens.colors().text_muted),
-                                            ),
+                                                    .text_color(tokens.colors().text_muted)
+                                                    .into_any_element()
+                                            },
+                                        ),
                                     )
                             }),
                     )

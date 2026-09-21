@@ -384,6 +384,17 @@ pub struct TerminalTab {
     pub screen: TerminalScreen,
 }
 
+/// What the view should do with one request to close a running terminal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseRequest {
+    /// The terminal is still present and needs one explicit confirmation.
+    Confirm,
+    /// The second request removed the tab and should reach the daemon.
+    Close,
+    /// The terminal already disappeared, so there is nothing to stop.
+    Missing,
+}
+
 /// The shells the dock is showing, and which one is in front.
 ///
 /// The daemon owns the ptys; this is only the strip and the screens. A window
@@ -393,6 +404,7 @@ pub struct TerminalTab {
 pub struct TerminalTabs {
     tabs: Vec<TerminalTab>,
     active: usize,
+    armed_close: Option<TerminalId>,
 }
 
 impl TerminalTabs {
@@ -436,6 +448,7 @@ impl TerminalTabs {
     /// Add a shell and bring it to the front, because opening one is asking
     /// to type in it.
     pub fn open(&mut self, id: TerminalId, title: String, rows: u16, cols: u16) {
+        self.armed_close = None;
         self.tabs.push(TerminalTab {
             id,
             title,
@@ -447,7 +460,27 @@ impl TerminalTabs {
     /// Show a tab that is already open.
     pub fn focus(&mut self, index: usize) {
         if index < self.tabs.len() {
+            self.armed_close = None;
             self.active = index;
+        }
+    }
+
+    /// Whether this terminal is waiting for a second close activation.
+    pub fn close_confirmation(&self, id: &TerminalId) -> bool {
+        self.armed_close.as_ref() == Some(id)
+    }
+
+    /// Ask to stop a running terminal, requiring the same action twice.
+    pub fn request_close(&mut self, id: &TerminalId) -> CloseRequest {
+        if !self.tabs.iter().any(|tab| &tab.id == id) {
+            return CloseRequest::Missing;
+        }
+        if self.close_confirmation(id) {
+            self.close(id);
+            CloseRequest::Close
+        } else {
+            self.armed_close = Some(id.clone());
+            CloseRequest::Confirm
         }
     }
 
@@ -456,6 +489,9 @@ impl TerminalTabs {
     /// The neighbour to the left, the way every tab strip does it: closing the
     /// third tab leaves the second in front, not the first.
     pub fn close(&mut self, id: &TerminalId) {
+        if self.armed_close.as_ref() == Some(id) {
+            self.armed_close = None;
+        }
         let Some(index) = self.tabs.iter().position(|tab| &tab.id == id) else {
             return;
         };
@@ -504,6 +540,13 @@ impl TerminalTabs {
             }
         }
         self.tabs = kept;
+        if self
+            .armed_close
+            .as_ref()
+            .is_some_and(|id| !self.tabs.iter().any(|tab| &tab.id == id))
+        {
+            self.armed_close = None;
+        }
         self.active = front
             .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
             .unwrap_or(0);
@@ -706,6 +749,34 @@ mod tests {
         tabs.close(&TerminalId("two".into()));
         assert!(tabs.is_empty());
         assert_eq!(tabs.active_id(), None, "nothing left to type into");
+    }
+
+    #[test]
+    fn a_running_terminal_needs_a_second_close_request() {
+        let mut tabs = TerminalTabs::new();
+        let terminal = TerminalId("one".into());
+        tabs.open(terminal.clone(), "shell 1".into(), 24, 80);
+
+        assert_eq!(tabs.request_close(&terminal), CloseRequest::Confirm);
+        assert!(tabs.close_confirmation(&terminal));
+        assert_eq!(tabs.tabs().len(), 1, "the first press is not destructive");
+
+        assert_eq!(tabs.request_close(&terminal), CloseRequest::Close);
+        assert!(tabs.is_empty());
+    }
+
+    #[test]
+    fn moving_to_another_terminal_cancels_a_pending_close() {
+        let mut tabs = TerminalTabs::new();
+        let one = TerminalId("one".into());
+        tabs.open(one.clone(), "shell 1".into(), 24, 80);
+        tabs.open(TerminalId("two".into()), "shell 2".into(), 24, 80);
+
+        assert_eq!(tabs.request_close(&one), CloseRequest::Confirm);
+        tabs.focus(1);
+        assert!(!tabs.close_confirmation(&one));
+        assert_eq!(tabs.request_close(&one), CloseRequest::Confirm);
+        assert_eq!(tabs.tabs().len(), 2);
     }
 
     #[test]

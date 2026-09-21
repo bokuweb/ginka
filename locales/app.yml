@@ -610,6 +610,15 @@ terminal.open:
 terminal.open_file:
   en: "Open %{location}"
   ja: "%{location} を開く"
+terminal.close:
+  en: Close this running terminal
+  ja: 実行中のターミナルを閉じる
+terminal.close.confirm:
+  en: Activate again to close this running terminal
+  ja: もう一度操作して実行中のターミナルを閉じる
+terminal.close.short:
+  en: Close?
+  ja: 閉じる？
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…
