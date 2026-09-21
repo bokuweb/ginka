@@ -583,6 +583,9 @@ surface.files.edit:
 surface.files.add_selection:
   en: Add selection to chat
   ja: 選択範囲をチャットに追加
+surface.files.send_selection_to_terminal:
+  en: Send selection to terminal
+  ja: 選択範囲をターミナルに送る
 surface.files.find:
   en: Find
   ja: 検索

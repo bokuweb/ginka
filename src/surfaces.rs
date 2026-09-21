@@ -14,6 +14,7 @@ use ginka_ui::Tokens;
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
     language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
+    selected_text,
 };
 use ginka_ui::file_search::FileSearchScope;
 use ginka_ui::file_tree::{FileTree, TreeRowKind};
@@ -175,6 +176,8 @@ pub enum SurfaceEvent {
     },
     /// Add an editor selection's exact source location to the chat draft.
     AddFileReference(String),
+    /// Paste an editor selection into the active terminal.
+    WriteTerminalSelection(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
     /// Set every installed copy of a grouped skill to one state.
@@ -2553,6 +2556,25 @@ impl SurfacePanel {
                 }),
             )
         });
+        let terminal_selection = buffer.editor.as_ref().map(|editor| {
+            let disabled = {
+                let editor = editor.read(cx);
+                selected_text(&editor.value(), editor.selected_range()).is_none()
+            };
+            let editor = editor.clone();
+            (
+                disabled,
+                cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    let selection = {
+                        let editor = editor.read(cx);
+                        selected_text(&editor.value(), editor.selected_range())
+                    };
+                    if let Some(selection) = selection {
+                        cx.emit(SurfaceEvent::WriteTerminalSelection(selection));
+                    }
+                }),
+            )
+        });
         let find = buffer.editor.as_ref().map(|editor| {
             let editor = editor.clone();
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -2655,7 +2677,25 @@ impl SurfacePanel {
                                 .disabled(disabled)
                                 .on_click(selection)
                         },
-                    )),
+                    ))
+                    .children(
+                        (!buffer.previewing)
+                            .then_some(terminal_selection)
+                            .flatten()
+                            .map(|(disabled, selection)| {
+                                let label =
+                                    rust_i18n::t!("surface.files.send_selection_to_terminal")
+                                        .to_string();
+                                Button::new("send-file-selection-to-terminal")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(disabled)
+                                    .tooltip(label.clone())
+                                    .accessibility_label(label)
+                                    .child(Icon::new(IconName::SquareTerminal).size_3())
+                                    .on_click(selection)
+                            }),
+                    ),
             )
             .children(buffer.complaint.as_ref().map(|complaint| {
                 div()

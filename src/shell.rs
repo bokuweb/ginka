@@ -513,6 +513,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::WriteTerminalSelection(selection) => {
+                    this.write_terminal_selection(selection.clone(), window, cx)
+                }
                 crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
                 crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
                     this.set_skill_enabled(name.clone(), *enabled, cx)
@@ -1850,6 +1853,16 @@ impl Shell {
     /// Sized for the dock as it is now, and focused, because someone who
     /// opened a terminal means to type in it.
     fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_terminal_with_input(None, window, cx);
+    }
+
+    /// Start a shell and optionally paste initial input once the daemon owns it.
+    fn open_terminal_with_input(
+        &mut self,
+        input: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
@@ -1858,7 +1871,13 @@ impl Shell {
         self.terminal_focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
             let opened = cx
-                .background_spawn(async move { link.open_terminal(&workspace, rows, cols).await })
+                .background_spawn(async move {
+                    let terminal = link.open_terminal(&workspace, rows, cols).await;
+                    if let (Some(terminal), Some(input)) = (&terminal, input) {
+                        link.write_terminal(terminal, input).await;
+                    }
+                    terminal
+                })
                 .await;
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
@@ -1876,6 +1895,26 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Paste an editor selection into the terminal without appending Return.
+    fn write_terminal_selection(
+        &mut self,
+        selection: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.layout.is_open(Panel::TerminalDock) {
+            self.toggle(Panel::TerminalDock, cx);
+        }
+        self.terminal_focus.focus(window, cx);
+        let Some(terminal) = self.terminals.active_id() else {
+            self.open_terminal_with_input(Some(selection), window, cx);
+            return;
+        };
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, selection).await })
+            .detach();
     }
 
     /// Start or refresh semantic indexing in a visible daemon terminal.

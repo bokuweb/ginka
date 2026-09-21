@@ -422,7 +422,7 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] Closing a running terminal is an explicit two-step action: the first activation arms that tab and changes its accessible label, the second removes it and sends the shared close request to the daemon; moving to another tab cancels the pending close
 - [ ] Terminal splits
 - [x] File-path detection in terminal and chat output → click opens the file. Terminal rows and settled assistant prose share one detector: relative paths and absolute paths beneath the worktree open the Files editor at their optional one-based line/column, while URLs, version numbers, domain names, parent traversal and paths on another host are never treated as workspace files. Inline-code locations become links without rewriting fenced code
-- [ ] Selection → "add to chat" / "add to terminal"
+- [x] Editor selection → "add to chat" / "send to terminal": saved selections add an exact one-based file location to the chat draft; current-buffer text, including unsaved edits, is pasted unchanged into the active daemon terminal without an extra Return, opening one when necessary
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
 - [x] Intra-line word diff
 - [ ] Split diff
