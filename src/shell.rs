@@ -56,6 +56,8 @@ actions!(
         FindTranscript,
         NextSurface,
         PreviousSurface,
+        NextTerminalTab,
+        PreviousTerminalTab,
         NavigateBack,
         NavigateForward
     ]
@@ -140,6 +142,14 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-alt-left", PreviousSurface, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-left", PreviousSurface, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-]", NextTerminalTab, Some("Terminal")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-pagedown", NextTerminalTab, Some("Terminal")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-[", PreviousTerminalTab, Some("Terminal")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-pageup", PreviousTerminalTab, Some("Terminal")),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -2853,6 +2863,37 @@ impl Shell {
 
     fn on_previous_surface(&mut self, _: &PreviousSurface, _: &mut Window, cx: &mut Context<Self>) {
         self.cycle_surface(false, cx);
+    }
+
+    fn cycle_terminal_tab(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let moved = if previous {
+            self.terminals.focus_previous()
+        } else {
+            self.terminals.focus_next()
+        };
+        if moved {
+            self.terminal_search = None;
+            self.persist();
+            cx.notify();
+        }
+    }
+
+    fn on_next_terminal_tab(
+        &mut self,
+        _: &NextTerminalTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_terminal_tab(false, cx);
+    }
+
+    fn on_previous_terminal_tab(
+        &mut self,
+        _: &PreviousTerminalTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_terminal_tab(true, cx);
     }
 
     /// Whether a recorded destination still exists in the daemon's latest list.
@@ -7977,6 +8018,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
+            .on_action(cx.listener(Self::on_next_terminal_tab))
+            .on_action(cx.listener(Self::on_previous_terminal_tab))
             .on_action(cx.listener(Self::on_navigate_back))
             .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))

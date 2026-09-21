@@ -629,6 +629,28 @@ impl TerminalTabs {
         }
     }
 
+    /// Focus the next tab, wrapping to the first, and report whether it moved.
+    pub fn focus_next(&mut self) -> bool {
+        if self.tabs.len() < 2 {
+            return false;
+        }
+        self.focus((self.active + 1) % self.tabs.len());
+        true
+    }
+
+    /// Focus the previous tab, wrapping to the last, and report whether it moved.
+    pub fn focus_previous(&mut self) -> bool {
+        if self.tabs.len() < 2 {
+            return false;
+        }
+        self.focus(if self.active == 0 {
+            self.tabs.len() - 1
+        } else {
+            self.active - 1
+        });
+        true
+    }
+
     /// Whether this terminal is waiting for a second close activation.
     pub fn close_confirmation(&self, id: &TerminalId) -> bool {
         self.armed_close.as_ref() == Some(id)
@@ -988,6 +1010,29 @@ mod tests {
         tabs.focus_id(&right);
         assert_eq!(tabs.split_ids(), Some([right.clone(), spare]));
         assert_eq!(tabs.active_id(), Some(right));
+    }
+
+    #[test]
+    fn keyboard_tab_navigation_wraps_and_keeps_the_other_split_pane() {
+        let mut tabs = TerminalTabs::new();
+        let spare = TerminalId("spare".into());
+        let left = TerminalId("left".into());
+        let right = TerminalId("right".into());
+        tabs.open(spare.clone(), "spare".into(), 24, 40);
+        tabs.open(left.clone(), "left".into(), 24, 40);
+        tabs.open_split(right.clone(), "right".into(), 24, 40);
+
+        assert!(tabs.focus_next());
+        assert_eq!(tabs.active_id(), Some(spare.clone()));
+        assert_eq!(tabs.split_ids(), Some([left.clone(), spare.clone()]));
+
+        assert!(tabs.focus_previous());
+        assert_eq!(tabs.active_id(), Some(right.clone()));
+        assert_eq!(tabs.split_ids(), Some([left, right]));
+
+        tabs.close(&spare);
+        tabs.close(&TerminalId("left".into()));
+        assert!(!tabs.focus_next(), "one tab has nowhere else to move");
     }
 
     #[test]
