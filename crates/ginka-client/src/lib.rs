@@ -17,6 +17,7 @@ use anyhow::{Context, Result, anyhow};
 use async_tungstenite::tungstenite::Message;
 use async_tungstenite::tungstenite::client::IntoClientRequest;
 use async_tungstenite::tungstenite::http::HeaderValue;
+use async_tungstenite::tungstenite::protocol::WebSocketConfig;
 use futures_util::StreamExt;
 use ginka_protocol::envelope::PROTOCOL_VERSION;
 use ginka_protocol::rpc::{Request, Response};
@@ -84,9 +85,10 @@ impl Client {
         let stream = async_net::TcpStream::connect(("127.0.0.1", handshake.port))
             .await
             .with_context(|| format!("connecting to 127.0.0.1:{}", handshake.port))?;
-        let (socket, _) = async_tungstenite::client_async(request, stream)
-            .await
-            .context("the daemon refused the connection")?;
+        let (socket, _) =
+            async_tungstenite::client_async_with_config(request, stream, Some(wire_config()))
+                .await
+                .context("the daemon refused the connection")?;
         let (mut sink, mut incoming) = socket.split();
 
         // Nothing is asked before the hello: the daemon answers it with the
@@ -283,6 +285,16 @@ impl Client {
     }
 }
 
+/// Apply the protocol's message bound to everything received from the daemon.
+///
+/// The frame cap is raised to the same value as the message cap because one
+/// attachment request or image response may legitimately occupy one frame.
+fn wire_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES))
+        .max_frame_size(Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES))
+}
+
 /// Deliver an answer to whoever is waiting for it.
 ///
 /// A missing entry means the caller gave up; that is not an error, and the
@@ -321,4 +333,18 @@ where
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wire_config;
+    use ginka_protocol::MAX_WIRE_MESSAGE_BYTES;
+
+    #[test]
+    fn the_client_bounds_daemon_messages_and_their_frames() {
+        let config = wire_config();
+
+        assert_eq!(config.max_message_size, Some(MAX_WIRE_MESSAGE_BYTES));
+        assert_eq!(config.max_frame_size, Some(MAX_WIRE_MESSAGE_BYTES));
+    }
 }
