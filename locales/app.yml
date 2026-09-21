@@ -172,6 +172,21 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.attachment.add:
+  en: Attach files
+  ja: ファイルを添付
+composer.attachment.choose:
+  en: Choose files to attach
+  ja: 添付するファイルを選択
+composer.attachment.uploading:
+  en: Uploading files…
+  ja: ファイルをアップロード中…
+composer.attachment.remove:
+  en: Remove attachment
+  ja: 添付を削除
+composer.attachment.failed:
+  en: "Could not attach file: %{error}"
+  ja: "ファイルを添付できませんでした: %{error}"
 composer.access.pick:
   en: Choose what the agent may touch
   ja: エージェントに許す操作を選ぶ
@@ -355,6 +370,9 @@ palette.transcript.find.hint:
 palette.transcript.outline:
   en: Toggle prompt outline
   ja: プロンプト一覧を切り替え
+palette.composer.attach:
+  en: Attach files to prompt
+  ja: プロンプトにファイルを添付
 transcript.outline.label:
   en: "Prompts (%{count})"
   ja: "プロンプト (%{count})"

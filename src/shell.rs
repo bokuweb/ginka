@@ -13,7 +13,7 @@ use crate::surfaces::SurfacePanel;
 use ginka_core::Paths;
 use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
-use ginka_protocol::model::{AgentStatus, Checkpoint, SessionState, TranscriptEntry};
+use ginka_protocol::model::{AgentStatus, Attachment, Checkpoint, SessionState, TranscriptEntry};
 use ginka_protocol::provider::ProviderModel;
 use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
 use ginka_ui::Tokens;
@@ -298,6 +298,14 @@ pub struct Shell {
     mentions: Vec<ginka_protocol::model::FileEntry>,
     /// The commands offered for the `/` being typed, if one is.
     commands: Vec<ginka_protocol::model::SlashCommand>,
+    /// Files already copied into the daemon store for the next ordinary prompt.
+    attachments: Vec<Attachment>,
+    /// Whether selected files are currently being read and uploaded.
+    attachment_busy: bool,
+    /// Why the most recent selected file could not be attached.
+    attachment_error: Option<String>,
+    /// Invalidates an upload reply when navigation changed underneath it.
+    attachment_generation: u64,
     /// The agent the user chose, which beats whatever would have been picked
     /// for them. `None` until they choose one.
     chosen_agent: Option<String>,
@@ -532,6 +540,10 @@ impl Shell {
                         this.submitted = false;
                         this.transcript_follows = true;
                         this.picker = None;
+                        this.attachments.clear();
+                        this.attachment_busy = false;
+                        this.attachment_error = None;
+                        this.attachment_generation = this.attachment_generation.wrapping_add(1);
                         this.chosen_agent = None;
                         this.chosen_model = None;
                         this.chosen_reasoning_effort = None;
@@ -836,6 +848,10 @@ impl Shell {
             picker: None,
             mentions: Vec::new(),
             commands: Vec::new(),
+            attachments: Vec::new(),
+            attachment_busy: false,
+            attachment_error: None,
+            attachment_generation: 0,
             chosen_agent: None,
             chosen_model: None,
             chosen_reasoning_effort: None,
@@ -952,6 +968,86 @@ impl Shell {
         .detach();
     }
 
+    /// Pick local files and copy them into the daemon-owned attachment store.
+    ///
+    /// Paths never enter the transcript. Only the returned opaque references
+    /// are kept by the window, so this remains valid when the daemon runs on a
+    /// different host from the client.
+    fn choose_attachments(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.attachment_busy || self.session_state == Some(SessionState::AwaitingInput) {
+            return;
+        }
+        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some(
+                rust_i18n::t!("composer.attachment.choose")
+                    .to_string()
+                    .into(),
+            ),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if paths.is_empty() {
+                return;
+            }
+            let Some((link, generation)) = this
+                .update(cx, |this, cx| {
+                    this.attachment_busy = true;
+                    this.attachment_error = None;
+                    this.attachment_generation = this.attachment_generation.wrapping_add(1);
+                    cx.notify();
+                    (this.link.clone(), this.attachment_generation)
+                })
+                .ok()
+            else {
+                return;
+            };
+            let uploaded = cx
+                .background_spawn(async move {
+                    let mut uploaded = Vec::with_capacity(paths.len());
+                    for path in paths {
+                        let bytes = std::fs::read(&path)
+                            .map_err(|error| format!("{}: {error}", path.display()))?;
+                        let name = path
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string());
+                        uploaded.push(link.upload_attachment(name, bytes).await?);
+                    }
+                    Ok::<_, String>(uploaded)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.attachment_generation != generation {
+                    return;
+                }
+                this.attachment_busy = false;
+                match uploaded {
+                    Ok(uploaded) => this.attachments.extend(uploaded),
+                    Err(error) => this.attachment_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove one uploaded file from the next prompt.
+    ///
+    /// Its daemon blob is deliberately left for ordinary store cleanup: a
+    /// client must not delete content another draft may already reference.
+    fn remove_attachment(&mut self, reference: &str, cx: &mut Context<Self>) {
+        self.attachments
+            .retain(|attachment| attachment.reference != reference);
+        self.attachment_error = None;
+        cx.notify();
+    }
+
     /// Register the folder selected in the add-project dialog.
     fn submit_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.add_project.as_mut() else {
@@ -1037,6 +1133,10 @@ impl Shell {
         self.picker = None;
         self.mentions.clear();
         self.commands.clear();
+        self.attachments.clear();
+        self.attachment_busy = false;
+        self.attachment_error = None;
+        self.attachment_generation = self.attachment_generation.wrapping_add(1);
         self.checkpoints = Vec::new();
         self.rewinding = None;
         self.forking = None;
@@ -1943,17 +2043,28 @@ impl Shell {
     /// A chat that has no workspace yet — the home screen — gets one first,
     /// which is either the chosen project's checkout or a scratch worktree.
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let text = self.composer.read(cx).value().trim().to_string();
-        if text.is_empty() {
+        if self.attachment_busy {
             return;
         }
+        let draft = self.composer.read(cx).value().trim().to_string();
         if self.session_state == Some(SessionState::AwaitingInput)
             && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
             && let Some(request_id) = self.transcript.open_request().map(str::to_string)
         {
-            self.respond_from_composer(session, request_id, text, window, cx);
+            if draft.is_empty() {
+                return;
+            }
+            self.respond_from_composer(session, request_id, draft, window, cx);
             return;
         }
+        let references = self
+            .attachments
+            .iter()
+            .map(|attachment| attachment.reference.as_str())
+            .collect::<Vec<_>>();
+        let Some(text) = ginka_ui::composer::submission(&draft, &references) else {
+            return;
+        };
         match self.session.clone() {
             Some(row) => self.send(row, text, window, cx),
             None => self.send_first(text, window, cx),
@@ -2037,6 +2148,8 @@ impl Shell {
     fn send(&mut self, row: SessionRow, text: String, window: &mut Window, cx: &mut Context<Self>) {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
+        self.attachments.clear();
+        self.attachment_error = None;
         // The draft belonged to the prompt that has just been sent.
         {
             let link = self.link.clone();
@@ -2599,6 +2712,7 @@ impl Shell {
                 self.open_terminal(window, cx);
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
+            Command::AttachFiles => self.choose_attachments(window, cx),
             Command::FindTranscript => self.on_find_transcript(&FindTranscript, window, cx),
             Command::TogglePromptOutline => {
                 self.prompt_outline_open = !self.prompt_outline_open;
@@ -4065,8 +4179,12 @@ impl Shell {
         // borrow held across the whole composer.
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
-        let primary_action =
-            ginka_ui::composer::primary_action(working, self.composer.read(cx).value().as_ref());
+        let awaiting_input = self.session_state == Some(SessionState::AwaitingInput);
+        let primary_action = ginka_ui::composer::primary_action(
+            working,
+            self.composer.read(cx).value().as_ref(),
+            !awaiting_input && !self.attachments.is_empty(),
+        );
         let picker = self.picker_panel(cx);
         let model_chip = self.model_chip_button(cx);
         let effort_chip = self.reasoning_effort_chip_button(cx);
@@ -4076,6 +4194,35 @@ impl Shell {
         let account_chip = self.account_chip_button(cx);
         let usage_chip = self.usage_chip_button(cx);
         let new_session = self.new_session_button(cx);
+        let attachment_chips = self
+            .attachments
+            .iter()
+            .map(|attachment| {
+                let reference = attachment.reference.clone();
+                Button::new(SharedString::from(format!(
+                    "remove-attachment-{}",
+                    attachment.reference
+                )))
+                .ghost()
+                .compact()
+                .tooltip(rust_i18n::t!("composer.attachment.remove").to_string())
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div()
+                                .max_w(px(180.))
+                                .truncate()
+                                .text_xs()
+                                .child(attachment.name.clone()),
+                        )
+                        .child(Icon::new(IconName::Close).size_3()),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(&reference, cx)))
+            })
+            .collect::<Vec<_>>();
+        let attachment_error = self.attachment_error.clone();
 
         v_flex()
             .w_full()
@@ -4101,6 +4248,23 @@ impl Shell {
                     } else {
                         tokens.colors().border_subtle
                     })
+                    .children((!attachment_chips.is_empty()).then(|| {
+                        h_flex()
+                            .w_full()
+                            .gap_1()
+                            .flex_wrap()
+                            .children(attachment_chips)
+                    }))
+                    .children(attachment_error.map(|error| {
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(
+                                rust_i18n::t!("composer.attachment.failed", error = error)
+                                    .to_string(),
+                            )
+                    }))
                     .child(Textarea::new(&self.composer))
                     .child(
                         h_flex()
@@ -4108,10 +4272,24 @@ impl Shell {
                             .gap_2()
                             .items_center()
                             .child(
-                                Icon::empty()
-                                    .path(ginka_ui::assets::icon::PAPERCLIP)
-                                    .size_4()
-                                    .text_color(tokens.colors().text_muted),
+                                Button::new("attach-files")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(self.attachment_busy || awaiting_input)
+                                    .tooltip(if self.attachment_busy {
+                                        rust_i18n::t!("composer.attachment.uploading").to_string()
+                                    } else {
+                                        rust_i18n::t!("composer.attachment.add").to_string()
+                                    })
+                                    .child(
+                                        Icon::empty()
+                                            .path(ginka_ui::assets::icon::PAPERCLIP)
+                                            .size_4()
+                                            .text_color(tokens.colors().text_muted),
+                                    )
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.choose_attachments(window, cx)
+                                    })),
                             )
                             .child(div().flex_1())
                             .children(model_chip)

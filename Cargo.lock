@@ -2389,6 +2389,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "async-channel",
+ "base64 0.22.1",
  "ginka-client",
  "ginka-core",
  "ginka-protocol",

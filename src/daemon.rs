@@ -15,9 +15,9 @@ use ginka_core::Paths;
 use std::path::PathBuf;
 
 use ginka_protocol::model::{
-    Account, AgentStatus, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch, FileContent,
-    FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch, Skill, SlashCommand,
-    TerminalInfo, TranscriptEntry, WorkspaceSummary,
+    Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch,
+    FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch, Skill,
+    SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
@@ -162,6 +162,26 @@ impl DaemonLink {
             .await?
         {
             Response::SessionMatches { matches } => Ok(matches),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Upload bytes selected by this client to the daemon-owned attachment store.
+    pub async fn upload_attachment(
+        &self,
+        name: String,
+        bytes: Vec<u8>,
+    ) -> Result<Attachment, String> {
+        use base64::Engine as _;
+
+        match self
+            .ask_result(Request::UploadAttachment {
+                name,
+                data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            })
+            .await?
+        {
+            Response::Attachment { attachment } => Ok(attachment),
             other => Err(format!("unexpected answer {other:?}")),
         }
     }

@@ -233,7 +233,11 @@ active conversation. With nothing selected, the rail stands alone.
   printed and *at the wall* appears as a word beside it, never as colour alone
   (`docs/accounts.md` §11). While a session is working, the circular action is
   Stop when the draft is empty and Send as soon as a follow-up has been typed;
-  that send steers or queues according to the driver's existing policy. `@`
+  that send steers or queues according to the driver's existing policy. The
+  attachment button selects several files, uploads their bytes into the
+  daemon-owned store, and shows removable filename chips without putting
+  opaque references into the editable draft. An attachment by itself is a
+  sendable prompt; upload errors stay beside the chips. `@`
   file mentions and `/` slash commands have an inline filtered menu. `↩`
   sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
   available.

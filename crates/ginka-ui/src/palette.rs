@@ -27,6 +27,8 @@ pub enum Command {
     NewTerminal,
     /// Build or refresh semantic search for the selected workspace.
     IndexWorkspace,
+    /// Choose files for the next prompt.
+    AttachFiles,
     /// Find persisted text in the open conversation.
     FindTranscript,
     /// Show or hide the open conversation's prompt outline.
@@ -105,6 +107,12 @@ pub fn entries(
         label: rust_i18n::t!("palette.terminal.new").to_string(),
         hint: None,
         command: Command::NewTerminal,
+    });
+    all.push(Entry {
+        id: "composer:attach".into(),
+        label: rust_i18n::t!("palette.composer.attach").to_string(),
+        hint: None,
+        command: Command::AttachFiles,
     });
     if let Some(indexed) = workspace_indexed {
         all.push(Entry {
@@ -320,6 +328,15 @@ mod tests {
             entries(&layout(), &[], None, true, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::TogglePromptOutline)
+        );
+    }
+
+    #[test]
+    fn attaching_files_is_available_before_a_session_exists() {
+        assert!(
+            entries(&layout(), &[], None, false, false, false)
+                .iter()
+                .any(|entry| entry.command == Command::AttachFiles)
         );
     }
 }

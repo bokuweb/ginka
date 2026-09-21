@@ -85,6 +85,7 @@ ginka-protocol.workspace = true
 ginka-ui.workspace = true
 anyhow.workspace = true
 async-channel.workspace = true
+base64.workspace = true
 gpui.workspace = true
 gpui_platform.workspace = true
 gpui-component.workspace = true
