@@ -9,6 +9,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::Engine as _;
+use ginka_protocol::AgentEvent;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
@@ -49,6 +50,37 @@ impl BlobStore {
         self.put(&bytes, &mime)
     }
 
+    /// Replace inline binary sources in one normalized provider event.
+    ///
+    /// This runs at the daemon's transcript boundary: drivers remain unaware
+    /// of storage, while both persisted entries and live pushes receive the
+    /// same short reference. Only fields that can carry provider output are
+    /// inspected; user prompts and control metadata never pass through here.
+    pub fn externalize_event(&self, event: &mut AgentEvent) -> Result<()> {
+        match event {
+            AgentEvent::TextDelta { text } | AgentEvent::Reasoning { text } => {
+                *text = self.externalize(text)?;
+            }
+            AgentEvent::ToolCall { activity } | AgentEvent::ToolResult { activity } => {
+                if let Some(detail) = activity.detail.as_mut() {
+                    *detail = self.externalize(detail)?;
+                }
+            }
+            AgentEvent::SubagentFinished {
+                summary: Some(summary),
+                ..
+            }
+            | AgentEvent::SessionResult {
+                summary: Some(summary),
+                ..
+            } => {
+                *summary = self.externalize(summary)?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// Store bytes and return their reference. Identical bytes of the same
     /// type resolve to the same file, so a screenshot repeated across turns
     /// is stored once.
@@ -62,8 +94,16 @@ impl BlobStore {
             // cannot leave a half file under a name that claims to be whole.
             let temp = path.with_extension("part");
             std::fs::write(&temp, bytes).with_context(|| format!("writing {}", temp.display()))?;
-            std::fs::rename(&temp, &path)
-                .with_context(|| format!("publishing {}", path.display()))?;
+            match std::fs::rename(&temp, &path) {
+                Ok(()) => {}
+                // Another session can externalize the same screenshot at the
+                // same time. Identical content has the same target, so losing
+                // that publication race is success once the target exists.
+                Err(_) if path.exists() => {}
+                Err(error) => {
+                    return Err(error).with_context(|| format!("publishing {}", path.display()));
+                }
+            }
         }
         Ok(format!("{BLOB_SCHEME}{name}"))
     }

@@ -8,9 +8,10 @@
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
     Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint,
-    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project,
-    ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand, TerminalInfo,
-    TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch, WorkspaceSummary,
+    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, GitCommit, PlanSnapshot,
+    Project, ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand,
+    TerminalInfo, TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch,
+    WorkspaceSummary,
 };
 use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -89,6 +90,9 @@ pub enum Request {
     /// thing a person least wants deleted by accident, so it stays unless
     /// `delete_home` says otherwise.
     RemoveAccount { id: AccountId, delete_home: bool },
+    /// Select the account future sessions of its provider use. Existing
+    /// sessions retain the account they started on.
+    SelectAccount { id: AccountId },
     /// Run the vendor's own sign-in for an account, in a terminal in
     /// `workspace`'s dock, with the account's directory in its environment.
     LoginAccount {
@@ -121,7 +125,7 @@ pub enum Request {
         /// Provider service tier, when the selected model accepts one.
         #[serde(default)]
         service_tier: Option<String>,
-        /// Which login to run on; the provider's default when absent.
+        /// Which login to run on; the provider's active account when absent.
         account: Option<AccountId>,
         /// What the agent may do without asking. `Ask` when absent.
         #[serde(default)]
@@ -160,6 +164,49 @@ pub enum Request {
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
+    /// Follow-ups waiting behind a session's active turn, in dispatch order.
+    QueuedMessages {
+        /// Session whose pending prompts are requested.
+        session: SessionId,
+    },
+    /// Replace the text of one queued follow-up without changing its place.
+    EditQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+        /// Replacement prompt text.
+        text: String,
+    },
+    /// Remove one queued follow-up before it reaches the transcript.
+    RemoveQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+    },
+    /// Move one queued follow-up to a zero-based dispatch position.
+    MoveQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+        /// Destination in dispatch order, clamped to the queue's end.
+        index: u32,
+    },
+    /// Inject one queued follow-up into the active turn when its transport can
+    /// receive unsolicited input.
+    SendQueuedMessageNow {
+        /// Session whose live transport should receive the prompt.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+    },
+    /// Ask the provider to compact an idle conversation's context.
+    ///
+    /// This is deliberately distinct from a follow-up: it is refused while a
+    /// turn is running and on providers without an explicit compact command.
+    CompactSession { session: SessionId },
     /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser), approve a
     /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal), or resolve a
     /// [`Permission`](crate::event::AgentEvent::Permission) request.
@@ -221,6 +268,13 @@ pub enum Request {
         workspace: WorkspaceId,
         source: ChangeSource,
     },
+    /// Recent commits in a workspace, newest first and bounded by the daemon.
+    WorkspaceHistory {
+        workspace: WorkspaceId,
+        /// Maximum rows to return; defaults to 50 and never exceeds 200.
+        #[serde(default)]
+        limit: Option<u32>,
+    },
 
     /// Commit a workspace's work.
     ///
@@ -243,6 +297,27 @@ pub enum Request {
         /// `true` stages it, `false` takes it back out.
         staged: bool,
     },
+    /// Move one exact diff hunk into or out of the index.
+    ///
+    /// `header` is the complete `@@` line last read from the corresponding
+    /// unstaged or staged diff. A stale header is refused rather than matched
+    /// approximately to another change.
+    StageHunk {
+        workspace: WorkspaceId,
+        path: String,
+        header: String,
+        /// `true` stages it, `false` takes it back out.
+        staged: bool,
+    },
+    /// Throw away one exact unstaged hunk.
+    ///
+    /// `header` is the complete `@@` line last read from the unstaged diff. A
+    /// stale header is refused rather than matched approximately.
+    RevertHunk {
+        workspace: WorkspaceId,
+        path: String,
+        header: String,
+    },
     /// Throw away one file's uncommitted work.
     ///
     /// Destructive and not undoable through git: a file the agent invented is
@@ -253,6 +328,8 @@ pub enum Request {
     },
     /// Push a workspace's branch, setting an upstream if it has none.
     Push { workspace: WorkspaceId },
+    /// Fetch and fast-forward a clean workspace branch from its upstream.
+    Pull { workspace: WorkspaceId },
 
     /// The files in a workspace, best matches for `query` first.
     ///
@@ -465,7 +542,7 @@ pub struct Attempt {
     /// A driver id: `claude`, `codex`, …
     pub agent: String,
     pub model: Option<String>,
-    /// Which login to run on; the provider's default when absent.
+    /// Which login to run on; the provider's active account when absent.
     #[serde(default)]
     pub account: Option<AccountId>,
 }
@@ -525,11 +602,21 @@ pub enum Response {
     Transcript {
         entries: Vec<TranscriptEntry>,
     },
+    QueuedMessages {
+        /// Pending prompts in dispatch order.
+        messages: Vec<crate::model::QueuedMessage>,
+        /// Whether the active transport can receive a waiting prompt now.
+        can_send_now: bool,
+    },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
     },
     Changes {
         changes: Changes,
+    },
+    /// Recent commits in newest-first order.
+    History {
+        commits: Vec<GitCommit>,
     },
     Files {
         files: Vec<FileEntry>,
@@ -683,6 +770,44 @@ mod tests {
                 session: SessionId("s-1".into()),
                 after: Some(10),
                 limit: None,
+            },
+            Request::CompactSession {
+                session: SessionId("s-1".into()),
+            },
+            Request::EditQueuedMessage {
+                session: SessionId("s-1".into()),
+                id: 7,
+                text: "use the parser".into(),
+            },
+            Request::MoveQueuedMessage {
+                session: SessionId("s-1".into()),
+                id: 7,
+                index: 0,
+            },
+            Request::SendQueuedMessageNow {
+                session: SessionId("s-1".into()),
+                id: 7,
+            },
+            Request::Pull {
+                workspace: WorkspaceId("comet/harbor".into()),
+            },
+            Request::WorkspaceHistory {
+                workspace: WorkspaceId("comet/harbor".into()),
+                limit: Some(25),
+            },
+            Request::StageHunk {
+                workspace: WorkspaceId("comet/harbor".into()),
+                path: "src/main.rs".into(),
+                header: "@@ -1 +1 @@".into(),
+                staged: true,
+            },
+            Request::SelectAccount {
+                id: AccountId("codex-work".into()),
+            },
+            Request::RevertHunk {
+                workspace: WorkspaceId("comet/harbor".into()),
+                path: "src/main.rs".into(),
+                header: "@@ -1 +1 @@".into(),
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),
