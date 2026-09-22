@@ -878,6 +878,77 @@ impl DaemonLink {
         .await;
     }
 
+    /// Follow-ups waiting behind this session's active turn.
+    pub async fn queued_messages(
+        &self,
+        session: &SessionId,
+    ) -> (Vec<ginka_protocol::model::QueuedMessage>, bool) {
+        match self
+            .ask_result(Request::QueuedMessages {
+                session: session.clone(),
+            })
+            .await
+        {
+            Ok(Response::QueuedMessages {
+                messages,
+                can_send_now,
+            }) => (messages, can_send_now),
+            _ => (Vec::new(), false),
+        }
+    }
+
+    /// Replace one waiting follow-up.
+    pub async fn edit_queued_message(
+        &self,
+        session: &SessionId,
+        id: u64,
+        text: String,
+    ) -> Result<(), String> {
+        self.git_sync(Request::EditQueuedMessage {
+            session: session.clone(),
+            id,
+            text,
+        })
+        .await
+    }
+
+    /// Remove one waiting follow-up.
+    pub async fn remove_queued_message(&self, session: &SessionId, id: u64) -> Result<(), String> {
+        self.git_sync(Request::RemoveQueuedMessage {
+            session: session.clone(),
+            id,
+        })
+        .await
+    }
+
+    /// Move one waiting follow-up to a zero-based dispatch position.
+    pub async fn move_queued_message(
+        &self,
+        session: &SessionId,
+        id: u64,
+        index: u32,
+    ) -> Result<(), String> {
+        self.git_sync(Request::MoveQueuedMessage {
+            session: session.clone(),
+            id,
+            index,
+        })
+        .await
+    }
+
+    /// Inject one waiting follow-up into the active turn when supported.
+    pub async fn send_queued_message_now(
+        &self,
+        session: &SessionId,
+        id: u64,
+    ) -> Result<(), String> {
+        self.git_sync(Request::SendQueuedMessageNow {
+            session: session.clone(),
+            id,
+        })
+        .await
+    }
+
     /// Ask the provider to compact an idle conversation's context.
     pub async fn compact_session(&self, session: &SessionId) -> Result<(), String> {
         match self

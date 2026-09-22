@@ -473,6 +473,24 @@ enum SessionCommand {
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
+    /// List follow-ups waiting behind the active turn.
+    Queue { session: String },
+    /// Replace one queued follow-up without moving it.
+    QueueEdit {
+        session: String,
+        id: u64,
+        text: String,
+    },
+    /// Remove one queued follow-up.
+    QueueRemove { session: String, id: u64 },
+    /// Move one queued follow-up to a zero-based position.
+    QueueMove {
+        session: String,
+        id: u64,
+        index: u32,
+    },
+    /// Inject one queued follow-up into the active turn when supported.
+    QueueSendNow { session: String, id: u64 },
     /// Compact an idle provider conversation's context.
     Compact { session: String },
     /// Answer a question, plan or permission request in a running turn.
@@ -1058,6 +1076,35 @@ fn request_for(command: Command) -> Result<Request> {
             session: SessionId(session),
             text,
         },
+        Command::Session(SessionCommand::Queue { session }) => Request::QueuedMessages {
+            session: SessionId(session),
+        },
+        Command::Session(SessionCommand::QueueEdit { session, id, text }) => {
+            Request::EditQueuedMessage {
+                session: SessionId(session),
+                id,
+                text,
+            }
+        }
+        Command::Session(SessionCommand::QueueRemove { session, id }) => {
+            Request::RemoveQueuedMessage {
+                session: SessionId(session),
+                id,
+            }
+        }
+        Command::Session(SessionCommand::QueueMove { session, id, index }) => {
+            Request::MoveQueuedMessage {
+                session: SessionId(session),
+                id,
+                index,
+            }
+        }
+        Command::Session(SessionCommand::QueueSendNow { session, id }) => {
+            Request::SendQueuedMessageNow {
+                session: SessionId(session),
+                id,
+            }
+        }
         Command::Session(SessionCommand::Compact { session }) => Request::CompactSession {
             session: SessionId(session),
         },
@@ -1494,6 +1541,16 @@ fn print(response: Response, patch: bool) {
             }
             for entry in entries {
                 println!("{}", ginka_cli_format::transcript_line(&entry));
+            }
+        }
+        Response::QueuedMessages { messages, .. } => {
+            for (index, message) in messages.into_iter().enumerate() {
+                println!(
+                    "{}\t{}\t{}",
+                    index,
+                    message.id,
+                    message.text.replace(['\r', '\n'], " ")
+                );
             }
         }
     }

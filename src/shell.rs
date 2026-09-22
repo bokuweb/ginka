@@ -365,6 +365,16 @@ pub struct Shell {
     mentions: Vec<ginka_protocol::model::FileEntry>,
     /// The commands offered for the `/` being typed, if one is.
     commands: Vec<ginka_protocol::model::SlashCommand>,
+    /// Follow-ups waiting behind the selected session's active turn.
+    queued_messages: Vec<ginka_protocol::model::QueuedMessage>,
+    /// Whether the active transport can accept a waiting prompt immediately.
+    queue_can_send_now: bool,
+    /// Stable id of the queued prompt currently being edited in the composer.
+    editing_queued_message: Option<u64>,
+    /// The ordinary draft displaced while a queued prompt is edited.
+    queue_edit_draft: Option<String>,
+    /// Why the most recent queue mutation was refused.
+    queue_error: Option<String>,
     /// Files already copied into the daemon store for the next ordinary prompt.
     attachments: Vec<ComposerAttachment>,
     /// Whether selected files are currently being read and uploaded.
@@ -651,10 +661,16 @@ impl Shell {
                             this.adopt_terminals(cx);
                         }
                         this.mentions.clear();
+                        this.queued_messages.clear();
+                        this.queue_can_send_now = false;
+                        this.editing_queued_message = None;
+                        this.queue_edit_draft = None;
+                        this.queue_error = None;
                         // Whatever was half-written here when it was last left.
                         this.composer
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
+                        this.refresh_queue(cx);
                         if this.surfaces.read(cx).open_surface()
                             == Some(ginka_ui::surface::Surface::Skills)
                         {
@@ -834,6 +850,19 @@ impl Shell {
                                 }
                             })
                             .map_err(|_| ()),
+                        DaemonEvent::SessionQueueChanged { session } => {
+                            let is_showing = this
+                                .update(cx, |this, _| {
+                                    this.session.as_ref().and_then(|row| row.session.as_ref())
+                                        == Some(&session)
+                                })
+                                .unwrap_or(false);
+                            if is_showing {
+                                pull_queue(&this, &link, session, cx).await
+                            } else {
+                                Ok(())
+                            }
+                        }
                         // Anything that changes what the sidebar says.
                         DaemonEvent::ProjectsChanged
                         | DaemonEvent::WorkspacesChanged { .. }
@@ -940,6 +969,7 @@ impl Shell {
             if this.layout.is_open(Panel::TerminalDock) {
                 this.adopt_terminals(cx);
             }
+            this.refresh_queue(cx);
         });
         Self {
             layout: Layout::from_settings(&settings),
@@ -965,6 +995,11 @@ impl Shell {
             picker: None,
             mentions: Vec::new(),
             commands: Vec::new(),
+            queued_messages: Vec::new(),
+            queue_can_send_now: false,
+            editing_queued_message: None,
+            queue_edit_draft: None,
+            queue_error: None,
             attachments: Vec::new(),
             attachment_busy: false,
             attachment_error: None,
@@ -1339,6 +1374,11 @@ impl Shell {
         self.picker = None;
         self.mentions.clear();
         self.commands.clear();
+        self.queued_messages.clear();
+        self.queue_can_send_now = false;
+        self.editing_queued_message = None;
+        self.queue_edit_draft = None;
+        self.queue_error = None;
         self.attachments.clear();
         self.attachment_busy = false;
         self.attachment_error = None;
@@ -2812,6 +2852,149 @@ impl Shell {
         }
     }
 
+    /// Re-read the selected conversation's daemon-owned follow-up queue.
+    fn refresh_queue(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            self.queued_messages.clear();
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = pull_queue(&this, &link, session, cx).await;
+        })
+        .detach();
+    }
+
+    /// Put one queued prompt in the composer without losing its normal draft.
+    fn edit_queued_message(
+        &mut self,
+        id: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_queued_message.is_none() {
+            self.queue_edit_draft = Some(self.composer.read(cx).value().to_string());
+        }
+        self.editing_queued_message = Some(id);
+        self.queue_error = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leave queue editing and restore the draft it displaced.
+    fn cancel_queued_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.editing_queued_message = None;
+        self.queue_error = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        cx.notify();
+    }
+
+    /// Persist the queued prompt currently being edited.
+    fn save_queued_edit(
+        &mut self,
+        session: SessionId,
+        id: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.edit_queued_message(&session, id, text).await })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        let draft = this.queue_edit_draft.take().unwrap_or_default();
+                        this.editing_queued_message = None;
+                        this.queue_error = None;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value(draft, window, cx));
+                    }
+                    Err(error) => this.queue_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove one queued prompt.
+    fn remove_queued_message(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.remove_queued_message(&session, id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.queue_error = Some(error);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move one queued prompt to a zero-based dispatch position.
+    fn move_queued_message(&mut self, id: u64, index: u32, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.move_queued_message(&session, id, index).await },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.queue_error = Some(error);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask the live transport to take one waiting prompt immediately.
+    fn send_queued_message_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.send_queued_message_now(&session, id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.queue_error = None,
+                    Err(error) => this.queue_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Send what is in the composer.
     ///
     /// A chat that has no workspace yet — the home screen — gets one first,
@@ -2821,6 +3004,12 @@ impl Shell {
             return;
         }
         let draft = self.composer.read(cx).value().trim().to_string();
+        if let Some(id) = self.editing_queued_message
+            && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
+        {
+            self.save_queued_edit(session, id, draft, window, cx);
+            return;
+        }
         if self.session_state == Some(SessionState::AwaitingInput)
             && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
             && let Some(request_id) = self.transcript.open_request().map(str::to_string)
@@ -5256,6 +5445,132 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The editable FIFO shown above the composer while a turn is active.
+    fn queue_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.queued_messages.is_empty() && self.queue_error.is_none() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let count = self.queued_messages.len();
+        let rows = self
+            .queued_messages
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, message)| {
+                let send_id = message.id;
+                let edit_id = message.id;
+                let edit_text = message.text.clone();
+                let remove_id = message.id;
+                let earlier_id = message.id;
+                let later_id = message.id;
+                h_flex()
+                    .w_full()
+                    .min_h(px(42.))
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{}", index + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .child(message.text),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-now-{send_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(!self.queue_can_send_now)
+                            .label(rust_i18n::t!("composer.queue.send_now").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send_queued_message_now(send_id, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-earlier-{earlier_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(index == 0)
+                            .tooltip(rust_i18n::t!("composer.queue.earlier").to_string())
+                            .child(Icon::new(IconName::ArrowUp).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.move_queued_message(
+                                    earlier_id,
+                                    index.saturating_sub(1) as u32,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-later-{later_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(index + 1 >= count)
+                            .tooltip(rust_i18n::t!("composer.queue.later").to_string())
+                            .child(Icon::new(IconName::ArrowDown).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.move_queued_message(later_id, (index + 1) as u32, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-edit-{edit_id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("composer.queue.edit").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_queued_message(edit_id, edit_text.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-remove-{remove_id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("composer.queue.remove").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_queued_message(remove_id, cx)
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    h_flex().w_full().items_center().child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(
+                                rust_i18n::t!("composer.queue.title", count = count).to_string(),
+                            ),
+                    ),
+                )
+                .children(rows)
+                .children(self.queue_error.clone().map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The composer: a card holding the input, what will run it, and the way
     /// to send or stop it.
     ///
@@ -5270,8 +5585,8 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
         let awaiting_input = self.session_state == Some(SessionState::AwaitingInput);
-        let accepts_attachments =
-            ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
+        let accepts_attachments = self.editing_queued_message.is_none()
+            && ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
         let primary_action = ginka_ui::composer::primary_action(
             working,
             self.composer.read(cx).value().as_ref(),
@@ -5287,6 +5602,29 @@ impl Shell {
         let usage_chip = self.usage_chip_button(cx);
         let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
+        let queue_panel = self.queue_panel(cx);
+        let queue_editing = self.editing_queued_message.map(|_| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.queue.editing").to_string()),
+                )
+                .child(
+                    Button::new("cancel-queue-edit")
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("composer.queue.cancel").to_string())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_queued_edit(window, cx)),
+                        ),
+                )
+        });
         let attachment_chips = self
             .attachments
             .iter()
@@ -5336,6 +5674,7 @@ impl Shell {
             .pb_3()
             .gap_2()
             .children(picker)
+            .children(queue_panel)
             .child(
                 v_flex()
                     .w_full()
@@ -5381,6 +5720,7 @@ impl Shell {
                                     .to_string(),
                             )
                     }))
+                    .children(queue_editing)
                     .child(Textarea::new(&self.composer))
                     .child(
                         h_flex()
@@ -6448,11 +6788,13 @@ impl Shell {
 
         // Written through the daemon rather than held here: a second window on
         // the same workspace is looking at the same draft.
-        let link = self.link.clone();
-        let saving = text.clone();
-        let for_draft = workspace.clone();
-        cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
-            .detach();
+        if self.editing_queued_message.is_none() {
+            let link = self.link.clone();
+            let saving = text.clone();
+            let for_draft = workspace.clone();
+            cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
+                .detach();
+        }
 
         // A command takes the whole prompt, so it is asked about first.
         if let Some(query) = ginka_ui::transcript::command_being_typed(&text) {
@@ -8642,6 +8984,29 @@ async fn pull_transcript(
         .await;
     this.update(cx, |this, cx| this.fold(&session, &entries, cx))
         .map_err(|_| ())
+}
+
+/// Re-read one session's ordered follow-up queue after a push or navigation.
+async fn pull_queue(
+    this: &WeakEntity<Shell>,
+    link: &Arc<DaemonLink>,
+    session: SessionId,
+    cx: &mut AsyncApp,
+) -> Result<(), ()> {
+    let listing = link.clone();
+    let requested = session.clone();
+    let (messages, can_send_now) = cx
+        .background_spawn(async move { listing.queued_messages(&requested).await })
+        .await;
+    this.update(cx, |this, cx| {
+        if this.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&session) {
+            this.queued_messages = messages;
+            this.queue_can_send_now = can_send_now;
+            this.queue_error = None;
+            cx.notify();
+        }
+    })
+    .map_err(|_| ())
 }
 
 /// The mono family is a theme concern, not a per-view constant.

@@ -164,6 +164,44 @@ pub enum Request {
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
+    /// Follow-ups waiting behind a session's active turn, in dispatch order.
+    QueuedMessages {
+        /// Session whose pending prompts are requested.
+        session: SessionId,
+    },
+    /// Replace the text of one queued follow-up without changing its place.
+    EditQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+        /// Replacement prompt text.
+        text: String,
+    },
+    /// Remove one queued follow-up before it reaches the transcript.
+    RemoveQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+    },
+    /// Move one queued follow-up to a zero-based dispatch position.
+    MoveQueuedMessage {
+        /// Session that owns the queue.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+        /// Destination in dispatch order, clamped to the queue's end.
+        index: u32,
+    },
+    /// Inject one queued follow-up into the active turn when its transport can
+    /// receive unsolicited input.
+    SendQueuedMessageNow {
+        /// Session whose live transport should receive the prompt.
+        session: SessionId,
+        /// Stable session-local row id.
+        id: u64,
+    },
     /// Ask the provider to compact an idle conversation's context.
     ///
     /// This is deliberately distinct from a follow-up: it is refused while a
@@ -564,6 +602,12 @@ pub enum Response {
     Transcript {
         entries: Vec<TranscriptEntry>,
     },
+    QueuedMessages {
+        /// Pending prompts in dispatch order.
+        messages: Vec<crate::model::QueuedMessage>,
+        /// Whether the active transport can receive a waiting prompt now.
+        can_send_now: bool,
+    },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
     },
@@ -729,6 +773,20 @@ mod tests {
             },
             Request::CompactSession {
                 session: SessionId("s-1".into()),
+            },
+            Request::EditQueuedMessage {
+                session: SessionId("s-1".into()),
+                id: 7,
+                text: "use the parser".into(),
+            },
+            Request::MoveQueuedMessage {
+                session: SessionId("s-1".into()),
+                id: 7,
+                index: 0,
+            },
+            Request::SendQueuedMessageNow {
+                session: SessionId("s-1".into()),
+                id: 7,
             },
             Request::Pull {
                 workspace: WorkspaceId("comet/harbor".into()),

@@ -169,6 +169,65 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_session_queue",
+            description: "List follow-ups waiting behind a session's active turn, in dispatch order.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}},
+                "required": ["session"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_edit",
+            description: "Replace one queued follow-up without changing its dispatch position.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1},
+                    "text": {"type": "string"}
+                },
+                "required": ["session", "id", "text"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_remove",
+            description: "Remove one queued follow-up before it reaches the transcript.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1}
+                },
+                "required": ["session", "id"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_move",
+            description: "Move one queued follow-up to a zero-based dispatch position.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1},
+                    "index": {"type": "integer", "minimum": 0}
+                },
+                "required": ["session", "id", "index"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_send_now",
+            description: "Inject one queued follow-up into the active turn when the transport supports live input. A refusal leaves it queued.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1}
+                },
+                "required": ["session", "id"],
+            }),
+        },
+        Tool {
             name: "ginka_session_compact",
             description: "Compact an idle provider conversation's context. Refused while a turn is running or when the provider has no explicit compact operation.",
             schema: json!({
@@ -533,6 +592,29 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             session: SessionId(text("session")?),
             text: text("text")?,
         },
+        "ginka_session_queue" => Request::QueuedMessages {
+            session: SessionId(text("session")?),
+        },
+        "ginka_queue_edit" => Request::EditQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            text: text("text")?,
+        },
+        "ginka_queue_remove" => Request::RemoveQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_queue_move" => Request::MoveQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            index: number("index")
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or_else(|| anyhow!("{tool} needs an `index`"))?,
+        },
+        "ginka_queue_send_now" => Request::SendQueuedMessageNow {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
         "ginka_session_compact" => Request::CompactSession {
             session: SessionId(text("session")?),
         },
@@ -720,6 +802,8 @@ mod tests {
                 "workspace": "comet/harbor",
                 "session": "s-1",
                 "request_id": "ask-1",
+                "id": 7,
+                "index": 0,
                 "response": "yes",
                 "agent": "claude",
                 "account": "claude-work",

@@ -283,6 +283,12 @@ pub enum DaemonEvent {
         session: SessionId,
         state: SessionState,
     },
+    /// A session's editable follow-up queue changed. Clients re-read the
+    /// ordered rows so concurrent edits from another client cannot diverge.
+    SessionQueueChanged {
+        /// Session whose queue clients should re-read.
+        session: SessionId,
+    },
     /// A terminal printed something.
     ///
     /// The bytes as the shell wrote them, escapes and all: what they mean is

@@ -271,7 +271,13 @@ active conversation. With nothing selected, the rail stands alone.
   the chips. `@`
   file mentions and `/` slash commands have an inline filtered menu. `↩`
   sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
-  available.
+  available. Those pending prompts appear as one compact card immediately
+  above the composer, in dispatch order. Each row has a stable daemon-owned
+  identity and can be edited in the composer, removed, or moved earlier and
+  later without creating a transcript entry. *Send now* is enabled only when
+  the current live transport accepts steering; a refusal leaves the row in
+  place. A queued prompt becomes immutable transcript history at dispatch,
+  never at enqueue time.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on

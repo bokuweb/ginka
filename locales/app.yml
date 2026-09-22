@@ -172,6 +172,30 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.queue.title:
+  en: "%{count} queued"
+  ja: "%{count} 件のキュー"
+composer.queue.send_now:
+  en: Send now
+  ja: 今すぐ反映
+composer.queue.edit:
+  en: Edit
+  ja: 編集
+composer.queue.remove:
+  en: Remove
+  ja: 削除
+composer.queue.earlier:
+  en: Move earlier
+  ja: 前へ移動
+composer.queue.later:
+  en: Move later
+  ja: 後へ移動
+composer.queue.editing:
+  en: Editing queued message
+  ja: キューのメッセージを編集中
+composer.queue.cancel:
+  en: Cancel
+  ja: キャンセル
 composer.attachment.add:
   en: Attach files
   ja: ファイルを添付

@@ -369,7 +369,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Session persistence: sessions and transcripts as normalized events; resume from the vendor session id
 - [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, paged from a cursor and followed live off the daemon's push stream
 - [ ] Virtualize the transcript list (§6.2's budget is lost here first)
-- [x] Message queueing while the agent is busy
+- [x] Message queueing while the agent is busy, with daemon-owned stable rows shared by the UI, CLI and MCP; pending prompts can be edited, removed, reordered and sent into a steerable live transport before they become transcript history
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [x] Agent and model pickers in the composer, and a new-session toggle
 - [x] Composer: `@file` mentions, slash commands from `.claude/commands`, drafts persisted per workspace
@@ -388,7 +388,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
 - [ ] Session persistence: tasks, chats, messages; resume from vendor session id
 - [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination
-- [ ] Composer: `@file` mentions, slash commands, drafts persisted per workspace, message queueing while the agent is busy
+- [x] Composer: `@file` mentions, slash commands, drafts persisted per workspace, and a visible editable follow-up queue while the agent is busy
 - [x] Plan approval and ask-user-question interaction modes at the protocol, supervisor and transcript layers; a shipped interactive driver remains M5
 - [ ] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [ ] `codex` driver
@@ -709,3 +709,4 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-22 | Partial staging operates on a regenerated exact hunk across an explicit index boundary | A cumulative HEAD diff cannot tell whether part of a file is already staged, and applying coordinates from a stale view can move the wrong edit. `Unstaged` therefore names the worktree-versus-index source, while `Staged` names index-versus-HEAD. A hunk request carries its complete header; the daemon regenerates that side's patch, refuses a missing header, and applies only the selected hunk to the index. UI, CLI and MCP share the operation, moving the wire contract to protocol 15. |
 | 2026-09-22 | Hunk discard reverses a regenerated worktree-versus-index patch and never the cumulative diff | A partially staged file contains accepted index state that discard must preserve. The request therefore carries the complete unstaged hunk header; the daemon regenerates that side, refuses stale headers and reverse-applies only the exact hunk to the worktree. The window confirms the destructive action in two steps, while CLI and MCP expose the same protocol 16 request. |
 | 2026-09-22 | Account switching is one persisted active choice per provider and only affects future sessions | Orca demonstrates the useful boundary: a manual switch changes what launches next while existing vendor threads remain attached to the login that owns them. Ginka stores only the selected account id in daemon settings, resolves a missing `StartSession.account` through it, and falls back to the vendor default when the named account is removed. UI, CLI and MCP share `SelectAccount`; adding the active marker and request moves the wire contract to protocol 17. |
+| 2026-09-22 | A queued follow-up stays editable until it is dispatched | Recording a waiting prompt as transcript history made edit, delete and reorder dishonest. The daemon now owns stable session-local queue rows; UI, CLI and MCP address those ids to edit, remove, move or attempt live delivery. Dispatch is the point where the prompt enters the transcript, and an unsupported or refused *send now* preserves the row instead of stopping useful work. The shared queue requests and push event move the wire contract to protocol 18. |

@@ -308,6 +308,19 @@ impl SessionState {
     }
 }
 
+/// One follow-up waiting behind the session's active turn.
+///
+/// The id is stable for the lifetime of the daemon so edits, removal and
+/// reordering can never target a neighbouring message after the list changes.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// Session-local monotonic identifier.
+    pub id: u64,
+    /// Prompt text that will be recorded when this message is dispatched.
+    pub text: String,
+}
+
 /// One recorded position in a session's transcript.
 ///
 /// The transcript is an append-only log of normalized events, not a list of

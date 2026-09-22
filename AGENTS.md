@@ -31,7 +31,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
 - The shell renders a project rail, a session list that opens for the selected project, conversation and resizable right panel, with a composer, context bar, terminal dock and surface chooser. Right-panel and terminal visibility/dimensions plus the active surface persist per workspace; sidebar navigation remains global. Projects are added through one name-and-source-folder modal. Its palette and type bases share e1's token contract for future integration. **Not yet visually signed off** (see roadmap M0).
 
-- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; readable messages can be copied or quoted into the durable draft. Claude and Codex task updates share one bounded live Tasks card, remain searchable after persistence and carry into cross-provider handoffs. Each turn boundary retains the provider, model, reasoning effort and service tier that actually started it. The composer starts an agent or sends a follow-up, picks which agent and model answer, and stops one that is working. Codex context readings expose an idle-only manual compaction control; unsupported providers never receive a guessed command. A turn boundary is where a checkpoint was taken, so it is also the way back to it.
+- **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; readable messages can be copied or quoted into the durable draft. Claude and Codex task updates share one bounded live Tasks card, remain searchable after persistence and carry into cross-provider handoffs. Each turn boundary retains the provider, model, reasoning effort and service tier that actually started it. The composer starts an agent or sends a follow-up, picks which agent and model answer, and stops one that is working. Follow-ups that cannot steer the live transport remain as stable queue rows above it; the window, CLI and MCP can edit, remove, reorder or attempt to send them now, and only dispatch makes them transcript history. Codex context readings expose an idle-only manual compaction control; unsupported providers never receive a guessed command. A turn boundary is where a checkpoint was taken, so it is also the way back to it.
 - **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
 
 - **English and Japanese.** Every user-visible string is in `locales/app.yml` in both; the language follows `app.json`, then the environment, then English.
@@ -93,6 +93,11 @@ cargo run -p ginka-cli -- account login codex-work   # the vendor's sign-in, her
 cargo run -p ginka-cli -- account select codex-work  # future Codex sessions use it
 cargo run -p ginka-cli -- account list               # signed in, and headroom
 cargo run -p ginka-cli -- session log <session>
+cargo run -p ginka-cli -- session queue <session>     # list pending follow-ups
+cargo run -p ginka-cli -- session queue-edit <session> <id> "replacement"
+cargo run -p ginka-cli -- session queue-remove <session> <id>
+cargo run -p ginka-cli -- session queue-move <session> <id> <zero-based-index>
+cargo run -p ginka-cli -- session queue-send-now <session> <id>
 cargo run -p ginka-cli -- session compact <session>
 cargo run -p ginka-cli -- checkpoint list <workspace>
 cargo run -p ginka-cli -- --json project list   # the protocol's own shapes, for agents

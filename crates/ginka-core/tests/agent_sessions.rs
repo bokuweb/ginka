@@ -1039,6 +1039,125 @@ fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
 }
 
 #[test]
+fn a_busy_sessions_queue_can_be_read_edited_reordered_and_trimmed() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "codex",
+        &[
+            r#"{"type":"thread.started","thread_id":"vendor-q"}"#,
+            "#sleep 1200",
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+    for text in ["second", "third", "remove me"] {
+        fixture.ask(Request::SendMessage {
+            session: session.clone(),
+            text: text.into(),
+        });
+    }
+
+    let (queued, can_send_now) = match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages {
+            messages,
+            can_send_now,
+        } => (messages, can_send_now),
+        other => panic!("expected queued messages, got {other:?}"),
+    };
+    assert!(
+        !can_send_now,
+        "Codex exec must advertise that it cannot inject into the live turn"
+    );
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["second", "third", "remove me"]
+    );
+    assert_eq!(
+        fixture
+            .transcript(&session)
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptPayload::User { .. }))
+            .count(),
+        1,
+        "waiting prompts are queue rows, not immutable transcript entries"
+    );
+
+    fixture.ask(Request::EditQueuedMessage {
+        session: session.clone(),
+        id: queued[1].id,
+        text: "edited third".into(),
+    });
+    fixture.ask(Request::MoveQueuedMessage {
+        session: session.clone(),
+        id: queued[1].id,
+        index: 0,
+    });
+    fixture.ask(Request::RemoveQueuedMessage {
+        session: session.clone(),
+        id: queued[2].id,
+    });
+    let queued = match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages { messages, .. } => messages,
+        other => panic!("expected queued messages, got {other:?}"),
+    };
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["edited third", "second"]
+    );
+
+    let send_now = fixture.service.handle(Request::SendQueuedMessageNow {
+        session: session.clone(),
+        id: queued[0].id,
+    });
+    assert!(
+        send_now.is_err(),
+        "Codex exec cannot receive unsolicited input, so useful work stays running"
+    );
+    assert_eq!(
+        match fixture.ask(Request::QueuedMessages {
+            session: session.clone(),
+        }) {
+            Response::QueuedMessages { messages, .. } => messages.len(),
+            other => panic!("expected queued messages, got {other:?}"),
+        },
+        2,
+        "a refused send-now leaves the queue untouched"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let users = fixture
+            .transcript(&session)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                TranscriptPayload::User { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if users.len() >= 2 {
+            assert_eq!(users[..2], ["first", "edited third"]);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reordered prompt never dispatched"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
 fn turns_keep_counting_across_the_processes_that_ran_them() {
     // Each turn is its own process, so a driver's own count restarts every
     // time. A transcript that says "end of turn 1" twice, and two checkpoints

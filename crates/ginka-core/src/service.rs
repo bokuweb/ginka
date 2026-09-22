@@ -488,6 +488,41 @@ impl Service {
                 attempts,
             } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
+            Request::QueuedMessages { session } => {
+                self.session(&session)?;
+                Ok(Response::QueuedMessages {
+                    messages: self.sessions.queued_messages(&session),
+                    can_send_now: self.sessions.can_send_queued_message_now(&session),
+                })
+            }
+            Request::EditQueuedMessage { session, id, text } => {
+                self.session(&session)?;
+                self.sessions
+                    .edit_queued_message(&session, id, text)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RemoveQueuedMessage { session, id } => {
+                self.session(&session)?;
+                self.sessions
+                    .remove_queued_message(&session, id)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::MoveQueuedMessage { session, id, index } => {
+                self.session(&session)?;
+                self.sessions
+                    .move_queued_message(&session, id, index as usize)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::SendQueuedMessageNow { session, id } => {
+                self.session(&session)?;
+                self.sessions
+                    .send_queued_message_now(&session, id)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::CompactSession { session } => self.compact_session(&session),
             Request::RespondToAgent {
                 session,
