@@ -31,9 +31,9 @@ pub fn offers_choice(accounts: &[Account], provider: &str) -> bool {
 /// Which account the next prompt runs on.
 ///
 /// The one the user chose, if it is this provider's — a choice made for the
-/// last agent means nothing to the next — else the provider's default. `None`
-/// only when the daemon has said nothing about the provider, in which case
-/// it runs the default anyway.
+/// last agent means nothing to the next — else the provider's persisted active
+/// account, then its system default. `None` only when the daemon has said
+/// nothing about the provider, in which case it runs the default anyway.
 pub fn account_to_start<'a>(
     accounts: &'a [Account],
     provider: &str,
@@ -42,6 +42,7 @@ pub fn account_to_start<'a>(
     let candidates = accounts_for(accounts, provider);
     chosen
         .and_then(|id| candidates.iter().find(|account| &account.id == id).copied())
+        .or_else(|| candidates.iter().find(|account| account.active).copied())
         .or_else(|| {
             candidates
                 .iter()
@@ -115,6 +116,7 @@ mod tests {
             label: id.into(),
             home: None,
             is_default,
+            active: is_default,
             env_keys: Vec::new(),
             signed_in: None,
             login: None,
@@ -181,6 +183,24 @@ mod tests {
             Some("claude")
         );
         assert_eq!(account_to_start(&accounts, "gemini", None), None);
+    }
+
+    #[test]
+    fn the_persisted_active_account_is_used_when_nothing_was_chosen_here() {
+        let mut accounts = accounts();
+        accounts[0].active = false;
+        accounts[1].active = true;
+
+        assert_eq!(
+            account_to_start(&accounts, "claude", None).map(|account| account.id.0.as_str()),
+            Some("claude-work")
+        );
+        assert_eq!(
+            account_to_start(&accounts, "claude", Some(&AccountId("claude".into())))
+                .map(|account| account.id.0.as_str()),
+            Some("claude"),
+            "an existing session keeps its recorded account"
+        );
     }
 
     #[test]
