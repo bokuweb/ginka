@@ -3355,7 +3355,7 @@ impl Shell {
             query,
             typed: String::new(),
             chosen: 0,
-            selected_text: (!selected_text.trim().is_empty()).then_some(selected_text),
+            selected_text: ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned),
         });
         cx.notify();
     }
@@ -3753,7 +3753,7 @@ impl Shell {
     /// door rather than an apology. Once a prompt is away the scrolling column
     /// takes over even before the first word arrives, because that is where
     /// the activity line lives and "working" is what the reader needs to see.
-    fn transcript(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
@@ -3816,12 +3816,57 @@ impl Shell {
             );
         v_flex()
             .id("transcript")
+            .relative()
             .flex_1()
             .min_h_0()
             .children(self.transcript_outline(cx))
             .children(self.transcript_search_bar(cx))
             .child(scroller)
+            .children(self.transcript_selection_action(selected_text, cx))
             .into_any_element()
+    }
+
+    /// A selection-scoped quote action that does not move the transcript.
+    ///
+    /// A mouse press clears the toolkit's window selection before its click is
+    /// delivered, so the action retains the render-time text and handles mouse
+    /// activation on press. Keyboard and touch activation keep the ordinary
+    /// button click path.
+    fn transcript_selection_action(
+        &self,
+        selected_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let selected_text = selected_text?;
+        let mouse_text = selected_text.clone();
+        let click_text = selected_text;
+        let label = rust_i18n::t!("transcript.quote_selection").to_string();
+
+        Some(
+            div()
+                .absolute()
+                .top_2()
+                .right_3()
+                .child(
+                    Button::new("quote-transcript-selection")
+                        .compact()
+                        .tooltip(label.clone())
+                        .accessibility_label(label.clone())
+                        .label(label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.quote_in_composer(&mouse_text, window, cx)
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            if !matches!(event, ClickEvent::Mouse(_)) {
+                                this.quote_in_composer(&click_text, window, cx);
+                            }
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A bounded list of the conversation's top-level prompts.
@@ -8055,7 +8100,7 @@ impl Shell {
             }))
     }
 
-    fn center(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn center(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         let dock_open = self.layout.is_open(Panel::TerminalDock);
         let dock_height = self.layout.size(Panel::TerminalDock);
 
@@ -8074,7 +8119,7 @@ impl Shell {
                     resizable_panel().child(
                         v_flex()
                             .size_full()
-                            .child(self.transcript(cx))
+                            .child(self.transcript(selected_text, cx))
                             .child(self.composer(cx))
                             .into_any_element(),
                     ),
@@ -8337,7 +8382,9 @@ impl Render for Shell {
                 .into_any_element()
         });
         let column_header = self.column_header(cx).into_any_element();
-        let centre = self.center(cx).into_any_element();
+        let selected_text = TextSelection::selected_text(window, cx);
+        let selected_text = ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned);
+        let centre = self.center(selected_text, cx).into_any_element();
 
         v_flex()
             .key_context(CONTEXT)

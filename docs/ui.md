@@ -206,8 +206,11 @@ active conversation. With nothing selected, the rail stands alone.
   selection, falling back to the complete visible message, and normalizes it
   into a Markdown blockquote at the end of the existing draft. The command
   palette captures a selection before taking focus and offers the same action,
-  so choosing it with the mouse cannot lose the range. Both paths leave a blank
-  line for the reply and return focus to the composer. A turn that
+  so choosing it with the mouse cannot lose the range. While meaningful text
+  is selected, a compact keyboard-focusable action floats at the transcript's
+  top-right without moving the conversation; its mouse path retains the range
+  before the toolkit clears selection on press. Every path leaves a blank line
+  for the reply and returns focus to the composer. A turn that
   succeeded prints no outcome of its own, because being
   answered is how a turn says it worked. A delegated agent is one bordered
   parent card rather than a second conversation: its reasoning, messages and

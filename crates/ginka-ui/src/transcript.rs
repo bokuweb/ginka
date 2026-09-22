@@ -859,6 +859,11 @@ pub fn quote_target<'a>(message: &'a str, selection: &'a str) -> &'a str {
     }
 }
 
+/// Return an exact selection only when quoting it would add meaningful text.
+pub fn selected_quote(selection: &str) -> Option<&str> {
+    (!selection.trim().is_empty()).then_some(selection)
+}
+
 /// Whether to pull the transcript to its foot, and whether it is still
 /// following.
 ///
@@ -913,6 +918,16 @@ mod tests {
             quote_target("the whole answer", " \n\t"),
             "the whole answer"
         );
+    }
+
+    #[test]
+    fn the_selection_quote_action_exists_only_for_meaningful_text() {
+        assert_eq!(
+            selected_quote("  exact range  \n"),
+            Some("  exact range  \n")
+        );
+        assert_eq!(selected_quote(" \n\t"), None);
+        assert_eq!(selected_quote(""), None);
     }
 
     #[test]
