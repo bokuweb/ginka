@@ -308,6 +308,19 @@ impl SessionState {
     }
 }
 
+/// One follow-up waiting behind the session's active turn.
+///
+/// The id is stable for the lifetime of the daemon so edits, removal and
+/// reordering can never target a neighbouring message after the list changes.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    /// Session-local monotonic identifier.
+    pub id: u64,
+    /// Prompt text that will be recorded when this message is dispatched.
+    pub text: String,
+}
+
 /// One recorded position in a session's transcript.
 ///
 /// The transcript is an append-only log of normalized events, not a list of
@@ -396,6 +409,10 @@ pub struct Account {
     pub home: Option<PathBuf>,
     /// The provider's own default, which cannot be removed.
     pub is_default: bool,
+    /// Selected for new sessions of this provider. Running sessions keep the
+    /// account they started on.
+    #[serde(default)]
+    pub active: bool,
     /// The *names* of the variables the account's `env` sets. The values never
     /// cross the wire (`docs/accounts.md` §10).
     pub env_keys: Vec<String>,
@@ -698,6 +715,8 @@ pub enum ChangeSource {
     /// Everything not committed, staged or not, including files git has never
     /// seen — an agent's new file is the change most worth reading.
     Uncommitted,
+    /// Changes in the worktree that are not yet in the index.
+    Unstaged,
     /// What is staged for the next commit.
     Staged,
     /// What has happened since a checkpoint: the answer to "what did this turn
@@ -780,6 +799,25 @@ pub struct FileChange {
     /// A binary file has counts but no hunks: there is nothing to read.
     pub binary: bool,
     pub hunks: Vec<Hunk>,
+}
+
+/// One commit in a workspace's recent history.
+///
+/// Parent ids are retained so a client can draw branch and merge topology
+/// without interpreting presentation text from `git log`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    /// Full object id of the commit.
+    pub id: String,
+    /// Full object ids of its parents, empty for a root commit.
+    pub parents: Vec<String>,
+    /// Author name recorded in the commit.
+    pub author: String,
+    /// Author time as Unix seconds.
+    pub authored_at: i64,
+    /// First line of the commit message.
+    pub summary: String,
 }
 
 impl FileChange {

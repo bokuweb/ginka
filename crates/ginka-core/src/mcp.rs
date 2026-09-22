@@ -91,6 +91,15 @@ pub fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
+            name: "ginka_account_select",
+            description: "Select the login future sessions of its provider use. Running sessions keep their original login.",
+            schema: json!({
+                "type": "object",
+                "properties": {"account": {"type": "string"}},
+                "required": ["account"],
+            }),
+        },
+        Tool {
             name: "ginka_sessions",
             description: "List agent sessions, newest first.",
             schema: json!({
@@ -111,7 +120,7 @@ pub fn tools() -> Vec<Tool> {
                     "reasoning_effort": {"type": "string", "description": "A value advertised for the selected model"},
                     "service_tier": {"type": "string", "description": "A value advertised for the selected model"},
                     "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands sandboxed or refused) otherwise"},
-                    "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's default otherwise"},
+                    "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's active account otherwise"},
                 },
                 "required": ["workspace", "agent", "prompt"],
             }),
@@ -157,6 +166,74 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"session": {"type": "string"}, "text": {"type": "string"}},
                 "required": ["session", "text"],
+            }),
+        },
+        Tool {
+            name: "ginka_session_queue",
+            description: "List follow-ups waiting behind a session's active turn, in dispatch order.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}},
+                "required": ["session"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_edit",
+            description: "Replace one queued follow-up without changing its dispatch position.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1},
+                    "text": {"type": "string"}
+                },
+                "required": ["session", "id", "text"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_remove",
+            description: "Remove one queued follow-up before it reaches the transcript.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1}
+                },
+                "required": ["session", "id"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_move",
+            description: "Move one queued follow-up to a zero-based dispatch position.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1},
+                    "index": {"type": "integer", "minimum": 0}
+                },
+                "required": ["session", "id", "index"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_send_now",
+            description: "Inject one queued follow-up into the active turn when the transport supports live input. A refusal leaves it queued.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1}
+                },
+                "required": ["session", "id"],
+            }),
+        },
+        Tool {
+            name: "ginka_session_compact",
+            description: "Compact an idle provider conversation's context. Refused while a turn is running or when the provider has no explicit compact operation.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}},
+                "required": ["session"],
             }),
         },
         Tool {
@@ -216,7 +293,47 @@ pub fn tools() -> Vec<Tool> {
                 "properties": {
                     "workspace": workspace,
                     "staged": {"type": "boolean", "description": "Only what is staged for the next commit"},
+                    "unstaged": {"type": "boolean", "description": "Only worktree edits not yet in the index"},
                     "since_checkpoint": {"type": "string"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_stage_hunk",
+            description: "Stage or unstage one exact hunk from the current diff. Stale hunk headers are refused.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "header": {"type": "string"},
+                    "staged": {"type": "boolean"},
+                },
+                "required": ["workspace", "path", "header", "staged"],
+            }),
+        },
+        Tool {
+            name: "ginka_revert_hunk",
+            description: "Permanently discard one exact unstaged hunk. Stale hunk headers are refused.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "header": {"type": "string"},
+                },
+                "required": ["workspace", "path", "header"],
+            }),
+        },
+        Tool {
+            name: "ginka_history",
+            description: "Read a workspace's recent commit history with parent topology.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "limit": {"type": "integer", "minimum": 0, "maximum": 200},
                 },
                 "required": ["workspace"],
             }),
@@ -232,6 +349,24 @@ pub fn tools() -> Vec<Tool> {
                     "staged_only": {"type": "boolean"},
                 },
                 "required": ["workspace", "message"],
+            }),
+        },
+        Tool {
+            name: "ginka_push",
+            description: "Push a workspace branch, setting its upstream on the first push.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_pull",
+            description: "Fetch and fast-forward a clean workspace branch. Refuses dirty or diverged work instead of merging or rebasing it.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
             }),
         },
         Tool {
@@ -394,6 +529,9 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         },
         "ginka_agents" => Request::ListAgents,
         "ginka_accounts" => Request::Accounts,
+        "ginka_account_select" => Request::SelectAccount {
+            id: ginka_protocol::AccountId(text("account")?),
+        },
         "ginka_sessions" => Request::ListSessions {
             workspace: maybe("workspace").map(WorkspaceId),
             origin: None,
@@ -454,6 +592,32 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             session: SessionId(text("session")?),
             text: text("text")?,
         },
+        "ginka_session_queue" => Request::QueuedMessages {
+            session: SessionId(text("session")?),
+        },
+        "ginka_queue_edit" => Request::EditQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            text: text("text")?,
+        },
+        "ginka_queue_remove" => Request::RemoveQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_queue_move" => Request::MoveQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            index: number("index")
+                .and_then(|index| u32::try_from(index).ok())
+                .ok_or_else(|| anyhow!("{tool} needs an `index`"))?,
+        },
+        "ginka_queue_send_now" => Request::SendQueuedMessageNow {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_session_compact" => Request::CompactSession {
+            session: SessionId(text("session")?),
+        },
         "ginka_session_respond" => Request::RespondToAgent {
             session: SessionId(text("session")?),
             request_id: text("request_id")?,
@@ -480,13 +644,38 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                     checkpoint: CheckpointId(checkpoint),
                 },
                 None if flag("staged") => ginka_protocol::model::ChangeSource::Staged,
+                None if flag("unstaged") => ginka_protocol::model::ChangeSource::Unstaged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_stage_hunk" => Request::StageHunk {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            header: text("header")?,
+            staged: arguments
+                .get("staged")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("ginka_stage_hunk needs `staged`"))?,
+        },
+        "ginka_revert_hunk" => Request::RevertHunk {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            header: text("header")?,
+        },
+        "ginka_history" => Request::WorkspaceHistory {
+            workspace: WorkspaceId(text("workspace")?),
+            limit: number("limit").map(|limit| limit as u32),
         },
         "ginka_commit" => Request::Commit {
             workspace: WorkspaceId(text("workspace")?),
             message: text("message")?,
             all: !flag("staged_only"),
+        },
+        "ginka_push" => Request::Push {
+            workspace: WorkspaceId(text("workspace")?),
+        },
+        "ginka_pull" => Request::Pull {
+            workspace: WorkspaceId(text("workspace")?),
         },
         "ginka_files" => Request::WorkspaceFiles {
             workspace: WorkspaceId(text("workspace")?),
@@ -613,13 +802,18 @@ mod tests {
                 "workspace": "comet/harbor",
                 "session": "s-1",
                 "request_id": "ask-1",
+                "id": 7,
+                "index": 0,
                 "response": "yes",
                 "agent": "claude",
+                "account": "claude-work",
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
                 "query": "needle",
                 "path": "src/main.rs",
+                "header": "@@ -1 +1 @@",
+                "staged": true,
                 "expected_revision": "abc123",
                 "checkpoint": "c-1",
                 "prefix": "attempt",

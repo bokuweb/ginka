@@ -11,7 +11,7 @@
 
 pub mod discovery;
 
-pub use discovery::Discovery;
+pub use discovery::{DaemonLocation, Discovery};
 
 use anyhow::{Context, Result, anyhow};
 use async_tungstenite::tungstenite::Message;
@@ -73,18 +73,36 @@ impl Client {
     /// state wants what happens next, not the backlog of a daemon that has
     /// been running for a week.
     pub async fn connect(handshake: &Handshake, resume_from: Option<Seq>) -> Result<Self> {
-        let mut request = handshake
-            .endpoint()
+        Self::connect_to(
+            &handshake.endpoint(),
+            &format!("127.0.0.1:{}", handshake.port),
+            &handshake.token,
+            resume_from,
+        )
+        .await
+    }
+
+    /// Connect to an explicitly addressed daemon.
+    ///
+    /// Kept within this crate: [`Discovery`] is the policy boundary that
+    /// decides whether a published local daemon or an external override wins.
+    pub(crate) async fn connect_to(
+        endpoint: &str,
+        address: &str,
+        token: &str,
+        resume_from: Option<Seq>,
+    ) -> Result<Self> {
+        let mut request = endpoint
             .into_client_request()
             .context("building the upgrade request")?;
         request.headers_mut().insert(
             "authorization",
-            HeaderValue::from_str(&handshake.authorization())?,
+            HeaderValue::from_str(&format!("Bearer {token}"))?,
         );
 
-        let stream = async_net::TcpStream::connect(("127.0.0.1", handshake.port))
+        let stream = async_net::TcpStream::connect(address)
             .await
-            .with_context(|| format!("connecting to 127.0.0.1:{}", handshake.port))?;
+            .with_context(|| format!("connecting to {address}"))?;
         let (socket, _) =
             async_tungstenite::client_async_with_config(request, stream, Some(wire_config()))
                 .await
@@ -97,7 +115,7 @@ impl Client {
         sink.send(Message::Text(
             serde_json::to_string(&ClientMessage::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                token: handshake.token.clone(),
+                token: token.to_string(),
             })
             .context("encoding the hello")?
             .into(),
