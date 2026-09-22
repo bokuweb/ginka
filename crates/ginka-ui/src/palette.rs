@@ -227,12 +227,14 @@ pub fn entries(
             command: Command::NavigateForward,
         });
     }
-    all.push(Entry {
-        id: "terminal:new".into(),
-        label: rust_i18n::t!("palette.terminal.new").to_string(),
-        hint: None,
-        command: Command::NewTerminal,
-    });
+    if workspace_indexed.is_some() {
+        all.push(Entry {
+            id: "terminal:new".into(),
+            label: rust_i18n::t!("palette.terminal.new").to_string(),
+            hint: None,
+            command: Command::NewTerminal,
+        });
+    }
     all.push(Entry {
         id: "composer:attach".into(),
         label: rust_i18n::t!("palette.composer.attach").to_string(),
@@ -462,6 +464,24 @@ mod tests {
             entries(&layout(), &[], None, false, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::AttachFiles)
+        );
+    }
+
+    #[test]
+    fn a_new_terminal_is_offered_only_when_there_is_a_workspace_to_own_it() {
+        let home = entries(&layout(), &[], None, false, false, false);
+        assert!(
+            !home
+                .iter()
+                .any(|entry| entry.command == Command::NewTerminal),
+            "a terminal without a workspace would be a no-op"
+        );
+
+        let workspace = entries(&layout(), &[], Some(false), false, false, false);
+        assert!(
+            workspace
+                .iter()
+                .any(|entry| entry.command == Command::NewTerminal)
         );
     }
 

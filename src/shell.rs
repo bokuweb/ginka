@@ -7462,7 +7462,7 @@ impl Shell {
                                 },
                             )),
                     )
-                    .children((!self.terminals.is_empty()).then(|| {
+                    .children(self.session.is_some().then(|| {
                         let label = rust_i18n::t!("terminal.open").to_string();
                         Button::new("new-terminal")
                             .ghost()
