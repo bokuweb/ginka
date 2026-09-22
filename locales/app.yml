@@ -466,8 +466,11 @@ transcript.quote:
   en: Quote
   ja: 引用
 transcript.quote.tooltip:
-  en: Quote this message in chat
-  ja: このメッセージをチャットに引用
+  en: Quote selected text or this message in chat
+  ja: 選択したテキストまたはこのメッセージをチャットに引用
+transcript.quote_selection:
+  en: Quote selected text in chat
+  ja: 選択したテキストをチャットに引用
 transcript.thinking:
   en: Thinking…
   ja: 考えています…

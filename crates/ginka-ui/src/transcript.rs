@@ -847,6 +847,18 @@ pub fn settled(text: &str) -> (&str, &str) {
     text.split_at(cut)
 }
 
+/// Choose the exact selected range for quoting, or the owning message.
+///
+/// Window text selection is allowed to contain leading and trailing space;
+/// only an all-whitespace selection is treated as absent.
+pub fn quote_target<'a>(message: &'a str, selection: &'a str) -> &'a str {
+    if selection.trim().is_empty() {
+        message
+    } else {
+        selection
+    }
+}
+
 /// Whether to pull the transcript to its foot, and whether it is still
 /// following.
 ///
@@ -886,6 +898,22 @@ mod tests {
     use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn quoting_prefers_the_exact_selected_range_and_falls_back_to_the_message() {
+        assert_eq!(
+            quote_target("the whole answer", "chosen words"),
+            "chosen words"
+        );
+        assert_eq!(
+            quote_target("the whole answer", "  chosen words  \n"),
+            "  chosen words  \n"
+        );
+        assert_eq!(
+            quote_target("the whole answer", " \n\t"),
+            "the whole answer"
+        );
+    }
 
     #[test]
     fn prose_file_locations_become_internal_markdown_links() {

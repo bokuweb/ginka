@@ -30,6 +30,7 @@ use ginka_ui::workspace::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_base::TextSelection;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -1886,7 +1887,9 @@ impl Shell {
                     .tooltip(rust_i18n::t!("transcript.quote.tooltip").to_string())
                     .child(rust_i18n::t!("transcript.quote").to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.quote_in_composer(&quoted, window, cx)
+                        let selection = TextSelection::selected_text(window, cx);
+                        let target = ginka_ui::transcript::quote_target(&quoted, &selection);
+                        this.quote_in_composer(target, window, cx)
                     })),
             )
             .into_any_element()
@@ -3332,6 +3335,7 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("palette.placeholder").to_string())
         });
+        let selected_text = TextSelection::selected_text(window, cx);
         query.read(cx).focus_handle(cx).focus(window, cx);
         cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -3351,6 +3355,7 @@ impl Shell {
             query,
             typed: String::new(),
             chosen: 0,
+            selected_text: (!selected_text.trim().is_empty()).then_some(selected_text),
         });
         cx.notify();
     }
@@ -3384,6 +3389,9 @@ impl Shell {
                 close_armed: active.is_some_and(|tab| self.terminals.close_confirmation(&tab.id)),
             },
         ));
+        entries.extend(ginka_ui::palette::transcript_entries(
+            self.session.is_some() && palette.selected_text.is_some(),
+        ));
         ginka_ui::palette::filter(entries, &palette.typed)
     }
 
@@ -3409,8 +3417,12 @@ impl Shell {
             "enter" => {
                 if let Some(entry) = found.get(palette.chosen) {
                     let command = entry.command.clone();
+                    let selected_text = self
+                        .palette
+                        .as_ref()
+                        .and_then(|palette| palette.selected_text.clone());
                     self.palette = None;
-                    self.run_command(command, window, cx);
+                    self.run_command(command, selected_text.as_deref(), window, cx);
                 }
             }
             _ => {}
@@ -3421,6 +3433,7 @@ impl Shell {
     fn run_command(
         &mut self,
         command: ginka_ui::palette::Command,
+        selected_text: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -3462,6 +3475,11 @@ impl Shell {
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
             Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
+            Command::QuoteTranscriptSelection => {
+                if let Some(selection) = selected_text {
+                    self.quote_in_composer(selection, window, cx);
+                }
+            }
             Command::NextTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -8460,8 +8478,17 @@ impl Shell {
                                         .cursor_pointer()
                                         .hover(|this| this.bg(tokens.colors().row_hover()))
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            let selected_text = this
+                                                .palette
+                                                .as_ref()
+                                                .and_then(|palette| palette.selected_text.clone());
                                             this.palette = None;
-                                            this.run_command(command.clone(), window, cx);
+                                            this.run_command(
+                                                command.clone(),
+                                                selected_text.as_deref(),
+                                                window,
+                                                cx,
+                                            );
                                         }))
                                         .child(
                                             div()
@@ -8527,6 +8554,8 @@ struct Palette {
     typed: String,
     /// Which entry Return would run.
     chosen: usize,
+    /// Text selected before the palette took focus, retained for quote actions.
+    selected_text: Option<String>,
 }
 
 /// What the access chip and its rows call a mode.

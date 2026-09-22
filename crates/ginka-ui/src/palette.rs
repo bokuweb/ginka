@@ -35,6 +35,8 @@ pub enum Command {
     CopyTerminalOutput,
     /// Quote the active terminal selection into the chat composer.
     QuoteTerminalSelection,
+    /// Quote the selected transcript text into the chat composer.
+    QuoteTranscriptSelection,
     /// Move to the next terminal tab.
     NextTerminal,
     /// Move to the previous terminal tab.
@@ -164,6 +166,19 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
         });
     }
     entries
+}
+
+/// Transcript actions that have a meaningful target in the current window.
+pub fn transcript_entries(has_selection: bool) -> Vec<Entry> {
+    has_selection
+        .then(|| Entry {
+            id: "transcript:quote-selection".into(),
+            label: rust_i18n::t!("transcript.quote_selection").to_string(),
+            hint: None,
+            command: Command::QuoteTranscriptSelection,
+        })
+        .into_iter()
+        .collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -485,6 +500,18 @@ mod tests {
             entries(&layout(), &[], None, true, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::TogglePromptOutline)
+        );
+    }
+
+    #[test]
+    fn transcript_selection_is_offered_only_when_there_is_text_to_quote() {
+        assert!(transcript_entries(false).is_empty());
+        assert_eq!(
+            transcript_entries(true)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect::<Vec<_>>(),
+            vec![Command::QuoteTranscriptSelection]
         );
     }
 
