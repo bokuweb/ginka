@@ -152,14 +152,25 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
         /// Show what is staged for the next commit instead of everything.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["unstaged", "since"])]
         staged: bool,
+        /// Show only edits that are not staged yet.
+        #[arg(long, conflicts_with = "since")]
+        unstaged: bool,
         /// Show what has happened since a checkpoint, by its id.
         #[arg(long)]
         since: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
+    },
+    /// Show recent commits in a workspace, newest first.
+    History {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Maximum commits to print.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
     },
     /// Leave comments on a diff and send them back to the agent.
     #[command(subcommand)]
@@ -173,6 +184,29 @@ enum Command {
         /// Take it back out instead of putting it in.
         #[arg(long)]
         undo: bool,
+    },
+    /// Put one exact diff hunk into the next commit, or take it back out.
+    StageHunk {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Complete `@@` header printed by `changes --patch`.
+        header: String,
+        /// Take the hunk back out instead of putting it in.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Throw away one exact unstaged diff hunk.
+    ///
+    /// This cannot be undone through git. A stale hunk header is refused.
+    RevertHunk {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Complete `@@` header printed by `changes --unstaged --patch`.
+        header: String,
     },
     /// Throw away a file's uncommitted work.
     ///
@@ -203,6 +237,11 @@ enum Command {
     },
     /// Push a workspace's branch, setting an upstream if it has none.
     Push {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
+    /// Fetch and fast-forward a clean workspace branch from its upstream.
+    Pull {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
@@ -348,6 +387,8 @@ enum AccountCommand {
         #[arg(long)]
         delete_home: bool,
     },
+    /// Select the login future sessions of its provider use.
+    Select { id: String },
     /// Run the vendor's own sign-in for a login, here in this terminal.
     Login { id: String },
     /// Ask the provider how much of a login's rate-limit windows is left.
@@ -422,7 +463,7 @@ enum SessionCommand {
         /// Service tier advertised for the selected model.
         #[arg(long)]
         service_tier: Option<String>,
-        /// Which login to run on, by id. The provider's default otherwise.
+        /// Which login to run on, by id. The provider's active account otherwise.
         #[arg(long)]
         account: Option<String>,
         /// What the agent may touch: read-only, ask (edit freely, commands
@@ -432,6 +473,26 @@ enum SessionCommand {
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
+    /// List follow-ups waiting behind the active turn.
+    Queue { session: String },
+    /// Replace one queued follow-up without moving it.
+    QueueEdit {
+        session: String,
+        id: u64,
+        text: String,
+    },
+    /// Remove one queued follow-up.
+    QueueRemove { session: String, id: u64 },
+    /// Move one queued follow-up to a zero-based position.
+    QueueMove {
+        session: String,
+        id: u64,
+        index: u32,
+    },
+    /// Inject one queued follow-up into the active turn when supported.
+    QueueSendNow { session: String, id: u64 },
+    /// Compact an idle provider conversation's context.
+    Compact { session: String },
     /// Answer a question, plan or permission request in a running turn.
     Respond {
         session: String,
@@ -770,6 +831,9 @@ fn request_for(command: Command) -> Result<Request> {
             id: AccountId(id),
             delete_home,
         },
+        Command::Account(AccountCommand::Select { id }) => {
+            Request::SelectAccount { id: AccountId(id) }
+        }
         Command::Account(AccountCommand::Refresh { id }) => Request::RefreshPlanUsage {
             account: AccountId(id),
         },
@@ -922,6 +986,26 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             staged: !undo,
         },
+        Command::StageHunk {
+            workspace,
+            path,
+            header,
+            undo,
+        } => Request::StageHunk {
+            workspace: WorkspaceId(workspace),
+            path,
+            header,
+            staged: !undo,
+        },
+        Command::RevertHunk {
+            workspace,
+            path,
+            header,
+        } => Request::RevertHunk {
+            workspace: WorkspaceId(workspace),
+            path,
+            header,
+        },
         Command::Revert { workspace, path } => Request::RevertFile {
             workspace: WorkspaceId(workspace),
             path,
@@ -939,20 +1023,30 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Push { workspace } => Request::Push {
             workspace: WorkspaceId(workspace),
         },
+        Command::Pull { workspace } => Request::Pull {
+            workspace: WorkspaceId(workspace),
+        },
         Command::Changes {
             workspace,
             staged,
+            unstaged,
             since,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
-            source: match (staged, since) {
-                (_, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+            source: match (staged, unstaged, since) {
+                (_, _, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
-                (true, None) => ChangeSource::Staged,
-                (false, None) => ChangeSource::Uncommitted,
+                (true, false, None) => ChangeSource::Staged,
+                (false, true, None) => ChangeSource::Unstaged,
+                (false, false, None) => ChangeSource::Uncommitted,
+                (true, true, None) => unreachable!("clap rejects conflicting diff sources"),
             },
+        },
+        Command::History { workspace, limit } => Request::WorkspaceHistory {
+            workspace: WorkspaceId(workspace),
+            limit: Some(limit),
         },
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
@@ -981,6 +1075,38 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
             session: SessionId(session),
             text,
+        },
+        Command::Session(SessionCommand::Queue { session }) => Request::QueuedMessages {
+            session: SessionId(session),
+        },
+        Command::Session(SessionCommand::QueueEdit { session, id, text }) => {
+            Request::EditQueuedMessage {
+                session: SessionId(session),
+                id,
+                text,
+            }
+        }
+        Command::Session(SessionCommand::QueueRemove { session, id }) => {
+            Request::RemoveQueuedMessage {
+                session: SessionId(session),
+                id,
+            }
+        }
+        Command::Session(SessionCommand::QueueMove { session, id, index }) => {
+            Request::MoveQueuedMessage {
+                session: SessionId(session),
+                id,
+                index,
+            }
+        }
+        Command::Session(SessionCommand::QueueSendNow { session, id }) => {
+            Request::SendQueuedMessageNow {
+                session: SessionId(session),
+                id,
+            }
+        }
+        Command::Session(SessionCommand::Compact { session }) => Request::CompactSession {
+            session: SessionId(session),
         },
         Command::Session(SessionCommand::Respond {
             session,
@@ -1275,6 +1401,17 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::History { commits } => {
+            for commit in commits {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    commit.id.chars().take(8).collect::<String>(),
+                    commit.authored_at,
+                    commit.author,
+                    commit.summary
+                );
+            }
+        }
         Response::Files { files } => {
             for file in files {
                 println!("{}", file.path);
@@ -1404,6 +1541,16 @@ fn print(response: Response, patch: bool) {
             }
             for entry in entries {
                 println!("{}", ginka_cli_format::transcript_line(&entry));
+            }
+        }
+        Response::QueuedMessages { messages, .. } => {
+            for (index, message) in messages.into_iter().enumerate() {
+                println!(
+                    "{}\t{}\t{}",
+                    index,
+                    message.id,
+                    message.text.replace(['\r', '\n'], " ")
+                );
             }
         }
     }
@@ -1612,7 +1759,11 @@ fn print_accounts(accounts: &[Account], plans: &[PlanSnapshot]) {
             .unwrap_or_default();
         println!(
             "{:<18} {:<8} {:<16} {:<12} {}",
-            account.id.0,
+            if account.active {
+                format!("* {}", account.id.0)
+            } else {
+                account.id.0.clone()
+            },
             account.provider.as_str(),
             account.label,
             state,
@@ -1862,6 +2013,12 @@ mod ginka_cli_format {
                 "usage: {} in, {} out",
                 usage.input_tokens, usage.output_tokens
             ),
+            AgentEvent::ContextUsage { usage } => format!(
+                "context: {}/{} ({:.0}%)",
+                usage.used_tokens,
+                usage.window_tokens,
+                usage.used_percent()
+            ),
             AgentEvent::PlanUsage { usage } => match usage.tightest() {
                 Some(window) => format!("plan: {} {:.0}% used", window.label, window.used_percent),
                 None => String::new(),
@@ -1893,9 +2050,9 @@ mod ginka_cli_format {
             // know is how a vendor's format change first shows up.
             AgentEvent::Unsupported { shape } => format!("-- not understood: {shape} --"),
             // Nothing a transcript reader needs to see.
-            AgentEvent::Commands { .. } | AgentEvent::TurnStarted | AgentEvent::SteerAccepted => {
-                String::new()
-            }
+            AgentEvent::Commands { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::SteerAccepted => String::new(),
         }
     }
 

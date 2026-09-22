@@ -25,6 +25,26 @@ pub enum Command {
     ShowSurface(Surface),
     /// Start another shell in the dock.
     NewTerminal,
+    /// Split the active terminal pane, or return to one pane.
+    ToggleTerminalSplit,
+    /// Move keyboard input to the other visible terminal pane.
+    FocusOtherTerminalPane,
+    /// Find text in the active terminal's bounded history.
+    FindTerminal,
+    /// Copy the active terminal's visible output to the clipboard.
+    CopyTerminalOutput,
+    /// Quote the active terminal selection into the chat composer.
+    QuoteTerminalSelection,
+    /// Quote the selected transcript text into the chat composer.
+    QuoteTranscriptSelection,
+    /// Move to the next terminal tab.
+    NextTerminal,
+    /// Move to the previous terminal tab.
+    PreviousTerminal,
+    /// Return the active terminal from history to live output.
+    TerminalToLive,
+    /// Ask to close the active daemon-owned terminal.
+    CloseTerminal,
     /// Build or refresh semantic search for the selected workspace.
     IndexWorkspace,
     /// Choose files for the next prompt.
@@ -39,6 +59,156 @@ pub enum Command {
     NavigateForward,
     /// Select a workspace in the sidebar.
     Switch(WorkspaceId),
+}
+
+/// Which contextual terminal actions can do something in the current window.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TerminalActions {
+    /// Number of daemon terminals shown in the shared tab strip.
+    pub tabs: usize,
+    /// Whether the active viewport contains text worth copying.
+    pub has_output: bool,
+    /// Whether the active terminal has a non-empty mouse selection.
+    pub has_selection: bool,
+    /// Whether two terminal panes are currently visible.
+    pub split: bool,
+    /// Whether the active terminal is browsing older output.
+    pub browsing_history: bool,
+    /// Whether closing the active terminal is awaiting confirmation.
+    pub close_armed: bool,
+}
+
+/// Terminal commands that are meaningful for the current tab and pane state.
+pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
+    if state.tabs == 0 {
+        return Vec::new();
+    }
+    let mut entries = vec![
+        Entry {
+            id: "terminal:split".into(),
+            label: if state.split {
+                rust_i18n::t!("terminal.split.close").to_string()
+            } else {
+                rust_i18n::t!("terminal.split.open").to_string()
+            },
+            hint: None,
+            command: Command::ToggleTerminalSplit,
+        },
+        Entry {
+            id: "terminal:find".into(),
+            label: rust_i18n::t!("terminal.search.open").to_string(),
+            hint: Some(terminal_find_shortcut().into()),
+            command: Command::FindTerminal,
+        },
+        Entry {
+            id: "terminal:close".into(),
+            label: if state.close_armed {
+                rust_i18n::t!("terminal.close.short").to_string()
+            } else {
+                rust_i18n::t!("terminal.close").to_string()
+            },
+            hint: None,
+            command: Command::CloseTerminal,
+        },
+    ];
+    if state.has_output {
+        entries.insert(
+            2,
+            Entry {
+                id: "terminal:copy-output".into(),
+                label: rust_i18n::t!("terminal.copy_output").to_string(),
+                hint: Some(crate::terminal::copy_shortcut(cfg!(target_os = "macos")).into()),
+                command: Command::CopyTerminalOutput,
+            },
+        );
+    }
+    if state.has_selection {
+        entries.insert(
+            3,
+            Entry {
+                id: "terminal:quote-selection".into(),
+                label: rust_i18n::t!("terminal.quote_selection").to_string(),
+                hint: None,
+                command: Command::QuoteTerminalSelection,
+            },
+        );
+    }
+    if state.split {
+        entries.push(Entry {
+            id: "terminal:focus-other".into(),
+            label: rust_i18n::t!("terminal.split.focus_other").to_string(),
+            hint: None,
+            command: Command::FocusOtherTerminalPane,
+        });
+    }
+    if state.tabs > 1 {
+        entries.extend([
+            Entry {
+                id: "terminal:next".into(),
+                label: rust_i18n::t!("palette.terminal.next").to_string(),
+                hint: Some(next_terminal_shortcut().into()),
+                command: Command::NextTerminal,
+            },
+            Entry {
+                id: "terminal:previous".into(),
+                label: rust_i18n::t!("palette.terminal.previous").to_string(),
+                hint: Some(previous_terminal_shortcut().into()),
+                command: Command::PreviousTerminal,
+            },
+        ]);
+    }
+    if state.browsing_history {
+        entries.push(Entry {
+            id: "terminal:live".into(),
+            label: rust_i18n::t!("terminal.history.live.tooltip").to_string(),
+            hint: None,
+            command: Command::TerminalToLive,
+        });
+    }
+    entries
+}
+
+/// Transcript actions that have a meaningful target in the current window.
+pub fn transcript_entries(has_selection: bool) -> Vec<Entry> {
+    has_selection
+        .then(|| Entry {
+            id: "transcript:quote-selection".into(),
+            label: rust_i18n::t!("transcript.quote_selection").to_string(),
+            hint: None,
+            command: Command::QuoteTranscriptSelection,
+        })
+        .into_iter()
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn terminal_find_shortcut() -> &'static str {
+    "⌘F"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn terminal_find_shortcut() -> &'static str {
+    "Ctrl+F"
+}
+
+#[cfg(target_os = "macos")]
+fn next_terminal_shortcut() -> &'static str {
+    "⌘⇧]"
+}
+
+#[cfg(not(target_os = "macos"))]
+fn next_terminal_shortcut() -> &'static str {
+    "Ctrl+PageDown"
+}
+
+#[cfg(target_os = "macos")]
+fn previous_terminal_shortcut() -> &'static str {
+    "⌘⇧["
+}
+
+#[cfg(not(target_os = "macos"))]
+fn previous_terminal_shortcut() -> &'static str {
+    "Ctrl+PageUp"
 }
 
 /// One line of the palette.
@@ -102,12 +272,14 @@ pub fn entries(
             command: Command::NavigateForward,
         });
     }
-    all.push(Entry {
-        id: "terminal:new".into(),
-        label: rust_i18n::t!("palette.terminal.new").to_string(),
-        hint: None,
-        command: Command::NewTerminal,
-    });
+    if workspace_indexed.is_some() {
+        all.push(Entry {
+            id: "terminal:new".into(),
+            label: rust_i18n::t!("palette.terminal.new").to_string(),
+            hint: None,
+            command: Command::NewTerminal,
+        });
+    }
     all.push(Entry {
         id: "composer:attach".into(),
         label: rust_i18n::t!("palette.composer.attach").to_string(),
@@ -332,11 +504,116 @@ mod tests {
     }
 
     #[test]
+    fn transcript_selection_is_offered_only_when_there_is_text_to_quote() {
+        assert!(transcript_entries(false).is_empty());
+        assert_eq!(
+            transcript_entries(true)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect::<Vec<_>>(),
+            vec![Command::QuoteTranscriptSelection]
+        );
+    }
+
+    #[test]
     fn attaching_files_is_available_before_a_session_exists() {
         assert!(
             entries(&layout(), &[], None, false, false, false)
                 .iter()
                 .any(|entry| entry.command == Command::AttachFiles)
         );
+    }
+
+    #[test]
+    fn a_new_terminal_is_offered_only_when_there_is_a_workspace_to_own_it() {
+        let home = entries(&layout(), &[], None, false, false, false);
+        assert!(
+            !home
+                .iter()
+                .any(|entry| entry.command == Command::NewTerminal),
+            "a terminal without a workspace would be a no-op"
+        );
+
+        let workspace = entries(&layout(), &[], Some(false), false, false, false);
+        assert!(
+            workspace
+                .iter()
+                .any(|entry| entry.command == Command::NewTerminal)
+        );
+    }
+
+    #[test]
+    fn terminal_palette_actions_follow_the_visible_terminal_state() {
+        assert!(terminal_entries(TerminalActions::default()).is_empty());
+
+        let one = terminal_entries(TerminalActions {
+            tabs: 1,
+            has_output: true,
+            has_selection: true,
+            browsing_history: true,
+            ..TerminalActions::default()
+        });
+        for command in [
+            Command::ToggleTerminalSplit,
+            Command::FindTerminal,
+            Command::CopyTerminalOutput,
+            Command::QuoteTerminalSelection,
+            Command::TerminalToLive,
+            Command::CloseTerminal,
+        ] {
+            assert!(
+                one.iter().any(|entry| entry.command == command),
+                "{command:?} is not reachable from the palette"
+            );
+        }
+        assert!(!one.iter().any(|entry| matches!(
+            entry.command,
+            Command::FocusOtherTerminalPane | Command::NextTerminal | Command::PreviousTerminal
+        )));
+        let unarmed_close = one
+            .iter()
+            .find(|entry| entry.command == Command::CloseTerminal)
+            .map(|entry| entry.label.clone())
+            .unwrap();
+
+        let split = terminal_entries(TerminalActions {
+            tabs: 3,
+            split: true,
+            close_armed: true,
+            ..TerminalActions::default()
+        });
+        for command in [
+            Command::FocusOtherTerminalPane,
+            Command::NextTerminal,
+            Command::PreviousTerminal,
+        ] {
+            assert!(split.iter().any(|entry| entry.command == command));
+        }
+        let armed_close = split
+            .iter()
+            .find(|entry| entry.command == Command::CloseTerminal)
+            .map(|entry| entry.label.clone())
+            .unwrap();
+        assert_ne!(
+            armed_close, unarmed_close,
+            "the destructive second activation must identify itself"
+        );
+        assert!(
+            !split
+                .iter()
+                .any(|entry| entry.command == Command::TerminalToLive)
+        );
+    }
+
+    #[test]
+    fn a_blank_terminal_does_not_offer_a_no_op_copy_command() {
+        let entries = terminal_entries(TerminalActions {
+            tabs: 1,
+            ..TerminalActions::default()
+        });
+        assert!(!entries.iter().any(|entry| matches!(
+            entry.command,
+            Command::CopyTerminalOutput | Command::QuoteTerminalSelection
+        )));
     }
 }
