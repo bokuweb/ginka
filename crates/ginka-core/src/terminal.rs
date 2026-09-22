@@ -17,6 +17,7 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use std::collections::HashMap;
 use std::io::{Read as _, Write as _};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// How much output is read at once.
@@ -43,6 +44,8 @@ struct Running {
     workspace: WorkspaceId,
     /// What it is called in a tab strip.
     title: String,
+    /// Monotonic daemon-local creation order; titles may change or sort oddly.
+    opened_order: u64,
     /// What it has printed, trimmed to `HISTORY_LIMIT`.
     ///
     /// Shared with the thread reading the pty rather than passed through the
@@ -67,6 +70,8 @@ pub struct TerminalCommand {
 /// Every terminal the daemon is running.
 pub struct Terminals {
     running: Mutex<HashMap<TerminalId, Running>>,
+    next_workspace_number: Mutex<HashMap<WorkspaceId, u64>>,
+    next_opened_order: AtomicU64,
     events: Arc<dyn EventSink>,
 }
 
@@ -75,6 +80,8 @@ impl Terminals {
     pub fn new(events: Arc<dyn EventSink>) -> Self {
         Self {
             running: Mutex::new(HashMap::new()),
+            next_workspace_number: Mutex::new(HashMap::new()),
+            next_opened_order: AtomicU64::new(0),
             events,
         }
     }
@@ -185,16 +192,21 @@ impl Terminals {
         let reader = pair.master.try_clone_reader().context("reading the pty")?;
         let id = TerminalId(uuid::Uuid::new_v4().simple().to_string());
         let history = Arc::new(Mutex::new(String::new()));
+        let (opened_order, ordinal) = {
+            let mut numbers = self
+                .next_workspace_number
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let opened_order = self.next_opened_order.fetch_add(1, Ordering::Relaxed);
+            let next = numbers.entry(workspace.clone()).or_default();
+            *next += 1;
+            (opened_order, *next)
+        };
 
         self.pump(id.clone(), reader, history.clone(), on_exit);
         let mut running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        // Numbered within the workspace, because that is the strip they appear
-        // in: two shells in two workspaces are both the first one there.
-        let ordinal = running
-            .values()
-            .filter(|other| &other.workspace == workspace)
-            .count()
-            + 1;
+        // Numbered monotonically within the workspace: closing shell 1 while
+        // shell 2 is visible must not make the next tab another shell 2.
         running.insert(
             id.clone(),
             Running {
@@ -203,6 +215,7 @@ impl Terminals {
                 child,
                 workspace: workspace.clone(),
                 title: title.unwrap_or_else(|| format!("shell {ordinal}")),
+                opened_order,
                 history,
             },
         );
@@ -215,20 +228,24 @@ impl Terminals {
     /// a dock that did not show them would be hiding work that is still going.
     pub fn list(&self, workspace: &WorkspaceId) -> Vec<TerminalInfo> {
         let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
-        let mut found: Vec<TerminalInfo> = running
+        let mut found: Vec<(u64, TerminalInfo)> = running
             .iter()
             .filter(|(_, shell)| &shell.workspace == workspace)
-            .map(|(id, shell)| TerminalInfo {
-                id: id.clone(),
-                workspace: shell.workspace.clone(),
-                title: shell.title.clone(),
+            .map(|(id, shell)| {
+                (
+                    shell.opened_order,
+                    TerminalInfo {
+                        id: id.clone(),
+                        workspace: shell.workspace.clone(),
+                        title: shell.title.clone(),
+                    },
+                )
             })
             .collect();
-        // By the name they were given, which counts up as they were opened: a
-        // HashMap has no order and a tab strip that reshuffled itself would be
-        // unusable.
-        found.sort_by(|a, b| a.title.cmp(&b.title));
-        found
+        // A HashMap has no order, and titles are presentation: `shell 10`
+        // sorts before `shell 2`, while command terminals carry words instead.
+        found.sort_by_key(|(opened_order, _)| *opened_order);
+        found.into_iter().map(|(_, terminal)| terminal).collect()
     }
 
     /// What a terminal has printed lately, for a window that has just found it.
@@ -569,22 +586,37 @@ mod tests {
         let first = terminals.open(&mine, dir.path(), 24, 80).unwrap();
         let second = terminals.open(&mine, dir.path(), 24, 80).unwrap();
         let elsewhere = terminals.open(&other, dir.path(), 24, 80).unwrap();
+        let mut mine_ids = vec![first.clone(), second.clone()];
+        for _ in 0..8 {
+            mine_ids.push(terminals.open(&mine, dir.path(), 24, 80).unwrap());
+        }
 
         let listed = terminals.list(&mine);
         assert_eq!(
             listed.iter().map(|t| t.id.clone()).collect::<Vec<_>>(),
-            vec![first.clone(), second.clone()],
-            "one workspace's strip shows that workspace's shells"
+            mine_ids,
+            "one workspace's strip keeps creation order past shell 9"
         );
         assert_eq!(listed[0].title, "shell 1");
         assert_eq!(listed[1].title, "shell 2");
+        assert_eq!(listed[9].title, "shell 10");
         assert_eq!(
             terminals.list(&other)[0].title,
             "shell 1",
             "the first shell in a workspace is its first, whatever else is running"
         );
 
-        for id in [first, second, elsewhere] {
+        terminals.close(&first).unwrap();
+        let replacement = terminals.open(&mine, dir.path(), 24, 80).unwrap();
+        let relisted = terminals.list(&mine);
+        assert_eq!(
+            relisted.last().map(|terminal| terminal.title.as_str()),
+            Some("shell 11"),
+            "closing a shell must not reuse a title that is still visible"
+        );
+        mine_ids.push(replacement);
+
+        for id in mine_ids.into_iter().chain([elsewhere]) {
             terminals.close(&id).unwrap();
         }
         assert!(terminals.list(&mine).is_empty());

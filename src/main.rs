@@ -9,6 +9,8 @@
 // linking a UI toolkit.
 rust_i18n::i18n!("locales", fallback = "en");
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod browser;
 mod daemon;
 mod lsp;
 mod shell;
