@@ -6,6 +6,7 @@
 //! tests: a cost of `None` prints as nothing, never as `$0.00`, because zero
 //! would be a claim that the work was free.
 
+use ginka_protocol::Usage;
 use ginka_protocol::model::{PlanSnapshot, UsageRow, UsageTotals};
 
 /// The usage report as the daemon answers it.
@@ -77,6 +78,16 @@ pub fn compact(count: u64) -> String {
     }
 }
 
+/// The current session's billed-token count in one chip-sized number.
+///
+/// Provider usage treats cache reads and reasoning as breakdowns of input and
+/// output respectively, so adding those fields again would visibly overstate
+/// consumption. `None` distinguishes no reading yet from a real zero.
+pub fn session_token_count(usage: &Usage) -> Option<String> {
+    let total = usage.input_tokens.saturating_add(usage.output_tokens);
+    (total > 0).then(|| compact(total))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +125,20 @@ mod tests {
         assert_eq!(compact(950), "950");
         assert_eq!(compact(12_345), "12.3k");
         assert_eq!(compact(4_000_000), "4.0M");
+    }
+
+    #[test]
+    fn session_token_count_is_visible_without_double_counting_cache() {
+        let usage = Usage {
+            input_tokens: 12_345,
+            output_tokens: 1_200,
+            cache_read_tokens: 9_000,
+            reasoning_tokens: 600,
+            cost_usd: Some(0.42),
+        };
+
+        assert_eq!(session_token_count(&usage).as_deref(), Some("13.5k"));
+        assert_eq!(session_token_count(&Usage::default()), None);
     }
 
     #[test]

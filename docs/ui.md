@@ -327,8 +327,11 @@ When it cannot, the same row adopts a replacement session whose first turn is
 given a bounded digest of the conversation so far.
 
 Usage is a separate composer chip and therefore remains visible even when a
-provider has only one login. Turn events push new readings into it immediately;
-clicking it requests a fresh reading. It is never refreshed by a timer.
+provider has only one login. The active transcript's cumulative input plus
+output tokens appear beside the tightest rate-limit window; cache and reasoning
+breakdowns are not counted twice. Turn events push both readings into it
+immediately; clicking requests a fresh rate-limit reading. It is never refreshed
+by a timer.
 
 ## 5. What we build ourselves
 

@@ -220,9 +220,15 @@ composer.account.no_reading:
 composer.usage.unknown:
   en: Usage —
   ja: 使用量 —
+composer.usage.tokens:
+  en: "%{count} tokens"
+  ja: "%{count} トークン"
+composer.usage.tokens_and_headroom:
+  en: "%{count} tokens · %{headroom}"
+  ja: "%{count} トークン · %{headroom}"
 composer.usage.refresh:
-  en: Refresh usage
-  ja: 使用量を更新
+  en: Session tokens update live; click to refresh rate-limit headroom
+  ja: セッションのトークン数は随時更新・クリックで残量を再取得
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"

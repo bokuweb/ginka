@@ -6662,15 +6662,31 @@ impl Shell {
             ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
             crate::daemon::now(),
         );
+        let token_count = ginka_ui::reports::session_token_count(&self.transcript.usage());
         let exhausted = headroom.as_ref().is_some_and(|headroom| headroom.exhausted);
-        let label = match headroom.as_ref() {
-            Some(headroom) if headroom.exhausted => format!(
-                "{} · {}",
-                headroom.summary(),
-                rust_i18n::t!("composer.account.at_wall")
-            ),
-            Some(headroom) => headroom.summary(),
-            None => rust_i18n::t!("composer.usage.unknown").to_string(),
+        let headroom_label = headroom.as_ref().map(|headroom| {
+            if headroom.exhausted {
+                format!(
+                    "{} · {}",
+                    headroom.summary(),
+                    rust_i18n::t!("composer.account.at_wall")
+                )
+            } else {
+                headroom.summary()
+            }
+        });
+        let label = match (token_count, headroom_label) {
+            (Some(count), Some(headroom)) => rust_i18n::t!(
+                "composer.usage.tokens_and_headroom",
+                count = count,
+                headroom = headroom
+            )
+            .to_string(),
+            (Some(count), None) => {
+                rust_i18n::t!("composer.usage.tokens", count = count).to_string()
+            }
+            (None, Some(headroom)) => headroom,
+            (None, None) => rust_i18n::t!("composer.usage.unknown").to_string(),
         };
         let account = account.id.clone();
 
