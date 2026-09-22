@@ -646,6 +646,12 @@ terminal.search.placeholder:
 terminal.copy_output:
   en: Copy terminal selection or visible output
   ja: ターミナルの選択範囲または表示中の出力をコピー
+terminal.quote_selection:
+  en: Quote terminal selection in chat
+  ja: ターミナルの選択範囲をチャットで引用
+terminal.quote_selection.short:
+  en: Quote
+  ja: 引用
 terminal.split.open:
   en: Split terminal
   ja: ターミナルを分割

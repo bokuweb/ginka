@@ -2342,16 +2342,36 @@ impl Shell {
             .detach();
     }
 
-    /// Copy the active selection, or the viewport when nothing is selected.
-    fn copy_terminal_output(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self.terminals.active().and_then(|tab| {
+    fn active_terminal_selection_text(&self) -> Option<String> {
+        self.terminals.active().and_then(|tab| {
             self.terminal_selection
                 .as_ref()
                 .filter(|drag| drag.terminal == tab.id)
                 .and_then(|drag| tab.screen.selection_text(drag.selection))
-                .or_else(|| Some(tab.screen.text()).filter(|text| !text.is_empty()))
+        })
+    }
+
+    fn quoteable_terminal_selection(&self) -> Option<String> {
+        self.active_terminal_selection_text()
+            .filter(|selection| !selection.trim().is_empty())
+    }
+
+    /// Copy the active selection, or the viewport when nothing is selected.
+    fn copy_terminal_output(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.active_terminal_selection_text().or_else(|| {
+            self.terminals
+                .active()
+                .map(|tab| tab.screen.text())
+                .filter(|text| !text.is_empty())
         }) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Append the active terminal selection to the composer as a quote.
+    fn quote_terminal_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(selection) = self.quoteable_terminal_selection() {
+            self.quote_in_composer(&selection, window, cx);
         }
     }
 
@@ -3358,6 +3378,7 @@ impl Shell {
             ginka_ui::palette::TerminalActions {
                 tabs: self.terminals.tabs().len(),
                 has_output: active.is_some_and(|tab| !tab.screen.text().is_empty()),
+                has_selection: self.quoteable_terminal_selection().is_some(),
                 split: self.terminals.split_ids().is_some(),
                 browsing_history: active.is_some_and(|tab| tab.screen.display_offset() > 0),
                 close_armed: active.is_some_and(|tab| self.terminals.close_confirmation(&tab.id)),
@@ -3440,6 +3461,7 @@ impl Shell {
                 self.open_terminal_search(window, cx);
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
+            Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
             Command::NextTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -7519,6 +7541,7 @@ impl Shell {
             .terminals
             .active()
             .is_some_and(|tab| !tab.screen.text().is_empty());
+        let has_selection = self.quoteable_terminal_selection().is_some();
         let history_offset = self
             .terminals
             .active()
@@ -7703,6 +7726,18 @@ impl Shell {
                             .accessibility_label(label)
                             .child(Icon::new(IconName::Copy).size_3())
                             .on_click(cx.listener(|this, _, _, cx| this.copy_terminal_output(cx)))
+                    }))
+                    .children(has_selection.then(|| {
+                        let label = rust_i18n::t!("terminal.quote_selection").to_string();
+                        Button::new("quote-terminal-selection")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label.clone())
+                            .label(rust_i18n::t!("terminal.quote_selection.short").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.quote_terminal_selection(window, cx)
+                            }))
                     }))
                     .children((history_offset > 0).then(|| {
                         Button::new("terminal-live")

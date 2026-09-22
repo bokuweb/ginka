@@ -43,7 +43,7 @@ The statuses describe Ginka at 2026-09-13:
 | Updates/platforms | Signed in-app update flow and packaged macOS/Linux/Windows builds | **Planned** for M6; macOS ships first. |
 | Security | Local CLI credentials, command allowlists, CSP, no remote Markdown images | **Different architecture.** Ginka is native and daemon-authenticated; equivalent subprocess/path/content boundaries remain requirements. |
 
-Terminal copying now prefers an exact mouse-drag selection and falls back to the visible viewport; reverse drags and multiline ranges preserve their character and line boundaries.
+Terminal copying now prefers an exact mouse-drag selection and falls back to the visible viewport; reverse drags and multiline ranges preserve their character and line boundaries. A non-blank terminal selection can be quoted into an existing chat draft from the toolbar or command palette.
 
 ## Implementation order
 

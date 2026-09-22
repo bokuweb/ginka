@@ -33,6 +33,8 @@ pub enum Command {
     FindTerminal,
     /// Copy the active terminal's visible output to the clipboard.
     CopyTerminalOutput,
+    /// Quote the active terminal selection into the chat composer.
+    QuoteTerminalSelection,
     /// Move to the next terminal tab.
     NextTerminal,
     /// Move to the previous terminal tab.
@@ -64,6 +66,8 @@ pub struct TerminalActions {
     pub tabs: usize,
     /// Whether the active viewport contains text worth copying.
     pub has_output: bool,
+    /// Whether the active terminal has a non-empty mouse selection.
+    pub has_selection: bool,
     /// Whether two terminal panes are currently visible.
     pub split: bool,
     /// Whether the active terminal is browsing older output.
@@ -113,6 +117,17 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
                 label: rust_i18n::t!("terminal.copy_output").to_string(),
                 hint: Some(crate::terminal::copy_shortcut(cfg!(target_os = "macos")).into()),
                 command: Command::CopyTerminalOutput,
+            },
+        );
+    }
+    if state.has_selection {
+        entries.insert(
+            3,
+            Entry {
+                id: "terminal:quote-selection".into(),
+                label: rust_i18n::t!("terminal.quote_selection").to_string(),
+                hint: None,
+                command: Command::QuoteTerminalSelection,
             },
         );
     }
@@ -507,6 +522,7 @@ mod tests {
         let one = terminal_entries(TerminalActions {
             tabs: 1,
             has_output: true,
+            has_selection: true,
             browsing_history: true,
             ..TerminalActions::default()
         });
@@ -514,6 +530,7 @@ mod tests {
             Command::ToggleTerminalSplit,
             Command::FindTerminal,
             Command::CopyTerminalOutput,
+            Command::QuoteTerminalSelection,
             Command::TerminalToLive,
             Command::CloseTerminal,
         ] {
@@ -563,13 +580,13 @@ mod tests {
 
     #[test]
     fn a_blank_terminal_does_not_offer_a_no_op_copy_command() {
-        assert!(
-            !terminal_entries(TerminalActions {
-                tabs: 1,
-                ..TerminalActions::default()
-            })
-            .iter()
-            .any(|entry| entry.command == Command::CopyTerminalOutput)
-        );
+        let entries = terminal_entries(TerminalActions {
+            tabs: 1,
+            ..TerminalActions::default()
+        });
+        assert!(!entries.iter().any(|entry| matches!(
+            entry.command,
+            Command::CopyTerminalOutput | Command::QuoteTerminalSelection
+        )));
     }
 }
