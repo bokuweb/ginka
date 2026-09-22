@@ -7,6 +7,7 @@
 
 use crate::Client;
 use anyhow::{Context, Result, anyhow};
+use ginka_protocol::handshake::{DAEMON_ADDRESS_ENV, DAEMON_TOKEN_ENV};
 use ginka_protocol::{Handshake, Seq};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,6 +23,30 @@ const STARTUP_POLL: Duration = Duration::from_millis(25);
 
 /// The environment variable that overrides which daemon binary is started.
 pub const DAEMON_BINARY_ENV: &str = "GINKA_DAEMON";
+
+/// Whether daemon-host paths also name files on this client machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DaemonLocation {
+    /// The daemon was discovered locally or spawned by this client.
+    Local,
+    /// An explicit address points at a daemon whose paths are not local paths.
+    External,
+}
+
+impl DaemonLocation {
+    /// Whether daemon-host paths may be handed to this machine's OS APIs.
+    pub fn allows_local_paths(self) -> bool {
+        self == Self::Local
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConnectionTarget {
+    endpoint: String,
+    address: String,
+    token: String,
+    location: DaemonLocation,
+}
 
 /// Where to look for a daemon, and how to start one.
 #[derive(Debug, Clone)]
@@ -62,11 +87,34 @@ impl Discovery {
         serde_json::from_str(&text).ok()
     }
 
+    /// Whether paths returned by this daemon may be used by local OS APIs.
+    ///
+    /// A partial override is external too: the connection will be refused,
+    /// and exposing a local-path action while misconfigured is not safe.
+    pub fn location(&self) -> DaemonLocation {
+        if std::env::var_os(DAEMON_ADDRESS_ENV).is_some()
+            || std::env::var_os(DAEMON_TOKEN_ENV).is_some()
+        {
+            DaemonLocation::External
+        } else {
+            DaemonLocation::Local
+        }
+    }
+
     /// Connect to the running daemon, starting one if the published details
     /// are missing or dead.
     ///
     /// `resume_from` is passed through to [`Client::connect`].
     pub async fn connect(&self, resume_from: Option<Seq>) -> Result<Client> {
+        if let Some(target) = self.override_target()? {
+            return Client::connect_to(
+                &target.endpoint,
+                &target.address,
+                &target.token,
+                resume_from,
+            )
+            .await;
+        }
         if let Some(handshake) = self.published()
             && let Ok(client) = Client::connect(&handshake, resume_from).await
         {
@@ -78,6 +126,15 @@ impl Discovery {
 
     /// Connect only if a daemon is already running.
     pub async fn connect_existing(&self, resume_from: Option<Seq>) -> Result<Client> {
+        if let Some(target) = self.override_target()? {
+            return Client::connect_to(
+                &target.endpoint,
+                &target.address,
+                &target.token,
+                resume_from,
+            )
+            .await;
+        }
         let handshake = self
             .published()
             .ok_or_else(|| anyhow!("no daemon is running"))?;
@@ -102,6 +159,12 @@ impl Discovery {
             .spawn()
             .with_context(|| format!("starting {}", binary.display()))?;
         Ok(())
+    }
+
+    fn override_target(&self) -> Result<Option<ConnectionTarget>> {
+        let address = std::env::var(DAEMON_ADDRESS_ENV).ok();
+        let token = std::env::var(DAEMON_TOKEN_ENV).ok();
+        target_from_overrides(address.as_deref(), token.as_deref())
     }
 
     /// Wait for the daemon to publish itself, then connect.
@@ -146,6 +209,37 @@ impl Discovery {
     }
 }
 
+fn target_from_overrides(
+    address: Option<&str>,
+    token: Option<&str>,
+) -> Result<Option<ConnectionTarget>> {
+    match (address, token) {
+        (None, None) => Ok(None),
+        (Some(address), Some(token)) => {
+            let address = address.trim();
+            let token = token.trim();
+            if address.is_empty()
+                || token.is_empty()
+                || address.contains('/')
+                || address.chars().any(char::is_whitespace)
+            {
+                return Err(anyhow!(
+                    "{DAEMON_ADDRESS_ENV} must be host:port and {DAEMON_TOKEN_ENV} must not be empty"
+                ));
+            }
+            Ok(Some(ConnectionTarget {
+                endpoint: format!("ws://{address}/rpc"),
+                address: address.to_string(),
+                token: token.to_string(),
+                location: DaemonLocation::External,
+            }))
+        }
+        _ => Err(anyhow!(
+            "{DAEMON_ADDRESS_ENV} and {DAEMON_TOKEN_ENV} must be set together"
+        )),
+    }
+}
+
 /// The `ginka-daemon` next to the currently running executable, if it exists.
 fn sibling_daemon() -> Option<PathBuf> {
     let candidate = std::env::current_exe()
@@ -162,6 +256,27 @@ fn sibling_daemon() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_complete_override_is_an_external_daemon_target() {
+        let target = target_from_overrides(Some("buildbox:4317"), Some("secret"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(target.address, "buildbox:4317");
+        assert_eq!(target.endpoint, "ws://buildbox:4317/rpc");
+        assert_eq!(target.token, "secret");
+        assert_eq!(target.location, DaemonLocation::External);
+        assert!(!target.location.allows_local_paths());
+        assert!(DaemonLocation::Local.allows_local_paths());
+    }
+
+    #[test]
+    fn half_an_external_override_is_refused_instead_of_starting_local() {
+        assert!(target_from_overrides(Some("buildbox:4317"), None).is_err());
+        assert!(target_from_overrides(None, Some("secret")).is_err());
+        assert!(target_from_overrides(None, None).unwrap().is_none());
+    }
 
     #[test]
     fn an_explicit_binary_wins_over_everything_else() {

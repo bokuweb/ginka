@@ -72,6 +72,10 @@ pub struct WorkspaceLayoutSettings {
     pub terminal_dock_height: f32,
     /// Stable lowercase name of the selected surface, if one is selected.
     pub active_surface: Option<String>,
+    /// Daemon terminal ids shown in the left and right split panes.
+    pub terminal_split: Option<[String; 2]>,
+    /// Daemon terminal id that receives keyboard input after restoration.
+    pub terminal_active: Option<String>,
 }
 
 impl Default for WorkspaceLayoutSettings {
@@ -82,6 +86,8 @@ impl Default for WorkspaceLayoutSettings {
             terminal_dock_open: false,
             terminal_dock_height: 220.0,
             active_surface: None,
+            terminal_split: None,
+            terminal_active: None,
         }
     }
 }
@@ -213,6 +219,11 @@ pub struct DaemonSettings {
     /// (`docs/accounts.md` §3). A provider's default account is never here:
     /// it is the vendor's own home, configured by `agents` above.
     pub accounts: BTreeMap<String, AccountSettings>,
+    /// Account selected for future sessions, keyed by provider id.
+    ///
+    /// Missing means the provider's system default. Existing sessions keep
+    /// the account recorded on them when this changes.
+    pub active_accounts: BTreeMap<String, ginka_protocol::AccountId>,
     /// Chat connectors: which platforms the daemon listens to, in which
     /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
     /// never here.
@@ -302,6 +313,7 @@ impl Default for DaemonSettings {
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),
+            active_accounts: BTreeMap::new(),
             connectors: crate::connector::ConnectorsSettings::default(),
             tools: crate::tools::ToolSettings::default(),
         }
@@ -396,6 +408,8 @@ mod tests {
                 terminal_dock_open: false,
                 terminal_dock_height: 180.0,
                 active_surface: Some("files".into()),
+                terminal_split: None,
+                terminal_active: None,
             },
         );
         settings.workspace_layouts.insert(
@@ -406,6 +420,8 @@ mod tests {
                 terminal_dock_open: true,
                 terminal_dock_height: 300.0,
                 active_surface: Some("git".into()),
+                terminal_split: None,
+                terminal_active: None,
             },
         );
 
@@ -416,6 +432,25 @@ mod tests {
             restored.workspace_layouts["comet/main"],
             restored.workspace_layouts["comet/review"]
         );
+    }
+
+    #[test]
+    fn a_workspace_terminal_split_round_trips_as_view_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let mut settings = AppSettings::default();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                terminal_split: Some(["left".into(), "right".into()]),
+                terminal_active: Some("right".into()),
+                ..WorkspaceLayoutSettings::default()
+            },
+        );
+
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert_eq!(restored, settings);
     }
 
     #[test]

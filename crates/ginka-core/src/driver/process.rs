@@ -151,17 +151,49 @@ impl Drop for AgentProcess {
     }
 }
 
-/// Signal the whole process group. `kill(1)` is used rather than `libc::kill`
-/// because the workspace denies `unsafe_code`, and a subprocess at cancel time
-/// costs nothing next to the process it is ending.
+/// Signal the whole process group when the child demonstrably leads one.
+///
+/// `kill(1)` is used rather than `libc::kill` because the workspace denies
+/// `unsafe_code`, and a subprocess at cancel time costs nothing next to the
+/// process it is ending. The group checks matter even though spawn requests a
+/// new group: signalling an unverified negative PID can terminate the daemon's
+/// own host when a platform or launch race did not honour that request.
 #[cfg(unix)]
 fn terminate_group(pid: u32) {
+    let Some(target) = group_signal_target(
+        pid,
+        process_group_of(std::process::id()),
+        process_group_of(pid),
+    ) else {
+        tracing::warn!(pid, "agent does not lead a separate process group");
+        return;
+    };
     let _ = Command::new("kill")
-        .arg("-TERM")
-        .arg(format!("-{pid}"))
+        .args(["-TERM", "--", &target])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+#[cfg(unix)]
+fn process_group_of(pid: u32) -> Option<u32> {
+    let output = Command::new("ps")
+        .args(["-o", "pgid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout).trim().parse().ok()
+}
+
+fn group_signal_target(
+    pid: u32,
+    current_group: Option<u32>,
+    child_group: Option<u32>,
+) -> Option<String> {
+    (pid != 0 && child_group == Some(pid) && child_group != current_group)
+        .then(|| format!("-{pid}"))
 }
 
 fn read_stream(
@@ -211,4 +243,20 @@ fn read_stream(
         .and_then(|status| status.code());
     finished.store(true, Ordering::Release);
     let _ = events.send(AgentEvent::ProcessExited { code });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::group_signal_target;
+
+    #[test]
+    fn only_a_confirmed_foreign_process_group_can_be_signalled() {
+        assert_eq!(
+            group_signal_target(42, Some(7), Some(42)),
+            Some("-42".into())
+        );
+        assert_eq!(group_signal_target(42, Some(42), Some(42)), None);
+        assert_eq!(group_signal_target(42, Some(7), Some(7)), None);
+        assert_eq!(group_signal_target(42, Some(7), None), None);
+    }
 }

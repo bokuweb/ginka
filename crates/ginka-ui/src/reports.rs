@@ -7,6 +7,7 @@
 //! would be a claim that the work was free.
 
 use ginka_protocol::model::{PlanSnapshot, UsageRow, UsageTotals};
+use ginka_protocol::{ContextUsage, Usage};
 
 /// The usage report as the daemon answers it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -77,6 +78,32 @@ pub fn compact(count: u64) -> String {
     }
 }
 
+/// The current session's billed-token count in one chip-sized number.
+///
+/// Provider usage treats cache reads and reasoning as breakdowns of input and
+/// output respectively, so adding those fields again would visibly overstate
+/// consumption. `None` distinguishes no reading yet from a real zero.
+pub fn session_token_count(usage: &Usage) -> Option<String> {
+    let total = usage.input_tokens.saturating_add(usage.output_tokens);
+    (total > 0).then(|| compact(total))
+}
+
+/// A compact current-context reading kept visually distinct from cumulative
+/// session tokens.
+pub fn context_window_summary(usage: &ContextUsage) -> String {
+    format!(
+        "{:.0}% · {} / {}",
+        usage.used_percent(),
+        compact(usage.used_tokens),
+        compact(usage.window_tokens)
+    )
+}
+
+/// Whether the current context can be compacted without interrupting a turn.
+pub fn can_compact_context(usage: Option<&ContextUsage>, session_busy: bool) -> bool {
+    !session_busy && usage.is_some_and(|usage| usage.can_compact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,6 +141,49 @@ mod tests {
         assert_eq!(compact(950), "950");
         assert_eq!(compact(12_345), "12.3k");
         assert_eq!(compact(4_000_000), "4.0M");
+    }
+
+    #[test]
+    fn session_token_count_is_visible_without_double_counting_cache() {
+        let usage = Usage {
+            input_tokens: 12_345,
+            output_tokens: 1_200,
+            cache_read_tokens: 9_000,
+            reasoning_tokens: 600,
+            cost_usd: Some(0.42),
+        };
+
+        assert_eq!(session_token_count(&usage).as_deref(), Some("13.5k"));
+        assert_eq!(session_token_count(&Usage::default()), None);
+    }
+
+    #[test]
+    fn context_summary_distinguishes_the_current_window_from_session_tokens() {
+        let usage = ContextUsage {
+            used_tokens: 32_000,
+            window_tokens: 128_000,
+            can_compact: false,
+        };
+
+        assert_eq!(context_window_summary(&usage), "25% · 32.0k / 128.0k");
+    }
+
+    #[test]
+    fn compact_is_offered_only_for_an_idle_supported_context() {
+        let supported = ContextUsage {
+            used_tokens: 32_000,
+            window_tokens: 128_000,
+            can_compact: true,
+        };
+        let unsupported = ContextUsage {
+            can_compact: false,
+            ..supported
+        };
+
+        assert!(can_compact_context(Some(&supported), false));
+        assert!(!can_compact_context(Some(&supported), true));
+        assert!(!can_compact_context(Some(&unsupported), false));
+        assert!(!can_compact_context(None, false));
     }
 
     #[test]

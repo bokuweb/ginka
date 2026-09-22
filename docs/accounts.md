@@ -1,7 +1,8 @@
 # Accounts: several logins per provider, and the headroom on each
 
-**Status:** design, agreed 2026-09-05; §12 landed in full on 2026-09-06 (see
-the notes in §6 and §12), with Q9 still open. It is the
+**Status:** design, agreed 2026-09-05; §12 landed in full on 2026-09-06 and
+the persistent active-account choice landed on 2026-09-22 (see the notes in
+§6 and §12), with Q9 still open. It is the
 shape M5's "plan usage meter" (roadmap §3.3 N12) takes once a provider can
 have more than one login, and it adds one requirement of its own (N17). Read
 roadmap §4.4, §4.5 and §6.3 first; this document extends them and does not
@@ -19,9 +20,9 @@ that login*.
 
 Two things are wanted, in this order:
 
-1. **Choose which login a chat runs on**, from the composer and from the CLI,
-   with the choice recorded on the session and on every usage event it
-   produces.
+1. **Choose which login future chats run on**, from the composer and from the
+   CLI, with an explicit per-chat override and the effective choice recorded
+   on the session and on every usage event it produces.
 2. **See how much of each login's rate-limit window is left** before choosing,
    which is N12 asked per login rather than per machine.
 
@@ -83,6 +84,10 @@ would index.
       "provider": "codex",
       "label": "Personal"
     }
+  },
+  "active_accounts": {
+    "claude": "claude-work",
+    "codex": "codex-personal"
   }
 }
 ```
@@ -99,6 +104,11 @@ Rules that fall out of this:
 - **The binary is per provider, never per account.** One CLI, several logins.
   `program` stays on `agents.<provider>` and there is no way to put it on an
   account.
+- **One active account is remembered per provider.** It is the default for
+  future sessions, not a mutation of sessions that already exist. Selecting
+  the provider's implicit default removes that provider from
+  `active_accounts`; removing an active named account falls back the same way.
+  An invalid or stale id is also read as the provider default.
 - **`env` is the same escape hatch `AgentSettings::env` already is**, applied
   after the provider's and before the session's (§4). It exists so a gateway or
   an API key can be attached to one account rather than to every session of a
@@ -181,7 +191,11 @@ sends the digest in front of the new thread's first prompt
 the running session, so the original stays where it was.
 
 Starting a chat is where the choice is normally made, and where it costs
-nothing.
+nothing. The daemon remembers the latest manual choice for that provider so
+every client starts future chats consistently. `StartSession.account` still
+wins when supplied; when it is absent the daemon resolves the provider's
+active account. Existing sessions keep the account recorded at creation and
+therefore keep resuming the same vendor thread.
 
 ## 6. Headroom: what each provider can tell us
 
@@ -206,6 +220,14 @@ limits: a `primary` and a `secondary` window, each with `used_percent`,
 and that reading is free. The labels are derived from the window's length
 (`5h`, `week`) rather than from the names `primary` and `secondary`, which
 say nothing to a reader.
+
+That event can also carry `last_token_usage` beside `model_context_window`.
+Those two values normalize into `AgentEvent::ContextUsage`; they are kept
+separate from cumulative `Usage`, because compaction can reduce context while
+session accounting continues to rise. The parser also accepts the app-server's
+camel-case spelling, but emits no context reading unless both occupancy and a
+non-zero capacity are present. The window therefore shows no guessed meter for
+a provider or transport that does not report one.
 
 **Corrected 2026-09-06, from running 0.142.5:** the modern stream — the
 `thread.*` / `turn.*` vocabulary, which is what a current CLI emits — carries
@@ -307,6 +329,8 @@ pub struct Account {
     pub home: PathBuf,
     /// The provider's own default, which cannot be removed.
     pub is_default: bool,
+    /// Whether future sessions of this provider use this account by default.
+    pub active: bool,
     /// The *names* of the variables `env` sets. Values never cross the wire.
     pub env_keys: Vec<String>,
     /// What the last probe said, when there has been one.
@@ -325,9 +349,11 @@ pub struct PlanSnapshot {
 
 Requests: `Accounts`, `AddAccount { id, provider, label }`,
 `RemoveAccount { id, delete_home: bool }`, `LoginAccount { id }` (answers with
-the terminal it opened), `RefreshPlanUsage { account }`. `StartSession` gains
-`account: Option<AccountId>`, `None` meaning the provider's default. `Usage`
-gains a grouping — by day, by agent, by account — where it has two today.
+the terminal it opened), `SelectAccount { id }`,
+`RefreshPlanUsage { account }`. `StartSession` gains
+`account: Option<AccountId>`; `None` means the provider's active account,
+which is its implicit default until a named login is selected. `Usage` gains a
+grouping — by day, by agent, by account — where it has two today.
 
 Pushes: `DaemonEvent::PlanUsageChanged { snapshot }` and
 `DaemonEvent::AccountsChanged`. Events: `AgentEvent::PlanUsage { usage }` from
@@ -339,6 +365,7 @@ CLI:
 ginka account list                       # id, provider, label, signed in, headroom, age
 ginka account add --provider codex work  # creates ~/.ginka/accounts/work, 0700
 ginka account login work                 # the vendor's login, in a daemon terminal
+ginka account select work                # future Codex chats use this login
 ginka account remove work [--delete-home]
 ginka account refresh work               # on-demand headroom, where the provider has it
 ginka chat --account work "…"            # unchanged otherwise
@@ -389,6 +416,9 @@ Additions to `docs/ui.md`, recorded there too:
   chosen provider has more than one account. It carries the label and, when a
   reading exists, the tightest window as *percent · reset*. Its menu lists the
   provider's accounts with the same two facts and an *Add account…* entry.
+  Choosing a row persists it as the provider's active account for every
+  client and future chat; a continuing chat still shows and uses the account
+  it started on.
 - **Sidebar footer** — the plan label the spec reserves becomes the account in
   use and its headroom.
 - **Reports surface** — a per-account section: every window with its
@@ -405,6 +435,13 @@ day), and an *Add a login…* row in the agent and account pickers that opens a
 small dialog — in the agent picker as well, because the account chip only
 exists once there is a choice, and the first second login has to be reachable
 from somewhere. Step 4 waits on Q9.
+
+The 2026-09-22 follow-up made the manual choice persistent per provider after
+checking Orca's account-switching behaviour: new sessions follow the active
+login, existing sessions retain the login that owns their vendor thread, and
+removing the active login falls back to the vendor default. Ginka keeps its
+own settings/protocol/daemon implementation and does not mirror credentials or
+copy an external implementation.
 
 1. **Accounts.** The settings block, `home_variable`, the spawn layer, `probe`
    per account, `AccountId` on sessions and usage events, the migration, the
