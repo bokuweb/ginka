@@ -16,7 +16,7 @@
 //! the next turn is about. The working tree is not described: the agent can
 //! read it, and it is the one thing that is already true.
 
-use ginka_protocol::event::{ActivityKind, AgentEvent};
+use ginka_protocol::event::{ActivityKind, AgentEvent, TaskItem, TaskStatus};
 use ginka_protocol::model::{TranscriptEntry, TranscriptPayload};
 use std::collections::BTreeSet;
 
@@ -31,6 +31,12 @@ pub const DEFAULT_BUDGET: usize = 12_000;
 const REPLY_HEAD: usize = 1_200;
 const REPLY_TAIL: usize = 600;
 
+/// Task metadata is context, not the conversation itself. Keep enough rows to
+/// resume current work without letting an agent-controlled list consume the
+/// handoff budget before the new provider sees the user's prompt.
+const TASK_ROWS: usize = 20;
+const TASK_LABEL_CHARS: usize = 160;
+
 /// One exchange: what was asked, what the agent answered, what it touched.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Turn {
@@ -38,6 +44,7 @@ struct Turn {
     answered: String,
     files: BTreeSet<String>,
     commands: Vec<String>,
+    tasks: Vec<TaskItem>,
 }
 
 impl Turn {
@@ -46,6 +53,7 @@ impl Turn {
             && self.answered.trim().is_empty()
             && self.files.is_empty()
             && self.commands.is_empty()
+            && self.tasks.is_empty()
     }
 }
 
@@ -86,6 +94,9 @@ fn fold(entries: &[TranscriptEntry]) -> Vec<Turn> {
                 match event {
                     AgentEvent::TextDelta { text } => turn.answered.push_str(text),
                     AgentEvent::ToolCall { activity } | AgentEvent::ToolResult { activity } => {
+                        if let Some(tasks) = &activity.tasks {
+                            turn.tasks.clone_from(tasks);
+                        }
                         match activity.kind {
                             ActivityKind::FileChange => {
                                 turn.files.insert(activity.title.clone());
@@ -145,6 +156,33 @@ fn render_turn(turn: &Turn, number: usize, agent: &str) -> String {
         out.push_str("Files changed: ");
         out.push_str(&turn.files.iter().cloned().collect::<Vec<_>>().join(", "));
         out.push('\n');
+    }
+    if !turn.tasks.is_empty() {
+        out.push_str("Tasks:\n");
+        for task in turn.tasks.iter().take(TASK_ROWS) {
+            let status = match task.status {
+                TaskStatus::Pending => "pending",
+                TaskStatus::InProgress => "in progress",
+                TaskStatus::Completed => "completed",
+                TaskStatus::Cancelled => "cancelled",
+            };
+            out.push_str("- [");
+            out.push_str(status);
+            out.push_str("] ");
+            let mut label = task.label.chars();
+            let bounded = label.by_ref().take(TASK_LABEL_CHARS).collect::<String>();
+            out.push_str(&bounded);
+            if label.next().is_some() {
+                out.push('…');
+            }
+            out.push('\n');
+        }
+        if turn.tasks.len() > TASK_ROWS {
+            out.push_str(&format!(
+                "[… {} task(s) omitted …]\n",
+                turn.tasks.len() - TASK_ROWS
+            ));
+        }
     }
     out
 }
@@ -242,10 +280,27 @@ mod tests {
                         id: None,
                         kind: ActivityKind::FileChange,
                         title: path.to_string(),
+                        tasks: None,
                         detail: None,
                         failed: false,
                         complete: true,
                     },
+                },
+            },
+        }
+    }
+
+    fn tasks(seq: u64, items: serde_json::Value) -> TranscriptEntry {
+        TranscriptEntry {
+            seq,
+            at: seq as i64,
+            payload: TranscriptPayload::Agent {
+                event: AgentEvent::ToolCall {
+                    activity: ActivityItem::from_tool(
+                        Some("tasks-1".into()),
+                        "TodoWrite",
+                        &serde_json::json!({ "todos": items }),
+                    ),
                 },
             },
         }
@@ -271,6 +326,63 @@ mod tests {
         assert!(text.contains("Files changed: src/parser.rs"), "{text}");
         assert!(text.contains("## Turn 2"), "{text}");
         assert!(text.contains("Files changed: tests/parser.rs"), "{text}");
+    }
+
+    #[test]
+    fn a_handoff_carries_only_the_latest_task_snapshot_and_its_states() {
+        let entries = [
+            user(1, "finish the reconnect work"),
+            tasks(
+                2,
+                serde_json::json!([
+                    {"content": "Old wording", "status": "in_progress"}
+                ]),
+            ),
+            tasks(
+                3,
+                serde_json::json!([
+                    {"content": "Inspect transport", "status": "completed"},
+                    {"content": "Verify reconnect", "status": "in_progress"},
+                    {"content": "Remove workaround", "status": "cancelled"}
+                ]),
+            ),
+        ];
+
+        let text = digest(&entries, "claude", DEFAULT_BUDGET);
+
+        assert!(text.contains("Tasks:\n"), "{text}");
+        assert!(text.contains("- [completed] Inspect transport"), "{text}");
+        assert!(text.contains("- [in progress] Verify reconnect"), "{text}");
+        assert!(text.contains("- [cancelled] Remove workaround"), "{text}");
+        assert!(
+            !text.contains("Old wording"),
+            "only the newest snapshot matters: {text}"
+        );
+    }
+
+    #[test]
+    fn task_context_cannot_overrun_the_handoff_budget() {
+        let items = (0..ActivityItem::MAX_TASKS)
+            .map(|index| {
+                serde_json::json!({
+                    "content": format!("task {index} {}", "detail ".repeat(100)),
+                    "status": "pending"
+                })
+            })
+            .collect::<Vec<_>>();
+        let entries = [
+            user(1, "continue"),
+            tasks(2, serde_json::Value::Array(items)),
+        ];
+
+        let text = digest(&entries, "claude", DEFAULT_BUDGET);
+
+        assert!(
+            text.len() <= DEFAULT_BUDGET,
+            "task metadata must respect the same handoff budget: {}",
+            text.len()
+        );
+        assert!(text.contains("task(s) omitted"), "{text}");
     }
 
     #[test]
