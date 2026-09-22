@@ -380,6 +380,13 @@ impl TerminalScreen {
             return None;
         }
 
+        if key == "enter" && modifiers.shift && !modifiers.control && !modifiers.alt {
+            return Some("\n".into());
+        }
+        if key == "backspace" && modifiers.control && !modifiers.shift && !modifiers.alt {
+            return Some("\x08".into());
+        }
+
         let control = modifiers.control.then(|| match key {
             "space" | "@" => Some('\0'),
             "[" => Some('\x1b'),
@@ -396,6 +403,43 @@ impl TerminalScreen {
                 .map(|letter| (letter as u8 - b'a' + 1) as char),
             _ => None,
         });
+
+        if control.as_ref().is_none_or(Option::is_none) {
+            let modifier = 1
+                + u8::from(modifiers.shift)
+                + 2 * u8::from(modifiers.alt)
+                + 4 * u8::from(modifiers.control);
+            let modified = match key {
+                "up" => Some(format!("\x1b[1;{modifier}A")),
+                "down" => Some(format!("\x1b[1;{modifier}B")),
+                "right" => Some(format!("\x1b[1;{modifier}C")),
+                "left" => Some(format!("\x1b[1;{modifier}D")),
+                "home" => Some(format!("\x1b[1;{modifier}H")),
+                "end" => Some(format!("\x1b[1;{modifier}F")),
+                "insert" => Some(format!("\x1b[2;{modifier}~")),
+                "delete" => Some(format!("\x1b[3;{modifier}~")),
+                "pageup" => Some(format!("\x1b[5;{modifier}~")),
+                "pagedown" => Some(format!("\x1b[6;{modifier}~")),
+                "f1" => Some(format!("\x1b[1;{modifier}P")),
+                "f2" => Some(format!("\x1b[1;{modifier}Q")),
+                "f3" => Some(format!("\x1b[1;{modifier}R")),
+                "f4" => Some(format!("\x1b[1;{modifier}S")),
+                "f5" => Some(format!("\x1b[15;{modifier}~")),
+                "f6" => Some(format!("\x1b[17;{modifier}~")),
+                "f7" => Some(format!("\x1b[18;{modifier}~")),
+                "f8" => Some(format!("\x1b[19;{modifier}~")),
+                "f9" => Some(format!("\x1b[20;{modifier}~")),
+                "f10" => Some(format!("\x1b[21;{modifier}~")),
+                "f11" => Some(format!("\x1b[23;{modifier}~")),
+                "f12" => Some(format!("\x1b[24;{modifier}~")),
+                _ => None,
+            };
+            if modifier > 1
+                && let Some(modified) = modified
+            {
+                return Some(modified);
+            }
+        }
 
         let application_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
         let named = match (key, modifiers.shift) {
@@ -1122,6 +1166,52 @@ mod tests {
         let screen = TerminalScreen::new(2, 20);
 
         assert_eq!(screen.key_input(&key("cmd-c", Some("c"))), None);
+    }
+
+    #[test]
+    fn modified_terminal_navigation_uses_xterm_modifier_codes() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(
+            screen.key_input(&key("ctrl-left", None)).as_deref(),
+            Some("\x1b[1;5D")
+        );
+        assert_eq!(
+            screen.key_input(&key("shift-alt-up", None)).as_deref(),
+            Some("\x1b[1;4A")
+        );
+        assert_eq!(
+            screen.key_input(&key("ctrl-delete", None)).as_deref(),
+            Some("\x1b[3;5~")
+        );
+    }
+
+    #[test]
+    fn modified_terminal_function_keys_keep_their_key_number() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(
+            screen.key_input(&key("ctrl-shift-f5", None)).as_deref(),
+            Some("\x1b[15;6~")
+        );
+        assert_eq!(
+            screen.key_input(&key("alt-f2", None)).as_deref(),
+            Some("\x1b[1;3Q")
+        );
+    }
+
+    #[test]
+    fn shifted_enter_and_control_backspace_reach_cli_programs() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(
+            screen.key_input(&key("shift-enter", None)).as_deref(),
+            Some("\n")
+        );
+        assert_eq!(
+            screen.key_input(&key("ctrl-backspace", None)).as_deref(),
+            Some("\x08")
+        );
     }
 
     #[test]
