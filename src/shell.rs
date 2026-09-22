@@ -282,6 +282,18 @@ struct ComposerAttachment {
     preview_url: Option<String>,
 }
 
+/// One image being annotated before it is returned to the composer.
+struct ImageMarkup {
+    source_reference: String,
+    source_name: String,
+    preview_url: String,
+    document: ginka_ui::markup::MarkupDocument,
+    tool: ginka_ui::markup::MarkupTool,
+    canvas_bounds: Bounds<Pixels>,
+    drawing: bool,
+    text: Entity<InputState>,
+}
+
 /// Upload prepared attachment bytes and build the local presentation rows.
 async fn upload_attachment_payloads(
     link: Arc<DaemonLink>,
@@ -298,6 +310,97 @@ async fn upload_attachment_payloads(
         });
     }
     Ok(uploaded)
+}
+
+fn paint_markup_shape(
+    shape: &ginka_ui::markup::MarkupShape,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    use ginka_ui::markup::MarkupShape;
+    let at = |value: ginka_ui::markup::Point| {
+        point(bounds.origin.x + px(value.x), bounds.origin.y + px(value.y))
+    };
+    let stroke = match shape {
+        MarkupShape::Highlight(_) => (px(14.), rgb(0xffd84d).alpha(0.42)),
+        _ => (px(3.), rgb(0xff4d67)),
+    };
+    let mut builder = PathBuilder::stroke(stroke.0);
+    match shape {
+        MarkupShape::Pen(points) | MarkupShape::Highlight(points) => {
+            for (index, value) in points.iter().enumerate() {
+                if index == 0 {
+                    builder.move_to(at(*value));
+                } else {
+                    builder.line_to(at(*value));
+                }
+            }
+        }
+        MarkupShape::Arrow([start, end]) => {
+            builder.move_to(at(*start));
+            builder.line_to(at(*end));
+        }
+        MarkupShape::Rectangle([start, end]) => {
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            builder.move_to(at(ginka_ui::markup::Point::new(left, top)));
+            builder.line_to(at(ginka_ui::markup::Point::new(right, top)));
+            builder.line_to(at(ginka_ui::markup::Point::new(right, bottom)));
+            builder.line_to(at(ginka_ui::markup::Point::new(left, bottom)));
+            builder.close();
+        }
+        MarkupShape::Ellipse([start, end]) => {
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            let radius_x = px((right - left) / 2.0);
+            let radius_y = px((bottom - top) / 2.0);
+            builder.move_to(at(ginka_ui::markup::Point::new(
+                right,
+                (top + bottom) / 2.0,
+            )));
+            builder.arc_to(
+                point(radius_x, radius_y),
+                px(0.),
+                false,
+                false,
+                at(ginka_ui::markup::Point::new(left, (top + bottom) / 2.0)),
+            );
+            builder.arc_to(
+                point(radius_x, radius_y),
+                px(0.),
+                false,
+                false,
+                at(ginka_ui::markup::Point::new(right, (top + bottom) / 2.0)),
+            );
+            builder.close();
+        }
+        MarkupShape::Text { at: anchor, .. } => {
+            let anchor = at(*anchor);
+            builder.move_to(anchor + point(px(-5.), px(0.)));
+            builder.line_to(anchor + point(px(5.), px(0.)));
+            builder.move_to(anchor + point(px(0.), px(-5.)));
+            builder.line_to(anchor + point(px(0.), px(5.)));
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, stroke.1);
+    }
+}
+
+fn markup_tool_label(tool: ginka_ui::markup::MarkupTool) -> String {
+    use ginka_ui::markup::MarkupTool;
+    match tool {
+        MarkupTool::Pen => rust_i18n::t!("composer.markup.pen").to_string(),
+        MarkupTool::Highlight => rust_i18n::t!("composer.markup.highlight").to_string(),
+        MarkupTool::Arrow => rust_i18n::t!("composer.markup.arrow").to_string(),
+        MarkupTool::Rectangle => rust_i18n::t!("composer.markup.rectangle").to_string(),
+        MarkupTool::Ellipse => rust_i18n::t!("composer.markup.ellipse").to_string(),
+        MarkupTool::Text => rust_i18n::t!("composer.markup.text").to_string(),
+    }
 }
 
 pub struct Shell {
@@ -377,6 +480,8 @@ pub struct Shell {
     queue_error: Option<String>,
     /// Files already copied into the daemon store for the next ordinary prompt.
     attachments: Vec<ComposerAttachment>,
+    /// Full-size annotation dialog for one image attachment.
+    image_markup: Option<ImageMarkup>,
     /// Whether selected files are currently being read and uploaded.
     attachment_busy: bool,
     /// Why the most recent selected file could not be attached.
@@ -571,6 +676,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
+                crate::surfaces::SurfaceEvent::AddBrowserContext(context) => {
+                    this.add_browser_context(context, window, cx)
+                }
                 crate::surfaces::SurfaceEvent::WriteTerminalSelection(selection) => {
                     this.write_terminal_selection(selection.clone(), window, cx)
                 }
@@ -639,6 +747,9 @@ impl Shell {
                         this.transcript_follows = true;
                         this.picker = None;
                         this.attachments.clear();
+                        this.image_markup = None;
+                        this.surfaces
+                            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
                         this.attachment_busy = false;
                         this.attachment_error = None;
                         this.attachment_generation = this.attachment_generation.wrapping_add(1);
@@ -1001,6 +1112,7 @@ impl Shell {
             queue_edit_draft: None,
             queue_error: None,
             attachments: Vec::new(),
+            image_markup: None,
             attachment_busy: false,
             attachment_error: None,
             attachment_generation: 0,
@@ -1289,6 +1401,135 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open the non-destructive annotation dialog for an uploaded image.
+    fn open_image_markup(&mut self, reference: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachments.iter().find(|attachment| {
+            attachment.attachment.reference == reference && attachment.preview_url.is_some()
+        }) else {
+            return;
+        };
+        let text = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.markup.text_placeholder").to_string())
+        });
+        self.image_markup = Some(ImageMarkup {
+            source_reference: reference.to_string(),
+            source_name: attachment.attachment.name.clone(),
+            preview_url: attachment.preview_url.clone().unwrap_or_default(),
+            document: ginka_ui::markup::MarkupDocument::default(),
+            tool: ginka_ui::markup::MarkupTool::Pen,
+            canvas_bounds: Bounds::default(),
+            drawing: false,
+            text,
+        });
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(true, cx));
+        cx.notify();
+    }
+
+    fn markup_point(bounds: Bounds<Pixels>, position: Point<Pixels>) -> ginka_ui::markup::Point {
+        ginka_ui::markup::Point::new(
+            (position.x - bounds.origin.x)
+                .as_f32()
+                .clamp(0.0, bounds.size.width.as_f32()),
+            (position.y - bounds.origin.y)
+                .as_f32()
+                .clamp(0.0, bounds.size.height.as_f32()),
+        )
+    }
+
+    fn begin_markup(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        let at = Self::markup_point(markup.canvas_bounds, event.position);
+        if markup.tool == ginka_ui::markup::MarkupTool::Text {
+            let text = markup.text.read(cx).value().to_string();
+            markup.document.commit_text(at, text);
+        } else {
+            markup.document.begin(markup.tool, at);
+            markup.drawing = true;
+        }
+        cx.notify();
+    }
+
+    fn extend_markup(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        if !markup.drawing {
+            return;
+        }
+        markup
+            .document
+            .extend(Self::markup_point(markup.canvas_bounds, event.position));
+        cx.notify();
+    }
+
+    fn finish_markup(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        if markup.drawing {
+            markup
+                .document
+                .finish(Self::markup_point(markup.canvas_bounds, event.position));
+            markup.drawing = false;
+            cx.notify();
+        }
+    }
+
+    /// Upload the flattened annotation through the same daemon path as every
+    /// other attachment, replacing the unmarked source in this draft.
+    fn submit_image_markup(&mut self, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_ref() else {
+            return;
+        };
+        let Some(svg) = ginka_ui::markup::compose_svg(
+            &markup.preview_url,
+            markup.canvas_bounds.size.width.as_f32(),
+            markup.canvas_bounds.size.height.as_f32(),
+            &markup.document,
+        ) else {
+            return;
+        };
+        let source_reference = markup.source_reference.clone();
+        let name = format!("annotated-{}.svg", markup.source_name);
+        let link = self.link.clone();
+        let generation = self.attachment_generation;
+        self.attachment_busy = true;
+        self.attachment_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let uploaded = cx
+                .background_spawn(async move {
+                    upload_attachment_payloads(link, vec![(name, svg.into_bytes())]).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.attachment_generation != generation {
+                    return;
+                }
+                this.attachment_busy = false;
+                match uploaded {
+                    Ok(uploaded) => {
+                        this.attachments.retain(|attachment| {
+                            attachment.attachment.reference != source_reference
+                        });
+                        this.attachments.extend(uploaded);
+                        this.image_markup = None;
+                        this.surfaces
+                            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
+                    }
+                    Err(error) => this.attachment_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Register the folder selected in the add-project dialog.
     fn submit_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.add_project.as_mut() else {
@@ -1380,6 +1621,9 @@ impl Shell {
         self.queue_edit_draft = None;
         self.queue_error = None;
         self.attachments.clear();
+        self.image_markup = None;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
         self.attachment_busy = false;
         self.attachment_error = None;
         self.attachment_generation = self.attachment_generation.wrapping_add(1);
@@ -1994,6 +2238,15 @@ impl Shell {
     fn add_file_reference(&mut self, reference: &str, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).value();
         let draft = ginka_ui::editor::append_reference(&draft, reference);
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+    }
+
+    /// Add a sanitized inspect-mode bundle to the current chat draft.
+    fn add_browser_context(&mut self, context: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).value();
+        let draft = ginka_ui::browser::append_context(&draft, context);
         self.composer
             .update(cx, |state, cx| state.set_value(draft, window, cx));
         self.composer.focus_handle(cx).focus(window, cx);
@@ -3112,6 +3365,9 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.attachments.clear();
+        self.image_markup = None;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
         self.attachment_error = None;
         // The draft belonged to the prompt that has just been sent.
         {
@@ -5629,39 +5885,56 @@ impl Shell {
             .attachments
             .iter()
             .map(|attachment| {
-                let reference = attachment.attachment.reference.clone();
-                Button::new(SharedString::from(format!(
-                    "remove-attachment-{}",
-                    attachment.attachment.reference
-                )))
-                .ghost()
-                .compact()
-                .tooltip(rust_i18n::t!("composer.attachment.remove").to_string())
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .children(attachment.preview_url.clone().map(|preview_url| {
-                            div()
-                                .size(px(36.))
-                                .rounded(px(tokens.radius.row))
-                                .overflow_hidden()
-                                .child(
-                                    img(SharedString::from(preview_url))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                        }))
-                        .child(
-                            div()
-                                .max_w(px(180.))
-                                .truncate()
-                                .text_xs()
-                                .child(attachment.attachment.name.clone()),
-                        )
-                        .child(Icon::new(IconName::Close).size_3()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(&reference, cx)))
+                let open_reference = attachment.attachment.reference.clone();
+                let remove_reference = attachment.attachment.reference.clone();
+                let name = attachment.attachment.name.clone();
+                let content = h_flex()
+                    .gap_1()
+                    .items_center()
+                    .children(attachment.preview_url.clone().map(|preview_url| {
+                        div()
+                            .size(px(36.))
+                            .rounded(px(tokens.radius.row))
+                            .overflow_hidden()
+                            .child(
+                                img(SharedString::from(preview_url))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                    }))
+                    .child(div().max_w(px(180.)).truncate().text_xs().child(name));
+                let content = if attachment.preview_url.is_some() {
+                    Button::new(SharedString::from(format!(
+                        "annotate-attachment-{open_reference}"
+                    )))
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("composer.markup.open").to_string())
+                    .child(content)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_image_markup(&open_reference, window, cx)
+                    }))
+                    .into_any_element()
+                } else {
+                    content.into_any_element()
+                };
+                h_flex()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().row_hover())
+                    .child(content)
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "remove-attachment-{remove_reference}"
+                        )))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(rust_i18n::t!("composer.attachment.remove").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_attachment(&remove_reference, cx)
+                        })),
+                    )
             })
             .collect::<Vec<_>>();
         let attachment_error = self.attachment_error.clone();
@@ -7485,6 +7758,207 @@ impl Shell {
         }
     }
 
+    /// Image annotation stays in application chrome and produces one safe,
+    /// self-contained SVG that follows the ordinary attachment path.
+    fn image_markup_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let markup = self.image_markup.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let preview_url = markup.preview_url.clone();
+        let selected_tool = markup.tool;
+        let text_input = markup.text.clone();
+        let shapes = markup.document.shapes().to_vec();
+        let active = markup.document.active().cloned();
+        let shell = cx.entity();
+        let has_marks = !shapes.is_empty();
+        let busy = self.attachment_busy;
+        let tool_buttons = ginka_ui::markup::MarkupTool::ALL
+            .iter()
+            .copied()
+            .map(|tool| {
+                Button::new(SharedString::from(format!("markup-tool-{}", tool.label())))
+                    .compact()
+                    .when(tool != selected_tool, |button| button.ghost())
+                    .label(markup_tool_label(tool))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(markup) = this.image_markup.as_mut() {
+                            markup.tool = tool;
+                            markup.drawing = false;
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(tokens.colors().bg_window.opacity(0.82))
+                .child(
+                    v_flex()
+                        .id("image-markup-dialog")
+                        .w(px(920.))
+                        .max_w_full()
+                        .p_4()
+                        .gap_3()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_lg()
+                                        .font_semibold()
+                                        .child(rust_i18n::t!("composer.markup.title").to_string()),
+                                )
+                                .child(
+                                    Button::new("close-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .icon(IconName::Close)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.image_markup = None;
+                                            this.surfaces.update(cx, |surfaces, cx| {
+                                                surfaces.suspend_browser(false, cx)
+                                            });
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .children(tool_buttons)
+                                .when(selected_tool == ginka_ui::markup::MarkupTool::Text, |row| {
+                                    row.child(div().ml_2().flex_1().child(Input::new(&text_input)))
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("undo-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .label(rust_i18n::t!("composer.markup.undo").to_string())
+                                        .disabled(!has_marks)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(markup) = this.image_markup.as_mut() {
+                                                markup.document.undo();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("clear-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .label(rust_i18n::t!("composer.markup.clear").to_string())
+                                        .disabled(!has_marks)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(markup) = this.image_markup.as_mut() {
+                                                markup.document.clear();
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .w_full()
+                                .h(px(500.))
+                                .overflow_hidden()
+                                .rounded(px(tokens.radius.row))
+                                .bg(tokens.colors().bg_window)
+                                .cursor_crosshair()
+                                .child(
+                                    img(SharedString::from(preview_url))
+                                        .absolute()
+                                        .size_full()
+                                        .object_fit(ObjectFit::Fill),
+                                )
+                                .child(
+                                    canvas(
+                                        move |_, _, _| {},
+                                        move |bounds, _, window, _| {
+                                            for shape in &shapes {
+                                                paint_markup_shape(shape, bounds, window);
+                                            }
+                                            if let Some(shape) = &active {
+                                                paint_markup_shape(shape, bounds, window);
+                                            }
+                                        },
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .on_prepaint(move |bounds, _, cx| {
+                                    shell.update(cx, |this, _| {
+                                        if let Some(markup) = this.image_markup.as_mut() {
+                                            markup.canvas_bounds = bounds;
+                                        }
+                                    });
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        this.begin_markup(event, cx)
+                                    }),
+                                )
+                                .on_mouse_move(cx.listener(
+                                    |this, event: &MouseMoveEvent, _, cx| {
+                                        this.extend_markup(event, cx)
+                                    },
+                                ))
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                                        this.finish_markup(event, cx)
+                                    }),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-image-markup")
+                                        .ghost()
+                                        .label(rust_i18n::t!("composer.markup.cancel").to_string())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.image_markup = None;
+                                            this.surfaces.update(cx, |surfaces, cx| {
+                                                surfaces.suspend_browser(false, cx)
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("attach-image-markup")
+                                        .primary()
+                                        .label(rust_i18n::t!("composer.markup.attach").to_string())
+                                        .disabled(!has_marks || busy)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_image_markup(cx)
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// Project name and source-folder selection, drawn as one modal workflow.
     fn add_project_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.add_project.as_ref()?;
@@ -9025,6 +9499,11 @@ impl Render for Shell {
         // Before anything is measured: the tail on screen is whatever the
         // reveal has walked out so far.
         self.write_a_little_more(window);
+        if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_workspace(workspace, window, cx)
+            });
+        }
         // Copied out: the headers below bind listeners through `cx`, and a
         // borrow of the theme held across that is a borrow held across the
         // whole window.
@@ -9125,6 +9604,7 @@ impl Render for Shell {
                 ),
             )
             .children(self.palette_view(cx))
+            .children(self.image_markup_view(cx))
             .children(self.add_project_view(cx))
             .children(self.add_account_view(cx))
     }

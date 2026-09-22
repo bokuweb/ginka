@@ -211,6 +211,45 @@ composer.attachment.remove:
 composer.attachment.failed:
   en: "Could not attach file: %{error}"
   ja: "ファイルを添付できませんでした: %{error}"
+composer.markup.open:
+  en: Annotate image
+  ja: 画像に描き込む
+composer.markup.title:
+  en: Annotate image for the agent
+  ja: AIへの指示を画像に描き込む
+composer.markup.text_placeholder:
+  en: Text placed on click
+  ja: クリック位置に置くテキスト
+composer.markup.pen:
+  en: Pen
+  ja: ペン
+composer.markup.highlight:
+  en: Highlight
+  ja: ハイライト
+composer.markup.arrow:
+  en: Arrow
+  ja: 矢印
+composer.markup.rectangle:
+  en: Rectangle
+  ja: 四角
+composer.markup.ellipse:
+  en: Ellipse
+  ja: 楕円
+composer.markup.text:
+  en: Text
+  ja: テキスト
+composer.markup.undo:
+  en: Undo
+  ja: 元に戻す
+composer.markup.clear:
+  en: Clear
+  ja: すべて消す
+composer.markup.cancel:
+  en: Cancel
+  ja: キャンセル
+composer.markup.attach:
+  en: Attach annotation
+  ja: 注釈画像を添付
 composer.access.pick:
   en: Choose what the agent may touch
   ja: エージェントに許す操作を選ぶ
@@ -292,6 +331,33 @@ composer.account.add.cancel:
 daemon.unreachable:
   en: "The daemon could not be reached."
   ja: "デーモンに接続できません。"
+surface.browser.pending:
+  en: The embedded browser is available on macOS and Windows.
+  ja: 組み込みブラウザは macOS と Windows で利用できます。
+surface.browser.address:
+  en: Enter a URL or search
+  ja: URL または検索語を入力
+surface.browser.back:
+  en: Back
+  ja: 戻る
+surface.browser.forward:
+  en: Forward
+  ja: 進む
+surface.browser.reload:
+  en: Reload
+  ja: 再読み込み
+surface.browser.inspect:
+  en: Inspect
+  ja: 要素を選択
+surface.browser.feedback:
+  en: What should change about this element?
+  ja: この要素をどう変更しますか？
+surface.browser.dismiss:
+  en: Dismiss inspected element
+  ja: 選択した要素を破棄
+surface.browser.add_to_chat:
+  en: Add to chat
+  ja: チャットに追加
 surface.reports.pending:
   en: What the work cost, and how close each login is to its limit.
   ja: 作業のコストと、各ログインの上限までの残り。

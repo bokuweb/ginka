@@ -30,6 +30,8 @@ use gpui_component::input::{
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::collections::HashMap;
 use std::rc::Rc;
 
 struct FileBuffer {
@@ -48,6 +50,17 @@ enum FileOpenMode {
 
 pub struct SurfacePanel {
     open: Option<Surface>,
+    /// Native browser view on platforms supported by the toolkit.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    browser_tabs: HashMap<WorkspaceId, Result<Entity<crate::browser::BrowserPane>, SharedString>>,
+    /// Workspace whose native browser is currently visible.
+    browser_workspace: Option<WorkspaceId>,
+    /// Native child views sit above GPUI overlays and must yield to a modal.
+    browser_suspended: bool,
+    /// Latest inspected element, held above the native child view until sent.
+    browser_capture: Option<ginka_core::browser::BrowserCapture>,
+    /// Requested design change paired with the inspected element.
+    browser_feedback: Entity<TextareaState>,
     /// What the workspace on screen has changed, as the shell last read it.
     changes: Option<Changes>,
     /// What is already in the index, shown separately from worktree-only edits.
@@ -193,6 +206,8 @@ pub enum SurfaceEvent {
     AddFileReference(String),
     /// Paste an editor selection into the active terminal.
     WriteTerminalSelection(String),
+    /// Add one sanitized inspect-mode bundle to the active chat draft.
+    AddBrowserContext(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
     /// Set every installed copy of a grouped skill to one state.
@@ -240,6 +255,10 @@ impl SurfacePanel {
             }
         })
         .detach();
+        let browser_feedback = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.browser.feedback").to_string())
+        });
         Self {
             finder,
             files: Vec::new(),
@@ -259,6 +278,12 @@ impl SurfacePanel {
             definition: None,
             local_paths,
             open: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            browser_tabs: HashMap::new(),
+            browser_workspace: None,
+            browser_suspended: false,
+            browser_capture: None,
+            browser_feedback,
             changes: None,
             staged_changes: None,
             history: Vec::new(),
@@ -871,9 +896,73 @@ impl SurfacePanel {
         }
     }
 
+    /// Select the browser tab owned by a workspace, creating it lazily.
+    pub fn set_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_workspace.as_ref() == Some(&workspace) {
+            return;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = window;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if let Some(previous) = self
+                .browser_workspace
+                .as_ref()
+                .and_then(|workspace| self.browser_tabs.get(workspace))
+                .and_then(|browser| browser.as_ref().ok())
+            {
+                previous.update(cx, |browser, cx| browser.set_visible(false, cx));
+            }
+            if !self.browser_tabs.contains_key(&workspace) {
+                let created =
+                    crate::browser::BrowserPane::create(window, cx).map_err(SharedString::from);
+                if let Ok(browser) = &created {
+                    let expected = workspace.clone();
+                    cx.subscribe(browser, move |this, _, event, cx| {
+                        if this.browser_workspace.as_ref() != Some(&expected) {
+                            return;
+                        }
+                        match event {
+                            crate::browser::BrowserEvent::Inspected(capture) => {
+                                this.browser_capture = Some(capture.clone());
+                                cx.notify();
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                self.browser_tabs.insert(workspace.clone(), created);
+            }
+            if let Some(browser) = self
+                .browser_tabs
+                .get(&workspace)
+                .and_then(|browser| browser.as_ref().ok())
+            {
+                let visible = self.open == Some(Surface::Browser) && !self.browser_suspended;
+                browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+            }
+        }
+        self.browser_workspace = Some(workspace);
+        self.browser_capture = None;
+        cx.notify();
+    }
+
     /// Which surface is showing, so the shell knows what to keep fetching.
     pub fn open_surface(&self) -> Option<Surface> {
         self.open
+    }
+
+    /// Hide a native browser while GPUI application chrome must cover it.
+    pub fn suspend_browser(&mut self, suspended: bool, cx: &mut Context<Self>) {
+        if self.browser_suspended != suspended {
+            self.browser_suspended = suspended;
+            cx.notify();
+        }
     }
 
     /// Whether periodic refresh should include recent commit history.
@@ -1895,6 +1984,108 @@ impl SurfacePanel {
                     .text_color(tokens.colors().text_muted)
                     .child(surface.availability()),
             )
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn browser(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let capture = self.browser_capture.clone();
+        let capture_card = capture.map(|capture| {
+            let label = if capture
+                .element
+                .accessibility_name
+                .as_deref()
+                .is_some_and(|name| !name.is_empty())
+            {
+                capture
+                    .element
+                    .accessibility_name
+                    .clone()
+                    .unwrap_or_default()
+            } else if !capture.element.text.is_empty() {
+                capture.element.text.clone()
+            } else {
+                capture.element.selector.clone()
+            };
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .gap_2()
+                .p_3()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tokens.colors().text_primary)
+                                .child(format!("<{}> {label}", capture.element.tag_name)),
+                        )
+                        .child(
+                            Button::new("browser-capture-dismiss")
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Close)
+                                .tooltip(rust_i18n::t!("surface.browser.dismiss").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.browser_capture = None;
+                                    this.browser_feedback.update(cx, |feedback, cx| {
+                                        feedback.set_value("", window, cx)
+                                    });
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(Textarea::new(&self.browser_feedback).h(px(70.)))
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("browser-capture-send")
+                            .primary()
+                            .label(rust_i18n::t!("surface.browser.add_to_chat").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let feedback = this.browser_feedback.read(cx).value().to_string();
+                                let context =
+                                    ginka_core::browser::format_capture(&capture, &feedback);
+                                this.browser_capture = None;
+                                this.browser_feedback
+                                    .update(cx, |feedback, cx| feedback.set_value("", window, cx));
+                                cx.emit(SurfaceEvent::AddBrowserContext(context));
+                                cx.notify();
+                            })),
+                    ),
+                )
+        });
+        let Some(workspace) = self.browser_workspace.as_ref() else {
+            return self.placeholder(Surface::Browser, cx).into_any_element();
+        };
+        let Some(browser) = self.browser_tabs.get(workspace) else {
+            return self.placeholder(Surface::Browser, cx).into_any_element();
+        };
+        match browser {
+            Ok(browser) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .children(capture_card)
+                .child(browser.clone())
+                .into_any_element(),
+            Err(error) => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(tokens.colors().status_error)
+                .child(error.clone())
+                .into_any_element(),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn browser(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.placeholder(Surface::Browser, cx).into_any_element()
     }
 }
 
@@ -3132,6 +3323,20 @@ impl Render for SurfacePanel {
         let tokens = Tokens::global(cx);
         let border = tokens.colors().border_subtle;
         let open = self.open;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(browser) = self
+            .browser_workspace
+            .as_ref()
+            .and_then(|workspace| self.browser_tabs.get(workspace))
+            .and_then(|browser| browser.as_ref().ok())
+        {
+            browser.update(cx, |browser, cx| {
+                browser.set_visible(
+                    open == Some(Surface::Browser) && !self.browser_suspended,
+                    cx,
+                )
+            });
+        }
 
         v_flex()
             .size_full()
@@ -3142,6 +3347,7 @@ impl Render for SurfacePanel {
                 None => self.empty_state(cx).into_any_element(),
                 Some(Surface::Git) => self.git(cx).into_any_element(),
                 Some(Surface::Files) => self.files(cx).into_any_element(),
+                Some(Surface::Browser) => self.browser(cx),
                 Some(Surface::Reports) => self.reports(cx).into_any_element(),
                 Some(Surface::Skills) => self.skills(cx).into_any_element(),
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
