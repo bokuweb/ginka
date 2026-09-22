@@ -416,6 +416,13 @@ impl Service {
                 self.events.emit(DaemonEvent::AccountsChanged);
                 Ok(Response::Ack)
             }
+            Request::SelectAccount { id } => {
+                crate::account::select(&mut self.settings, &id).map_err(account_error)?;
+                self.save_settings()?;
+                self.accounts = None;
+                self.events.emit(DaemonEvent::AccountsChanged);
+                Ok(Response::Ack)
+            }
             Request::LoginAccount {
                 id,
                 workspace,
@@ -481,6 +488,42 @@ impl Service {
                 attempts,
             } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
+            Request::QueuedMessages { session } => {
+                self.session(&session)?;
+                Ok(Response::QueuedMessages {
+                    messages: self.sessions.queued_messages(&session),
+                    can_send_now: self.sessions.can_send_queued_message_now(&session),
+                })
+            }
+            Request::EditQueuedMessage { session, id, text } => {
+                self.session(&session)?;
+                self.sessions
+                    .edit_queued_message(&session, id, text)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RemoveQueuedMessage { session, id } => {
+                self.session(&session)?;
+                self.sessions
+                    .remove_queued_message(&session, id)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::MoveQueuedMessage { session, id, index } => {
+                self.session(&session)?;
+                self.sessions
+                    .move_queued_message(&session, id, index as usize)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::SendQueuedMessageNow { session, id } => {
+                self.session(&session)?;
+                self.sessions
+                    .send_queued_message_now(&session, id)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::CompactSession { session } => self.compact_session(&session),
             Request::RespondToAgent {
                 session,
                 request_id,
@@ -574,6 +617,12 @@ impl Service {
                     changes: Changes { source, files },
                 })
             }
+            Request::WorkspaceHistory { workspace, limit } => {
+                let worktree = self.worktree(&workspace)?;
+                let limit = limit.unwrap_or(50).min(200) as usize;
+                let commits = git::history(&worktree.path, limit).map_err(failed)?;
+                Ok(Response::History { commits })
+            }
             Request::Commit {
                 workspace,
                 message,
@@ -603,6 +652,28 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
+            Request::StageHunk {
+                workspace,
+                path,
+                header,
+                staged,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                git::stage_hunk(&worktree.path, &path, &header, staged).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RevertHunk {
+                workspace,
+                path,
+                header,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                git::revert_hunk(&worktree.path, &path, &header).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
             Request::RevertFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
                 git::revert_file(&worktree.path, &path).map_err(failed)?;
@@ -616,6 +687,14 @@ impl Service {
             Request::Push { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 git::push(&worktree.path).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
+            Request::Pull { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                git::pull_fast_forward(&worktree.path).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: worktree.project.clone(),
                 });
@@ -1369,8 +1448,8 @@ impl Service {
             Some(account) => crate::account::resolve(&self.settings, driver.id(), Some(&account))
                 .map_err(account_error)?,
             // No login named: the original's where the agent is the same,
-            // the provider's default where it is not — the original's login
-            // belongs to another provider.
+            // the provider's active account where it is not — the original's
+            // login belongs to another provider.
             None if same_agent => original.account.clone(),
             None => {
                 crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
@@ -1478,6 +1557,46 @@ impl Service {
         }
         self.sessions
             .send(id.clone(), driver, spec, stored.vendor_session_id)
+            .map_err(failed)?;
+        Ok(Response::Ack)
+    }
+
+    /// Compact one provider thread as its own resumed turn.
+    ///
+    /// Refusing active sessions is load-bearing: a compact command must never
+    /// be steered into, or queued behind, ordinary work where it could be
+    /// interpreted as user text at the wrong boundary.
+    fn compact_session(&mut self, id: &SessionId) -> Result<Response, RpcError> {
+        let stored = self.session(id)?;
+        if self.sessions.is_running(id) {
+            return Err(RpcError::failed(
+                "the session is still working; compact after the turn finishes",
+            ));
+        }
+        if stored.vendor_session_id.is_none() {
+            return Err(RpcError::failed(
+                "the session has no provider thread to compact",
+            ));
+        }
+        let vendor_session_id = stored.vendor_session_id.as_deref().expect("checked above");
+        let worktree = self.worktree(&stored.workspace)?;
+        let driver = self.driver(&stored.agent)?;
+        let mut spec = SessionSpec::new(&worktree.path, "")
+            .with_model(stored.model.clone())
+            .with_reasoning_effort(stored.reasoning_effort.clone())
+            .with_service_tier(stored.service_tier.clone())
+            .with_access_mode(stored.access_mode)
+            .with_mcp_servers(self.mcp_servers(&worktree.path));
+        for (key, value) in crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &stored.account,
+            driver.home_variable(),
+        ) {
+            spec = spec.with_env(key, value);
+        }
+        self.sessions
+            .compact(id.clone(), driver, spec, vendor_session_id)
             .map_err(failed)?;
         Ok(Response::Ack)
     }

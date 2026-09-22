@@ -172,6 +172,30 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.queue.title:
+  en: "%{count} queued"
+  ja: "%{count} 件のキュー"
+composer.queue.send_now:
+  en: Send now
+  ja: 今すぐ反映
+composer.queue.edit:
+  en: Edit
+  ja: 編集
+composer.queue.remove:
+  en: Remove
+  ja: 削除
+composer.queue.earlier:
+  en: Move earlier
+  ja: 前へ移動
+composer.queue.later:
+  en: Move later
+  ja: 後へ移動
+composer.queue.editing:
+  en: Editing queued message
+  ja: キューのメッセージを編集中
+composer.queue.cancel:
+  en: Cancel
+  ja: キャンセル
 composer.attachment.add:
   en: Attach files
   ja: ファイルを添付
@@ -187,6 +211,45 @@ composer.attachment.remove:
 composer.attachment.failed:
   en: "Could not attach file: %{error}"
   ja: "ファイルを添付できませんでした: %{error}"
+composer.markup.open:
+  en: Annotate image
+  ja: 画像に描き込む
+composer.markup.title:
+  en: Annotate image for the agent
+  ja: AIへの指示を画像に描き込む
+composer.markup.text_placeholder:
+  en: Text placed on click
+  ja: クリック位置に置くテキスト
+composer.markup.pen:
+  en: Pen
+  ja: ペン
+composer.markup.highlight:
+  en: Highlight
+  ja: ハイライト
+composer.markup.arrow:
+  en: Arrow
+  ja: 矢印
+composer.markup.rectangle:
+  en: Rectangle
+  ja: 四角
+composer.markup.ellipse:
+  en: Ellipse
+  ja: 楕円
+composer.markup.text:
+  en: Text
+  ja: テキスト
+composer.markup.undo:
+  en: Undo
+  ja: 元に戻す
+composer.markup.clear:
+  en: Clear
+  ja: すべて消す
+composer.markup.cancel:
+  en: Cancel
+  ja: キャンセル
+composer.markup.attach:
+  en: Attach annotation
+  ja: 注釈画像を添付
 composer.access.pick:
   en: Choose what the agent may touch
   ja: エージェントに許す操作を選ぶ
@@ -220,9 +283,24 @@ composer.account.no_reading:
 composer.usage.unknown:
   en: Usage —
   ja: 使用量 —
+composer.usage.tokens:
+  en: "%{count} tokens"
+  ja: "%{count} トークン"
+composer.usage.tokens_and_headroom:
+  en: "%{count} tokens · %{headroom}"
+  ja: "%{count} トークン · %{headroom}"
+composer.usage.context:
+  en: "Context %{summary}"
+  ja: "コンテキスト %{summary}"
 composer.usage.refresh:
-  en: Refresh usage
-  ja: 使用量を更新
+  en: Session tokens and context update live; click to refresh rate-limit headroom
+  ja: セッションのトークン数とコンテキストは随時更新・クリックで残量を再取得
+composer.usage.compact:
+  en: Compact
+  ja: 圧縮
+composer.usage.compact_tooltip:
+  en: Compact this provider thread to free context
+  ja: providerのスレッドを圧縮してコンテキストを空ける
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"
@@ -253,6 +331,33 @@ composer.account.add.cancel:
 daemon.unreachable:
   en: "The daemon could not be reached."
   ja: "デーモンに接続できません。"
+surface.browser.pending:
+  en: The embedded browser is available on macOS and Windows.
+  ja: 組み込みブラウザは macOS と Windows で利用できます。
+surface.browser.address:
+  en: Enter a URL or search
+  ja: URL または検索語を入力
+surface.browser.back:
+  en: Back
+  ja: 戻る
+surface.browser.forward:
+  en: Forward
+  ja: 進む
+surface.browser.reload:
+  en: Reload
+  ja: 再読み込み
+surface.browser.inspect:
+  en: Inspect
+  ja: 要素を選択
+surface.browser.feedback:
+  en: What should change about this element?
+  ja: この要素をどう変更しますか？
+surface.browser.dismiss:
+  en: Dismiss inspected element
+  ja: 選択した要素を破棄
+surface.browser.add_to_chat:
+  en: Add to chat
+  ja: チャットに追加
 surface.reports.pending:
   en: What the work cost, and how close each login is to its limit.
   ja: 作業のコストと、各ログインの上限までの残り。
@@ -466,8 +571,11 @@ transcript.quote:
   en: Quote
   ja: 引用
 transcript.quote.tooltip:
-  en: Quote this message in chat
-  ja: このメッセージをチャットに引用
+  en: Quote selected text or this message in chat
+  ja: 選択したテキストまたはこのメッセージをチャットに引用
+transcript.quote_selection:
+  en: Quote selected text in chat
+  ja: 選択したテキストをチャットに引用
 transcript.thinking:
   en: Thinking…
   ja: 考えています…
@@ -483,6 +591,9 @@ transcript.turn:
 transcript.tool:
   en: tool
   ja: ツール
+transcript.tasks:
+  en: Tasks
+  ja: タスク
 transcript.subagent:
   en: Subagent
   ja: サブエージェント
@@ -535,6 +646,12 @@ palette.surface:
 palette.terminal.new:
   en: New terminal
   ja: 新しいターミナル
+palette.terminal.next:
+  en: Next terminal tab
+  ja: 次のターミナルタブ
+palette.terminal.previous:
+  en: Previous terminal tab
+  ja: 前のターミナルタブ
 palette.workspace.index:
   en: Index workspace for semantic search
   ja: セマンティック検索用にワークスペースをインデックス
@@ -583,6 +700,9 @@ surface.files.edit:
 surface.files.add_selection:
   en: Add selection to chat
   ja: 選択範囲をチャットに追加
+surface.files.send_selection_to_terminal:
+  en: Send selection to terminal
+  ja: 選択範囲をターミナルに送る
 surface.files.find:
   en: Find
   ja: 検索
@@ -610,6 +730,9 @@ terminal.open:
 terminal.open_file:
   en: "Open %{location}"
   ja: "%{location} を開く"
+terminal.show:
+  en: "Show terminal %{title}"
+  ja: "ターミナル %{title} を表示"
 terminal.close:
   en: Close this running terminal
   ja: 実行中のターミナルを閉じる
@@ -625,15 +748,84 @@ terminal.history.lines_back:
 terminal.history.live.tooltip:
   en: Return to live terminal output
   ja: ターミナルの最新出力に戻る
+terminal.search.open:
+  en: Find in terminal
+  ja: ターミナル内を検索
+terminal.search.placeholder:
+  en: Find in terminal
+  ja: ターミナル内を検索
+terminal.copy_output:
+  en: Copy terminal selection or visible output
+  ja: ターミナルの選択範囲または表示中の出力をコピー
+terminal.quote_selection:
+  en: Quote terminal selection in chat
+  ja: ターミナルの選択範囲をチャットで引用
+terminal.quote_selection.short:
+  en: Quote
+  ja: 引用
+terminal.split.open:
+  en: Split terminal
+  ja: ターミナルを分割
+terminal.split.open.short:
+  en: Split
+  ja: 分割
+terminal.split.close:
+  en: Exit terminal split
+  ja: ターミナル分割を解除
+terminal.split.close.short:
+  en: Single
+  ja: 単一
+terminal.split.focus_other:
+  en: Other pane
+  ja: 別のペイン
 surface.git.reading:
   en: Reading the worktree…
   ja: ワークツリーを読んでいます…
 surface.git.clean:
   en: Nothing has changed
   ja: 変更はありません
+surface.git.pull:
+  en: Pull
+  ja: Pull
+surface.git.pull_tooltip:
+  en: Fetch and fast-forward this clean branch
+  ja: cleanなbranchをfetchしてfast-forwardする
+surface.git.push:
+  en: Push
+  ja: Push
+surface.git.push_tooltip:
+  en: Push this branch and create its upstream when needed
+  ja: branchをpushし、必要ならupstreamを作成する
+surface.git.history:
+  en: History
+  ja: 履歴
+surface.git.history_tooltip:
+  en: Show or hide recent commits
+  ja: 最近のcommitを表示・非表示
+surface.git.history_empty:
+  en: No commits yet
+  ja: commitはまだありません
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"
+surface.git.section.unstaged:
+  en: Changes
+  ja: 未ステージの変更
+surface.git.section.staged:
+  en: Staged changes
+  ja: ステージ済みの変更
+surface.git.hunk.stage:
+  en: Stage hunk
+  ja: hunkをステージ
+surface.git.hunk.unstage:
+  en: Unstage hunk
+  ja: hunkを戻す
+surface.git.hunk.discard:
+  en: Discard hunk
+  ja: hunkを破棄
+surface.git.hunk.discard_confirm:
+  en: Discard?
+  ja: 破棄しますか？
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。

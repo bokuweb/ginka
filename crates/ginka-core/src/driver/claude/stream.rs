@@ -373,7 +373,10 @@ impl ClaudeStream {
             .and_then(Value::as_str)
             .unwrap_or_default()
         {
-            "message_start" => vec![AgentEvent::TurnStarted],
+            // The supervisor records one provider-neutral `TurnStarted`
+            // before it reads output. This vendor marker carries no options
+            // and would otherwise overwrite that provenance with blanks.
+            "message_start" => Vec::new(),
             "content_block_delta" => {
                 let delta = event.get("delta").unwrap_or(&Value::Null);
                 match delta
