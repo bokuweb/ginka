@@ -19,6 +19,8 @@ pub struct AppSettings {
     pub right_panel_width: f32,
     pub terminal_dock_open: bool,
     pub terminal_dock_height: f32,
+    /// Right-panel and terminal arrangement keyed by immutable workspace id.
+    pub workspace_layouts: BTreeMap<String, WorkspaceLayoutSettings>,
     /// Restored on launch when the workspace still exists.
     pub last_workspace: Option<String>,
     /// BCP-47 tag; `None` follows the system locale.
@@ -44,10 +46,48 @@ impl Default for AppSettings {
             right_panel_width: 420.0,
             terminal_dock_open: false,
             terminal_dock_height: 220.0,
+            workspace_layouts: BTreeMap::new(),
             last_workspace: None,
             locale: None,
             recent_models: BTreeMap::new(),
             recent_model_options: BTreeMap::new(),
+        }
+    }
+}
+
+/// The parts of the window arrangement that belong to one workspace.
+///
+/// Sidebar state stays global because it is navigation across workspaces;
+/// surfaces and terminals describe the workspace currently being inspected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkspaceLayoutSettings {
+    /// Whether the surface panel is visible.
+    pub right_panel_open: bool,
+    /// Remembered surface-panel width in logical pixels.
+    pub right_panel_width: f32,
+    /// Whether the terminal dock is visible.
+    pub terminal_dock_open: bool,
+    /// Remembered terminal-dock height in logical pixels.
+    pub terminal_dock_height: f32,
+    /// Stable lowercase name of the selected surface, if one is selected.
+    pub active_surface: Option<String>,
+    /// Daemon terminal ids shown in the left and right split panes.
+    pub terminal_split: Option<[String; 2]>,
+    /// Daemon terminal id that receives keyboard input after restoration.
+    pub terminal_active: Option<String>,
+}
+
+impl Default for WorkspaceLayoutSettings {
+    fn default() -> Self {
+        Self {
+            right_panel_open: false,
+            right_panel_width: 420.0,
+            terminal_dock_open: false,
+            terminal_dock_height: 220.0,
+            active_surface: None,
+            terminal_split: None,
+            terminal_active: None,
         }
     }
 }
@@ -179,6 +219,11 @@ pub struct DaemonSettings {
     /// (`docs/accounts.md` §3). A provider's default account is never here:
     /// it is the vendor's own home, configured by `agents` above.
     pub accounts: BTreeMap<String, AccountSettings>,
+    /// Account selected for future sessions, keyed by provider id.
+    ///
+    /// Missing means the provider's system default. Existing sessions keep
+    /// the account recorded on them when this changes.
+    pub active_accounts: BTreeMap<String, ginka_protocol::AccountId>,
     /// Chat connectors: which platforms the daemon listens to, in which
     /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
     /// never here.
@@ -268,6 +313,7 @@ impl Default for DaemonSettings {
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),
+            active_accounts: BTreeMap::new(),
             connectors: crate::connector::ConnectorsSettings::default(),
             tools: crate::tools::ToolSettings::default(),
         }
@@ -347,6 +393,64 @@ mod tests {
         };
         save(&path, &settings).unwrap();
         assert_eq!(load::<AppSettings>(&path), settings);
+    }
+
+    #[test]
+    fn workspace_layouts_round_trip_without_overwriting_each_other() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let mut settings = AppSettings::default();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                right_panel_open: true,
+                right_panel_width: 560.0,
+                terminal_dock_open: false,
+                terminal_dock_height: 180.0,
+                active_surface: Some("files".into()),
+                terminal_split: None,
+                terminal_active: None,
+            },
+        );
+        settings.workspace_layouts.insert(
+            "comet/review".into(),
+            WorkspaceLayoutSettings {
+                right_panel_open: false,
+                right_panel_width: 360.0,
+                terminal_dock_open: true,
+                terminal_dock_height: 300.0,
+                active_surface: Some("git".into()),
+                terminal_split: None,
+                terminal_active: None,
+            },
+        );
+
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert_eq!(restored, settings);
+        assert_ne!(
+            restored.workspace_layouts["comet/main"],
+            restored.workspace_layouts["comet/review"]
+        );
+    }
+
+    #[test]
+    fn a_workspace_terminal_split_round_trips_as_view_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let mut settings = AppSettings::default();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                terminal_split: Some(["left".into(), "right".into()]),
+                terminal_active: Some("right".into()),
+                ..WorkspaceLayoutSettings::default()
+            },
+        );
+
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert_eq!(restored, settings);
     }
 
     #[test]

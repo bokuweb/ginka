@@ -109,7 +109,7 @@ pub struct Binding {
     /// The driver id: `claude`, `codex`.
     pub agent: String,
     pub model: Option<String>,
-    /// Which login to run on; the provider's default when absent.
+    /// Which login to run on; the provider's active account when absent.
     pub account: Option<AccountId>,
     /// The ceiling for this channel. `auto` has to be written down here in
     /// plain text; nothing said in Slack can raise it.

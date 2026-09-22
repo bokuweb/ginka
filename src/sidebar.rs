@@ -16,7 +16,7 @@
 
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
-use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
+use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{Input, InputState};
@@ -76,10 +76,12 @@ pub struct SessionSidebar {
     /// update this view without putting decision logic in the binary crate.
     search: Entity<InputState>,
     search_query: String,
+    /// Whether a locally picked project path names the daemon's filesystem.
+    local_paths: bool,
 }
 
 impl SessionSidebar {
-    pub fn new(rows: Vec<SessionRow>, search: Entity<InputState>) -> Self {
+    pub fn new(rows: Vec<SessionRow>, search: Entity<InputState>, local_paths: bool) -> Self {
         Self {
             projects: Vec::new(),
             rows,
@@ -90,6 +92,7 @@ impl SessionSidebar {
             account: None,
             search,
             search_query: String::new(),
+            local_paths,
         }
     }
 
@@ -178,6 +181,20 @@ impl SessionSidebar {
         }
         self.adopt_workspace(workspace.clone(), cx);
         cx.emit(SidebarEvent::Selected);
+    }
+
+    /// Select one of the first nine rows currently visible in the session list.
+    pub fn select_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project.as_ref() else {
+            return;
+        };
+        let Some(workspace) = session_shortcuts(&self.rows, project, &self.search_query)
+            .get(index)
+            .cloned()
+        else {
+            return;
+        };
+        self.select_workspace(&workspace, cx);
     }
 
     /// Move the selection without announcing it.
@@ -336,22 +353,24 @@ impl SessionSidebar {
                     .flex_1()
                     .child(self.section(rust_i18n::t!("sidebar.projects").to_string(), cx)),
             )
-            .child(
-                div()
-                    .id("add-project")
-                    .px_2()
-                    .pt_3()
-                    .pb_1()
-                    .cursor_pointer()
-                    .child(
-                        Icon::new(IconName::Plus)
-                            .size_3p5()
-                            .text_color(tokens.colors().text_muted),
-                    )
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(SidebarEvent::AddProjectRequested);
-                    })),
-            )
+            .when(self.local_paths, |this| {
+                this.child(
+                    div()
+                        .id("add-project")
+                        .px_2()
+                        .pt_3()
+                        .pb_1()
+                        .cursor_pointer()
+                        .child(
+                            Icon::new(IconName::Plus)
+                                .size_3p5()
+                                .text_color(tokens.colors().text_muted),
+                        )
+                        .on_click(cx.listener(|_, _, _, cx| {
+                            cx.emit(SidebarEvent::AddProjectRequested);
+                        })),
+                )
+            })
     }
 
     /// The heading a project's workspaces hang under, and the way to aim a new

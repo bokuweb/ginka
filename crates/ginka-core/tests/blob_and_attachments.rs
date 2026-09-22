@@ -2,6 +2,9 @@
 
 use ginka_core::attachment::{AttachmentStore, MAX_ATTACHMENT_BYTES};
 use ginka_core::blob::{BlobStore, INLINE_THRESHOLD_BYTES};
+use ginka_protocol::AgentEvent;
+use ginka_protocol::event::ActivityItem;
+use serde_json::json;
 
 fn data_url(mime: &str, bytes: &[u8]) -> String {
     use base64::Engine as _;
@@ -45,6 +48,46 @@ fn a_large_image_becomes_a_reference_that_resolves_back_to_its_bytes() {
 }
 
 #[test]
+fn agent_events_store_large_inline_images_before_the_transcript_sees_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(tmp.path());
+    let bytes = big_png();
+    let url = data_url("image/png", &bytes);
+    let mut activity = ActivityItem::from_tool(Some("shot".into()), "screenshot", &json!({}));
+    activity.detail = Some(url);
+    activity.complete = true;
+    let mut event = AgentEvent::ToolResult { activity };
+
+    store.externalize_event(&mut event).unwrap();
+
+    let AgentEvent::ToolResult { activity } = event else {
+        unreachable!("the event variant is preserved")
+    };
+    let reference = activity.detail.unwrap();
+    assert!(reference.starts_with("ginka-blob:"), "{reference}");
+    assert_eq!(store.read(&reference).unwrap().unwrap(), bytes);
+}
+
+#[test]
+fn ordinary_agent_text_is_not_rewritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(tmp.path());
+    let mut event = AgentEvent::TextDelta {
+        text: "data URLs are useful".into(),
+    };
+
+    store.externalize_event(&mut event).unwrap();
+
+    assert_eq!(
+        event,
+        AgentEvent::TextDelta {
+            text: "data URLs are useful".into()
+        }
+    );
+    assert!(store.is_empty().unwrap());
+}
+
+#[test]
 fn the_same_screenshot_twice_is_stored_once() {
     let tmp = tempfile::tempdir().unwrap();
     let store = BlobStore::new(tmp.path());
@@ -53,6 +96,33 @@ fn the_same_screenshot_twice_is_stored_once() {
     let first = store.externalize(&url).unwrap();
     let second = store.externalize(&url).unwrap();
     assert_eq!(first, second);
+    assert_eq!(store.len().unwrap(), 1);
+}
+
+#[test]
+fn concurrent_sessions_can_store_the_same_screenshot() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = BlobStore::new(tmp.path());
+    let url = data_url("image/png", &big_png());
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+    let workers = (0..2)
+        .map(|_| {
+            let store = store.clone();
+            let url = url.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                store.externalize(&url)
+            })
+        })
+        .collect::<Vec<_>>();
+
+    barrier.wait();
+    let references = workers
+        .into_iter()
+        .map(|worker| worker.join().unwrap().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(references[0], references[1]);
     assert_eq!(store.len().unwrap(), 1);
 }
 

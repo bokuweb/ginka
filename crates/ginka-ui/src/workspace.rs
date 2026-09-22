@@ -572,9 +572,81 @@ pub fn session_matches(row: &SessionRow, query: &str) -> bool {
     })
 }
 
+/// The first nine visible active workspaces addressed by number shortcuts.
+///
+/// The order is exactly the selected project's session list: attention first,
+/// then the daemon's stable order among equal states. Archived rows and rows
+/// hidden by the current search do not acquire an invisible shortcut.
+pub fn session_shortcuts(
+    rows: &[SessionRow],
+    project: &ProjectName,
+    query: &str,
+) -> Vec<WorkspaceId> {
+    let mut visible = rows
+        .iter()
+        .filter(|row| !row.archived)
+        .filter(|row| row.origin.as_ref() == project.0)
+        .filter(|row| session_matches(row, query))
+        .collect::<Vec<_>>();
+    visible.sort_by_key(|row| row.attention_rank());
+    visible
+        .into_iter()
+        .take(9)
+        .map(|row| row.workspace.clone())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbered_shortcuts_follow_the_visible_projects_attention_order() {
+        let mut rows = SessionRow::samples();
+        rows.truncate(5);
+        for row in &mut rows {
+            row.origin = "comet".into();
+            row.archived = false;
+        }
+        rows[0].state = AgentState::Idle;
+        rows[1].state = AgentState::Working;
+        rows[2].state = AgentState::NeedsAttention;
+        rows[3].origin = "nebula".into();
+        rows[4].archived = true;
+
+        let shortcuts = session_shortcuts(&rows, &ProjectName("comet".into()), "");
+        assert_eq!(
+            shortcuts,
+            vec![
+                rows[1].workspace.clone(),
+                rows[2].workspace.clone(),
+                rows[0].workspace.clone(),
+            ]
+        );
+    }
+
+    #[test]
+    fn numbered_shortcuts_respect_search_and_stop_at_nine() {
+        let sample = SessionRow::samples().remove(0);
+        let rows = (0..12)
+            .map(|index| {
+                let mut row = sample.clone();
+                row.workspace = WorkspaceId(format!("comet/task-{index}"));
+                row.title = format!("Task {index}").into();
+                row.origin = "comet".into();
+                row
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            session_shortcuts(&rows, &ProjectName("comet".into()), "").len(),
+            9
+        );
+        assert_eq!(
+            session_shortcuts(&rows, &ProjectName("comet".into()), "task 11"),
+            vec![WorkspaceId("comet/task-11".into())]
+        );
+    }
 
     #[test]
     fn a_project_draft_requires_a_name_and_source_folder() {

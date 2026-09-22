@@ -6,14 +6,15 @@
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
 use ginka_protocol::model::{
-    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind, Skill, SkillScope,
-    WorkspaceContentMatch, WorkspaceFileMatch,
+    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, GitCommit, LineKind, Skill,
+    SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
     language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
+    selected_text,
 };
 use ginka_ui::file_search::FileSearchScope;
 use ginka_ui::file_tree::{FileTree, TreeRowKind};
@@ -26,8 +27,11 @@ use gpui_component::input::{
     Editor, EditorState, Input, InputEvent, InputState, Replace, Search, TabSize, Textarea,
     TextareaState,
 };
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+use std::collections::HashMap;
 use std::rc::Rc;
 
 struct FileBuffer {
@@ -46,8 +50,26 @@ enum FileOpenMode {
 
 pub struct SurfacePanel {
     open: Option<Surface>,
+    /// Native browser view on platforms supported by the toolkit.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    browser_tabs: HashMap<WorkspaceId, Result<Entity<crate::browser::BrowserPane>, SharedString>>,
+    /// Workspace whose native browser is currently visible.
+    browser_workspace: Option<WorkspaceId>,
+    /// Native child views sit above GPUI overlays and must yield to a modal.
+    browser_suspended: bool,
+    /// Latest inspected element, held above the native child view until sent.
+    browser_capture: Option<ginka_core::browser::BrowserCapture>,
+    /// Requested design change paired with the inspected element.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    browser_feedback: Entity<TextareaState>,
     /// What the workspace on screen has changed, as the shell last read it.
     changes: Option<Changes>,
+    /// What is already in the index, shown separately from worktree-only edits.
+    staged_changes: Option<Changes>,
+    /// Recent commits for the selected workspace, already bounded by the daemon.
+    history: Vec<GitCommit>,
+    /// Whether the reader asked to see recent commits above the current diff.
+    history_open: bool,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -69,6 +91,8 @@ pub struct SurfacePanel {
     /// Two steps, like a rewind: a revert deletes a file the agent wrote, and
     /// git has nothing to undo it with.
     reverting: Option<String>,
+    /// The exact unstaged hunk whose destructive discard awaits confirmation.
+    reverting_hunk: Option<String>,
     /// The commit message being written, if the box is open.
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
@@ -110,6 +134,8 @@ pub struct SurfacePanel {
     opening: Option<(WorkspaceId, String, FileOpenMode)>,
     /// Cross-file definition to select after its buffer has been opened.
     definition: Option<(WorkspaceId, DefinitionTarget)>,
+    /// Whether daemon-host worktree paths may launch a process on this machine.
+    local_paths: bool,
     /// What the work cost and where each login stands, as the shell last
     /// read it. `None` until the Reports surface has been opened.
     usage: Option<ginka_ui::reports::UsageReport>,
@@ -130,6 +156,8 @@ pub struct SurfacePanel {
 
 /// Emitted when the panel wants the shell to do something only it can.
 pub enum SurfaceEvent {
+    /// The visible right-panel surface changed and should be remembered.
+    SurfaceShown(Option<Surface>),
     /// Commit the workspace's work with this message.
     ///
     /// `only_staged` when the reader has staged something: having said which
@@ -138,6 +166,12 @@ pub enum SurfaceEvent {
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
     GenerateCommitMessage { only_staged: bool },
+    /// Fast-forward the workspace from its configured upstream.
+    Pull,
+    /// Push the workspace branch, creating its upstream when needed.
+    Push,
+    /// Refresh recent commits after the reader expands history.
+    RefreshHistory,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -171,12 +205,25 @@ pub enum SurfaceEvent {
     },
     /// Add an editor selection's exact source location to the chat draft.
     AddFileReference(String),
+    /// Paste an editor selection into the active terminal.
+    WriteTerminalSelection(String),
+    /// Add one sanitized inspect-mode bundle to the active chat draft.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    AddBrowserContext(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
     /// Set every installed copy of a grouped skill to one state.
     SetSkillEnabled { name: String, enabled: bool },
     /// Put a file into the next commit, or take it back out.
     Stage { path: String, staged: bool },
+    /// Put one exact hunk into the next commit, or take it back out.
+    StageHunk {
+        path: String,
+        header: String,
+        staged: bool,
+    },
+    /// Permanently discard one exact unstaged hunk.
+    RevertHunk { path: String, header: String },
     /// Throw away a file's uncommitted work.
     Revert { path: String },
 }
@@ -184,7 +231,7 @@ pub enum SurfaceEvent {
 impl EventEmitter<SurfaceEvent> for SurfacePanel {}
 
 impl SurfacePanel {
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>, local_paths: bool) -> Self {
         let finder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.files.search").to_string())
@@ -210,6 +257,11 @@ impl SurfacePanel {
             }
         })
         .detach();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        let browser_feedback = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.browser.feedback").to_string())
+        });
         Self {
             finder,
             files: Vec::new(),
@@ -227,13 +279,25 @@ impl SurfacePanel {
             browsing_files: true,
             opening: None,
             definition: None,
+            local_paths,
             open: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            browser_tabs: HashMap::new(),
+            browser_workspace: None,
+            browser_suspended: false,
+            browser_capture: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            browser_feedback,
             changes: None,
+            staged_changes: None,
+            history: Vec::new(),
+            history_open: false,
             expanded: None,
             comments: Vec::new(),
             commenting: None,
             staged: Vec::new(),
             reverting: None,
+            reverting_hunk: None,
             message: None,
             generating: false,
             generated: None,
@@ -514,6 +578,7 @@ impl SurfacePanel {
         };
         let surface = cx.entity().downgrade();
         let definition_workspace = workspace.clone();
+        let local_paths = self.local_paths;
         let editor = (!file.binary && !file.truncated).then(|| {
             let editor = cx.new(|cx| {
                 EditorState::new(window, cx)
@@ -554,18 +619,20 @@ impl SurfacePanel {
                     });
                 });
             });
-            crate::lsp::attach(
-                editor.clone(),
-                lsp,
-                crate::lsp::EditorLspDocument::new(
-                    worktree,
-                    file.path.clone(),
-                    file.text.clone(),
-                    show_definition,
-                ),
-                window,
-                cx,
-            );
+            if local_paths {
+                crate::lsp::attach(
+                    editor.clone(),
+                    lsp,
+                    crate::lsp::EditorLspDocument::new(
+                        worktree,
+                        file.path.clone(),
+                        file.text.clone(),
+                        show_definition,
+                    ),
+                    window,
+                    cx,
+                );
+            }
             editor
         });
         self.file_buffers.push(FileBuffer {
@@ -789,9 +856,16 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Show a remote-sync error without disturbing a commit message draft.
+    pub fn set_git_sync_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
+        self.complaint = complaint.map(SharedString::from);
+        cx.notify();
+    }
+
     /// Show a surface, which is what the palette does when it is asked for
     /// one.
     pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
+        let changed = self.open != Some(surface);
         self.open = Some(surface);
         // A finder that opens empty is one the user has to type into before it
         // says anything; the start of the list is what a picker shows before
@@ -804,6 +878,81 @@ impl SurfacePanel {
             self.skill_error = None;
             cx.emit(SurfaceEvent::RefreshSkills);
         }
+        if changed {
+            cx.emit(SurfaceEvent::SurfaceShown(Some(surface)));
+        }
+        cx.notify();
+    }
+
+    /// Return to the chooser so another surface can be opened with a pointer.
+    fn show_chooser(&mut self, cx: &mut Context<Self>) {
+        if self.open.take().is_some() {
+            cx.emit(SurfaceEvent::SurfaceShown(None));
+            cx.notify();
+        }
+    }
+
+    /// Restore one workspace's selected surface without treating it as a click.
+    pub fn restore_surface(&mut self, surface: Option<Surface>, cx: &mut Context<Self>) {
+        if self.open != surface {
+            self.open = surface;
+            cx.notify();
+        }
+    }
+
+    /// Select the browser tab owned by a workspace, creating it lazily.
+    pub fn set_workspace(
+        &mut self,
+        workspace: WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_workspace.as_ref() == Some(&workspace) {
+            return;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = window;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            if let Some(previous) = self
+                .browser_workspace
+                .as_ref()
+                .and_then(|workspace| self.browser_tabs.get(workspace))
+                .and_then(|browser| browser.as_ref().ok())
+            {
+                previous.update(cx, |browser, cx| browser.set_visible(false, cx));
+            }
+            if !self.browser_tabs.contains_key(&workspace) {
+                let created =
+                    crate::browser::BrowserPane::create(window, cx).map_err(SharedString::from);
+                if let Ok(browser) = &created {
+                    let expected = workspace.clone();
+                    cx.subscribe(browser, move |this, _, event, cx| {
+                        if this.browser_workspace.as_ref() != Some(&expected) {
+                            return;
+                        }
+                        match event {
+                            crate::browser::BrowserEvent::Inspected(capture) => {
+                                this.browser_capture = Some(capture.clone());
+                                cx.notify();
+                            }
+                        }
+                    })
+                    .detach();
+                }
+                self.browser_tabs.insert(workspace.clone(), created);
+            }
+            if let Some(browser) = self
+                .browser_tabs
+                .get(&workspace)
+                .and_then(|browser| browser.as_ref().ok())
+            {
+                let visible = self.open == Some(Surface::Browser) && !self.browser_suspended;
+                browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
+            }
+        }
+        self.browser_workspace = Some(workspace);
+        self.browser_capture = None;
         cx.notify();
     }
 
@@ -812,18 +961,39 @@ impl SurfacePanel {
         self.open
     }
 
+    /// Hide a native browser while GPUI application chrome must cover it.
+    pub fn suspend_browser(&mut self, suspended: bool, cx: &mut Context<Self>) {
+        if self.browser_suspended != suspended {
+            self.browser_suspended = suspended;
+            cx.notify();
+        }
+    }
+
+    /// Whether periodic refresh should include recent commit history.
+    pub fn history_is_open(&self) -> bool {
+        self.history_open
+    }
+
     /// Hand the panel what changed. Called from the shell's refresh.
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
-            // A file that is no longer in the list cannot stay expanded.
-            if let Some(path) = &self.expanded
-                && !changes
-                    .as_ref()
-                    .is_some_and(|changes| changes.files.iter().any(|file| &file.path == path))
-            {
-                self.expanded = None;
-            }
             self.changes = changes;
+            cx.notify();
+        }
+    }
+
+    /// Hand the panel the index-only diff, separate from worktree edits.
+    pub fn set_staged_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
+        if self.staged_changes != changes {
+            self.staged_changes = changes;
+            cx.notify();
+        }
+    }
+
+    /// Hand the Git surface the selected workspace's recent commits.
+    pub fn set_history(&mut self, history: Vec<GitCommit>, cx: &mut Context<Self>) {
+        if self.history != history {
+            self.history = history;
             cx.notify();
         }
     }
@@ -833,7 +1003,7 @@ impl SurfacePanel {
     /// The window has no title bar (`docs/ui.md` §3.1), so this is the right
     /// column's own header and it is the same height as the other two — three
     /// strips at three heights would read as three windows.
-    fn toolbar(&self, cx: &App) -> impl IntoElement {
+    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
@@ -843,9 +1013,12 @@ impl SurfacePanel {
             .justify_between()
             .items_center()
             .child(
-                Icon::new(IconName::Plus)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
+                Button::new("choose-surface")
+                    .icon(IconName::Plus)
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("surface.choose").to_string())
+                    .on_click(cx.listener(|this, _, _, cx| this.show_chooser(cx))),
             )
             .child(
                 h_flex()
@@ -942,8 +1115,7 @@ impl SurfacePanel {
                 )
                 .into_any_element();
         };
-
-        if changes.is_empty() {
+        let Some(staged_changes) = self.staged_changes.clone() else {
             return v_flex()
                 .flex_1()
                 .items_center()
@@ -952,16 +1124,46 @@ impl SurfacePanel {
                     div()
                         .text_sm()
                         .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.reading").to_string()),
+                )
+                .into_any_element();
+        };
+
+        if changes.is_empty() && staged_changes.is_empty() {
+            return v_flex()
+                .flex_1()
+                .child(self.git_remote_actions(cx))
+                .when(self.history_open, |this| this.child(self.git_history(cx)))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
                         .child(rust_i18n::t!("surface.git.clean").to_string()),
                 )
                 .into_any_element();
         }
 
-        let (added, removed) = changes.totals();
+        let (unstaged_added, unstaged_removed) = changes.totals();
+        let (staged_added, staged_removed) = staged_changes.totals();
+        let added = unstaged_added + staged_added;
+        let removed = unstaged_removed + staged_removed;
+        let files = changes
+            .files
+            .iter()
+            .chain(&staged_changes.files)
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         v_flex()
             .id("git-surface")
             .flex_1()
             .overflow_y_scroll()
+            .child(self.git_remote_actions(cx))
+            .when(self.history_open, |this| this.child(self.git_history(cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -974,10 +1176,7 @@ impl SurfacePanel {
                             .flex_1()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child(
-                                rust_i18n::t!("surface.git.summary", files = changes.files.len())
-                                    .to_string(),
-                            ),
+                            .child(rust_i18n::t!("surface.git.summary", files = files).to_string()),
                     )
                     .child(
                         div()
@@ -992,15 +1191,156 @@ impl SurfacePanel {
                             .child(format!("-{removed}")),
                     ),
             )
+            .when(!changes.is_empty(), |this| {
+                this.child(self.change_section(&changes, false, cx))
+            })
+            .when(!staged_changes.is_empty(), |this| {
+                this.child(self.change_section(&staged_changes, true, cx))
+            })
+            .children(self.review_bar(cx))
+            .child(self.commit_box(cx))
+            .into_any_element()
+    }
+
+    /// One side of the index boundary and the files on that side.
+    fn change_section(
+        &self,
+        changes: &Changes,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .w_full()
+            .child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .bg(tokens.colors().bg_surface)
+                    .child(if staged {
+                        rust_i18n::t!("surface.git.section.staged").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.section.unstaged").to_string()
+                    }),
+            )
             .children(
                 changes
                     .files
                     .iter()
-                    .map(|file| self.file_row(file, cx).into_any_element()),
+                    .map(|file| self.file_row(file, staged, cx).into_any_element()),
             )
-            .children(self.review_bar(cx))
-            .child(self.commit_box(cx))
-            .into_any_element()
+    }
+
+    /// Remote operations stay visible even when the worktree is clean.
+    fn git_remote_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let history_open = self.history_open;
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1p5()
+            .gap_2()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(
+                Button::new("git-pull")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.pull").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.pull_tooltip").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Pull))),
+            )
+            .child(
+                Button::new("git-push")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.push").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
+            )
+            .child(
+                Button::new("git-history")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.history").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.history_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.history_open = !history_open;
+                        if this.history_open {
+                            cx.emit(SurfaceEvent::RefreshHistory);
+                        }
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// Recent commits, with topology retained for the future graph renderer.
+    fn git_history(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        let now = crate::daemon::now();
+        v_flex()
+            .w_full()
+            .max_h(px(260.))
+            .overflow_y_scrollbar()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .when(self.history.is_empty(), |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.history_empty").to_string()),
+                )
+            })
+            .children(self.history.iter().map(|commit| {
+                let short = commit.id.chars().take(8).collect::<String>();
+                let topology = if commit.parents.len() > 1 {
+                    "◆"
+                } else {
+                    "●"
+                };
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().accent)
+                            .child(topology),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_secondary)
+                                    .truncate()
+                                    .child(commit.summary.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(format!(
+                                        "{} · {} · {}",
+                                        short,
+                                        commit.author,
+                                        ginka_ui::workspace::relative_age(now, commit.authored_at)
+                                    )),
+                            ),
+                    )
+            }))
     }
 
     /// The batch of comments, and the way to send it.
@@ -1303,10 +1643,10 @@ impl SurfacePanel {
     fn file_actions(
         &self,
         file: &ginka_protocol::model::FileChange,
+        staged: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let tokens = Tokens::global(cx).clone();
-        let staged = self.staged.iter().any(|path| path == &file.path);
         let asking = self.reverting.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
         let to_stage = path.clone();
@@ -1315,7 +1655,7 @@ impl SurfacePanel {
 
         let mut actions: Vec<AnyElement> = vec![
             div()
-                .id(SharedString::from(format!("stage:{path}")))
+                .id(SharedString::from(format!("stage:{staged}:{path}")))
                 .px(px(7.))
                 .py(px(2.))
                 .rounded(px(tokens.radius.row))
@@ -1345,7 +1685,7 @@ impl SurfacePanel {
                 .into_any_element(),
         ];
 
-        if asking {
+        if asking && !staged {
             actions.push(
                 div()
                     .id(SharedString::from(format!("revert-yes:{path}")))
@@ -1367,32 +1707,34 @@ impl SurfacePanel {
                     .into_any_element(),
             );
         }
-        actions.push(
-            div()
-                .id(SharedString::from(format!("revert:{path}")))
-                .px(px(7.))
-                .py(px(2.))
-                .rounded(px(tokens.radius.row))
-                .text_xs()
-                .text_color(if asking {
-                    tokens.colors().text_primary
-                } else {
-                    tokens.colors().text_muted.opacity(0.7)
-                })
-                .cursor_pointer()
-                .hover(|this| this.bg(tokens.colors().row_hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.reverting = (!asking).then(|| to_arm.clone());
-                    cx.notify();
-                }))
-                .child(if asking {
-                    rust_i18n::t!("surface.git.revert.no").to_string()
-                } else {
-                    rust_i18n::t!("surface.git.revert").to_string()
-                })
-                .into_any_element(),
-        );
+        if !staged {
+            actions.push(
+                div()
+                    .id(SharedString::from(format!("revert:{path}")))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(if asking {
+                        tokens.colors().text_primary
+                    } else {
+                        tokens.colors().text_muted.opacity(0.7)
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.reverting = (!asking).then(|| to_arm.clone());
+                        cx.notify();
+                    }))
+                    .child(if asking {
+                        rust_i18n::t!("surface.git.revert.no").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.revert").to_string()
+                    })
+                    .into_any_element(),
+            );
+        }
         actions
     }
 
@@ -1400,18 +1742,24 @@ impl SurfacePanel {
     fn file_row(
         &self,
         file: &ginka_protocol::model::FileChange,
+        staged: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let expanded = self.expanded.as_deref() == Some(file.path.as_str());
-        let path = file.path.clone();
+        let row_key = format!(
+            "{}:{}",
+            if staged { "staged" } else { "unstaged" },
+            file.path
+        );
+        let expanded = self.expanded.as_deref() == Some(row_key.as_str());
+        let expand_key = row_key.clone();
         let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
 
         v_flex()
             .w_full()
             .child(
                 h_flex()
-                    .id(SharedString::from(format!("file:{}", file.path)))
+                    .id(SharedString::from(format!("file:{row_key}")))
                     .w_full()
                     .px_3()
                     .py_1p5()
@@ -1421,7 +1769,7 @@ impl SurfacePanel {
                     .when(expanded, |this| this.bg(tokens.colors().row_active()))
                     .hover(|this| this.bg(tokens.colors().row_hover()))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expanded = (!expanded).then(|| path.clone());
+                        this.expanded = (!expanded).then(|| expand_key.clone());
                         cx.notify();
                     }))
                     .child(
@@ -1461,7 +1809,7 @@ impl SurfacePanel {
                             .text_color(tokens.colors().status_error)
                             .child(format!("-{}", file.removed)),
                     )
-                    .children(self.file_actions(file, cx)),
+                    .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
                 this.child(
@@ -1475,18 +1823,85 @@ impl SurfacePanel {
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
+                    let hunk_path = file.path.clone();
+                    let hunk_header = hunk.header.clone();
+                    let action_header = hunk_header.clone();
+                    let discard_path = file.path.clone();
+                    let discard_header = hunk.header.clone();
+                    let discard_key = format!("{}\0{}", file.path, hunk.header);
+                    let discard_armed = self.reverting_hunk.as_deref() == Some(&discard_key);
                     v_flex()
                         .w_full()
                         .child(
-                            div()
+                            h_flex()
                                 .w_full()
                                 .px_3()
                                 .py_0p5()
-                                .font_family(mono.clone())
-                                .text_xs()
-                                .text_color(tokens.colors().text_muted)
                                 .bg(tokens.colors().bg_surface)
-                                .child(hunk.header.clone()),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(mono.clone())
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(hunk_header),
+                                )
+                                .child(
+                                    Button::new(format!(
+                                        "hunk:{}:{}:{}",
+                                        if staged { "unstage" } else { "stage" },
+                                        file.path,
+                                        hunk.header
+                                    ))
+                                    .ghost()
+                                    .compact()
+                                    .label(if staged {
+                                        rust_i18n::t!("surface.git.hunk.unstage").to_string()
+                                    } else {
+                                        rust_i18n::t!("surface.git.hunk.stage").to_string()
+                                    })
+                                    .on_click(cx.listener(
+                                        move |_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(SurfaceEvent::StageHunk {
+                                                path: hunk_path.clone(),
+                                                header: action_header.clone(),
+                                                staged: !staged,
+                                            });
+                                        },
+                                    )),
+                                )
+                                .when(!staged, |this| {
+                                    this.child(
+                                        Button::new(format!(
+                                            "discard-hunk:{}:{}",
+                                            file.path, hunk.header
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .label(if discard_armed {
+                                            rust_i18n::t!("surface.git.hunk.discard_confirm")
+                                                .to_string()
+                                        } else {
+                                            rust_i18n::t!("surface.git.hunk.discard").to_string()
+                                        })
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if discard_armed {
+                                                    this.reverting_hunk = None;
+                                                    cx.emit(SurfaceEvent::RevertHunk {
+                                                        path: discard_path.clone(),
+                                                        header: discard_header.clone(),
+                                                    });
+                                                } else {
+                                                    this.reverting_hunk = Some(discard_key.clone());
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                }),
                         )
                         .children(hunk.lines.iter().map(|line| {
                             let anchor = match line.kind {
@@ -1573,6 +1988,108 @@ impl SurfacePanel {
                     .text_color(tokens.colors().text_muted)
                     .child(surface.availability()),
             )
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn browser(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let capture = self.browser_capture.clone();
+        let capture_card = capture.map(|capture| {
+            let label = if capture
+                .element
+                .accessibility_name
+                .as_deref()
+                .is_some_and(|name| !name.is_empty())
+            {
+                capture
+                    .element
+                    .accessibility_name
+                    .clone()
+                    .unwrap_or_default()
+            } else if !capture.element.text.is_empty() {
+                capture.element.text.clone()
+            } else {
+                capture.element.selector.clone()
+            };
+            v_flex()
+                .w_full()
+                .flex_shrink_0()
+                .gap_2()
+                .p_3()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tokens.colors().text_primary)
+                                .child(format!("<{}> {label}", capture.element.tag_name)),
+                        )
+                        .child(
+                            Button::new("browser-capture-dismiss")
+                                .ghost()
+                                .compact()
+                                .icon(IconName::Close)
+                                .tooltip(rust_i18n::t!("surface.browser.dismiss").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.browser_capture = None;
+                                    this.browser_feedback.update(cx, |feedback, cx| {
+                                        feedback.set_value("", window, cx)
+                                    });
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(Textarea::new(&self.browser_feedback).h(px(70.)))
+                .child(
+                    h_flex().justify_end().child(
+                        Button::new("browser-capture-send")
+                            .primary()
+                            .label(rust_i18n::t!("surface.browser.add_to_chat").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let feedback = this.browser_feedback.read(cx).value().to_string();
+                                let context =
+                                    ginka_core::browser::format_capture(&capture, &feedback);
+                                this.browser_capture = None;
+                                this.browser_feedback
+                                    .update(cx, |feedback, cx| feedback.set_value("", window, cx));
+                                cx.emit(SurfaceEvent::AddBrowserContext(context));
+                                cx.notify();
+                            })),
+                    ),
+                )
+        });
+        let Some(workspace) = self.browser_workspace.as_ref() else {
+            return self.placeholder(Surface::Browser, cx).into_any_element();
+        };
+        let Some(browser) = self.browser_tabs.get(workspace) else {
+            return self.placeholder(Surface::Browser, cx).into_any_element();
+        };
+        match browser {
+            Ok(browser) => v_flex()
+                .flex_1()
+                .min_h_0()
+                .children(capture_card)
+                .child(browser.clone())
+                .into_any_element(),
+            Err(error) => v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .text_sm()
+                .text_color(tokens.colors().status_error)
+                .child(error.clone())
+                .into_any_element(),
+        }
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    fn browser(&self, cx: &mut Context<Self>) -> AnyElement {
+        self.placeholder(Surface::Browser, cx).into_any_element()
     }
 }
 
@@ -2522,6 +3039,25 @@ impl SurfacePanel {
                 }),
             )
         });
+        let terminal_selection = buffer.editor.as_ref().map(|editor| {
+            let disabled = {
+                let editor = editor.read(cx);
+                selected_text(&editor.value(), editor.selected_range()).is_none()
+            };
+            let editor = editor.clone();
+            (
+                disabled,
+                cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    let selection = {
+                        let editor = editor.read(cx);
+                        selected_text(&editor.value(), editor.selected_range())
+                    };
+                    if let Some(selection) = selection {
+                        cx.emit(SurfaceEvent::WriteTerminalSelection(selection));
+                    }
+                }),
+            )
+        });
         let find = buffer.editor.as_ref().map(|editor| {
             let editor = editor.clone();
             move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -2624,7 +3160,25 @@ impl SurfacePanel {
                                 .disabled(disabled)
                                 .on_click(selection)
                         },
-                    )),
+                    ))
+                    .children(
+                        (!buffer.previewing)
+                            .then_some(terminal_selection)
+                            .flatten()
+                            .map(|(disabled, selection)| {
+                                let label =
+                                    rust_i18n::t!("surface.files.send_selection_to_terminal")
+                                        .to_string();
+                                Button::new("send-file-selection-to-terminal")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(disabled)
+                                    .tooltip(label.clone())
+                                    .accessibility_label(label)
+                                    .child(Icon::new(IconName::SquareTerminal).size_3())
+                                    .on_click(selection)
+                            }),
+                    ),
             )
             .children(buffer.complaint.as_ref().map(|complaint| {
                 div()
@@ -2773,6 +3327,20 @@ impl Render for SurfacePanel {
         let tokens = Tokens::global(cx);
         let border = tokens.colors().border_subtle;
         let open = self.open;
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(browser) = self
+            .browser_workspace
+            .as_ref()
+            .and_then(|workspace| self.browser_tabs.get(workspace))
+            .and_then(|browser| browser.as_ref().ok())
+        {
+            browser.update(cx, |browser, cx| {
+                browser.set_visible(
+                    open == Some(Surface::Browser) && !self.browser_suspended,
+                    cx,
+                )
+            });
+        }
 
         v_flex()
             .size_full()
@@ -2783,6 +3351,7 @@ impl Render for SurfacePanel {
                 None => self.empty_state(cx).into_any_element(),
                 Some(Surface::Git) => self.git(cx).into_any_element(),
                 Some(Surface::Files) => self.files(cx).into_any_element(),
+                Some(Surface::Browser) => self.browser(cx),
                 Some(Surface::Reports) => self.reports(cx).into_any_element(),
                 Some(Surface::Skills) => self.skills(cx).into_any_element(),
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
