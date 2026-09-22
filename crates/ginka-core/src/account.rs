@@ -81,15 +81,28 @@ pub fn validate_id(id: &AccountId) -> Result<(), AccountError> {
 /// Which account a session runs on.
 ///
 /// The one asked for, checked against the provider it is for — a Codex login
-/// cannot run a Claude session — or the provider's default when none was.
-/// `provider` is the driver's id, which is what a session records.
+/// cannot run a Claude session — or the provider's active account when none
+/// was requested. A missing or stale active choice falls back to the
+/// provider's system default. `provider` is the driver's id, which is what a
+/// session records.
 pub fn resolve(
     settings: &DaemonSettings,
     provider: &str,
     requested: Option<&AccountId>,
 ) -> Result<AccountId, AccountError> {
     let Some(requested) = requested else {
-        return Ok(AccountId(provider.to_string()));
+        return Ok(settings
+            .active_accounts
+            .get(provider)
+            .filter(|id| {
+                id.0 == provider
+                    || settings
+                        .accounts
+                        .get(&id.0)
+                        .is_some_and(|account| account.provider.as_str() == provider)
+            })
+            .cloned()
+            .unwrap_or_else(|| AccountId(provider.to_string())));
     };
     if requested.0 == provider {
         return Ok(requested.clone());
@@ -114,6 +127,21 @@ pub fn resolve(
         });
     }
     Ok(requested.clone())
+}
+
+/// Select the account future sessions of its provider use.
+///
+/// Existing sessions are unaffected because their account id is stored on the
+/// session. Selecting the provider's own default removes the preference so a
+/// hand-edited settings file remains sparse.
+pub fn select(settings: &mut DaemonSettings, id: &AccountId) -> Result<(), AccountError> {
+    let provider = provider_of(settings, id)?;
+    if id.0 == provider {
+        settings.active_accounts.remove(&provider);
+    } else {
+        settings.active_accounts.insert(provider, id.clone());
+    }
+    Ok(())
 }
 
 /// The account's layer of an agent's environment (`docs/accounts.md` §4).
@@ -206,8 +234,14 @@ pub fn remove(
     if id.is_default() {
         return Err(AccountError::IsDefault(id.0.clone()));
     }
-    if settings.accounts.remove(&id.0).is_none() {
-        return Err(AccountError::Unknown(id.0.clone()));
+    let provider = settings
+        .accounts
+        .get(&id.0)
+        .map(|account| account.provider.as_str().to_string())
+        .ok_or_else(|| AccountError::Unknown(id.0.clone()))?;
+    settings.accounts.remove(&id.0);
+    if settings.active_accounts.get(&provider) == Some(id) {
+        settings.active_accounts.remove(&provider);
     }
     if delete_home {
         let home = home_dir(paths, id);
@@ -251,6 +285,8 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
         let Some(provider) = ProviderKind::parse(driver_id) else {
             continue;
         };
+        let active =
+            resolve(settings, driver_id, None).unwrap_or_else(|_| AccountId(driver_id.to_string()));
         let login = |env: Vec<(String, String)>| {
             driver.login_command().map(|command| LoginCommand {
                 program: command.program,
@@ -264,6 +300,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
             label: driver.display_name().to_string(),
             home: None,
             is_default: true,
+            active: active.0 == driver_id,
             env_keys: Vec::new(),
             signed_in: None,
             login: login(Vec::new()),
@@ -280,6 +317,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
                 .unwrap_or_default();
             seen.insert(id.0.clone());
             accounts.push(Account {
+                active: active == id,
                 id,
                 provider,
                 label: account.label.clone(),
@@ -298,6 +336,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
         }
         let id = AccountId(id.clone());
         accounts.push(Account {
+            active: settings.active_accounts.get(account.provider.as_str()) == Some(&id),
             home: Some(home_dir(paths, &id)),
             id,
             provider: account.provider,
@@ -542,6 +581,55 @@ mod tests {
             resolve(&settings, "claude", Some(&AccountId("nonesuch".into()))),
             Err(AccountError::Unknown(_))
         ));
+    }
+
+    #[test]
+    fn a_provider_remembers_the_account_selected_for_new_sessions() {
+        let (_tmp, paths) = paths();
+        let mut settings = DaemonSettings::default();
+        let work = AccountId("codex-work".into());
+        add(
+            &mut settings,
+            &paths,
+            work.clone(),
+            ProviderKind::Codex,
+            "Work".into(),
+            Some("CODEX_HOME"),
+        )
+        .unwrap();
+
+        select(&mut settings, &work).unwrap();
+        assert_eq!(resolve(&settings, "codex", None).unwrap(), work);
+
+        select(&mut settings, &AccountId("codex".into())).unwrap();
+        assert_eq!(
+            resolve(&settings, "codex", None).unwrap(),
+            AccountId("codex".into())
+        );
+    }
+
+    #[test]
+    fn removing_the_active_account_falls_back_to_the_system_default() {
+        let (_tmp, paths) = paths();
+        let mut settings = DaemonSettings::default();
+        let work = AccountId("claude-work".into());
+        add(
+            &mut settings,
+            &paths,
+            work.clone(),
+            ProviderKind::Claude,
+            "Work".into(),
+            Some("CLAUDE_CONFIG_DIR"),
+        )
+        .unwrap();
+        select(&mut settings, &work).unwrap();
+
+        remove(&mut settings, &paths, &work, false).unwrap();
+
+        assert_eq!(
+            resolve(&settings, "claude", None).unwrap(),
+            AccountId("claude".into())
+        );
     }
 
     #[test]

@@ -321,6 +321,16 @@ pub fn selection_reference(path: &str, text: &str, selection: Range<usize>) -> O
     Some(format!("{file} ({location})"))
 }
 
+/// Copy a non-empty editor selection at valid UTF-8 boundaries.
+///
+/// Unlike a source reference this may come from a dirty buffer: it is pasted
+/// as literal terminal input rather than presented as worktree context.
+pub fn selected_text(text: &str, selection: Range<usize>) -> Option<String> {
+    let start = floor_char_boundary(text, selection.start.min(text.len()));
+    let end = floor_char_boundary(text, selection.end.min(text.len()));
+    (start < end).then(|| text[start..end].to_string())
+}
+
 /// Reference a selection only while the editor still matches the disk read.
 ///
 /// A dirty buffer's line numbers describe text the agent cannot read from the
@@ -505,6 +515,17 @@ mod tests {
         assert_eq!(
             selection_reference("docs/read me.md", "one\ntwo", 0..3).as_deref(),
             Some("`docs/read me.md` (line 1)")
+        );
+    }
+
+    #[test]
+    fn selected_text_is_utf8_safe_and_does_not_require_a_saved_buffer() {
+        let text = "a日本語z";
+        assert_eq!(selected_text(text, 2..8).as_deref(), Some("日本"));
+        assert_eq!(selected_text(text, 3..3), None);
+        assert_eq!(
+            selected_text("changed in memory", 0..7).as_deref(),
+            Some("changed")
         );
     }
 
