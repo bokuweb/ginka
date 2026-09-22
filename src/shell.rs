@@ -58,6 +58,7 @@ actions!(
         PreviousSurface,
         NextTerminalTab,
         PreviousTerminalTab,
+        CopyTerminalOutput,
         NavigateBack,
         NavigateForward
     ]
@@ -153,6 +154,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new(
             ginka_ui::terminal::paste_shortcut(cfg!(target_os = "macos")),
             Paste,
+            Some("Terminal"),
+        ),
+        KeyBinding::new(
+            ginka_ui::terminal::copy_shortcut(cfg!(target_os = "macos")),
+            CopyTerminalOutput,
             Some("Terminal"),
         ),
         #[cfg(target_os = "macos")]
@@ -2327,6 +2333,15 @@ impl Shell {
         {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
+    }
+
+    fn on_copy_terminal_output(
+        &mut self,
+        _: &CopyTerminalOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_terminal_output(cx);
     }
 
     /// Browse terminal history without sending wheel movement to the pty.
@@ -7795,6 +7810,7 @@ impl Shell {
                 this.track_focus(&self.terminal_focus)
                     .key_context("Terminal")
                     .on_action(cx.listener(Self::paste_into_terminal))
+                    .on_action(cx.listener(Self::on_copy_terminal_output))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                         this.type_into_terminal(event, cx)
                     }))

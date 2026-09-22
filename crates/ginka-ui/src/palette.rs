@@ -111,7 +111,7 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
             Entry {
                 id: "terminal:copy-output".into(),
                 label: rust_i18n::t!("terminal.copy_output").to_string(),
-                hint: None,
+                hint: Some(crate::terminal::copy_shortcut(cfg!(target_os = "macos")).into()),
                 command: Command::CopyTerminalOutput,
             },
         );

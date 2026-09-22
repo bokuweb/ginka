@@ -257,6 +257,11 @@ pub fn paste_shortcut(is_macos: bool) -> &'static str {
     if is_macos { "cmd-v" } else { "ctrl-shift-v" }
 }
 
+/// Copy shortcut for a terminal on the selected platform family.
+pub fn copy_shortcut(is_macos: bool) -> &'static str {
+    if is_macos { "cmd-c" } else { "ctrl-shift-c" }
+}
+
 /// A terminal's screen, fed by the bytes its shell prints.
 pub struct TerminalScreen {
     term: Term<VoidListener>,
@@ -1219,6 +1224,18 @@ mod tests {
         assert_eq!(
             screen.key_input(&key("ctrl-v", None)).as_deref(),
             Some("\x16")
+        );
+    }
+
+    #[test]
+    fn terminal_copy_does_not_steal_interrupt_outside_macos() {
+        assert_eq!(copy_shortcut(true), "cmd-c");
+        assert_eq!(copy_shortcut(false), "ctrl-shift-c");
+
+        let screen = TerminalScreen::new(2, 20);
+        assert_eq!(
+            screen.key_input(&key("ctrl-c", None)).as_deref(),
+            Some("\x03")
         );
     }
 
