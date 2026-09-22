@@ -150,10 +150,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-shift-[", PreviousTerminalTab, Some("Terminal")),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-pageup", PreviousTerminalTab, Some("Terminal")),
-        #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-v", Paste, Some("Terminal")),
-        #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-v", Paste, Some("Terminal")),
+        KeyBinding::new(
+            ginka_ui::terminal::paste_shortcut(cfg!(target_os = "macos")),
+            Paste,
+            Some("Terminal"),
+        ),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]

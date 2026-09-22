@@ -252,6 +252,11 @@ pub struct TerminalSearchMatch {
     columns: Range<usize>,
 }
 
+/// Paste shortcut for a terminal on the selected platform family.
+pub fn paste_shortcut(is_macos: bool) -> &'static str {
+    if is_macos { "cmd-v" } else { "ctrl-shift-v" }
+}
+
 /// A terminal's screen, fed by the bytes its shell prints.
 pub struct TerminalScreen {
     term: Term<VoidListener>,
@@ -1203,6 +1208,18 @@ mod tests {
         let screen = TerminalScreen::new(2, 20);
 
         assert_eq!(screen.key_input(&key("cmd-c", Some("c"))), None);
+    }
+
+    #[test]
+    fn terminal_paste_does_not_steal_control_v_outside_macos() {
+        assert_eq!(paste_shortcut(true), "cmd-v");
+        assert_eq!(paste_shortcut(false), "ctrl-shift-v");
+
+        let screen = TerminalScreen::new(2, 20);
+        assert_eq!(
+            screen.key_input(&key("ctrl-v", None)).as_deref(),
+            Some("\x16")
+        );
     }
 
     #[test]
