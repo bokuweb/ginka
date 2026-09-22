@@ -20,6 +20,7 @@ use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use ginka_protocol::TerminalId;
 use ginka_protocol::model::TerminalInfo;
+use gpui::Keystroke;
 use std::ops::Range;
 use std::path::{Component, Path};
 
@@ -366,6 +367,84 @@ impl TerminalScreen {
         } else {
             text.replace("\r\n", "\n").replace('\n', "\r")
         }
+    }
+
+    /// Translate a platform keystroke into bytes understood by this terminal.
+    pub fn key_input(&self, keystroke: &Keystroke) -> Option<String> {
+        let key = keystroke.key.as_str();
+        let modifiers = &keystroke.modifiers;
+
+        // Platform modifiers belong to the window and its command bindings;
+        // they must never leak their printable key into a shell.
+        if modifiers.platform {
+            return None;
+        }
+
+        let control = modifiers.control.then(|| match key {
+            "space" | "@" => Some('\0'),
+            "[" => Some('\x1b'),
+            "\\" => Some('\x1c'),
+            "]" => Some('\x1d'),
+            "^" => Some('\x1e'),
+            "_" => Some('\x1f'),
+            "?" => Some('\x7f'),
+            _ if key.len() == 1 => key
+                .chars()
+                .next()
+                .map(|letter| letter.to_ascii_lowercase())
+                .filter(char::is_ascii_lowercase)
+                .map(|letter| (letter as u8 - b'a' + 1) as char),
+            _ => None,
+        });
+
+        let application_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+        let named = match (key, modifiers.shift) {
+            ("tab", true) => Some("\x1b[Z"),
+            ("enter", _) => Some("\r"),
+            ("tab", _) => Some("\t"),
+            ("backspace", _) => Some("\x7f"),
+            ("escape", _) => Some("\x1b"),
+            ("up", _) if application_cursor => Some("\x1bOA"),
+            ("down", _) if application_cursor => Some("\x1bOB"),
+            ("right", _) if application_cursor => Some("\x1bOC"),
+            ("left", _) if application_cursor => Some("\x1bOD"),
+            ("home", _) if application_cursor => Some("\x1bOH"),
+            ("end", _) if application_cursor => Some("\x1bOF"),
+            ("up", _) => Some("\x1b[A"),
+            ("down", _) => Some("\x1b[B"),
+            ("right", _) => Some("\x1b[C"),
+            ("left", _) => Some("\x1b[D"),
+            ("home", _) => Some("\x1b[H"),
+            ("end", _) => Some("\x1b[F"),
+            ("insert", _) => Some("\x1b[2~"),
+            ("delete", _) => Some("\x1b[3~"),
+            ("pageup", _) => Some("\x1b[5~"),
+            ("pagedown", _) => Some("\x1b[6~"),
+            ("f1", _) => Some("\x1bOP"),
+            ("f2", _) => Some("\x1bOQ"),
+            ("f3", _) => Some("\x1bOR"),
+            ("f4", _) => Some("\x1bOS"),
+            ("f5", _) => Some("\x1b[15~"),
+            ("f6", _) => Some("\x1b[17~"),
+            ("f7", _) => Some("\x1b[18~"),
+            ("f8", _) => Some("\x1b[19~"),
+            ("f9", _) => Some("\x1b[20~"),
+            ("f10", _) => Some("\x1b[21~"),
+            ("f11", _) => Some("\x1b[23~"),
+            ("f12", _) => Some("\x1b[24~"),
+            ("space", _) => Some(" "),
+            _ => None,
+        };
+
+        let mut input = control
+            .flatten()
+            .map(|character| character.to_string())
+            .or_else(|| named.map(str::to_string))
+            .or_else(|| keystroke.key_char.clone().filter(|typed| !typed.is_empty()))?;
+        if modifiers.alt {
+            input.insert(0, '\x1b');
+        }
+        Some(input)
     }
 
     /// Move the viewport far enough for a search match to be visible.
@@ -987,6 +1066,62 @@ mod tests {
             screen.paste_input("one\ntwo\x1b[201~three"),
             "\x1b[200~one\ntwo[201~three\x1b[201~"
         );
+    }
+
+    fn key(source: &str, typed: Option<&str>) -> Keystroke {
+        let mut key = Keystroke::parse(source).unwrap();
+        key.key_char = typed.map(str::to_string);
+        key
+    }
+
+    #[test]
+    fn terminal_keys_follow_application_cursor_mode() {
+        let mut screen = TerminalScreen::new(2, 20);
+        assert_eq!(
+            screen.key_input(&key("up", None)).as_deref(),
+            Some("\x1b[A")
+        );
+
+        screen.feed("\x1b[?1h");
+        assert_eq!(
+            screen.key_input(&key("up", None)).as_deref(),
+            Some("\x1bOA")
+        );
+    }
+
+    #[test]
+    fn terminal_keys_include_reverse_tab_and_function_keys() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(
+            screen.key_input(&key("shift-tab", None)).as_deref(),
+            Some("\x1b[Z")
+        );
+        assert_eq!(
+            screen.key_input(&key("f5", None)).as_deref(),
+            Some("\x1b[15~")
+        );
+    }
+
+    #[test]
+    fn terminal_keys_encode_control_symbols_and_alt_text() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(
+            screen.key_input(&key("ctrl-space", None)).as_deref(),
+            Some("\0")
+        );
+        assert_eq!(
+            screen.key_input(&key("alt-x->ß", Some("ß"))).as_deref(),
+            Some("\x1bß")
+        );
+    }
+
+    #[test]
+    fn platform_shortcuts_are_not_typed_into_the_terminal() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(screen.key_input(&key("cmd-c", Some("c"))), None);
     }
 
     #[test]

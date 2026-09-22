@@ -2279,10 +2279,11 @@ impl Shell {
             }
             return;
         }
-        let Some(terminal) = self.terminals.active_id() else {
-            return;
-        };
-        let Some(data) = keystroke_bytes(&event.keystroke) else {
+        let Some((terminal, data)) = self.terminals.active().and_then(|tab| {
+            tab.screen
+                .key_input(&event.keystroke)
+                .map(|data| (tab.id.clone(), data))
+        }) else {
             return;
         };
         let link = self.link.clone();
@@ -7908,51 +7909,6 @@ fn terminal_cell(
             SharedString::from(cell.text.to_string())
         })
         .into_any_element()
-}
-
-/// What a keystroke sends to a shell.
-///
-/// A pty takes bytes, so this is where a key becomes the bytes a terminal
-/// expects: the control characters for `ctrl-`, the escape sequences for the
-/// arrows and the editing keys, and the typed character otherwise. Anything
-/// this does not know is not sent, because a wrong byte is worse than none.
-fn keystroke_bytes(keystroke: &Keystroke) -> Option<String> {
-    let key = keystroke.key.as_str();
-    let modifiers = &keystroke.modifiers;
-
-    if modifiers.control && key.len() == 1 {
-        // ctrl-a is 0x01, and so on up the alphabet; ctrl-c is what stops a
-        // runaway command, which is the whole reason this branch exists.
-        let letter = key.chars().next()?.to_ascii_lowercase();
-        if letter.is_ascii_lowercase() {
-            return Some(((letter as u8 - b'a' + 1) as char).to_string());
-        }
-    }
-
-    let sequence = match key {
-        "enter" => "\r",
-        "tab" => "\t",
-        "backspace" => "\x7f",
-        "escape" => "\x1b",
-        "up" => "\x1b[A",
-        "down" => "\x1b[B",
-        "right" => "\x1b[C",
-        "left" => "\x1b[D",
-        "home" => "\x1b[H",
-        "end" => "\x1b[F",
-        "pageup" => "\x1b[5~",
-        "pagedown" => "\x1b[6~",
-        "delete" => "\x1b[3~",
-        "space" => " ",
-        _ => "",
-    };
-    if !sequence.is_empty() {
-        return Some(sequence.to_string());
-    }
-
-    // What the keyboard actually produced, which is what carries the layout
-    // and the shift state.
-    keystroke.key_char.clone().filter(|typed| !typed.is_empty())
 }
 
 /// Re-read the workspaces and hand back the selected session, if any.
