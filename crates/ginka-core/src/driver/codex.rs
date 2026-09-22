@@ -9,12 +9,12 @@
 //! than by a live session.
 
 use super::{
-    ActivityItem, AgentDriver, CommandSpec, ModelCatalogueProbe, ParseState, PlanUsageProbe,
-    ProviderModel, SessionSpec,
+    ActivityItem, AgentDriver, CommandSpec, CompactionSpec, ModelCatalogueProbe, ParseState,
+    PlanUsageProbe, ProviderModel, SessionSpec,
 };
 use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
 use ginka_protocol::provider::{OptionOutcome, ProviderOption, SessionOptions};
-use ginka_protocol::{AgentEvent, Usage};
+use ginka_protocol::{AgentEvent, ContextUsage, Usage};
 use serde_json::Value;
 
 /// The Codex CLI.
@@ -89,6 +89,26 @@ impl AgentDriver for CodexDriver {
 
     fn display_name(&self) -> &'static str {
         "Codex"
+    }
+
+    fn compaction(&self, _spec: &SessionSpec, vendor_session_id: &str) -> Option<CompactionSpec> {
+        Some(CompactionSpec {
+            command: CommandSpec::new(&self.program).arg("app-server"),
+            input: vec![
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "ginka", "title": "Ginka", "version": env!("CARGO_PKG_VERSION")}}
+                })
+                .to_string(),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+                    .to_string(),
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "thread/compact/start",
+                    "params": {"threadId": vendor_session_id}
+                })
+                .to_string(),
+            ],
+        })
     }
 
     fn models(&self) -> Vec<ProviderModel> {
@@ -281,10 +301,68 @@ impl AgentDriver for CodexDriver {
         if line.is_empty() {
             return Vec::new();
         }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut value) = serde_json::from_str::<Value>(line) else {
             state.unrecognized += 1;
             return Vec::new();
         };
+
+        // The app-server spells the same lifecycle as JSON-RPC notifications.
+        // Normalize its standard turn/item events; request responses are
+        // acknowledgements rather than transcript content.
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
+            if method == "turn/failed" {
+                state.recognized += 1;
+                state.turn += 1;
+                let summary = value
+                    .pointer("/params/turn/error/message")
+                    .or_else(|| value.pointer("/params/error/message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                return vec![
+                    AgentEvent::TurnEnd { turn: state.turn },
+                    AgentEvent::SessionResult {
+                        state: SessionState::Failed,
+                        summary,
+                    },
+                ];
+            }
+            let event_type = match method {
+                "turn/started" => Some("turn.started"),
+                "turn/completed" => Some("turn.completed"),
+                "item/started" => Some("item.started"),
+                "item/updated" => Some("item.updated"),
+                "item/completed" => Some("item.completed"),
+                _ => None,
+            };
+            if let Some(event_type) = event_type {
+                let mut normalized = value.get("params").cloned().unwrap_or_default();
+                normalized["type"] = Value::String(event_type.to_string());
+                value = normalized;
+            } else {
+                state.recognized += 1;
+                return Vec::new();
+            }
+        } else if value.get("id").is_some()
+            && value.get("msg").is_none()
+            && value.get("type").is_none()
+        {
+            state.recognized += 1;
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+            {
+                state.turn += 1;
+                return vec![
+                    AgentEvent::TurnEnd { turn: state.turn },
+                    AgentEvent::SessionResult {
+                        state: SessionState::Failed,
+                        summary: Some(message.to_string()),
+                    },
+                ];
+            }
+            return Vec::new();
+        }
 
         if let Some(id) = value
             .get("thread_id")
@@ -302,12 +380,16 @@ impl AgentDriver for CodexDriver {
         }
 
         match value.get("type").and_then(Value::as_str) {
-            Some(
-                "thread.started" | "session.created" | "turn.started" | "item.started"
-                | "item.updated",
-            ) => {
+            Some("thread.started" | "session.created" | "turn.started") => {
                 state.recognized += 1;
                 Vec::new()
+            }
+            Some("item.started" | "item.updated") => {
+                state.recognized += 1;
+                value
+                    .get("item")
+                    .map(|item| parse_live_item(item, false))
+                    .unwrap_or_default()
             }
             Some("item.completed") => {
                 state.recognized += 1;
@@ -320,6 +402,9 @@ impl AgentDriver for CodexDriver {
                     events.push(AgentEvent::Usage {
                         usage: usage_from(usage),
                     });
+                }
+                if let Some(usage) = context_usage_from(&value) {
+                    events.push(AgentEvent::ContextUsage { usage });
                 }
                 if let Some(usage) = value.get("rate_limits").and_then(plan_usage_from) {
                     events.push(AgentEvent::PlanUsage { usage });
@@ -418,7 +503,51 @@ fn parse_item(item: &Value) -> Vec<AgentEvent> {
                 &item.get("changes").cloned().unwrap_or(Value::Null),
             ),
         }],
+        "todo_list" => parse_live_item(item, true),
         _ => Vec::new(),
+    }
+}
+
+/// Normalize the one modern item whose updates matter before completion.
+fn parse_live_item(item: &Value, complete: bool) -> Vec<AgentEvent> {
+    let kind = item
+        .get("item_type")
+        .or_else(|| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind != "todo_list" {
+        return Vec::new();
+    }
+    let tasks = item
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| {
+            let text = task.get("text").and_then(Value::as_str)?;
+            Some(serde_json::json!({
+                "text": text,
+                "status": if task.get("completed").and_then(Value::as_bool) == Some(true) {
+                    "completed"
+                } else {
+                    "pending"
+                }
+            }))
+        })
+        .collect::<Vec<_>>();
+    let mut activity = ActivityItem::from_tool(
+        item.get("id").and_then(Value::as_str).map(str::to_string),
+        "update_plan",
+        &serde_json::json!({ "tasks": tasks }),
+    );
+    if activity.tasks.is_none() {
+        return Vec::new();
+    }
+    if complete {
+        activity.complete_with("", false);
+        vec![AgentEvent::ToolResult { activity }]
+    } else {
+        vec![AgentEvent::ToolCall { activity }]
     }
 }
 
@@ -494,9 +623,13 @@ fn parse_legacy(msg: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
         }
         Some("token_count") => {
             state.recognized += 1;
+            let info = msg.get("info").unwrap_or(msg);
             let mut events = vec![AgentEvent::Usage {
-                usage: usage_from(msg.get("info").unwrap_or(msg)),
+                usage: usage_from(info),
             }];
+            if let Some(usage) = context_usage_from(info) {
+                events.push(AgentEvent::ContextUsage { usage });
+            }
             // The older stream carries the account's windows beside the
             // counts; the reading is free, so it is taken.
             if let Some(usage) = msg.get("rate_limits").and_then(plan_usage_from) {
@@ -565,6 +698,10 @@ fn window_label(minutes: Option<i64>, fallback: &str) -> String {
 
 /// Codex's accounting, under whichever names this generation uses.
 fn usage_from(usage: &Value) -> Usage {
+    let usage = usage
+        .get("total_token_usage")
+        .or_else(|| usage.get("totalTokenUsage"))
+        .unwrap_or(usage);
     let number = |keys: &[&str]| -> u64 {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))
@@ -578,6 +715,44 @@ fn usage_from(usage: &Value) -> Usage {
         // Codex does not price a run, so a cost here would be invented.
         cost_usd: None,
     }
+}
+
+/// Read current context occupancy only when the vendor supplied a capacity and
+/// a last-request total together. Session totals are not context occupancy:
+/// they continue increasing after the provider compacts a thread.
+fn context_usage_from(value: &Value) -> Option<ContextUsage> {
+    let usage = value
+        .get("tokenUsage")
+        .or_else(|| value.get("usage"))
+        .unwrap_or(value);
+    let window_tokens = ["model_context_window", "modelContextWindow"]
+        .into_iter()
+        .find_map(|key| usage.get(key).and_then(Value::as_u64))?;
+    if window_tokens == 0 {
+        return None;
+    }
+    let last = ["last_token_usage", "lastTokenUsage", "last"]
+        .into_iter()
+        .find_map(|key| usage.get(key))?;
+    let used_tokens = ["total_tokens", "totalTokens"]
+        .into_iter()
+        .find_map(|key| last.get(key).and_then(Value::as_u64))
+        .unwrap_or_else(|| {
+            let input = ["input_tokens", "inputTokens"]
+                .into_iter()
+                .find_map(|key| last.get(key).and_then(Value::as_u64))
+                .unwrap_or(0);
+            let output = ["output_tokens", "outputTokens"]
+                .into_iter()
+                .find_map(|key| last.get(key).and_then(Value::as_u64))
+                .unwrap_or(0);
+            input.saturating_add(output)
+        });
+    Some(ContextUsage {
+        used_tokens,
+        window_tokens,
+        can_compact: true,
+    })
 }
 
 #[cfg(test)]
@@ -606,6 +781,66 @@ mod tests {
         assert_eq!(
             command.args.last().map(String::as_str),
             Some("do the thing")
+        );
+    }
+
+    #[test]
+    fn manual_compaction_uses_the_provider_command() {
+        let driver = CodexDriver::default();
+        let compact = driver
+            .compaction(&SessionSpec::new("/tmp/wt", ""), "thread-1")
+            .expect("codex exposes app-server compaction");
+        assert_eq!(compact.command.args, vec!["app-server"]);
+        assert!(compact.input[2].contains("thread/compact/start"));
+        assert!(compact.input[2].contains("thread-1"));
+    }
+
+    #[test]
+    fn app_server_compaction_lifecycle_finishes_the_control_turn() {
+        let (events, state) = parse(&[
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"id":"compact-1","type":"contextCompaction"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+        ]);
+
+        assert_eq!(state.turn, 1);
+        assert!(events.contains(&AgentEvent::TurnEnd { turn: 1 }));
+        assert!(events.contains(&AgentEvent::SessionResult {
+            state: SessionState::Finished,
+            summary: None,
+        }));
+    }
+
+    #[test]
+    fn app_server_compaction_error_closes_the_control_turn() {
+        let (events, state) =
+            parse(&[r#"{"id":2,"error":{"code":-32602,"message":"thread is busy"}}"#]);
+
+        assert_eq!(state.turn, 1);
+        assert_eq!(events[0], AgentEvent::TurnEnd { turn: 1 });
+        assert_eq!(
+            events[1],
+            AgentEvent::SessionResult {
+                state: SessionState::Failed,
+                summary: Some("thread is busy".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn app_server_compaction_failure_notification_closes_the_control_turn() {
+        let (events, state) = parse(&[
+            r#"{"method":"turn/failed","params":{"turn":{"error":{"message":"compact failed"}}}}"#,
+        ]);
+
+        assert_eq!(state.turn, 1);
+        assert_eq!(events[0], AgentEvent::TurnEnd { turn: 1 });
+        assert_eq!(
+            events[1],
+            AgentEvent::SessionResult {
+                state: SessionState::Failed,
+                summary: Some("compact failed".into()),
+            }
         );
     }
 
@@ -793,6 +1028,51 @@ mod tests {
     }
 
     #[test]
+    fn live_todo_items_become_provider_neutral_task_updates() {
+        let (events, state) = parse(&[
+            r#"{"type":"item.started","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":false}]}}"#,
+            r#"{"type":"item.updated","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":true},{"text":"Verify","completed":false}]}}"#,
+            r#"{"type":"item.completed","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":true},{"text":"Verify","completed":true}]}}"#,
+        ]);
+
+        assert_eq!(state.unrecognized, 0);
+        assert_eq!(events.len(), 3);
+        let AgentEvent::ToolCall { activity } = &events[1] else {
+            panic!("a live task snapshot is a normalized plan call")
+        };
+        assert_eq!(activity.kind, ginka_protocol::event::ActivityKind::Plan);
+        assert_eq!(
+            activity.tasks.as_deref(),
+            Some(
+                [
+                    ginka_protocol::TaskItem::new(
+                        "Inspect",
+                        ginka_protocol::TaskStatus::Completed,
+                    ),
+                    ginka_protocol::TaskItem::new(
+                        "Implement",
+                        ginka_protocol::TaskStatus::Completed,
+                    ),
+                    ginka_protocol::TaskItem::new(
+                        "Verify",
+                        ginka_protocol::TaskStatus::Pending,
+                    ),
+                ]
+                .as_slice()
+            )
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::ToolResult { activity })
+                if activity.tasks.as_ref().is_some_and(|tasks| {
+                    tasks.iter().all(|task| {
+                        task.status == ginka_protocol::TaskStatus::Completed
+                    })
+                })
+        ));
+    }
+
+    #[test]
     fn a_command_execution_arrives_as_a_call_and_its_result() {
         let (events, _) = parse(&[
             r#"{"type":"item.completed","item":{"id":"item_1","item_type":"command_execution","command":"cargo test","aggregated_output":"ok","exit_code":0}}"#,
@@ -936,6 +1216,57 @@ mod tests {
                 .any(|event| matches!(event, AgentEvent::PlanUsage { .. })),
             "nothing was reported, so nothing is claimed"
         );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ContextUsage { .. })),
+            "session totals without a context capacity are not a context reading"
+        );
+    }
+
+    #[test]
+    fn context_usage_accepts_the_app_server_spelling_without_guessing() {
+        assert_eq!(
+            context_usage_from(&serde_json::json!({
+                "tokenUsage": {
+                    "last": { "totalTokens": 48_000 },
+                    "modelContextWindow": 192_000
+                }
+            })),
+            Some(ContextUsage {
+                used_tokens: 48_000,
+                window_tokens: 192_000,
+                can_compact: true,
+            })
+        );
+        assert_eq!(
+            context_usage_from(&serde_json::json!({
+                "tokenUsage": { "last": { "totalTokens": 48_000 } }
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn the_older_stream_reports_current_context_separately_from_session_totals() {
+        let (events, _) = parse(&[
+            r#"{"id":"1","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":90000,"output_tokens":10000},"last_token_usage":{"total_tokens":32000},"model_context_window":128000}}}"#,
+        ]);
+
+        assert!(events.contains(&AgentEvent::ContextUsage {
+            usage: ContextUsage {
+                used_tokens: 32_000,
+                window_tokens: 128_000,
+                can_compact: true,
+            },
+        }));
+        assert!(events.contains(&AgentEvent::Usage {
+            usage: Usage {
+                input_tokens: 90_000,
+                output_tokens: 10_000,
+                ..Usage::default()
+            },
+        }));
     }
 
     #[test]

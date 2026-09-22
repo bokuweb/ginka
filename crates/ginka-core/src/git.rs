@@ -10,14 +10,15 @@
 
 use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
+use std::io::Write as _;
 
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
 pub use ginka_protocol::model::BranchStatus;
-use ginka_protocol::model::{ChangeSource, FileChange};
+use ginka_protocol::model::{ChangeSource, FileChange, GitCommit};
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,56 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
 
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            complaint(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run git without trimming stdout, for patch text whose final whitespace is data.
+fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            complaint(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run git with text on stdin, for operations such as applying one hunk.
+fn git_with_input(repo: &Path, args: &[&str], input: &str) -> Result<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .context("git stdin was not piped")?
+        .write_all(input.as_bytes())
+        .context("writing a patch to git")?;
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("waiting for git {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
             "git {} failed in {}: {}",
@@ -492,6 +543,12 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
                 }
             }
         }
+        ChangeSource::Unstaged => {
+            git(worktree, &["add", "--intent-to-add", "--all"]).ok();
+            let mut args = vec!["diff"];
+            args.extend(common);
+            git(worktree, &args)?
+        }
         ChangeSource::Staged => {
             let mut args = vec!["diff", "--cached"];
             args.extend(common);
@@ -503,6 +560,149 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
     };
 
     Ok(crate::diff::parse(&patch))
+}
+
+/// Move one exact hunk into or out of the index.
+///
+/// The patch is regenerated from the current repository state and selected by
+/// its complete `@@` header. If the view is stale, no other hunk is guessed:
+/// the operation fails before `git apply` can touch the index.
+pub fn stage_hunk(worktree: &Path, path: &str, header: &str, staged: bool) -> Result<()> {
+    if staged {
+        // Make a new file visible to `git diff` without staging its contents.
+        git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+    }
+    let mut args = vec!["diff"];
+    if !staged {
+        args.push("--cached");
+    }
+    args.extend(["--no-color", "--no-ext-diff", "-U3", "--", path]);
+    let patch = git_raw(worktree, &args)?;
+    let selected = select_hunk_patch(&patch, header)
+        .with_context(|| format!("hunk {header} no longer exists in {path}"))?;
+    let mut apply = vec!["apply", "--cached", "--whitespace=nowarn"];
+    if !staged {
+        apply.push("--reverse");
+    }
+    apply.push("-");
+    git_with_input(worktree, &apply, &selected)?;
+    Ok(())
+}
+
+/// Discard one exact unstaged hunk while preserving the index.
+///
+/// The worktree-versus-index patch is regenerated immediately before the
+/// reverse apply. A header that disappeared or changed is refused so a stale
+/// review cannot discard a neighbouring edit.
+pub fn revert_hunk(worktree: &Path, path: &str, header: &str) -> Result<()> {
+    // Make a new file visible without moving its contents into the index.
+    git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+    let patch = git_raw(
+        worktree,
+        &["diff", "--no-color", "--no-ext-diff", "-U3", "--", path],
+    )?;
+    let selected = select_hunk_patch(&patch, header)
+        .with_context(|| format!("hunk {header} no longer exists in {path}"))?;
+    git_with_input(
+        worktree,
+        &["apply", "--reverse", "--whitespace=nowarn", "-"],
+        &selected,
+    )?;
+    Ok(())
+}
+
+/// Keep a diff's file prelude and exactly one hunk.
+fn select_hunk_patch(patch: &str, header: &str) -> Option<String> {
+    let mut prelude = Vec::new();
+    let mut selected = Vec::new();
+    let mut before_hunks = true;
+    let mut found = false;
+
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            before_hunks = false;
+            if found {
+                break;
+            }
+            if line == header {
+                found = true;
+                selected.push(line);
+            }
+            continue;
+        }
+        if line.starts_with("diff --git ") && !before_hunks {
+            break;
+        }
+        if before_hunks {
+            prelude.push(line);
+        } else if found {
+            selected.push(line);
+        }
+    }
+
+    found.then(|| {
+        prelude
+            .into_iter()
+            .chain(selected)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
+}
+
+/// Read recent commits newest first, retaining enough topology for a graph.
+///
+/// `limit` is capped because this crosses the daemon boundary and the Git
+/// surface is a recent-history reader, not an unbounded repository export.
+pub fn history(worktree: &Path, limit: usize) -> Result<Vec<GitCommit>> {
+    let limit = limit.min(200);
+    if limit == 0 || head_commit(worktree).is_none() {
+        return Ok(Vec::new());
+    }
+    let max_count = format!("--max-count={limit}");
+    let output = git(
+        worktree,
+        &[
+            "log",
+            &max_count,
+            "--no-color",
+            "--format=%H%x1f%P%x1f%an%x1f%at%x1f%s%x1e",
+        ],
+    )?;
+    output
+        .split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim();
+            (!record.is_empty()).then_some(record)
+        })
+        .map(|record| {
+            let mut fields = record.splitn(5, '\x1f');
+            let id = fields.next().unwrap_or_default().to_string();
+            let parents = fields
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let author = fields.next().unwrap_or_default().to_string();
+            let authored_at = fields
+                .next()
+                .unwrap_or_default()
+                .parse::<i64>()
+                .context("parsing git commit author time")?;
+            let summary = fields.next().unwrap_or_default().to_string();
+            if id.is_empty() {
+                bail!("git log returned a commit without an object id");
+            }
+            Ok(GitCommit {
+                id,
+                parents,
+                author,
+                authored_at,
+                summary,
+            })
+        })
+        .collect()
 }
 
 /// Everything that has changed since `commit`, including untracked files.
@@ -696,6 +896,33 @@ pub fn push(worktree: &Path) -> Result<String> {
     } else {
         git(worktree, &["push"])
     }
+}
+
+/// Update a clean tracked branch without creating a merge commit or rebasing.
+///
+/// Dirty work is refused before contacting the remote. A missing upstream or
+/// divergence is an error for the caller to explain rather than a reason to
+/// guess which history the user wants rewritten.
+pub fn pull_fast_forward(worktree: &Path) -> Result<String> {
+    let branch = current_branch(worktree).context("a detached HEAD has no branch to pull")?;
+    if branch_status(worktree)?.dirty {
+        anyhow::bail!("branch {branch} has uncommitted work; commit or stash it before pulling");
+    }
+    let upstream = git(
+        worktree,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .with_context(|| format!("branch {branch} has no upstream to pull"))?;
+    let remote_key = format!("branch.{branch}.remote");
+    let remote = git(worktree, &["config", "--get", &remote_key])
+        .with_context(|| format!("branch {branch} has no remote to pull"))?;
+    git(worktree, &["fetch", "--prune", remote.trim()])?;
+    git(worktree, &["merge", "--ff-only", upstream.trim()])
 }
 
 /// Drop git's records of worktrees whose directories are gone.
@@ -1206,6 +1433,276 @@ prunable
             root.join("first.txt").exists(),
             "the file is not the target"
         );
+    }
+
+    #[test]
+    fn pulling_fast_forwards_a_clean_tracked_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        git(
+            dir.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let local = dir.path().join("local");
+        repository(&local);
+        git(
+            &local,
+            &["remote", "add", "upstream", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["push", "--set-upstream", "upstream", "main"]).unwrap();
+
+        let peer = dir.path().join("peer");
+        git(
+            dir.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&peer, &["config", "user.email", "peer@example.com"]).unwrap();
+        git(&peer, &["config", "user.name", "Peer"]).unwrap();
+        std::fs::write(peer.join("remote.txt"), "from remote\n").unwrap();
+        git(&peer, &["add", "remote.txt"]).unwrap();
+        git(&peer, &["commit", "-m", "advance remote"]).unwrap();
+        git(&peer, &["push"]).unwrap();
+
+        pull_fast_forward(&local).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(local.join("remote.txt")).unwrap(),
+            "from remote\n"
+        );
+        assert_eq!(
+            git(&local, &["rev-parse", "HEAD"]).unwrap(),
+            git(&local, &["rev-parse", "@{upstream}"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn pulling_refuses_dirty_work_before_contacting_the_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "keep this edit\n").unwrap();
+
+        let error = pull_fast_forward(&root).expect_err("dirty work must not be merged over");
+
+        assert!(error.to_string().contains("uncommitted"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "keep this edit\n"
+        );
+    }
+
+    #[test]
+    fn pulling_refuses_diverged_history_without_making_a_merge_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        git(
+            dir.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let local = dir.path().join("local");
+        repository(&local);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["push", "--set-upstream", "origin", "main"]).unwrap();
+        let peer = dir.path().join("peer");
+        git(
+            dir.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&peer, &["config", "user.email", "peer@example.com"]).unwrap();
+        git(&peer, &["config", "user.name", "Peer"]).unwrap();
+
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&local, &["add", "local.txt"]).unwrap();
+        git(&local, &["commit", "-m", "local commit"]).unwrap();
+        let local_head = git(&local, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(peer.join("remote.txt"), "remote\n").unwrap();
+        git(&peer, &["add", "remote.txt"]).unwrap();
+        git(&peer, &["commit", "-m", "remote commit"]).unwrap();
+        git(&peer, &["push"]).unwrap();
+
+        pull_fast_forward(&local).expect_err("divergence must need an explicit user choice");
+
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap(), local_head);
+        assert!(!local.join("remote.txt").exists());
+    }
+
+    #[test]
+    fn history_is_newest_first_and_keeps_parent_topology() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let first = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("second.txt"), "second\n").unwrap();
+        git(&root, &["add", "second.txt"]).unwrap();
+        git(&root, &["commit", "-m", "second change"]).unwrap();
+        let second = git(&root, &["rev-parse", "HEAD"]).unwrap();
+
+        let commits = history(&root, 20).unwrap();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].id, second);
+        assert_eq!(commits[0].parents.as_slice(), std::slice::from_ref(&first));
+        assert_eq!(commits[0].summary, "second change");
+        assert_eq!(commits[0].author, "Test");
+        assert!(commits[0].authored_at > 0);
+        assert_eq!(commits[1].id, first);
+        assert!(commits[1].parents.is_empty());
+    }
+
+    #[test]
+    fn history_is_empty_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--initial-branch=main"]).unwrap();
+
+        assert!(history(dir.path(), 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_hunk_can_move_between_the_worktree_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let original = (1..=24)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(root.join("tracked.txt"), &original).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        git(&root, &["commit", "-m", "add enough context"]).unwrap();
+        let edited = original
+            .replace("line 2\n", "line two\n")
+            .replace("line 20\n", "line twenty\n");
+        std::fs::write(root.join("tracked.txt"), edited).unwrap();
+
+        let unstaged = changes(&root, &ChangeSource::Unstaged).unwrap();
+        assert_eq!(unstaged[0].hunks.len(), 2);
+        let first = unstaged[0].hunks[0].header.clone();
+
+        stage_hunk(&root, "tracked.txt", &first, true).unwrap();
+        assert_eq!(
+            changes(&root, &ChangeSource::Staged).unwrap()[0]
+                .hunks
+                .len(),
+            1
+        );
+        assert_eq!(
+            changes(&root, &ChangeSource::Unstaged).unwrap()[0]
+                .hunks
+                .len(),
+            1
+        );
+
+        stage_hunk(&root, "tracked.txt", &first, false).unwrap();
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+        assert_eq!(
+            changes(&root, &ChangeSource::Unstaged).unwrap()[0]
+                .hunks
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_stale_hunk_header_is_refused_without_moving_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        let error = stage_hunk(&root, "tracked.txt", "@@ -99 +99 @@ stale", true)
+            .expect_err("a stale view must not stage another hunk");
+
+        assert!(error.to_string().contains("no longer exists"));
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_unstaged_hunk_can_be_discarded_without_touching_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let original = (1..=30)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(root.join("tracked.txt"), &original).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        git(&root, &["commit", "-m", "add discard fixture"]).unwrap();
+
+        let with_staged_edit = original.replace("line 2\n", "line two\n");
+        std::fs::write(root.join("tracked.txt"), &with_staged_edit).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        let with_both_edits = with_staged_edit.replace("line 29\n", "line twenty-nine\n");
+        std::fs::write(root.join("tracked.txt"), with_both_edits).unwrap();
+        let header = changes(&root, &ChangeSource::Unstaged).unwrap()[0].hunks[0]
+            .header
+            .clone();
+
+        revert_hunk(&root, "tracked.txt", &header).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            with_staged_edit
+        );
+        let staged = changes(&root, &ChangeSource::Staged).unwrap();
+        assert_eq!(staged[0].hunks.len(), 1);
+        assert!(
+            staged[0].hunks[0]
+                .lines
+                .iter()
+                .any(|line| line.text == "line two")
+        );
+        assert!(changes(&root, &ChangeSource::Unstaged).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_discard_header_leaves_the_worktree_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "keep this edit\n").unwrap();
+
+        let error = revert_hunk(&root, "tracked.txt", "@@ -99 +99 @@ stale")
+            .expect_err("a stale view must not discard another hunk");
+
+        assert!(error.to_string().contains("no longer exists"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "keep this edit\n"
+        );
+    }
+
+    #[test]
+    fn discarding_an_untracked_files_only_hunk_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("new.txt"), "new work\n").unwrap();
+        let header = changes(&root, &ChangeSource::Unstaged).unwrap()[0].hunks[0]
+            .header
+            .clone();
+
+        revert_hunk(&root, "new.txt", &header).unwrap();
+
+        assert!(!root.join("new.txt").exists());
+        assert!(changes(&root, &ChangeSource::Unstaged).unwrap().is_empty());
     }
 
     #[test]
