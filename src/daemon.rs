@@ -316,6 +316,14 @@ impl DaemonLink {
         }
     }
 
+    /// Select the login future sessions of its provider use.
+    pub async fn select_account(&self, account: &AccountId) -> Result<(), String> {
+        self.git_sync(Request::SelectAccount {
+            id: account.clone(),
+        })
+        .await
+    }
+
     /// The latest reading of every account's rate-limit windows.
     ///
     /// Comes with the usage report, of which the readings are the part the
@@ -443,11 +451,46 @@ impl DaemonLink {
         }
     }
 
-    /// The paths staged for the next commit.
-    pub async fn staged_paths(&self, workspace: &WorkspaceId) -> Vec<String> {
-        match self.changes(workspace, ChangeSource::Staged).await {
-            Some(changes) => changes.files.into_iter().map(|file| file.path).collect(),
-            None => Vec::new(),
+    /// Push a workspace branch through the daemon.
+    pub async fn push(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Push {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
+    /// Fetch and fast-forward a clean workspace branch through the daemon.
+    pub async fn pull(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Pull {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
+    async fn git_sync(&self, request: Request) -> Result<(), String> {
+        let client = self.client().await.ok_or("no daemon")?;
+        client
+            .request(request)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message)
+    }
+
+    /// Recent workspace commits, newest first and bounded by the daemon.
+    pub async fn history(
+        &self,
+        workspace: &WorkspaceId,
+        limit: u32,
+    ) -> Vec<ginka_protocol::model::GitCommit> {
+        match self
+            .ask(Request::WorkspaceHistory {
+                workspace: workspace.clone(),
+                limit: Some(limit),
+            })
+            .await
+        {
+            Some(Response::History { commits }) => commits,
+            _ => Vec::new(),
         }
     }
 
@@ -475,6 +518,38 @@ impl DaemonLink {
             staged,
         })
         .await;
+    }
+
+    /// Move one current diff hunk into or out of the index.
+    pub async fn stage_hunk(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        header: &str,
+        staged: bool,
+    ) -> Result<(), String> {
+        self.git_sync(Request::StageHunk {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            header: header.to_string(),
+            staged,
+        })
+        .await
+    }
+
+    /// Permanently discard one current unstaged hunk.
+    pub async fn revert_hunk(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        header: &str,
+    ) -> Result<(), String> {
+        self.git_sync(Request::RevertHunk {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            header: header.to_string(),
+        })
+        .await
     }
 
     /// Throw away a file's uncommitted work.
@@ -801,6 +876,91 @@ impl DaemonLink {
             text,
         })
         .await;
+    }
+
+    /// Follow-ups waiting behind this session's active turn.
+    pub async fn queued_messages(
+        &self,
+        session: &SessionId,
+    ) -> (Vec<ginka_protocol::model::QueuedMessage>, bool) {
+        match self
+            .ask_result(Request::QueuedMessages {
+                session: session.clone(),
+            })
+            .await
+        {
+            Ok(Response::QueuedMessages {
+                messages,
+                can_send_now,
+            }) => (messages, can_send_now),
+            _ => (Vec::new(), false),
+        }
+    }
+
+    /// Replace one waiting follow-up.
+    pub async fn edit_queued_message(
+        &self,
+        session: &SessionId,
+        id: u64,
+        text: String,
+    ) -> Result<(), String> {
+        self.git_sync(Request::EditQueuedMessage {
+            session: session.clone(),
+            id,
+            text,
+        })
+        .await
+    }
+
+    /// Remove one waiting follow-up.
+    pub async fn remove_queued_message(&self, session: &SessionId, id: u64) -> Result<(), String> {
+        self.git_sync(Request::RemoveQueuedMessage {
+            session: session.clone(),
+            id,
+        })
+        .await
+    }
+
+    /// Move one waiting follow-up to a zero-based dispatch position.
+    pub async fn move_queued_message(
+        &self,
+        session: &SessionId,
+        id: u64,
+        index: u32,
+    ) -> Result<(), String> {
+        self.git_sync(Request::MoveQueuedMessage {
+            session: session.clone(),
+            id,
+            index,
+        })
+        .await
+    }
+
+    /// Inject one waiting follow-up into the active turn when supported.
+    pub async fn send_queued_message_now(
+        &self,
+        session: &SessionId,
+        id: u64,
+    ) -> Result<(), String> {
+        self.git_sync(Request::SendQueuedMessageNow {
+            session: session.clone(),
+            id,
+        })
+        .await
+    }
+
+    /// Ask the provider to compact an idle conversation's context.
+    pub async fn compact_session(&self, session: &SessionId) -> Result<(), String> {
+        match self
+            .ask_result(Request::CompactSession {
+                session: session.clone(),
+            })
+            .await
+        {
+            Ok(Response::Ack) => Ok(()),
+            Ok(other) => Err(format!("unexpected compact response: {other:?}")),
+            Err(error) => Err(error),
+        }
     }
 
     /// Copy a conversation through a transcript position onto another agent.

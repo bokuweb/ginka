@@ -15,7 +15,7 @@ use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Attachment, Checkpoint, SessionState, TranscriptEntry};
 use ginka_protocol::provider::ProviderModel;
-use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, TaskStatus, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
 use ginka_ui::layout::{
@@ -30,10 +30,11 @@ use ginka_ui::workspace::{
 };
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_base::TextSelection;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
+    Disableable as _, ElementExt as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState},
@@ -42,6 +43,7 @@ use gpui_component::{
     v_flex,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -56,6 +58,9 @@ actions!(
         FindTranscript,
         NextSurface,
         PreviousSurface,
+        NextTerminalTab,
+        PreviousTerminalTab,
+        CopyTerminalOutput,
         NavigateBack,
         NavigateForward
     ]
@@ -141,6 +146,24 @@ pub fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-left", PreviousSurface, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-]", NextTerminalTab, Some("Terminal")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-pagedown", NextTerminalTab, Some("Terminal")),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-[", PreviousTerminalTab, Some("Terminal")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-pageup", PreviousTerminalTab, Some("Terminal")),
+        KeyBinding::new(
+            ginka_ui::terminal::paste_shortcut(cfg!(target_os = "macos")),
+            Paste,
+            Some("Terminal"),
+        ),
+        KeyBinding::new(
+            ginka_ui::terminal::copy_shortcut(cfg!(target_os = "macos")),
+            CopyTerminalOutput,
+            Some("Terminal"),
+        ),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-up", NavigateBack, Some(CONTEXT)),
@@ -205,6 +228,9 @@ const TRANSCRIPT_MEASURE: f32 = 780.;
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 17.;
 
+/// Width of one 12.5 px monospace cell in the terminal grid.
+const TERMINAL_CELL_WIDTH: f32 = 7.5;
+
 /// How wide a terminal is told it is.
 ///
 /// Fixed rather than measured: the dock's width changes with every window
@@ -235,10 +261,37 @@ struct TranscriptSearch {
     error: Option<String>,
 }
 
+/// Find state for one daemon-owned terminal tab.
+struct TerminalSearch {
+    terminal: ginka_protocol::TerminalId,
+    query: Entity<InputState>,
+    matches: Vec<ginka_ui::terminal::TerminalSearchMatch>,
+    chosen: Option<usize>,
+}
+
+/// A mouse selection in one visible daemon terminal.
+#[derive(Clone)]
+struct TerminalDrag {
+    terminal: ginka_protocol::TerminalId,
+    selection: ginka_ui::terminal::TerminalSelection,
+}
+
 /// One daemon-owned upload waiting in the composer, plus an optional local thumbnail.
 struct ComposerAttachment {
     attachment: Attachment,
     preview_url: Option<String>,
+}
+
+/// One image being annotated before it is returned to the composer.
+struct ImageMarkup {
+    source_reference: String,
+    source_name: String,
+    preview_url: String,
+    document: ginka_ui::markup::MarkupDocument,
+    tool: ginka_ui::markup::MarkupTool,
+    canvas_bounds: Bounds<Pixels>,
+    drawing: bool,
+    text: Entity<InputState>,
 }
 
 /// Upload prepared attachment bytes and build the local presentation rows.
@@ -257,6 +310,97 @@ async fn upload_attachment_payloads(
         });
     }
     Ok(uploaded)
+}
+
+fn paint_markup_shape(
+    shape: &ginka_ui::markup::MarkupShape,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    use ginka_ui::markup::MarkupShape;
+    let at = |value: ginka_ui::markup::Point| {
+        point(bounds.origin.x + px(value.x), bounds.origin.y + px(value.y))
+    };
+    let stroke = match shape {
+        MarkupShape::Highlight(_) => (px(14.), rgb(0xffd84d).alpha(0.42)),
+        _ => (px(3.), rgb(0xff4d67)),
+    };
+    let mut builder = PathBuilder::stroke(stroke.0);
+    match shape {
+        MarkupShape::Pen(points) | MarkupShape::Highlight(points) => {
+            for (index, value) in points.iter().enumerate() {
+                if index == 0 {
+                    builder.move_to(at(*value));
+                } else {
+                    builder.line_to(at(*value));
+                }
+            }
+        }
+        MarkupShape::Arrow([start, end]) => {
+            builder.move_to(at(*start));
+            builder.line_to(at(*end));
+        }
+        MarkupShape::Rectangle([start, end]) => {
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            builder.move_to(at(ginka_ui::markup::Point::new(left, top)));
+            builder.line_to(at(ginka_ui::markup::Point::new(right, top)));
+            builder.line_to(at(ginka_ui::markup::Point::new(right, bottom)));
+            builder.line_to(at(ginka_ui::markup::Point::new(left, bottom)));
+            builder.close();
+        }
+        MarkupShape::Ellipse([start, end]) => {
+            let left = start.x.min(end.x);
+            let right = start.x.max(end.x);
+            let top = start.y.min(end.y);
+            let bottom = start.y.max(end.y);
+            let radius_x = px((right - left) / 2.0);
+            let radius_y = px((bottom - top) / 2.0);
+            builder.move_to(at(ginka_ui::markup::Point::new(
+                right,
+                (top + bottom) / 2.0,
+            )));
+            builder.arc_to(
+                point(radius_x, radius_y),
+                px(0.),
+                false,
+                false,
+                at(ginka_ui::markup::Point::new(left, (top + bottom) / 2.0)),
+            );
+            builder.arc_to(
+                point(radius_x, radius_y),
+                px(0.),
+                false,
+                false,
+                at(ginka_ui::markup::Point::new(right, (top + bottom) / 2.0)),
+            );
+            builder.close();
+        }
+        MarkupShape::Text { at: anchor, .. } => {
+            let anchor = at(*anchor);
+            builder.move_to(anchor + point(px(-5.), px(0.)));
+            builder.line_to(anchor + point(px(5.), px(0.)));
+            builder.move_to(anchor + point(px(0.), px(-5.)));
+            builder.line_to(anchor + point(px(0.), px(5.)));
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, stroke.1);
+    }
+}
+
+fn markup_tool_label(tool: ginka_ui::markup::MarkupTool) -> String {
+    use ginka_ui::markup::MarkupTool;
+    match tool {
+        MarkupTool::Pen => rust_i18n::t!("composer.markup.pen").to_string(),
+        MarkupTool::Highlight => rust_i18n::t!("composer.markup.highlight").to_string(),
+        MarkupTool::Arrow => rust_i18n::t!("composer.markup.arrow").to_string(),
+        MarkupTool::Rectangle => rust_i18n::t!("composer.markup.rectangle").to_string(),
+        MarkupTool::Ellipse => rust_i18n::t!("composer.markup.ellipse").to_string(),
+        MarkupTool::Text => rust_i18n::t!("composer.markup.text").to_string(),
+    }
 }
 
 pub struct Shell {
@@ -324,8 +468,20 @@ pub struct Shell {
     mentions: Vec<ginka_protocol::model::FileEntry>,
     /// The commands offered for the `/` being typed, if one is.
     commands: Vec<ginka_protocol::model::SlashCommand>,
+    /// Follow-ups waiting behind the selected session's active turn.
+    queued_messages: Vec<ginka_protocol::model::QueuedMessage>,
+    /// Whether the active transport can accept a waiting prompt immediately.
+    queue_can_send_now: bool,
+    /// Stable id of the queued prompt currently being edited in the composer.
+    editing_queued_message: Option<u64>,
+    /// The ordinary draft displaced while a queued prompt is edited.
+    queue_edit_draft: Option<String>,
+    /// Why the most recent queue mutation was refused.
+    queue_error: Option<String>,
     /// Files already copied into the daemon store for the next ordinary prompt.
     attachments: Vec<ComposerAttachment>,
+    /// Full-size annotation dialog for one image attachment.
+    image_markup: Option<ImageMarkup>,
     /// Whether selected files are currently being read and uploaded.
     attachment_busy: bool,
     /// Why the most recent selected file could not be attached.
@@ -367,6 +523,12 @@ pub struct Shell {
     forking: Option<ForkMenu>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
+    /// Present while the reader is finding text in the active terminal.
+    terminal_search: Option<TerminalSearch>,
+    /// The visible terminal cells selected by the latest mouse drag.
+    terminal_selection: Option<TerminalDrag>,
+    /// Last painted bounds of each visible terminal pane.
+    terminal_bounds: HashMap<ginka_protocol::TerminalId, Bounds<Pixels>>,
     /// The command palette, while it is open: what is typed into it, the
     /// entries that match, and which one Return would run.
     palette: Option<Palette>,
@@ -469,8 +631,19 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
+                crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
+                crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
+                crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
+                }
+                crate::surfaces::SurfaceEvent::StageHunk {
+                    path,
+                    header,
+                    staged,
+                } => this.stage_hunk(path.clone(), header.clone(), *staged, cx),
+                crate::surfaces::SurfaceEvent::RevertHunk { path, header } => {
+                    this.revert_hunk(path.clone(), header.clone(), cx)
                 }
                 crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
                 crate::surfaces::SurfaceEvent::FindFiles(query) => {
@@ -502,6 +675,13 @@ impl Shell {
                 ),
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
+                }
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                crate::surfaces::SurfaceEvent::AddBrowserContext(context) => {
+                    this.add_browser_context(context, window, cx)
+                }
+                crate::surfaces::SurfaceEvent::WriteTerminalSelection(selection) => {
+                    this.write_terminal_selection(selection.clone(), window, cx)
                 }
                 crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
                 crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
@@ -568,6 +748,9 @@ impl Shell {
                         this.transcript_follows = true;
                         this.picker = None;
                         this.attachments.clear();
+                        this.image_markup = None;
+                        this.surfaces
+                            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
                         this.attachment_busy = false;
                         this.attachment_error = None;
                         this.attachment_generation = this.attachment_generation.wrapping_add(1);
@@ -584,15 +767,22 @@ impl Shell {
                         this.index_error = None;
                         // The shells belong to the workspace, not to the
                         // window: a different workspace is a different strip.
+                        this.terminal_search = None;
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
                         if this.layout.is_open(Panel::TerminalDock) {
                             this.adopt_terminals(cx);
                         }
                         this.mentions.clear();
+                        this.queued_messages.clear();
+                        this.queue_can_send_now = false;
+                        this.editing_queued_message = None;
+                        this.queue_edit_draft = None;
+                        this.queue_error = None;
                         // Whatever was half-written here when it was last left.
                         this.composer
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
+                        this.refresh_queue(cx);
                         if this.surfaces.read(cx).open_surface()
                             == Some(ginka_ui::surface::Surface::Skills)
                         {
@@ -772,6 +962,19 @@ impl Shell {
                                 }
                             })
                             .map_err(|_| ()),
+                        DaemonEvent::SessionQueueChanged { session } => {
+                            let is_showing = this
+                                .update(cx, |this, _| {
+                                    this.session.as_ref().and_then(|row| row.session.as_ref())
+                                        == Some(&session)
+                                })
+                                .unwrap_or(false);
+                            if is_showing {
+                                pull_queue(&this, &link, session, cx).await
+                            } else {
+                                Ok(())
+                            }
+                        }
                         // Anything that changes what the sidebar says.
                         DaemonEvent::ProjectsChanged
                         | DaemonEvent::WorkspacesChanged { .. }
@@ -795,7 +998,19 @@ impl Shell {
                         // A login was added, removed or signed in: the list
                         // is re-read with the rest.
                         DaemonEvent::AccountsChanged => {
-                            pull_rows(&this, &link, cx).await.map(|_| ())
+                            match pull_rows(&this, &link, cx).await {
+                                Err(()) => Err(()),
+                                Ok(_) => this
+                                    .update(cx, |this, cx| {
+                                        // The daemon's active marker is
+                                        // authoritative, including when
+                                        // another client made the choice.
+                                        this.chosen_account = None;
+                                        this.sync_footer(cx);
+                                        cx.notify();
+                                    })
+                                    .map_err(|_| ()),
+                            }
                         }
                         // The agent's commit message, for the box that asked
                         // for it — if it is still the workspace on screen.
@@ -821,13 +1036,26 @@ impl Shell {
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
                                 if this.terminals.feed(&terminal, &data) {
+                                    this.refresh_terminal_search(&terminal, cx);
                                     cx.notify();
                                 }
                             })
                             .map_err(|_| ()),
                         DaemonEvent::TerminalClosed { terminal } => this
                             .update(cx, |this, cx| {
+                                let was_split = this.terminals.split_ids().is_some();
+                                if this
+                                    .terminal_search
+                                    .as_ref()
+                                    .is_some_and(|search| search.terminal == terminal)
+                                {
+                                    this.terminal_search = None;
+                                }
                                 this.terminals.close(&terminal);
+                                if was_split && this.terminals.split_ids().is_none() {
+                                    this.resize_terminal(cx);
+                                }
+                                this.persist();
                                 cx.notify();
                             })
                             .map_err(|_| ()),
@@ -853,6 +1081,7 @@ impl Shell {
             if this.layout.is_open(Panel::TerminalDock) {
                 this.adopt_terminals(cx);
             }
+            this.refresh_queue(cx);
         });
         Self {
             layout: Layout::from_settings(&settings),
@@ -867,6 +1096,9 @@ impl Shell {
             reveal: Reveal::new(),
             palette: None,
             terminal_focus: cx.focus_handle(),
+            terminal_search: None,
+            terminal_selection: None,
+            terminal_bounds: HashMap::new(),
             terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
             submitted: false,
@@ -875,7 +1107,13 @@ impl Shell {
             picker: None,
             mentions: Vec::new(),
             commands: Vec::new(),
+            queued_messages: Vec::new(),
+            queue_can_send_now: false,
+            editing_queued_message: None,
+            queue_edit_draft: None,
+            queue_error: None,
             attachments: Vec::new(),
+            image_markup: None,
             attachment_busy: false,
             attachment_error: None,
             attachment_generation: 0,
@@ -1164,6 +1402,135 @@ impl Shell {
         cx.notify();
     }
 
+    /// Open the non-destructive annotation dialog for an uploaded image.
+    fn open_image_markup(&mut self, reference: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(attachment) = self.attachments.iter().find(|attachment| {
+            attachment.attachment.reference == reference && attachment.preview_url.is_some()
+        }) else {
+            return;
+        };
+        let text = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("composer.markup.text_placeholder").to_string())
+        });
+        self.image_markup = Some(ImageMarkup {
+            source_reference: reference.to_string(),
+            source_name: attachment.attachment.name.clone(),
+            preview_url: attachment.preview_url.clone().unwrap_or_default(),
+            document: ginka_ui::markup::MarkupDocument::default(),
+            tool: ginka_ui::markup::MarkupTool::Pen,
+            canvas_bounds: Bounds::default(),
+            drawing: false,
+            text,
+        });
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(true, cx));
+        cx.notify();
+    }
+
+    fn markup_point(bounds: Bounds<Pixels>, position: Point<Pixels>) -> ginka_ui::markup::Point {
+        ginka_ui::markup::Point::new(
+            (position.x - bounds.origin.x)
+                .as_f32()
+                .clamp(0.0, bounds.size.width.as_f32()),
+            (position.y - bounds.origin.y)
+                .as_f32()
+                .clamp(0.0, bounds.size.height.as_f32()),
+        )
+    }
+
+    fn begin_markup(&mut self, event: &MouseDownEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        let at = Self::markup_point(markup.canvas_bounds, event.position);
+        if markup.tool == ginka_ui::markup::MarkupTool::Text {
+            let text = markup.text.read(cx).value().to_string();
+            markup.document.commit_text(at, text);
+        } else {
+            markup.document.begin(markup.tool, at);
+            markup.drawing = true;
+        }
+        cx.notify();
+    }
+
+    fn extend_markup(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        if !markup.drawing {
+            return;
+        }
+        markup
+            .document
+            .extend(Self::markup_point(markup.canvas_bounds, event.position));
+        cx.notify();
+    }
+
+    fn finish_markup(&mut self, event: &MouseUpEvent, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_mut() else {
+            return;
+        };
+        if markup.drawing {
+            markup
+                .document
+                .finish(Self::markup_point(markup.canvas_bounds, event.position));
+            markup.drawing = false;
+            cx.notify();
+        }
+    }
+
+    /// Upload the flattened annotation through the same daemon path as every
+    /// other attachment, replacing the unmarked source in this draft.
+    fn submit_image_markup(&mut self, cx: &mut Context<Self>) {
+        let Some(markup) = self.image_markup.as_ref() else {
+            return;
+        };
+        let Some(svg) = ginka_ui::markup::compose_svg(
+            &markup.preview_url,
+            markup.canvas_bounds.size.width.as_f32(),
+            markup.canvas_bounds.size.height.as_f32(),
+            &markup.document,
+        ) else {
+            return;
+        };
+        let source_reference = markup.source_reference.clone();
+        let name = format!("annotated-{}.svg", markup.source_name);
+        let link = self.link.clone();
+        let generation = self.attachment_generation;
+        self.attachment_busy = true;
+        self.attachment_error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let uploaded = cx
+                .background_spawn(async move {
+                    upload_attachment_payloads(link, vec![(name, svg.into_bytes())]).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.attachment_generation != generation {
+                    return;
+                }
+                this.attachment_busy = false;
+                match uploaded {
+                    Ok(uploaded) => {
+                        this.attachments.retain(|attachment| {
+                            attachment.attachment.reference != source_reference
+                        });
+                        this.attachments.extend(uploaded);
+                        this.image_markup = None;
+                        this.surfaces
+                            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
+                    }
+                    Err(error) => this.attachment_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Register the folder selected in the add-project dialog.
     fn submit_add_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = self.add_project.as_mut() else {
@@ -1249,7 +1616,15 @@ impl Shell {
         self.picker = None;
         self.mentions.clear();
         self.commands.clear();
+        self.queued_messages.clear();
+        self.queue_can_send_now = false;
+        self.editing_queued_message = None;
+        self.queue_edit_draft = None;
+        self.queue_error = None;
         self.attachments.clear();
+        self.image_markup = None;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
         self.attachment_busy = false;
         self.attachment_error = None;
         self.attachment_generation = self.attachment_generation.wrapping_add(1);
@@ -1259,6 +1634,7 @@ impl Shell {
         self.index_starting = false;
         self.index_error = None;
         // The shells belong to the workspace that is no longer on screen.
+        self.terminal_search = None;
         self.terminals = ginka_ui::terminal::TerminalTabs::new();
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
@@ -1497,6 +1873,30 @@ impl Shell {
         .detach();
     }
 
+    /// Synchronize the selected branch through the daemon-owned git path.
+    fn sync_git(&mut self, push: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    if push {
+                        link.push(&workspace).await
+                    } else {
+                        link.pull(&workspace).await
+                    }
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
+            });
+        })
+        .detach();
+    }
+
     /// Ask the daemon for a commit message. The answer comes back as an
     /// event, which is what keeps a model's thirty seconds off the request
     /// path; only a refusal to *start* is reported here.
@@ -1536,6 +1936,46 @@ impl Shell {
         .detach();
     }
 
+    /// Move one exact hunk across the index boundary and surface stale views.
+    fn stage_hunk(&mut self, path: String, header: String, staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    link.stage_hunk(&workspace, &path, &header, staged).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
+            });
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Permanently discard one exact unstaged hunk and surface stale views.
+    fn revert_hunk(&mut self, path: String, header: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { link.revert_hunk(&workspace, &path, &header).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
+            });
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
     /// Throw away a file's uncommitted work.
     fn revert(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
@@ -1559,21 +1999,44 @@ impl Shell {
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
-            let (changes, staged, comments) = cx
+            let (changes, staged_changes, comments) = cx
                 .background_spawn(async move {
                     let changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .changes(&workspace, ginka_protocol::ChangeSource::Unstaged)
                         .await;
-                    let staged = link.staged_paths(&workspace).await;
+                    let staged_changes = link
+                        .changes(&workspace, ginka_protocol::ChangeSource::Staged)
+                        .await;
                     let comments = link.comments(&workspace).await;
-                    (changes, staged, comments)
+                    (changes, staged_changes, comments)
                 })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_changes(changes, cx);
+                let staged = staged_changes
+                    .as_ref()
+                    .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())
+                    .unwrap_or_default();
+                surfaces.set_staged_changes(staged_changes, cx);
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
             });
+        })
+        .detach();
+    }
+
+    /// Refresh bounded history only while the reader has expanded it.
+    fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let history = cx
+                .background_spawn(async move { link.history(&workspace, 50).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_history(history, cx));
         })
         .detach();
     }
@@ -1781,6 +2244,16 @@ impl Shell {
         self.composer.focus_handle(cx).focus(window, cx);
     }
 
+    /// Add a sanitized inspect-mode bundle to the current chat draft.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    fn add_browser_context(&mut self, context: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.composer.read(cx).value();
+        let draft = ginka_ui::browser::append_context(&draft, context);
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+    }
+
     /// Append a transcript message to the draft as a Markdown quote.
     fn quote_in_composer(&mut self, message: &str, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).value();
@@ -1819,7 +2292,9 @@ impl Shell {
                     .tooltip(rust_i18n::t!("transcript.quote.tooltip").to_string())
                     .child(rust_i18n::t!("transcript.quote").to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
-                        this.quote_in_composer(&quoted, window, cx)
+                        let selection = TextSelection::selected_text(window, cx);
+                        let target = ginka_ui::transcript::quote_target(&quoted, &selection);
+                        this.quote_in_composer(target, window, cx)
                     })),
             )
             .into_any_element()
@@ -1830,21 +2305,52 @@ impl Shell {
     /// Sized for the dock as it is now, and focused, because someone who
     /// opened a terminal means to type in it.
     fn open_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_terminal_with_input(None, false, window, cx);
+    }
+
+    /// Start a shell and optionally paste initial input once the daemon owns it.
+    fn open_terminal_with_input(
+        &mut self,
+        input: Option<String>,
+        split: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
-        let (rows, cols) = self.dock_size();
+        let (rows, mut cols) = self.dock_size();
+        if split && self.terminals.split_ids().is_none() {
+            cols = (cols / 2).max(1);
+        } else if !split && self.terminals.split_ids().is_some() {
+            cols = TERMINAL_COLUMNS;
+        }
         let link = self.link.clone();
         self.terminal_focus.focus(window, cx);
         cx.spawn(async move |this, cx| {
             let opened = cx
-                .background_spawn(async move { link.open_terminal(&workspace, rows, cols).await })
+                .background_spawn(async move {
+                    let terminal = link.open_terminal(&workspace, rows, cols).await;
+                    if let (Some(terminal), Some(input)) = (&terminal, input) {
+                        link.write_terminal(terminal, input).await;
+                    }
+                    terminal
+                })
                 .await;
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
                     let title = this.terminals.tabs().len() + 1;
-                    this.terminals
-                        .open(terminal, format!("shell {title}"), rows, cols);
+                    this.terminal_search = None;
+                    if split {
+                        this.terminals
+                            .open_split(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
+                    } else {
+                        this.terminals
+                            .open(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
+                    }
+                    this.persist();
                     // The daemon is the one that names them, and it numbers
                     // them per workspace: adopting straight afterwards is how
                     // two windows agree on what a tab is called.
@@ -1855,6 +2361,39 @@ impl Shell {
             }
         })
         .detach();
+    }
+
+    /// Add a daemon terminal beside the active pane, or collapse the split.
+    fn toggle_terminal_split(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminals.split_ids().is_some() {
+            self.terminals.unsplit();
+            self.resize_terminal(cx);
+            self.persist();
+            self.terminal_focus.focus(window, cx);
+            cx.notify();
+        } else {
+            self.open_terminal_with_input(None, true, window, cx);
+        }
+    }
+
+    /// Paste an editor selection into the terminal without appending Return.
+    fn write_terminal_selection(
+        &mut self,
+        selection: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.layout.is_open(Panel::TerminalDock) {
+            self.toggle(Panel::TerminalDock, cx);
+        }
+        self.terminal_focus.focus(window, cx);
+        let Some(terminal) = self.terminals.active_id() else {
+            self.open_terminal_with_input(Some(selection), false, window, cx);
+            return;
+        };
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, selection).await })
+            .detach();
     }
 
     /// Start or refresh semantic indexing in a visible daemon terminal.
@@ -1884,8 +2423,11 @@ impl Shell {
                 match result {
                     Ok(terminal) => {
                         let title = this.terminals.tabs().len() + 1;
+                        this.terminal_search = None;
                         this.terminals
                             .open(terminal, format!("shell {title}"), rows, cols);
+                        this.resize_terminal(cx);
+                        this.persist();
                         this.adopt_terminals(cx);
                     }
                     Err(error) => this.index_error = Some(error),
@@ -1975,8 +2517,11 @@ impl Shell {
             if let Some(terminal) = opened {
                 this.update(cx, |this, cx| {
                     let title = this.terminals.tabs().len() + 1;
+                    this.terminal_search = None;
                     this.terminals
                         .open(terminal, format!("shell {title}"), rows, cols);
+                    this.resize_terminal(cx);
+                    this.persist();
                     // Adopted straight afterwards so the tab takes the name
                     // the daemon gave it, which says whose sign-in it is.
                     this.adopt_terminals(cx);
@@ -1988,20 +2533,76 @@ impl Shell {
         .detach();
     }
 
-    /// Stop one of the dock's shells.
-    fn close_terminal(&mut self, terminal: ginka_protocol::TerminalId, cx: &mut Context<Self>) {
-        self.terminals.close(&terminal);
-        cx.notify();
-        let link = self.link.clone();
-        cx.background_spawn(async move { link.close_terminal(&terminal).await })
-            .detach();
+    /// Confirm, then stop one of the dock's running shells.
+    fn request_terminal_close(
+        &mut self,
+        terminal: ginka_protocol::TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        let was_split = self.terminals.split_ids().is_some();
+        match self.terminals.request_close(&terminal) {
+            ginka_ui::terminal::CloseRequest::Confirm => cx.notify(),
+            ginka_ui::terminal::CloseRequest::Close => {
+                if self
+                    .terminal_search
+                    .as_ref()
+                    .is_some_and(|search| search.terminal == terminal)
+                {
+                    self.terminal_search = None;
+                }
+                if was_split && self.terminals.split_ids().is_none() {
+                    self.resize_terminal(cx);
+                }
+                self.persist();
+                cx.notify();
+                let link = self.link.clone();
+                cx.background_spawn(async move { link.close_terminal(&terminal).await })
+                    .detach();
+            }
+            ginka_ui::terminal::CloseRequest::Missing => {}
+        }
     }
 
     /// Bring one of the dock's shells to the front.
     fn show_terminal(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let was_split = self.terminals.split_ids().is_some();
+        self.terminal_search = None;
         self.terminals.focus(index);
+        if was_split && self.terminals.split_ids().is_none() {
+            self.resize_terminal(cx);
+        }
+        self.persist();
         self.terminal_focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Focus one pane of a split without collapsing the pair.
+    fn focus_terminal(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let changed = self.terminals.active_id().as_ref() != Some(terminal);
+        if changed {
+            self.terminal_search = None;
+            self.terminals.focus_id(terminal);
+            self.persist();
+        }
+        self.terminal_focus.focus(window, cx);
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Move keyboard input to the other visible terminal pane.
+    fn focus_other_terminal_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminals.focus_other_pane() {
+            self.terminal_search = None;
+            self.persist();
+            self.terminal_focus.focus(window, cx);
+            cx.notify();
+        }
     }
 
     /// Find the shells the daemon kept running in this workspace, and replay
@@ -2012,14 +2613,45 @@ impl Shell {
         };
         let (rows, cols) = self.dock_size();
         let link = self.link.clone();
+        let requested_workspace = workspace.clone();
         cx.spawn(async move |this, cx| {
             let running = cx
-                .background_spawn(async move { link.terminals(&workspace).await })
+                .background_spawn(async move { link.terminals(&requested_workspace).await })
                 .await;
             let fresh = this
                 .update(cx, |this, cx| {
+                    if this.session.as_ref().map(|row| &row.workspace) != Some(&workspace) {
+                        return Vec::new();
+                    }
+                    let was_split = this.terminals.split_ids().is_some();
+                    let fresh = this.terminals.adopt(&running, rows, cols);
+                    let remembered = this
+                        .settings
+                        .workspace_layouts
+                        .get(&workspace.0)
+                        .map(|saved| (saved.terminal_split.clone(), saved.terminal_active.clone()))
+                        .unwrap_or_default();
+                    let active = remembered
+                        .1
+                        .as_ref()
+                        .map(|id| ginka_protocol::TerminalId(id.clone()));
+                    if let Some(split) = remembered.0.map(|ids| ids.map(ginka_protocol::TerminalId))
+                    {
+                        if !this.terminals.restore_split(split, active.as_ref())
+                            && let Some(active) = active.as_ref()
+                        {
+                            this.terminals.focus_id(active);
+                        }
+                    } else if let Some(active) = active.as_ref() {
+                        this.terminals.focus_id(active);
+                    }
+                    if (was_split && this.terminals.split_ids().is_none())
+                        || (!was_split && this.terminals.split_ids().is_some())
+                    {
+                        this.resize_terminal(cx);
+                    }
                     cx.notify();
-                    this.terminals.adopt(&running, rows, cols)
+                    fresh
                 })
                 .ok()
                 .unwrap_or_default();
@@ -2052,7 +2684,12 @@ impl Shell {
     fn dock_size(&self) -> (u16, u16) {
         let height = f32::from(self.layout.size(Panel::TerminalDock));
         let rows = ((height - 40.) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
-        (rows, TERMINAL_COLUMNS)
+        let columns = if self.terminals.split_ids().is_some() {
+            (TERMINAL_COLUMNS / 2).max(1)
+        } else {
+            TERMINAL_COLUMNS
+        };
+        (rows, columns)
     }
 
     /// Send a keystroke to the shell.
@@ -2061,15 +2698,331 @@ impl Shell {
     /// bytes: what a terminal *is* is a program reading the bytes a keyboard
     /// produced.
     fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
-        let Some(terminal) = self.terminals.active_id() else {
+        self.terminal_selection = None;
+        if event.keystroke.modifiers.shift
+            && matches!(event.keystroke.key.as_str(), "pageup" | "pagedown")
+        {
+            let direction = if event.keystroke.key == "pageup" {
+                1
+            } else {
+                -1
+            };
+            if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+                screen.scroll(direction * i32::from(screen.rows().saturating_sub(1).max(1)));
+                cx.notify();
+            }
             return;
-        };
-        let Some(data) = keystroke_bytes(&event.keystroke) else {
+        }
+        let Some((terminal, data)) = self.terminals.active().and_then(|tab| {
+            tab.screen
+                .key_input(&event.keystroke)
+                .map(|data| (tab.id.clone(), data))
+        }) else {
             return;
         };
         let link = self.link.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
+    }
+
+    /// Paste clipboard text using the active terminal's negotiated paste mode.
+    fn paste_into_terminal(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|clipboard| clipboard.text())
+        else {
+            return;
+        };
+        let Some((terminal, data)) = self
+            .terminals
+            .active()
+            .map(|tab| (tab.id.clone(), tab.screen.paste_input(&text)))
+        else {
+            return;
+        };
+        if data.is_empty() {
+            return;
+        }
+        self.terminal_selection = None;
+        cx.stop_propagation();
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
+            .detach();
+    }
+
+    fn active_terminal_selection_text(&self) -> Option<String> {
+        self.terminals.active().and_then(|tab| {
+            self.terminal_selection
+                .as_ref()
+                .filter(|drag| drag.terminal == tab.id)
+                .and_then(|drag| tab.screen.selection_text(drag.selection))
+        })
+    }
+
+    fn quoteable_terminal_selection(&self) -> Option<String> {
+        self.active_terminal_selection_text()
+            .filter(|selection| !selection.trim().is_empty())
+    }
+
+    /// Copy the active selection, or the viewport when nothing is selected.
+    fn copy_terminal_output(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self.active_terminal_selection_text().or_else(|| {
+            self.terminals
+                .active()
+                .map(|tab| tab.screen.text())
+                .filter(|text| !text.is_empty())
+        }) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Append the active terminal selection to the composer as a quote.
+    fn quote_terminal_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(selection) = self.quoteable_terminal_selection() {
+            self.quote_in_composer(&selection, window, cx);
+        }
+    }
+
+    /// Translate a pointer position into the fixed terminal grid.
+    fn terminal_point(
+        &self,
+        terminal: &ginka_protocol::TerminalId,
+        position: Point<Pixels>,
+    ) -> Option<ginka_ui::terminal::TerminalPoint> {
+        let bounds = self.terminal_bounds.get(terminal)?;
+        let tab = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| &tab.id == terminal)?;
+        let x = (position.x - bounds.origin.x - px(8.)).max(px(0.));
+        let y = (position.y - bounds.origin.y - px(4.)).max(px(0.));
+        let column = (x.as_f32() / TERMINAL_CELL_WIDTH).floor() as usize;
+        let row = (y.as_f32() / TERMINAL_LINE_HEIGHT).floor() as usize;
+        Some(ginka_ui::terminal::TerminalPoint::new(
+            row.min(tab.screen.rows() as usize - 1),
+            column.min(tab.screen.cols() as usize - 1),
+        ))
+    }
+
+    fn begin_terminal_selection(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_terminal(terminal, window, cx);
+        if let Some(point) = self.terminal_point(terminal, position) {
+            self.terminal_selection = Some(TerminalDrag {
+                terminal: terminal.clone(),
+                selection: ginka_ui::terminal::TerminalSelection::new(point, point),
+            });
+            cx.notify();
+        }
+    }
+
+    fn extend_terminal_selection(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some(point) = self.terminal_point(terminal, event.position) else {
+            return;
+        };
+        if let Some(drag) = self
+            .terminal_selection
+            .as_mut()
+            .filter(|drag| &drag.terminal == terminal)
+            && drag.selection.head != point
+        {
+            drag.selection.head = point;
+            cx.notify();
+        }
+    }
+
+    fn on_copy_terminal_output(
+        &mut self,
+        _: &CopyTerminalOutput,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.copy_terminal_output(cx);
+    }
+
+    /// Browse terminal history without sending wheel movement to the pty.
+    fn scroll_terminal(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        event: &ScrollWheelEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let pixels = f32::from(event.delta.pixel_delta(px(17.)).y);
+        if pixels == 0.0 {
+            return;
+        }
+        self.terminal_selection = None;
+        cx.stop_propagation();
+        let lines = (pixels.abs() / 17.0).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
+        if let Some(screen) = self
+            .terminals
+            .tabs_mut()
+            .iter_mut()
+            .find(|tab| &tab.id == terminal)
+            .map(|tab| &mut tab.screen)
+        {
+            let before = screen.display_offset();
+            screen.scroll(lines);
+            if screen.display_offset() != before {
+                cx.notify();
+            }
+        }
+    }
+
+    /// Jump from terminal history to the newest output.
+    fn terminal_to_live(&mut self, cx: &mut Context<Self>) {
+        if let Some(screen) = self.terminals.active_mut().map(|tab| &mut tab.screen) {
+            screen.scroll_to_live();
+            cx.notify();
+        }
+    }
+
+    /// Open find-in-terminal for the shell in front.
+    fn open_terminal_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(terminal) = self.terminals.active_id() else {
+            return;
+        };
+        if let Some(search) = self
+            .terminal_search
+            .as_ref()
+            .filter(|search| search.terminal == terminal)
+        {
+            search.query.read(cx).focus_handle(cx).focus(window, cx);
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("terminal.search.placeholder").to_string())
+        });
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| match event {
+            InputEvent::Change => this.search_terminal(query.read(cx).value().to_string(), cx),
+            InputEvent::PressEnter { shift, .. } => this.step_terminal_search(
+                if *shift {
+                    ginka_ui::search::Direction::Previous
+                } else {
+                    ginka_ui::search::Direction::Next
+                },
+                cx,
+            ),
+            _ => {}
+        })
+        .detach();
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        self.terminal_search = Some(TerminalSearch {
+            terminal,
+            query,
+            matches: Vec::new(),
+            chosen: None,
+        });
+        cx.notify();
+    }
+
+    /// Recompute matches after the terminal query changes.
+    fn search_terminal(&mut self, query: String, cx: &mut Context<Self>) {
+        let Some(terminal) = self
+            .terminal_search
+            .as_ref()
+            .map(|search| search.terminal.clone())
+        else {
+            return;
+        };
+        let matches = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| tab.id == terminal)
+            .map(|tab| tab.screen.refresh_search(&query, None))
+            .unwrap_or_default();
+        let search = self
+            .terminal_search
+            .as_mut()
+            .expect("the terminal search was read above");
+        (search.matches, search.chosen) = matches;
+        self.reveal_terminal_search();
+        cx.notify();
+    }
+
+    /// Recompute an open terminal search after that shell prints more output.
+    fn refresh_terminal_search(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((query, chosen)) = self
+            .terminal_search
+            .as_ref()
+            .filter(|search| &search.terminal == terminal)
+            .map(|search| (search.query.read(cx).value().to_string(), search.chosen))
+        else {
+            return;
+        };
+        let Some(results) = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| &tab.id == terminal)
+            .map(|tab| tab.screen.refresh_search(&query, chosen))
+        else {
+            return;
+        };
+        if let Some(search) = self.terminal_search.as_mut() {
+            (search.matches, search.chosen) = results;
+        }
+    }
+
+    /// Move to another terminal match, wrapping at either end.
+    fn step_terminal_search(
+        &mut self,
+        direction: ginka_ui::search::Direction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(search) = self.terminal_search.as_mut() else {
+            return;
+        };
+        search.chosen = ginka_ui::search::step(search.matches.len(), search.chosen, direction);
+        self.reveal_terminal_search();
+        cx.notify();
+    }
+
+    /// Put the selected terminal match inside the viewport.
+    fn reveal_terminal_search(&mut self) {
+        let Some((terminal, found)) = self.terminal_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .map(|found| (search.terminal.clone(), found.clone()))
+        }) else {
+            return;
+        };
+        if let Some(tab) = self
+            .terminals
+            .tabs_mut()
+            .iter_mut()
+            .find(|tab| tab.id == terminal)
+        {
+            tab.screen.reveal_search_match(&found);
+        }
+    }
+
+    /// Close terminal find and return keyboard input to the shell.
+    fn close_terminal_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.terminal_search = None;
+        self.terminal_focus.focus(window, cx);
+        cx.notify();
     }
 
     /// Leave a comment on a line of the diff.
@@ -2154,6 +3107,149 @@ impl Shell {
         }
     }
 
+    /// Re-read the selected conversation's daemon-owned follow-up queue.
+    fn refresh_queue(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            self.queued_messages.clear();
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = pull_queue(&this, &link, session, cx).await;
+        })
+        .detach();
+    }
+
+    /// Put one queued prompt in the composer without losing its normal draft.
+    fn edit_queued_message(
+        &mut self,
+        id: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.editing_queued_message.is_none() {
+            self.queue_edit_draft = Some(self.composer.read(cx).value().to_string());
+        }
+        self.editing_queued_message = Some(id);
+        self.queue_error = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leave queue editing and restore the draft it displaced.
+    fn cancel_queued_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.editing_queued_message = None;
+        self.queue_error = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        cx.notify();
+    }
+
+    /// Persist the queued prompt currently being edited.
+    fn save_queued_edit(
+        &mut self,
+        session: SessionId,
+        id: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.edit_queued_message(&session, id, text).await })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(()) => {
+                        let draft = this.queue_edit_draft.take().unwrap_or_default();
+                        this.editing_queued_message = None;
+                        this.queue_error = None;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value(draft, window, cx));
+                    }
+                    Err(error) => this.queue_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove one queued prompt.
+    fn remove_queued_message(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.remove_queued_message(&session, id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.queue_error = Some(error);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Move one queued prompt to a zero-based dispatch position.
+    fn move_queued_message(&mut self, id: u64, index: u32, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.move_queued_message(&session, id, index).await },
+                )
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.queue_error = Some(error);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask the live transport to take one waiting prompt immediately.
+    fn send_queued_message_now(&mut self, id: u64, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.send_queued_message_now(&session, id).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok(()) => this.queue_error = None,
+                    Err(error) => this.queue_error = Some(error),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Send what is in the composer.
     ///
     /// A chat that has no workspace yet — the home screen — gets one first,
@@ -2163,6 +3259,12 @@ impl Shell {
             return;
         }
         let draft = self.composer.read(cx).value().trim().to_string();
+        if let Some(id) = self.editing_queued_message
+            && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
+        {
+            self.save_queued_edit(session, id, draft, window, cx);
+            return;
+        }
         if self.session_state == Some(SessionState::AwaitingInput)
             && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
             && let Some(request_id) = self.transcript.open_request().map(str::to_string)
@@ -2265,6 +3367,9 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.attachments.clear();
+        self.image_markup = None;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.suspend_browser(false, cx));
         self.attachment_error = None;
         // The draft belonged to the prompt that has just been sent.
         {
@@ -2368,6 +3473,7 @@ impl Shell {
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
             self.layout
                 .write_workspace_into(&workspace, &mut self.settings);
+            self.write_terminal_arrangement(&workspace);
         } else {
             self.layout.write_into(&mut self.settings);
         }
@@ -2393,6 +3499,17 @@ impl Shell {
                 .read(cx)
                 .open_surface()
                 .map(|surface| surface.key().to_string());
+        }
+        self.write_terminal_arrangement(&workspace);
+    }
+
+    /// Store terminal ids as restorable view state, never as process ownership.
+    fn write_terminal_arrangement(&mut self, workspace: &WorkspaceId) {
+        let split = self.terminals.split_ids().map(|ids| ids.map(|id| id.0));
+        let active = self.terminals.active_id().map(|id| id.0);
+        if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
+            saved.terminal_split = split;
+            saved.terminal_active = active;
         }
     }
 
@@ -2506,6 +3623,37 @@ impl Shell {
         self.cycle_surface(false, cx);
     }
 
+    fn cycle_terminal_tab(&mut self, previous: bool, cx: &mut Context<Self>) {
+        let moved = if previous {
+            self.terminals.focus_previous()
+        } else {
+            self.terminals.focus_next()
+        };
+        if moved {
+            self.terminal_search = None;
+            self.persist();
+            cx.notify();
+        }
+    }
+
+    fn on_next_terminal_tab(
+        &mut self,
+        _: &NextTerminalTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_terminal_tab(false, cx);
+    }
+
+    fn on_previous_terminal_tab(
+        &mut self,
+        _: &PreviousTerminalTab,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cycle_terminal_tab(true, cx);
+    }
+
     /// Whether a recorded destination still exists in the daemon's latest list.
     fn navigation_target_available(
         target: &NavigationTarget,
@@ -2585,6 +3733,24 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self
+            .terminal_search
+            .as_ref()
+            .is_some_and(|search| self.terminals.active_id().as_ref() == Some(&search.terminal))
+        {
+            self.terminal_search
+                .as_ref()
+                .expect("the terminal search was just checked")
+                .query
+                .read(cx)
+                .focus_handle(cx)
+                .focus(window, cx);
+            return;
+        }
+        if self.terminal_focus.is_focused(window) && self.terminals.active_id().is_some() {
+            self.open_terminal_search(window, cx);
+            return;
+        }
         if self
             .session
             .as_ref()
@@ -2726,6 +3892,7 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("palette.placeholder").to_string())
         });
+        let selected_text = TextSelection::selected_text(window, cx);
         query.read(cx).focus_handle(cx).focus(window, cx);
         cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -2745,6 +3912,7 @@ impl Shell {
             query,
             typed: String::new(),
             chosen: 0,
+            selected_text: ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned),
         });
         cx.notify();
     }
@@ -2756,20 +3924,32 @@ impl Shell {
         };
         let rows = self.sidebar.read(cx).rows().to_vec();
         let (can_go_back, can_go_forward) = self.navigation_capabilities(cx);
-        ginka_ui::palette::filter(
-            ginka_ui::palette::entries(
-                &self.layout,
-                &rows,
-                self.session.as_ref().map(|row| row.indexed),
-                self.session
-                    .as_ref()
-                    .and_then(|row| row.session.as_ref())
-                    .is_some(),
-                can_go_back,
-                can_go_forward,
-            ),
-            &palette.typed,
-        )
+        let mut entries = ginka_ui::palette::entries(
+            &self.layout,
+            &rows,
+            self.session.as_ref().map(|row| row.indexed),
+            self.session
+                .as_ref()
+                .and_then(|row| row.session.as_ref())
+                .is_some(),
+            can_go_back,
+            can_go_forward,
+        );
+        let active = self.terminals.active();
+        entries.extend(ginka_ui::palette::terminal_entries(
+            ginka_ui::palette::TerminalActions {
+                tabs: self.terminals.tabs().len(),
+                has_output: active.is_some_and(|tab| !tab.screen.text().is_empty()),
+                has_selection: self.quoteable_terminal_selection().is_some(),
+                split: self.terminals.split_ids().is_some(),
+                browsing_history: active.is_some_and(|tab| tab.screen.display_offset() > 0),
+                close_armed: active.is_some_and(|tab| self.terminals.close_confirmation(&tab.id)),
+            },
+        ));
+        entries.extend(ginka_ui::palette::transcript_entries(
+            self.session.is_some() && palette.selected_text.is_some(),
+        ));
+        ginka_ui::palette::filter(entries, &palette.typed)
     }
 
     /// Move the cursor through the palette without leaving the keyboard.
@@ -2794,8 +3974,12 @@ impl Shell {
             "enter" => {
                 if let Some(entry) = found.get(palette.chosen) {
                     let command = entry.command.clone();
+                    let selected_text = self
+                        .palette
+                        .as_ref()
+                        .and_then(|palette| palette.selected_text.clone());
                     self.palette = None;
-                    self.run_command(command, window, cx);
+                    self.run_command(command, selected_text.as_deref(), window, cx);
                 }
             }
             _ => {}
@@ -2806,6 +3990,7 @@ impl Shell {
     fn run_command(
         &mut self,
         command: ginka_ui::palette::Command,
+        selected_text: Option<&str>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2826,6 +4011,60 @@ impl Shell {
                     self.toggle(Panel::TerminalDock, cx);
                 }
                 self.open_terminal(window, cx);
+            }
+            Command::ToggleTerminalSplit => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.toggle_terminal_split(window, cx);
+            }
+            Command::FocusOtherTerminalPane => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.focus_other_terminal_pane(window, cx);
+            }
+            Command::FindTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.open_terminal_search(window, cx);
+            }
+            Command::CopyTerminalOutput => self.copy_terminal_output(cx),
+            Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
+            Command::QuoteTranscriptSelection => {
+                if let Some(selection) = selected_text {
+                    self.quote_in_composer(selection, window, cx);
+                }
+            }
+            Command::NextTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.cycle_terminal_tab(false, cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::PreviousTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.cycle_terminal_tab(true, cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::TerminalToLive => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.terminal_to_live(cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::CloseTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                if let Some(terminal) = self.terminals.active_id() {
+                    self.request_terminal_close(terminal, cx);
+                }
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
             Command::AttachFiles => self.choose_attachments(window, cx),
@@ -3071,7 +4310,7 @@ impl Shell {
     /// door rather than an apology. Once a prompt is away the scrolling column
     /// takes over even before the first word arrives, because that is where
     /// the activity line lives and "working" is what the reader needs to see.
-    fn transcript(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn transcript(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> AnyElement {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
@@ -3134,12 +4373,57 @@ impl Shell {
             );
         v_flex()
             .id("transcript")
+            .relative()
             .flex_1()
             .min_h_0()
             .children(self.transcript_outline(cx))
             .children(self.transcript_search_bar(cx))
             .child(scroller)
+            .children(self.transcript_selection_action(selected_text, cx))
             .into_any_element()
+    }
+
+    /// A selection-scoped quote action that does not move the transcript.
+    ///
+    /// A mouse press clears the toolkit's window selection before its click is
+    /// delivered, so the action retains the render-time text and handles mouse
+    /// activation on press. Keyboard and touch activation keep the ordinary
+    /// button click path.
+    fn transcript_selection_action(
+        &self,
+        selected_text: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let selected_text = selected_text?;
+        let mouse_text = selected_text.clone();
+        let click_text = selected_text;
+        let label = rust_i18n::t!("transcript.quote_selection").to_string();
+
+        Some(
+            div()
+                .absolute()
+                .top_2()
+                .right_3()
+                .child(
+                    Button::new("quote-transcript-selection")
+                        .compact()
+                        .tooltip(label.clone())
+                        .accessibility_label(label.clone())
+                        .label(label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                this.quote_in_composer(&mouse_text, window, cx)
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            if !matches!(event, ClickEvent::Mouse(_)) {
+                                this.quote_in_composer(&click_text, window, cx);
+                            }
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// A bounded list of the conversation's top-level prompts.
@@ -3752,6 +5036,17 @@ impl Shell {
                 // frame, so the line still being written is drawn as the plain
                 // text it is until its block is done.
                 let (formatted, writing) = ginka_ui::transcript::settled(text);
+                let linked = Arc::new(
+                    self.session
+                        .as_ref()
+                        .map(|row| ginka_ui::transcript::link_file_locations(formatted, &row.path))
+                        .unwrap_or_else(|| ginka_ui::transcript::LinkedMarkdown {
+                            markdown: formatted.to_string(),
+                            targets: Vec::new(),
+                        }),
+                );
+                let linked_click = linked.clone();
+                let shell = cx.entity().downgrade();
                 v_flex()
                     .w_full()
                     .gap_1()
@@ -3759,8 +5054,36 @@ impl Shell {
                     .line_height(px(25.))
                     .text_color(tokens.colors().text_primary)
                     .children((!formatted.is_empty()).then(|| {
-                        TextView::markdown(("assistant", index), formatted.to_string())
+                        TextView::markdown(("assistant", index), linked.markdown.clone())
                             .selectable(true)
+                            .on_link_click(move |href, event, window, cx| {
+                                if event.is_right_click() {
+                                    return;
+                                }
+                                let Some(target) = linked_click.target(href).cloned() else {
+                                    cx.open_url(href);
+                                    return;
+                                };
+                                let path = target.path.clone();
+                                let _ = shell.update(cx, |this, cx| {
+                                    if let Some(range) = target.selection_range()
+                                        && let Some(workspace) =
+                                            this.session.as_ref().map(|row| row.workspace.clone())
+                                    {
+                                        this.open_definition(
+                                            &workspace,
+                                            ginka_ui::editor::DefinitionTarget {
+                                                path: path.clone(),
+                                                range,
+                                            },
+                                            window,
+                                            cx,
+                                        );
+                                    } else {
+                                        this.open_file(path.clone(), false, window, cx);
+                                    }
+                                });
+                            })
                     }))
                     .children((!writing.is_empty()).then(|| div().child(writing.to_string())))
                     .child(self.message_actions(index, "assistant", text, cx))
@@ -3776,6 +5099,7 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
+            TranscriptBlock::Tasks { items } => self.task_card(items, cx),
             TranscriptBlock::Subagent {
                 title,
                 steps,
@@ -3794,7 +5118,22 @@ impl Shell {
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.
-            TranscriptBlock::TurnEnd { turn, seq } => self.turn_rule(*turn, *seq, cx),
+            TranscriptBlock::TurnEnd {
+                turn,
+                seq,
+                provider,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => {
+                let provenance = ginka_ui::transcript::turn_provenance(
+                    provider.as_deref(),
+                    model.as_deref(),
+                    reasoning_effort.as_deref(),
+                    service_tier.as_deref(),
+                );
+                self.turn_rule(*turn, *seq, provenance, cx)
+            }
             // A turn that worked says so by being answered. Only an outcome
             // the user has to do something about is worth a line of its own.
             TranscriptBlock::Outcome { state, summary } => match state {
@@ -3894,7 +5233,13 @@ impl Shell {
     /// A transcript position maps both to a checkpointed working tree and to
     /// the inclusive event range a fork copies. Rewind is confirmed because it
     /// changes files; a fork is additive and can run immediately.
-    fn turn_rule(&self, turn: u32, seq: u64, cx: &mut Context<Self>) -> AnyElement {
+    fn turn_rule(
+        &self,
+        turn: u32,
+        seq: u64,
+        provenance: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let checkpoint = self
             .checkpoints
@@ -4021,6 +5366,12 @@ impl Shell {
                             )
                     }))
             }))
+            .children(provenance.map(|provenance| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted.opacity(0.7))
+                    .child(provenance)
+            }))
             .children(has_targets.then(|| {
                 h_flex()
                     .gap_1()
@@ -4144,6 +5495,76 @@ impl Shell {
                     // conversation off the screen.
                     .child(head_of(output, 24))
             }))
+            .into_any_element()
+    }
+
+    /// The latest provider-neutral task snapshot for the current turn.
+    fn task_card(&self, items: &[ginka_protocol::TaskItem], cx: &App) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let (completed, total) = ginka_ui::transcript::task_progress(items);
+
+        v_flex()
+            .w_full()
+            .rounded(px(tokens.radius.row))
+            .border_1()
+            .border_color(tokens.colors().border_subtle)
+            .bg(tokens.colors().bg_surface)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(rust_i18n::t!("transcript.tasks").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{completed}/{total}")),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_1p5()
+                    .border_t_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .children(items.iter().map(|item| {
+                        let (mark, colour) = match item.status {
+                            TaskStatus::Pending => ("○", tokens.colors().text_muted),
+                            TaskStatus::InProgress => ("→", tokens.colors().status_working),
+                            TaskStatus::Completed => ("✓", tokens.colors().status_done),
+                            TaskStatus::Cancelled => ("×", tokens.colors().text_muted.opacity(0.7)),
+                        };
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .text_color(colour)
+                            .child(div().min_w(px(14.)).child(mark))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(if item.status == TaskStatus::Cancelled {
+                                        tokens.colors().text_muted
+                                    } else {
+                                        tokens.colors().text_primary
+                                    })
+                                    .child(item.label.clone()),
+                            )
+                    })),
+            )
             .into_any_element()
     }
 
@@ -4282,6 +5703,132 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The editable FIFO shown above the composer while a turn is active.
+    fn queue_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.queued_messages.is_empty() && self.queue_error.is_none() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let count = self.queued_messages.len();
+        let rows = self
+            .queued_messages
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, message)| {
+                let send_id = message.id;
+                let edit_id = message.id;
+                let edit_text = message.text.clone();
+                let remove_id = message.id;
+                let earlier_id = message.id;
+                let later_id = message.id;
+                h_flex()
+                    .w_full()
+                    .min_h(px(42.))
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{}", index + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .child(message.text),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-now-{send_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(!self.queue_can_send_now)
+                            .label(rust_i18n::t!("composer.queue.send_now").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send_queued_message_now(send_id, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-earlier-{earlier_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(index == 0)
+                            .tooltip(rust_i18n::t!("composer.queue.earlier").to_string())
+                            .child(Icon::new(IconName::ArrowUp).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.move_queued_message(
+                                    earlier_id,
+                                    index.saturating_sub(1) as u32,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-later-{later_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(index + 1 >= count)
+                            .tooltip(rust_i18n::t!("composer.queue.later").to_string())
+                            .child(Icon::new(IconName::ArrowDown).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.move_queued_message(later_id, (index + 1) as u32, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-edit-{edit_id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("composer.queue.edit").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_queued_message(edit_id, edit_text.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-remove-{remove_id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("composer.queue.remove").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.remove_queued_message(remove_id, cx)
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    h_flex().w_full().items_center().child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(
+                                rust_i18n::t!("composer.queue.title", count = count).to_string(),
+                            ),
+                    ),
+                )
+                .children(rows)
+                .children(self.queue_error.clone().map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The composer: a card holding the input, what will run it, and the way
     /// to send or stop it.
     ///
@@ -4296,8 +5843,8 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
         let awaiting_input = self.session_state == Some(SessionState::AwaitingInput);
-        let accepts_attachments =
-            ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
+        let accepts_attachments = self.editing_queued_message.is_none()
+            && ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
         let primary_action = ginka_ui::composer::primary_action(
             working,
             self.composer.read(cx).value().as_ref(),
@@ -4311,44 +5858,85 @@ impl Shell {
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
         let usage_chip = self.usage_chip_button(cx);
+        let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
+        let queue_panel = self.queue_panel(cx);
+        let queue_editing = self.editing_queued_message.map(|_| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.queue.editing").to_string()),
+                )
+                .child(
+                    Button::new("cancel-queue-edit")
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("composer.queue.cancel").to_string())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_queued_edit(window, cx)),
+                        ),
+                )
+        });
         let attachment_chips = self
             .attachments
             .iter()
             .map(|attachment| {
-                let reference = attachment.attachment.reference.clone();
-                Button::new(SharedString::from(format!(
-                    "remove-attachment-{}",
-                    attachment.attachment.reference
-                )))
-                .ghost()
-                .compact()
-                .tooltip(rust_i18n::t!("composer.attachment.remove").to_string())
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .children(attachment.preview_url.clone().map(|preview_url| {
-                            div()
-                                .size(px(36.))
-                                .rounded(px(tokens.radius.row))
-                                .overflow_hidden()
-                                .child(
-                                    img(SharedString::from(preview_url))
-                                        .size_full()
-                                        .object_fit(ObjectFit::Cover),
-                                )
-                        }))
-                        .child(
-                            div()
-                                .max_w(px(180.))
-                                .truncate()
-                                .text_xs()
-                                .child(attachment.attachment.name.clone()),
-                        )
-                        .child(Icon::new(IconName::Close).size_3()),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| this.remove_attachment(&reference, cx)))
+                let open_reference = attachment.attachment.reference.clone();
+                let remove_reference = attachment.attachment.reference.clone();
+                let name = attachment.attachment.name.clone();
+                let content = h_flex()
+                    .gap_1()
+                    .items_center()
+                    .children(attachment.preview_url.clone().map(|preview_url| {
+                        div()
+                            .size(px(36.))
+                            .rounded(px(tokens.radius.row))
+                            .overflow_hidden()
+                            .child(
+                                img(SharedString::from(preview_url))
+                                    .size_full()
+                                    .object_fit(ObjectFit::Cover),
+                            )
+                    }))
+                    .child(div().max_w(px(180.)).truncate().text_xs().child(name));
+                let content = if attachment.preview_url.is_some() {
+                    Button::new(SharedString::from(format!(
+                        "annotate-attachment-{open_reference}"
+                    )))
+                    .ghost()
+                    .compact()
+                    .tooltip(rust_i18n::t!("composer.markup.open").to_string())
+                    .child(content)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_image_markup(&open_reference, window, cx)
+                    }))
+                    .into_any_element()
+                } else {
+                    content.into_any_element()
+                };
+                h_flex()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().row_hover())
+                    .child(content)
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "remove-attachment-{remove_reference}"
+                        )))
+                        .ghost()
+                        .compact()
+                        .icon(IconName::Close)
+                        .tooltip(rust_i18n::t!("composer.attachment.remove").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.remove_attachment(&remove_reference, cx)
+                        })),
+                    )
             })
             .collect::<Vec<_>>();
         let attachment_error = self.attachment_error.clone();
@@ -4361,6 +5949,7 @@ impl Shell {
             .pb_3()
             .gap_2()
             .children(picker)
+            .children(queue_panel)
             .child(
                 v_flex()
                     .w_full()
@@ -4406,6 +5995,7 @@ impl Shell {
                                     .to_string(),
                             )
                     }))
+                    .children(queue_editing)
                     .child(Textarea::new(&self.composer))
                     .child(
                         h_flex()
@@ -4440,6 +6030,7 @@ impl Shell {
                             .child(agent_chip)
                             .children(account_chip)
                             .children(usage_chip)
+                            .children(compact_chip)
                             .child(
                                 if primary_action == ginka_ui::composer::PrimaryAction::Stop {
                                     // With no follow-up waiting, stopping is the
@@ -5472,11 +7063,13 @@ impl Shell {
 
         // Written through the daemon rather than held here: a second window on
         // the same workspace is looking at the same draft.
-        let link = self.link.clone();
-        let saving = text.clone();
-        let for_draft = workspace.clone();
-        cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
-            .detach();
+        if self.editing_queued_message.is_none() {
+            let link = self.link.clone();
+            let saving = text.clone();
+            let for_draft = workspace.clone();
+            cx.background_spawn(async move { link.save_draft(&for_draft, saving).await })
+                .detach();
+        }
 
         // A command takes the whole prompt, so it is asked about first.
         if let Some(query) = ginka_ui::transcript::command_being_typed(&text) {
@@ -5663,7 +7256,7 @@ impl Shell {
     /// A conversation stays on the login it started on — the vendor's thread
     /// lives in that login's directory — so while one is being continued the
     /// answer is its account. A fresh chat takes what the reader picked, or
-    /// the provider's default.
+    /// the provider's persisted active account.
     fn account_to_start(&self) -> Option<&ginka_protocol::model::Account> {
         let provider = self.agent_to_start()?;
         let continuing = self
@@ -5825,15 +7418,38 @@ impl Shell {
             ginka_ui::accounts::snapshot_of(&self.plans, &account.id),
             crate::daemon::now(),
         );
+        let token_count = ginka_ui::reports::session_token_count(&self.transcript.usage());
+        let context = self
+            .transcript
+            .context_usage()
+            .as_ref()
+            .map(ginka_ui::reports::context_window_summary);
         let exhausted = headroom.as_ref().is_some_and(|headroom| headroom.exhausted);
-        let label = match headroom.as_ref() {
-            Some(headroom) if headroom.exhausted => format!(
-                "{} · {}",
-                headroom.summary(),
-                rust_i18n::t!("composer.account.at_wall")
-            ),
-            Some(headroom) => headroom.summary(),
-            None => rust_i18n::t!("composer.usage.unknown").to_string(),
+        let headroom_label = headroom.as_ref().map(|headroom| {
+            if headroom.exhausted {
+                format!(
+                    "{} · {}",
+                    headroom.summary(),
+                    rust_i18n::t!("composer.account.at_wall")
+                )
+            } else {
+                headroom.summary()
+            }
+        });
+        let mut labels = Vec::new();
+        if let Some(context) = context {
+            labels.push(rust_i18n::t!("composer.usage.context", summary = context).to_string());
+        }
+        if let Some(count) = token_count {
+            labels.push(rust_i18n::t!("composer.usage.tokens", count = count).to_string());
+        }
+        if let Some(headroom) = headroom_label {
+            labels.push(headroom);
+        }
+        let label = if labels.is_empty() {
+            rust_i18n::t!("composer.usage.unknown").to_string()
+        } else {
+            labels.join(" · ")
         };
         let account = account.id.clone();
 
@@ -5867,6 +7483,36 @@ impl Shell {
                     .detach();
                 }))
                 .child(label),
+        )
+    }
+
+    /// Manual context compaction, only when the provider explicitly reported
+    /// support and no turn can be interrupted by it.
+    fn compact_context_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let session = self.transcript_of.clone()?;
+        let busy = self.is_working()
+            || matches!(
+                self.session_state,
+                Some(SessionState::Starting | SessionState::Running | SessionState::AwaitingInput)
+            );
+        if !ginka_ui::reports::can_compact_context(self.transcript.context_usage().as_ref(), busy) {
+            return None;
+        }
+
+        Some(
+            Button::new("compact-context")
+                .ghost()
+                .compact()
+                .tooltip(rust_i18n::t!("composer.usage.compact_tooltip").to_string())
+                .label(rust_i18n::t!("composer.usage.compact").to_string())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let link = this.link.clone();
+                    let session = session.clone();
+                    cx.background_spawn(async move {
+                        let _ = link.compact_session(&session).await;
+                    })
+                    .detach();
+                })),
         )
     }
 
@@ -5934,6 +7580,12 @@ impl Shell {
                     cx.listener(move |this, _, window, cx| {
                         this.chosen_account = Some(id.clone());
                         this.picker = None;
+                        let link = this.link.clone();
+                        let selected = id.clone();
+                        cx.background_spawn(async move {
+                            let _ = link.select_account(&selected).await;
+                        })
+                        .detach();
                         // Choosing a login that is signed out is asking to
                         // sign in: the vendor's own command opens in the
                         // dock, pointed at the login's directory.
@@ -6044,7 +7696,15 @@ impl Shell {
                 typed_label.trim().to_string()
             };
             let added = cx
-                .background_spawn(async move { link.add_account(id, provider, label).await })
+                .background_spawn(async move {
+                    let added = link.add_account(id, provider, label).await;
+                    if let Ok(account) = &added {
+                        // A newly added login is the one the reader is about
+                        // to sign into, so future conversations should adopt it.
+                        let _ = link.select_account(&account.id).await;
+                    }
+                    added
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match added {
@@ -6098,6 +7758,207 @@ impl Shell {
             "enter" => self.submit_add_project(window, cx),
             _ => {}
         }
+    }
+
+    /// Image annotation stays in application chrome and produces one safe,
+    /// self-contained SVG that follows the ordinary attachment path.
+    fn image_markup_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let markup = self.image_markup.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let preview_url = markup.preview_url.clone();
+        let selected_tool = markup.tool;
+        let text_input = markup.text.clone();
+        let shapes = markup.document.shapes().to_vec();
+        let active = markup.document.active().cloned();
+        let shell = cx.entity();
+        let has_marks = !shapes.is_empty();
+        let busy = self.attachment_busy;
+        let tool_buttons = ginka_ui::markup::MarkupTool::ALL
+            .iter()
+            .copied()
+            .map(|tool| {
+                Button::new(SharedString::from(format!("markup-tool-{}", tool.label())))
+                    .compact()
+                    .when(tool != selected_tool, |button| button.ghost())
+                    .label(markup_tool_label(tool))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(markup) = this.image_markup.as_mut() {
+                            markup.tool = tool;
+                            markup.drawing = false;
+                        }
+                        cx.notify();
+                    }))
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .bg(tokens.colors().bg_window.opacity(0.82))
+                .child(
+                    v_flex()
+                        .id("image-markup-dialog")
+                        .w(px(920.))
+                        .max_w_full()
+                        .p_4()
+                        .gap_3()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_raised)
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_lg()
+                                        .font_semibold()
+                                        .child(rust_i18n::t!("composer.markup.title").to_string()),
+                                )
+                                .child(
+                                    Button::new("close-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .icon(IconName::Close)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.image_markup = None;
+                                            this.surfaces.update(cx, |surfaces, cx| {
+                                                surfaces.suspend_browser(false, cx)
+                                            });
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_1()
+                                .children(tool_buttons)
+                                .when(selected_tool == ginka_ui::markup::MarkupTool::Text, |row| {
+                                    row.child(div().ml_2().flex_1().child(Input::new(&text_input)))
+                                })
+                                .child(div().flex_1())
+                                .child(
+                                    Button::new("undo-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .label(rust_i18n::t!("composer.markup.undo").to_string())
+                                        .disabled(!has_marks)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(markup) = this.image_markup.as_mut() {
+                                                markup.document.undo();
+                                            }
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("clear-image-markup")
+                                        .ghost()
+                                        .compact()
+                                        .label(rust_i18n::t!("composer.markup.clear").to_string())
+                                        .disabled(!has_marks)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            if let Some(markup) = this.image_markup.as_mut() {
+                                                markup.document.clear();
+                                            }
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .relative()
+                                .w_full()
+                                .h(px(500.))
+                                .overflow_hidden()
+                                .rounded(px(tokens.radius.row))
+                                .bg(tokens.colors().bg_window)
+                                .cursor_crosshair()
+                                .child(
+                                    img(SharedString::from(preview_url))
+                                        .absolute()
+                                        .size_full()
+                                        .object_fit(ObjectFit::Fill),
+                                )
+                                .child(
+                                    canvas(
+                                        move |_, _, _| {},
+                                        move |bounds, _, window, _| {
+                                            for shape in &shapes {
+                                                paint_markup_shape(shape, bounds, window);
+                                            }
+                                            if let Some(shape) = &active {
+                                                paint_markup_shape(shape, bounds, window);
+                                            }
+                                        },
+                                    )
+                                    .absolute()
+                                    .size_full(),
+                                )
+                                .on_prepaint(move |bounds, _, cx| {
+                                    shell.update(cx, |this, _| {
+                                        if let Some(markup) = this.image_markup.as_mut() {
+                                            markup.canvas_bounds = bounds;
+                                        }
+                                    });
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseDownEvent, _, cx| {
+                                        this.begin_markup(event, cx)
+                                    }),
+                                )
+                                .on_mouse_move(cx.listener(
+                                    |this, event: &MouseMoveEvent, _, cx| {
+                                        this.extend_markup(event, cx)
+                                    },
+                                ))
+                                .on_mouse_up(
+                                    MouseButton::Left,
+                                    cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                                        this.finish_markup(event, cx)
+                                    }),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .justify_end()
+                                .gap_2()
+                                .child(
+                                    Button::new("cancel-image-markup")
+                                        .ghost()
+                                        .label(rust_i18n::t!("composer.markup.cancel").to_string())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.image_markup = None;
+                                            this.surfaces.update(cx, |surfaces, cx| {
+                                                surfaces.suspend_browser(false, cx)
+                                            });
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    Button::new("attach-image-markup")
+                                        .primary()
+                                        .label(rust_i18n::t!("composer.markup.attach").to_string())
+                                        .disabled(!has_marks || busy)
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.submit_image_markup(cx)
+                                        })),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
     }
 
     /// Project name and source-folder selection, drawn as one modal workflow.
@@ -6833,6 +8694,17 @@ impl Shell {
     fn terminal_dock(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let active = self.terminals.active_index();
+        let split = self.terminals.split_ids();
+        let active_has_output = self
+            .terminals
+            .active()
+            .is_some_and(|tab| !tab.screen.text().is_empty());
+        let has_selection = self.quoteable_terminal_selection().is_some();
+        let history_offset = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.display_offset())
+            .unwrap_or(0);
 
         v_flex()
             .size_full()
@@ -6848,82 +8720,302 @@ impl Shell {
                     .items_center()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .children(
-                        self.terminals
-                            .tabs()
-                            .iter()
-                            .enumerate()
-                            .map(|(index, tab)| {
-                                let showing = index == active;
-                                let id = tab.id.clone();
-                                let closing = tab.id.clone();
-                                h_flex()
-                                    .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
-                                    .px_2()
-                                    .py_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .rounded(px(tokens.radius.row))
-                                    .when(showing, |this| this.bg(tokens.colors().row_active()))
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.show_terminal(index, window, cx)
-                                    }))
-                                    .child(
-                                        Icon::new(IconName::SquareTerminal)
-                                            .size_3()
-                                            .text_color(tokens.colors().text_secondary),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if showing {
-                                                tokens.colors().text_primary
-                                            } else {
-                                                tokens.colors().text_secondary
-                                            })
-                                            .child(tab.title.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("close-terminal:{id}")))
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                cx.stop_propagation();
-                                                this.close_terminal(closing.clone(), cx)
+                    .child(
+                        h_flex()
+                            .id("terminal-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .overflow_x_scroll()
+                            .children(self.terminals.tabs().iter().enumerate().map(
+                                |(index, tab)| {
+                                    let showing = index == active;
+                                    let id = tab.id.clone();
+                                    let closing = tab.id.clone();
+                                    let confirming = self.terminals.close_confirmation(&tab.id);
+                                    let show_label =
+                                        rust_i18n::t!("terminal.show", title = tab.title.clone())
+                                            .to_string();
+                                    let close_label = if confirming {
+                                        rust_i18n::t!("terminal.close.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("terminal.close").to_string()
+                                    };
+                                    h_flex()
+                                        .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
+                                        .px_2()
+                                        .py_1()
+                                        .gap_2()
+                                        .items_center()
+                                        .rounded(px(tokens.radius.row))
+                                        .when(showing, |this| this.bg(tokens.colors().row_active()))
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "show-terminal:{id}"
+                                            )))
+                                            .ghost()
+                                            .compact()
+                                            .accessibility_label(show_label)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.show_terminal(index, window, cx)
                                             }))
                                             .child(
-                                                Icon::new(IconName::Close)
-                                                    .size_3()
-                                                    .text_color(tokens.colors().text_muted),
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        Icon::new(IconName::SquareTerminal)
+                                                            .size_3()
+                                                            .text_color(
+                                                                tokens.colors().text_secondary,
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(if showing {
+                                                                tokens.colors().text_primary
+                                                            } else {
+                                                                tokens.colors().text_secondary
+                                                            })
+                                                            .child(tab.title.clone()),
+                                                    ),
                                             ),
-                                    )
-                            }),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "close-terminal:{id}"
+                                            )))
+                                            .ghost()
+                                            .compact()
+                                            .tooltip(close_label.clone())
+                                            .accessibility_label(close_label)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.request_terminal_close(closing.clone(), cx)
+                                            }))
+                                            .child(
+                                                if confirming {
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(
+                                                            tokens.colors().status_attention,
+                                                        )
+                                                        .child(
+                                                            rust_i18n::t!("terminal.close.short")
+                                                                .to_string(),
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    Icon::new(IconName::Close)
+                                                        .size_3()
+                                                        .text_color(tokens.colors().text_muted)
+                                                        .into_any_element()
+                                                },
+                                            ),
+                                        )
+                                },
+                            )),
                     )
-                    .children((!self.terminals.is_empty()).then(|| {
-                        div()
-                            .id("new-terminal")
-                            .px_1p5()
-                            .py_1()
-                            .rounded(px(tokens.radius.row))
-                            .cursor_pointer()
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
-                            )
+                    .children(self.session.is_some().then(|| {
+                        let label = rust_i18n::t!("terminal.open").to_string();
+                        Button::new("new-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
                             .child(
                                 Icon::new(IconName::Plus)
                                     .size_3()
                                     .text_color(tokens.colors().text_muted),
                             )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
+                            )
                     }))
-                    .child(div().flex_1()),
+                    .children(split.is_some().then(|| {
+                        let label = rust_i18n::t!("terminal.split.focus_other").to_string();
+                        Button::new("focus-other-terminal-pane")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label.clone())
+                            .label(label)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.focus_other_terminal_pane(window, cx)
+                            }))
+                    }))
+                    .children((!self.terminals.is_empty()).then(|| {
+                        let label = if split.is_some() {
+                            rust_i18n::t!("terminal.split.close").to_string()
+                        } else {
+                            rust_i18n::t!("terminal.split.open").to_string()
+                        };
+                        Button::new("split-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
+                            .label(if split.is_some() {
+                                rust_i18n::t!("terminal.split.close.short").to_string()
+                            } else {
+                                rust_i18n::t!("terminal.split.open.short").to_string()
+                            })
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_terminal_split(window, cx)
+                            }))
+                    }))
+                    .children((!self.terminals.is_empty()).then(|| {
+                        Button::new("find-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(rust_i18n::t!("terminal.search.open").to_string())
+                            .child(Icon::new(IconName::Search).size_3())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_terminal_search(window, cx)
+                            }))
+                    }))
+                    .children(active_has_output.then(|| {
+                        let label = rust_i18n::t!("terminal.copy_output").to_string();
+                        Button::new("copy-terminal-output")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
+                            .child(Icon::new(IconName::Copy).size_3())
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_terminal_output(cx)))
+                    }))
+                    .children(has_selection.then(|| {
+                        let label = rust_i18n::t!("terminal.quote_selection").to_string();
+                        Button::new("quote-terminal-selection")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label.clone())
+                            .label(rust_i18n::t!("terminal.quote_selection.short").to_string())
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.quote_terminal_selection(window, cx)
+                            }))
+                    }))
+                    .children((history_offset > 0).then(|| {
+                        Button::new("terminal-live")
+                            .ghost()
+                            .compact()
+                            .tooltip(rust_i18n::t!("terminal.history.live.tooltip").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.terminal_to_live(cx)))
+                            .child(
+                                rust_i18n::t!(
+                                    "terminal.history.lines_back",
+                                    count = history_offset
+                                )
+                                .to_string(),
+                            )
+                    })),
             )
-            .child(match self.terminals.active() {
-                Some(tab) => self.terminal_screen(&tab.screen, cx).into_any_element(),
-                None => self.terminal_start(cx).into_any_element(),
-            })
+            .children(self.terminal_search_bar(cx))
+            .child(self.terminal_panes(cx))
+    }
+
+    /// One terminal viewport, or the two panes of an active split.
+    fn terminal_panes(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        if let Some(split) = self.terminals.split_ids() {
+            let active = self.terminals.active_id();
+            return h_flex()
+                .flex_1()
+                .min_w_0()
+                .children(split.into_iter().enumerate().filter_map(|(index, id)| {
+                    let tab = self.terminals.tabs().iter().find(|tab| tab.id == id)?;
+                    Some(
+                        v_flex()
+                            .id(SharedString::from(format!("terminal-pane:{id}")))
+                            .flex_1()
+                            .min_w_0()
+                            .when(active.as_ref() == Some(&id), |this| {
+                                this.border_t_1().border_color(tokens.colors().accent)
+                            })
+                            .when(index > 0, |this| {
+                                this.border_l_1()
+                                    .border_color(tokens.colors().border_subtle)
+                            })
+                            .child(self.terminal_screen(&id, &tab.screen, cx)),
+                    )
+                }))
+                .into_any_element();
+        }
+        match self.terminals.active() {
+            Some(tab) => self
+                .terminal_screen(&tab.id, &tab.screen, cx)
+                .into_any_element(),
+            None => self.terminal_start(cx).into_any_element(),
+        }
+    }
+
+    /// Find controls for the terminal in front.
+    fn terminal_search_bar(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let search = self.terminal_search.as_ref()?;
+        if self.terminals.active_id().as_ref() != Some(&search.terminal) {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let count = search
+            .chosen
+            .map(|chosen| format!("{} / {}", chosen + 1, search.matches.len()))
+            .unwrap_or_else(|| format!("0 / {}", search.matches.len()));
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .items_center()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .bg(tokens.colors().bg_surface)
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        this.close_terminal_search(window, cx);
+                    }
+                }))
+                .child(div().flex_1().child(Input::new(&search.query)))
+                .child(
+                    div()
+                        .min_w(px(58.))
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(count),
+                )
+                .child(
+                    Button::new("previous-terminal-match")
+                        .ghost()
+                        .disabled(search.matches.is_empty())
+                        .tooltip(rust_i18n::t!("transcript.search.previous").to_string())
+                        .child(Icon::new(IconName::ArrowUp).size_3())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.step_terminal_search(ginka_ui::search::Direction::Previous, cx)
+                        })),
+                )
+                .child(
+                    Button::new("next-terminal-match")
+                        .ghost()
+                        .disabled(search.matches.is_empty())
+                        .tooltip(rust_i18n::t!("transcript.search.next").to_string())
+                        .child(Icon::new(IconName::ArrowDown).size_3())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.step_terminal_search(ginka_ui::search::Direction::Next, cx)
+                        })),
+                )
+                .child(
+                    Button::new("close-terminal-search")
+                        .ghost()
+                        .tooltip(rust_i18n::t!("transcript.search.close").to_string())
+                        .child(Icon::new(IconName::Close).size_3())
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_terminal_search(window, cx)
+                        })),
+                )
+                .into_any_element(),
+        )
     }
 
     /// What the dock says before there is a shell in it.
@@ -6954,17 +9046,34 @@ impl Shell {
     /// colour would stop wherever the text did.
     fn terminal_screen(
         &self,
+        terminal: &ginka_protocol::TerminalId,
         screen: &ginka_ui::terminal::TerminalScreen,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let mono = cx.theme_mono_font();
-        let rows = screen.rows_of_cells();
+        let selected = self.terminal_search.as_ref().and_then(|search| {
+            (search.terminal == *terminal)
+                .then(|| search.chosen.and_then(|chosen| search.matches.get(chosen)))
+                .flatten()
+        });
+        let rows = screen.rows_of_cells_with_match(selected);
+        let selection = self
+            .terminal_selection
+            .as_ref()
+            .filter(|drag| drag.terminal == *terminal)
+            .map(|drag| drag.selection);
+        let worktree = self.session.as_ref().map(|row| row.path.clone());
+        let active = self.terminals.active_id().as_ref() == Some(terminal);
+        let focus_terminal = terminal.clone();
+        let drag_terminal = terminal.clone();
+        let bounds_terminal = terminal.clone();
+        let shell = cx.entity();
+        let scroll_terminal = terminal.clone();
+        let terminal_key = terminal.clone();
 
         v_flex()
-            .id("terminal-screen")
-            .track_focus(&self.terminal_focus)
-            .key_context("Terminal")
+            .id(SharedString::from(format!("terminal-screen:{terminal}")))
             .flex_1()
             .px_2()
             .py_1()
@@ -6972,39 +9081,121 @@ impl Shell {
             .font_family(mono)
             .text_size(px(12.5))
             .line_height(px(17.))
-            .on_key_down(
-                cx.listener(|this, event: &KeyDownEvent, _, cx| this.type_into_terminal(event, cx)),
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.begin_terminal_selection(&focus_terminal, event.position, window, cx)
+                }),
             )
-            .children(rows.into_iter().map(|row| {
-                h_flex().children(row.into_iter().map(|cell| {
-                    div()
-                        .when(cell.cursor, |this| {
-                            this.bg(tokens.colors().text_primary)
-                                .text_color(tokens.colors().bg_terminal)
-                        })
-                        .when(!cell.cursor, |this| {
-                            this.text_color(
-                                cell.foreground
-                                    .map(|colour| terminal_colour(colour, &tokens))
-                                    .unwrap_or(tokens.colors().text_primary),
-                            )
-                            .when_some(cell.background, |this, colour| {
-                                this.bg(terminal_colour(colour, &tokens))
-                            })
-                        })
-                        .when(cell.bold, |this| this.font_semibold())
-                        .when(cell.italic, |this| this.italic())
-                        .child(if cell.text == ' ' {
-                            // A space with no width is a hole in a painted bar.
-                            SharedString::from("\u{00a0}")
-                        } else {
-                            SharedString::from(cell.text.to_string())
-                        })
-                }))
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.extend_terminal_selection(&drag_terminal, event, cx)
+            }))
+            .on_prepaint(move |bounds, _, cx| {
+                shell.update(cx, |this, _| {
+                    this.terminal_bounds.insert(bounds_terminal.clone(), bounds);
+                });
+            })
+            .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
+                this.scroll_terminal(&scroll_terminal, event, cx)
+            }))
+            .when(active, |this| {
+                this.track_focus(&self.terminal_focus)
+                    .key_context("Terminal")
+                    .on_action(cx.listener(Self::paste_into_terminal))
+                    .on_action(cx.listener(Self::on_copy_terminal_output))
+                    .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
+                        this.type_into_terminal(event, cx)
+                    }))
+            })
+            .children(rows.into_iter().enumerate().map(|(row_index, row)| {
+                let text = row.iter().map(|cell| cell.text).collect::<String>();
+                let links = worktree
+                    .as_deref()
+                    .map(|root| ginka_ui::terminal::file_links(&text, root))
+                    .unwrap_or_default();
+                let mut elements = Vec::new();
+                let mut column = 0;
+                while column < row.len() {
+                    if let Some(link) = links.iter().find(|link| link.columns.start == column) {
+                        let end = link.columns.end.min(row.len());
+                        let path = link.path.clone();
+                        let click_link = link.clone();
+                        let location = match (link.line, link.column) {
+                            (Some(line), Some(column)) => {
+                                format!("{}:{line}:{column}", link.path)
+                            }
+                            (Some(line), None) => format!("{}:{line}", link.path),
+                            _ => link.path.clone(),
+                        };
+                        let label =
+                            rust_i18n::t!("terminal.open_file", location = location).to_string();
+                        elements.push(
+                            Button::new(SharedString::from(format!(
+                                "terminal-file:{terminal_key}:{row_index}:{column}"
+                            )))
+                            .text()
+                            .h(px(17.))
+                            .p_0()
+                            .accessibility_label(label)
+                            .child(h_flex().children(
+                                row[column..end].iter().cloned().enumerate().map(
+                                    |(offset, cell)| {
+                                        terminal_cell(
+                                            cell,
+                                            &tokens,
+                                            true,
+                                            selection.is_some_and(|selection| {
+                                                selection.contains(
+                                                    ginka_ui::terminal::TerminalPoint::new(
+                                                        row_index,
+                                                        column + offset,
+                                                    ),
+                                                )
+                                            }),
+                                        )
+                                    },
+                                ),
+                            ))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if let Some(range) = click_link.selection_range()
+                                    && let Some(workspace) =
+                                        this.session.as_ref().map(|row| row.workspace.clone())
+                                {
+                                    this.open_definition(
+                                        &workspace,
+                                        ginka_ui::editor::DefinitionTarget {
+                                            path: path.clone(),
+                                            range,
+                                        },
+                                        window,
+                                        cx,
+                                    );
+                                } else {
+                                    this.open_file(path.clone(), false, window, cx);
+                                }
+                            }))
+                            .into_any_element(),
+                        );
+                        column = end;
+                    } else {
+                        elements.push(terminal_cell(
+                            row[column].clone(),
+                            &tokens,
+                            false,
+                            selection.is_some_and(|selection| {
+                                selection.contains(ginka_ui::terminal::TerminalPoint::new(
+                                    row_index, column,
+                                ))
+                            }),
+                        ));
+                        column += 1;
+                    }
+                }
+                h_flex().children(elements)
             }))
     }
 
-    fn center(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn center(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         let dock_open = self.layout.is_open(Panel::TerminalDock);
         let dock_height = self.layout.size(Panel::TerminalDock);
 
@@ -7023,7 +9214,7 @@ impl Shell {
                     resizable_panel().child(
                         v_flex()
                             .size_full()
-                            .child(self.transcript(cx))
+                            .child(self.transcript(selected_text, cx))
                             .child(self.composer(cx))
                             .into_any_element(),
                     ),
@@ -7066,49 +9257,47 @@ fn terminal_colour(colour: ginka_ui::terminal::TerminalColor, tokens: &Tokens) -
     }
 }
 
-/// What a keystroke sends to a shell.
-///
-/// A pty takes bytes, so this is where a key becomes the bytes a terminal
-/// expects: the control characters for `ctrl-`, the escape sequences for the
-/// arrows and the editing keys, and the typed character otherwise. Anything
-/// this does not know is not sent, because a wrong byte is worse than none.
-fn keystroke_bytes(keystroke: &Keystroke) -> Option<String> {
-    let key = keystroke.key.as_str();
-    let modifiers = &keystroke.modifiers;
-
-    if modifiers.control && key.len() == 1 {
-        // ctrl-a is 0x01, and so on up the alphabet; ctrl-c is what stops a
-        // runaway command, which is the whole reason this branch exists.
-        let letter = key.chars().next()?.to_ascii_lowercase();
-        if letter.is_ascii_lowercase() {
-            return Some(((letter as u8 - b'a' + 1) as char).to_string());
-        }
-    }
-
-    let sequence = match key {
-        "enter" => "\r",
-        "tab" => "\t",
-        "backspace" => "\x7f",
-        "escape" => "\x1b",
-        "up" => "\x1b[A",
-        "down" => "\x1b[B",
-        "right" => "\x1b[C",
-        "left" => "\x1b[D",
-        "home" => "\x1b[H",
-        "end" => "\x1b[F",
-        "pageup" => "\x1b[5~",
-        "pagedown" => "\x1b[6~",
-        "delete" => "\x1b[3~",
-        "space" => " ",
-        _ => "",
-    };
-    if !sequence.is_empty() {
-        return Some(sequence.to_string());
-    }
-
-    // What the keyboard actually produced, which is what carries the layout
-    // and the shift state.
-    keystroke.key_char.clone().filter(|typed| !typed.is_empty())
+/// Draw one terminal cell without giving the view ownership of terminal state.
+fn terminal_cell(
+    cell: ginka_ui::terminal::ScreenCell,
+    tokens: &Tokens,
+    linked: bool,
+    selected: bool,
+) -> AnyElement {
+    div()
+        .when(cell.search_match, |this| {
+            this.bg(tokens.colors().accent.opacity(0.35))
+        })
+        .when(cell.cursor, |this| {
+            this.bg(tokens.colors().text_primary)
+                .text_color(tokens.colors().bg_terminal)
+        })
+        .when(!cell.cursor, |this| {
+            this.text_color(
+                cell.foreground
+                    .map(|colour| terminal_colour(colour, tokens))
+                    .unwrap_or(tokens.colors().text_primary),
+            )
+            .when_some(cell.background, |this, colour| {
+                this.bg(terminal_colour(colour, tokens))
+            })
+            .when(linked, |this| {
+                this.text_color(tokens.colors().accent).underline()
+            })
+        })
+        .when(cell.bold, |this| this.font_semibold())
+        .when(cell.italic, |this| this.italic())
+        .when(cell.underline, |this| this.underline())
+        .when(selected && !cell.cursor, |this| {
+            this.bg(tokens.colors().accent.opacity(0.45))
+        })
+        .child(if cell.text == ' ' {
+            // A space with no width is a hole in a painted bar.
+            SharedString::from("\u{00a0}")
+        } else {
+            SharedString::from(cell.text.to_string())
+        })
+        .into_any_element()
 }
 
 /// Re-read the workspaces and hand back the selected session, if any.
@@ -7122,7 +9311,7 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (showing, wants_changes, wants_usage) = this
+    let (showing, wants_changes, wants_usage, wants_history) = this
         .update(cx, |this, cx| {
             let open = this.surfaces.read(cx).open_surface();
             (
@@ -7132,11 +9321,25 @@ async fn pull_rows(
                 // opened is not worth that on every tick.
                 open == Some(ginka_ui::surface::Surface::Git),
                 open == Some(ginka_ui::surface::Surface::Reports),
+                open == Some(ginka_ui::surface::Surface::Git)
+                    && this.surfaces.read(cx).history_is_open(),
             )
         })
         .map_err(|_| ())?;
-    let (rows, projects, agents, accounts, plans, usage, checkpoints, changes, staged, comments) =
-        cx.background_spawn(async move {
+    let (
+        rows,
+        projects,
+        agents,
+        accounts,
+        plans,
+        usage,
+        checkpoints,
+        changes,
+        staged_changes,
+        comments,
+        history,
+    ) = cx
+        .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Separately from the workspaces: a project with no worktree is
             // still a heading a chat can be started under.
@@ -7157,15 +9360,21 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            let (changes, staged, comments) = match (&showing, wants_changes) {
+            let (changes, staged_changes, comments) = match (&showing, wants_changes) {
                 (Some(workspace), true) => (
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .changes(workspace, ginka_protocol::ChangeSource::Unstaged)
                         .await,
-                    listing.staged_paths(workspace).await,
+                    listing
+                        .changes(workspace, ginka_protocol::ChangeSource::Staged)
+                        .await,
                     listing.comments(workspace).await,
                 ),
-                _ => (None, Vec::new(), Vec::new()),
+                _ => (None, None, Vec::new()),
+            };
+            let history = match (&showing, wants_history) {
+                (Some(workspace), true) => listing.history(workspace, 50).await,
+                _ => Vec::new(),
             };
             (
                 rows,
@@ -7176,8 +9385,9 @@ async fn pull_rows(
                 usage,
                 checkpoints,
                 changes,
-                staged,
+                staged_changes,
                 comments,
+                history,
             )
         })
         .await;
@@ -7202,9 +9412,15 @@ async fn pull_rows(
             .update(cx, |sidebar, cx| sidebar.set_projects(listed, cx));
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
+                let staged = staged_changes
+                    .as_ref()
+                    .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())
+                    .unwrap_or_default();
                 surfaces.set_changes(changes, cx);
+                surfaces.set_staged_changes(staged_changes, cx);
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
+                surfaces.set_history(history, cx);
             });
         }
         this.sidebar
@@ -7246,6 +9462,29 @@ async fn pull_transcript(
         .map_err(|_| ())
 }
 
+/// Re-read one session's ordered follow-up queue after a push or navigation.
+async fn pull_queue(
+    this: &WeakEntity<Shell>,
+    link: &Arc<DaemonLink>,
+    session: SessionId,
+    cx: &mut AsyncApp,
+) -> Result<(), ()> {
+    let listing = link.clone();
+    let requested = session.clone();
+    let (messages, can_send_now) = cx
+        .background_spawn(async move { listing.queued_messages(&requested).await })
+        .await;
+    this.update(cx, |this, cx| {
+        if this.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&session) {
+            this.queued_messages = messages;
+            this.queue_can_send_now = can_send_now;
+            this.queue_error = None;
+            cx.notify();
+        }
+    })
+    .map_err(|_| ())
+}
+
 /// The mono family is a theme concern, not a per-view constant.
 trait MonoFont {
     fn theme_mono_font(&self) -> SharedString;
@@ -7262,6 +9501,11 @@ impl Render for Shell {
         // Before anything is measured: the tail on screen is whatever the
         // reveal has walked out so far.
         self.write_a_little_more(window);
+        if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_workspace(workspace, window, cx)
+            });
+        }
         // Copied out: the headers below bind listeners through `cx`, and a
         // borrow of the theme held across that is a borrow held across the
         // whole window.
@@ -7288,7 +9532,9 @@ impl Render for Shell {
                 .into_any_element()
         });
         let column_header = self.column_header(cx).into_any_element();
-        let centre = self.center(cx).into_any_element();
+        let selected_text = TextSelection::selected_text(window, cx);
+        let selected_text = ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned);
+        let centre = self.center(selected_text, cx).into_any_element();
 
         v_flex()
             .key_context(CONTEXT)
@@ -7299,6 +9545,8 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
+            .on_action(cx.listener(Self::on_next_terminal_tab))
+            .on_action(cx.listener(Self::on_previous_terminal_tab))
             .on_action(cx.listener(Self::on_navigate_back))
             .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))
@@ -7358,6 +9606,7 @@ impl Render for Shell {
                 ),
             )
             .children(self.palette_view(cx))
+            .children(self.image_markup_view(cx))
             .children(self.add_project_view(cx))
             .children(self.add_account_view(cx))
     }
@@ -7427,8 +9676,17 @@ impl Shell {
                                         .cursor_pointer()
                                         .hover(|this| this.bg(tokens.colors().row_hover()))
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            let selected_text = this
+                                                .palette
+                                                .as_ref()
+                                                .and_then(|palette| palette.selected_text.clone());
                                             this.palette = None;
-                                            this.run_command(command.clone(), window, cx);
+                                            this.run_command(
+                                                command.clone(),
+                                                selected_text.as_deref(),
+                                                window,
+                                                cx,
+                                            );
                                         }))
                                         .child(
                                             div()
@@ -7494,6 +9752,8 @@ struct Palette {
     typed: String,
     /// Which entry Return would run.
     chosen: usize,
+    /// Text selected before the palette took focus, retained for quote actions.
+    selected_text: Option<String>,
 }
 
 /// What the access chip and its rows call a mode.

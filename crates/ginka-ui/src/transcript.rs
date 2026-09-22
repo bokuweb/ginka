@@ -12,8 +12,139 @@
 //! detectable rather than silently swallowed.
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
-use ginka_protocol::{AgentEvent, SubagentStep, Usage};
+use ginka_protocol::{AgentEvent, ContextUsage, SubagentStep, TaskItem, TaskStatus, Usage};
+use std::path::Path;
 use std::time::{Duration, Instant};
+
+use crate::terminal::{TerminalFileLink, file_links};
+
+/// Markdown prepared for display with safe workspace file targets beside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkedMarkdown {
+    /// Markdown source containing internal `ginka-file:` links.
+    pub markdown: String,
+    /// Targets addressed by the numeric suffix of each internal link.
+    pub targets: Vec<TerminalFileLink>,
+}
+
+impl LinkedMarkdown {
+    /// Resolve one internal href without treating arbitrary URLs as files.
+    pub fn target(&self, href: &str) -> Option<&TerminalFileLink> {
+        let index = href.strip_prefix("ginka-file:")?.parse::<usize>().ok()?;
+        self.targets.get(index)
+    }
+}
+
+/// Link safe file locations in prose while leaving fenced code untouched.
+///
+/// The detector is shared with the terminal so both surfaces enforce the same
+/// daemon-host worktree boundary. Inline-code locations become linked code;
+/// fenced output remains copyable verbatim.
+pub fn link_file_locations(markdown: &str, worktree: &Path) -> LinkedMarkdown {
+    let mut output = String::with_capacity(markdown.len());
+    let mut targets = Vec::new();
+    let mut fence: Option<char> = None;
+
+    for line in markdown.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let trimmed = body.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some('`')
+        } else if trimmed.starts_with("~~~") {
+            Some('~')
+        } else {
+            None
+        };
+        if fence.is_some() || marker.is_some() {
+            output.push_str(body);
+            output.push_str(newline);
+            if let Some(marker) = marker {
+                fence = match fence {
+                    Some(open) if open == marker => None,
+                    None => Some(marker),
+                    open => open,
+                };
+            }
+            continue;
+        }
+
+        let characters = body.chars().collect::<Vec<_>>();
+        let protected = markdown_link_ranges(&characters);
+        let mut copied = 0;
+        for target in file_links(body, worktree) {
+            if protected
+                .iter()
+                .any(|(start, end)| target.columns.start < *end && target.columns.end > *start)
+            {
+                continue;
+            }
+            let mut start = target.columns.start;
+            let mut end = target.columns.end;
+            let inline_code = start > copied
+                && end < characters.len()
+                && characters[start - 1] == '`'
+                && characters[end] == '`';
+            if inline_code {
+                start -= 1;
+                end += 1;
+            }
+            if start < copied {
+                continue;
+            }
+            output.extend(characters[copied..start].iter());
+            let label = characters[start..end].iter().collect::<String>();
+            let index = targets.len();
+            output.push('[');
+            output.push_str(&label.replace(']', "\\]"));
+            output.push_str("](ginka-file:");
+            output.push_str(&index.to_string());
+            output.push(')');
+            copied = end;
+            targets.push(target);
+        }
+        output.extend(characters[copied..].iter());
+        output.push_str(newline);
+    }
+
+    LinkedMarkdown {
+        markdown: output,
+        targets,
+    }
+}
+
+fn markdown_link_ranges(characters: &[char]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut cursor = 0;
+    while cursor < characters.len() {
+        if characters[cursor] != '[' {
+            cursor += 1;
+            continue;
+        }
+        let Some(label_end) = characters[cursor + 1..]
+            .iter()
+            .position(|character| *character == ']')
+            .map(|offset| cursor + 1 + offset)
+        else {
+            break;
+        };
+        if characters.get(label_end + 1) != Some(&'(') {
+            cursor = label_end + 1;
+            continue;
+        }
+        let Some(destination_end) = characters[label_end + 2..]
+            .iter()
+            .position(|character| *character == ')')
+            .map(|offset| label_end + 2 + offset)
+        else {
+            break;
+        };
+        ranges.push((cursor, destination_end + 1));
+        cursor = destination_end + 1;
+    }
+    ranges
+}
 
 /// One drawable piece of a transcript.
 #[derive(Debug, Clone, PartialEq)]
@@ -33,6 +164,11 @@ pub enum Block {
         /// `None` while the tool is still running.
         output: Option<String>,
         is_error: bool,
+    },
+    /// The newest complete snapshot from an agent-maintained task list.
+    Tasks {
+        /// Provider-neutral rows in the order chosen by the agent.
+        items: Vec<TaskItem>,
     },
     /// A delegated agent and the bounded trail of work it reported.
     Subagent {
@@ -71,6 +207,14 @@ pub enum Block {
         turn: u32,
         /// The inclusive transcript position copied by a fork from here.
         seq: u64,
+        /// Provider that ran this turn, retained independently of later turns.
+        provider: Option<String>,
+        /// Requested or provider-reported model for this turn.
+        model: Option<String>,
+        /// Requested reasoning level for this turn.
+        reasoning_effort: Option<String>,
+        /// Requested service tier for this turn.
+        service_tier: Option<String>,
     },
     /// How the session ended.
     Outcome {
@@ -105,6 +249,11 @@ pub struct Transcript {
     positions: Vec<Option<usize>>,
     cursor: u64,
     usage: Usage,
+    context_usage: Option<ContextUsage>,
+    turn_provider: Option<String>,
+    turn_model: Option<String>,
+    turn_reasoning_effort: Option<String>,
+    turn_service_tier: Option<String>,
 }
 
 impl Transcript {
@@ -203,6 +352,12 @@ impl Transcript {
             }) => Activity::Running {
                 tool: title.clone(),
             },
+            Some(Block::Tasks { items }) => items
+                .iter()
+                .find(|item| item.status == TaskStatus::InProgress)
+                .map_or(Activity::Thinking, |item| Activity::Running {
+                    tool: item.label.clone(),
+                }),
             _ => Activity::Thinking,
         }
     }
@@ -213,6 +368,12 @@ impl Transcript {
     /// middle of the conversation.
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// The latest provider-reported context occupancy, kept apart from
+    /// cumulative session accounting because compaction can reduce it.
+    pub fn context_usage(&self) -> Option<ContextUsage> {
+        self.context_usage
     }
 
     /// Fold one entry in.
@@ -271,6 +432,9 @@ impl Transcript {
             // keeps the kind as its label and the title as the line the reader
             // scans.
             AgentEvent::ToolCall { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    return self.upsert_tasks(tasks.clone());
+                }
                 self.blocks.push(Block::Tool {
                     id: activity.id.clone().unwrap_or_default(),
                     name: activity.kind_str().to_string(),
@@ -280,11 +444,17 @@ impl Transcript {
                 });
                 Some(self.blocks.len() - 1)
             }
-            AgentEvent::ToolResult { activity } => self.attach_result(
-                activity.id.as_deref().unwrap_or_default(),
-                activity.detail.as_deref().unwrap_or_default(),
-                activity.failed,
-            ),
+            AgentEvent::ToolResult { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    self.upsert_tasks(tasks.clone())
+                } else {
+                    self.attach_result(
+                        activity.id.as_deref().unwrap_or_default(),
+                        activity.detail.as_deref().unwrap_or_default(),
+                        activity.failed,
+                    )
+                }
+            }
             AgentEvent::SubagentStarted { id, title } => {
                 self.blocks.push(Block::Subagent {
                     id: id.clone(),
@@ -339,9 +509,20 @@ impl Transcript {
                 self.usage = *usage;
                 None
             }
+            AgentEvent::ContextUsage { usage } => {
+                self.context_usage = Some(*usage);
+                None
+            }
             AgentEvent::PlanUsage { .. } => None,
             AgentEvent::TurnEnd { turn } => {
-                self.blocks.push(Block::TurnEnd { turn: *turn, seq });
+                self.blocks.push(Block::TurnEnd {
+                    turn: *turn,
+                    seq,
+                    provider: self.turn_provider.take(),
+                    model: self.turn_model.take(),
+                    reasoning_effort: self.turn_reasoning_effort.take(),
+                    service_tier: self.turn_service_tier.take(),
+                });
                 Some(self.blocks.len() - 1)
             }
             AgentEvent::SessionResult { state, summary } => {
@@ -356,10 +537,28 @@ impl Transcript {
             AgentEvent::Unsupported { shape } => {
                 self.append_text(&format!("(not understood: {shape})"))
             }
+            AgentEvent::TurnStarted {
+                provider,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => {
+                self.turn_provider.clone_from(provider);
+                self.turn_model.clone_from(model);
+                self.turn_reasoning_effort.clone_from(reasoning_effort);
+                self.turn_service_tier.clone_from(service_tier);
+                None
+            }
+            // The provider's own answer wins over a requested alias. Keep the
+            // supervisor's model when a connection event names none.
+            AgentEvent::Connected { model, .. } => {
+                if model.is_some() {
+                    self.turn_model.clone_from(model);
+                }
+                None
+            }
             // Session bookkeeping the conversation does not render.
-            AgentEvent::Connected { .. }
-            | AgentEvent::Commands { .. }
-            | AgentEvent::TurnStarted
+            AgentEvent::Commands { .. }
             | AgentEvent::SteerAccepted
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::AgentTitle { .. }
@@ -456,6 +655,25 @@ impl Transcript {
                 Some(self.blocks.len() - 1)
             }
         }
+    }
+
+    /// Replace the current turn's task snapshot, or start its one task card.
+    fn upsert_tasks(&mut self, items: Vec<TaskItem>) -> Option<usize> {
+        let boundary = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::TurnEnd { .. }))
+            .map_or(0, |index| index + 1);
+        if let Some(index) = self.blocks[boundary..]
+            .iter()
+            .rposition(|block| matches!(block, Block::Tasks { .. }))
+            .map(|index| boundary + index)
+        {
+            self.blocks[index] = Block::Tasks { items };
+            return Some(index);
+        }
+        self.blocks.push(Block::Tasks { items });
+        Some(self.blocks.len() - 1)
     }
 
     /// Number of delegated-agent steps retained in one drawable row.
@@ -716,6 +934,56 @@ pub fn settled(text: &str) -> (&str, &str) {
     text.split_at(cut)
 }
 
+/// Choose the exact selected range for quoting, or the owning message.
+///
+/// Window text selection is allowed to contain leading and trailing space;
+/// only an all-whitespace selection is treated as absent.
+pub fn quote_target<'a>(message: &'a str, selection: &'a str) -> &'a str {
+    if selection.trim().is_empty() {
+        message
+    } else {
+        selection
+    }
+}
+
+/// Return an exact selection only when quoting it would add meaningful text.
+pub fn selected_quote(selection: &str) -> Option<&str> {
+    (!selection.trim().is_empty()).then_some(selection)
+}
+
+/// Completed and total actionable tasks for a compact progress label.
+///
+/// Cancelled work remains visible in the card but is not work left to finish.
+pub fn task_progress(items: &[TaskItem]) -> (usize, usize) {
+    let completed = items
+        .iter()
+        .filter(|item| item.status == TaskStatus::Completed)
+        .count();
+    let total = items
+        .iter()
+        .filter(|item| item.status != TaskStatus::Cancelled)
+        .count();
+    (completed, total)
+}
+
+/// One compact provenance label for a completed turn.
+///
+/// Empty legacy fields disappear rather than leaving punctuation behind.
+pub fn turn_provenance(
+    provider: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+) -> Option<String> {
+    let parts = [provider, model, reasoning_effort, service_tier]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// Whether to pull the transcript to its foot, and whether it is still
 /// following.
 ///
@@ -754,6 +1022,88 @@ mod tests {
     use ginka_protocol::event::ActivityItem;
     use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn quoting_prefers_the_exact_selected_range_and_falls_back_to_the_message() {
+        assert_eq!(
+            quote_target("the whole answer", "chosen words"),
+            "chosen words"
+        );
+        assert_eq!(
+            quote_target("the whole answer", "  chosen words  \n"),
+            "  chosen words  \n"
+        );
+        assert_eq!(
+            quote_target("the whole answer", " \n\t"),
+            "the whole answer"
+        );
+    }
+
+    #[test]
+    fn the_selection_quote_action_exists_only_for_meaningful_text() {
+        assert_eq!(
+            selected_quote("  exact range  \n"),
+            Some("  exact range  \n")
+        );
+        assert_eq!(selected_quote(" \n\t"), None);
+        assert_eq!(selected_quote(""), None);
+    }
+
+    #[test]
+    fn prose_file_locations_become_internal_markdown_links() {
+        let linked = link_file_locations(
+            "See src/main.rs:12:3 and `crates/ginka-ui/src/lib.rs:8`.",
+            Path::new("/work/ginka"),
+        );
+
+        assert_eq!(
+            linked.markdown,
+            "See [src/main.rs:12:3](ginka-file:0) and [`crates/ginka-ui/src/lib.rs:8`](ginka-file:1)."
+        );
+        assert_eq!(linked.targets.len(), 2);
+        assert_eq!(linked.targets[0].path, "src/main.rs");
+        assert_eq!(linked.targets[0].line, Some(12));
+        assert_eq!(linked.targets[0].column, Some(3));
+        assert_eq!(linked.target("ginka-file:1").unwrap().line, Some(8));
+        assert!(linked.target("https://example.test").is_none());
+    }
+
+    #[test]
+    fn fenced_code_and_existing_markdown_links_are_not_rewritten() {
+        let source = "[docs](https://example.test/src/main.rs:1) [guide](docs/readme.md)\n\n```text\nsrc/main.rs:2\n```\n";
+        let linked = link_file_locations(source, Path::new("/work/ginka"));
+
+        assert_eq!(linked.markdown, source);
+        assert!(linked.targets.is_empty());
+    }
+
+    #[test]
+    fn transcript_file_links_share_the_terminal_workspace_boundary() {
+        let linked = link_file_locations(
+            "../secret.txt:1 /elsewhere/secret.txt:2 https://example.test/a.rs:3",
+            Path::new("/work/ginka"),
+        );
+
+        assert!(linked.targets.is_empty());
+        assert_eq!(
+            linked.markdown,
+            "../secret.txt:1 /elsewhere/secret.txt:2 https://example.test/a.rs:3"
+        );
+    }
+
+    #[test]
+    fn versions_and_domain_names_are_not_presented_as_files() {
+        let source = "Version 1.2 fixes example.com while README.md has details.";
+        let linked = link_file_locations(source, Path::new("/work/ginka"));
+
+        assert_eq!(
+            linked.markdown,
+            "Version 1.2 fixes example.com while [README.md](ginka-file:0) has details."
+        );
+        assert_eq!(linked.targets.len(), 1);
+        assert_eq!(linked.targets[0].path, "README.md");
+    }
 
     fn user(seq: u64, text: &str) -> TranscriptEntry {
         TranscriptEntry {
@@ -947,6 +1297,62 @@ mod tests {
                 is_error: false,
             }
         );
+    }
+
+    #[test]
+    fn task_updates_replace_the_live_card_and_hide_provider_tool_chrome() {
+        let task_activity = |id: &str, tasks: serde_json::Value| {
+            ActivityItem::from_tool(Some(id.into()), "TodoWrite", &json!({ "todos": tasks }))
+        };
+        let first = task_activity(
+            "tasks-1",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "in_progress"}
+            ]),
+        );
+        let second = task_activity(
+            "tasks-2",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "completed"},
+                {"content": "Verify", "status": "pending"}
+            ]),
+        );
+        let mut result = second.clone();
+        result.complete_with("tasks updated", false);
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(1, AgentEvent::ToolCall { activity: first }),
+            agent(2, AgentEvent::ToolCall { activity: second }),
+            agent(3, AgentEvent::ToolResult { activity: result }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::Tasks {
+                items: vec![
+                    TaskItem::new("Inspect", TaskStatus::Completed),
+                    TaskItem::new("Implement", TaskStatus::Completed),
+                    TaskItem::new("Verify", TaskStatus::Pending),
+                ],
+            }]
+        );
+        assert_eq!(transcript.block_index_for_seq(1), Some(0));
+        assert_eq!(transcript.block_index_for_seq(2), Some(0));
+        assert_eq!(transcript.block_index_for_seq(3), Some(0));
+    }
+
+    #[test]
+    fn task_progress_excludes_cancelled_work_from_the_completion_count() {
+        let items = vec![
+            TaskItem::new("Done", TaskStatus::Completed),
+            TaskItem::new("Current", TaskStatus::InProgress),
+            TaskItem::new("Later", TaskStatus::Pending),
+            TaskItem::new("Skipped", TaskStatus::Cancelled),
+        ];
+
+        assert_eq!(task_progress(&items), (1, 3));
     }
 
     #[test]
@@ -1196,6 +1602,34 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_stays_out_of_the_conversation_and_keeps_the_latest_reading() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            text(1, "done"),
+            agent(
+                2,
+                AgentEvent::ContextUsage {
+                    usage: ContextUsage {
+                        used_tokens: 32_000,
+                        window_tokens: 128_000,
+                        can_compact: true,
+                    },
+                },
+            ),
+        ]);
+
+        assert_eq!(transcript.blocks().len(), 1);
+        assert_eq!(
+            transcript.context_usage(),
+            Some(ContextUsage {
+                used_tokens: 32_000,
+                window_tokens: 128_000,
+                can_compact: true,
+            })
+        );
+    }
+
+    #[test]
     fn turn_boundaries_and_outcomes_are_drawn() {
         let mut transcript = Transcript::new();
         transcript.extend(&[
@@ -1211,7 +1645,14 @@ mod tests {
         assert_eq!(
             transcript.blocks(),
             &[
-                Block::TurnEnd { turn: 1, seq: 1 },
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 1,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
                 Block::Outcome {
                     state: SessionState::Finished,
                     summary: Some("done".into()),
@@ -1221,11 +1662,81 @@ mod tests {
     }
 
     #[test]
+    fn each_turn_keeps_the_provider_and_model_that_actually_started_it() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::TurnStarted {
+                    provider: Some("claude".into()),
+                    model: Some("sonnet".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::Connected {
+                    session_id: Some("vendor-1".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                },
+            ),
+            agent(3, AgentEvent::TurnEnd { turn: 1 }),
+            agent(
+                4,
+                AgentEvent::TurnStarted {
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ),
+            agent(5, AgentEvent::TurnEnd { turn: 2 }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 3,
+                    provider: Some("claude".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+                Block::TurnEnd {
+                    turn: 2,
+                    seq: 5,
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            turn_provenance(Some("codex"), Some("gpt-5.4"), Some("high"), Some("fast")).as_deref(),
+            Some("codex · gpt-5.4 · high · fast")
+        );
+    }
+
+    #[test]
     fn a_turn_boundary_keeps_the_transcript_position_used_by_a_fork() {
         let mut transcript = Transcript::new();
         transcript.apply(&agent(1, AgentEvent::TurnEnd { turn: 3 }));
 
-        assert_eq!(transcript.blocks(), &[Block::TurnEnd { turn: 3, seq: 1 }]);
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::TurnEnd {
+                turn: 3,
+                seq: 1,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+            }]
+        );
     }
 
     #[test]

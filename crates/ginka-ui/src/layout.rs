@@ -123,6 +123,14 @@ impl Layout {
             .workspace_layouts
             .get(&workspace.0)
             .and_then(|saved| saved.active_surface.clone());
+        let terminal_split = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.terminal_split.clone());
+        let terminal_active = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.terminal_active.clone());
         settings.workspace_layouts.insert(
             workspace.0.clone(),
             WorkspaceLayoutSettings {
@@ -131,6 +139,8 @@ impl Layout {
                 terminal_dock_open: self.dock_open,
                 terminal_dock_height: self.dock_height,
                 active_surface,
+                terminal_split,
+                terminal_active,
             },
         );
         settings.sidebar_open = self.sidebar_open;
@@ -369,6 +379,8 @@ mod tests {
                 terminal_dock_open: true,
                 terminal_dock_height: 180.0,
                 active_surface: Some("files".into()),
+                terminal_split: None,
+                terminal_active: None,
             },
         );
         let workspace = WorkspaceId("comet/main".into());
@@ -388,6 +400,8 @@ mod tests {
             "comet/main".into(),
             WorkspaceLayoutSettings {
                 active_surface: Some("files".into()),
+                terminal_split: Some(["left".into(), "right".into()]),
+                terminal_active: Some("right".into()),
                 ..WorkspaceLayoutSettings::default()
             },
         );
@@ -397,6 +411,8 @@ mod tests {
             terminal_dock_open: true,
             terminal_dock_height: 300.0,
             active_surface: Some("git".into()),
+            terminal_split: None,
+            terminal_active: None,
         };
         settings
             .workspace_layouts
@@ -410,6 +426,8 @@ mod tests {
 
         let saved = settings.workspace_layouts.get(&workspace.0).unwrap();
         assert_eq!(saved.active_surface.as_deref(), Some("files"));
+        assert_eq!(saved.terminal_split, Some(["left".into(), "right".into()]));
+        assert_eq!(saved.terminal_active.as_deref(), Some("right"));
         assert_eq!(saved.right_panel_width, 510.0);
         assert_eq!(settings.workspace_layouts.get("comet/review"), Some(&other));
     }

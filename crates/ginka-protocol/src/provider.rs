@@ -188,8 +188,8 @@ pub struct SessionOptions {
     pub reasoning_effort: Option<String>,
     pub service_tier: Option<String>,
     pub access_mode: AccessMode,
-    /// Which login the session runs on; `None` is the provider's default
-    /// (`docs/accounts.md` §5).
+    /// Which login the session runs on; `None` asks the caller to resolve the
+    /// provider's active account (`docs/accounts.md` §5).
     pub account: Option<crate::ids::AccountId>,
 }
 
