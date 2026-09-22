@@ -8,6 +8,7 @@ pub mod account;
 pub mod agent;
 pub mod attachment;
 pub mod blob;
+pub mod browser;
 pub mod checkpoint;
 pub mod commands;
 pub mod comments;
