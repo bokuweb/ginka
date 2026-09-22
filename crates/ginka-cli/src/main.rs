@@ -161,6 +161,14 @@ enum Command {
         #[arg(long)]
         patch: bool,
     },
+    /// Show recent commits in a workspace, newest first.
+    History {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Maximum commits to print.
+        #[arg(long, default_value_t = 50)]
+        limit: u32,
+    },
     /// Leave comments on a diff and send them back to the agent.
     #[command(subcommand)]
     Review(ReviewCommand),
@@ -964,6 +972,10 @@ fn request_for(command: Command) -> Result<Request> {
                 (false, None) => ChangeSource::Uncommitted,
             },
         },
+        Command::History { workspace, limit } => Request::WorkspaceHistory {
+            workspace: WorkspaceId(workspace),
+            limit: Some(limit),
+        },
         Command::Session(SessionCommand::List { workspace }) => Request::ListSessions {
             workspace: workspace.map(WorkspaceId),
             origin: None,
@@ -1288,6 +1300,17 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::History { commits } => {
+            for commit in commits {
+                println!(
+                    "{}\t{}\t{}\t{}",
+                    commit.id.chars().take(8).collect::<String>(),
+                    commit.authored_at,
+                    commit.author,
+                    commit.summary
+                );
+            }
+        }
         Response::Files { files } => {
             for file in files {
                 println!("{}", file.path);

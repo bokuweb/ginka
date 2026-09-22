@@ -575,6 +575,12 @@ impl Service {
                     changes: Changes { source, files },
                 })
             }
+            Request::WorkspaceHistory { workspace, limit } => {
+                let worktree = self.worktree(&workspace)?;
+                let limit = limit.unwrap_or(50).min(200) as usize;
+                let commits = git::history(&worktree.path, limit).map_err(failed)?;
+                Ok(Response::History { commits })
+            }
             Request::Commit {
                 workspace,
                 message,

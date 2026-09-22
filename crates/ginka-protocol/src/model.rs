@@ -782,6 +782,25 @@ pub struct FileChange {
     pub hunks: Vec<Hunk>,
 }
 
+/// One commit in a workspace's recent history.
+///
+/// Parent ids are retained so a client can draw branch and merge topology
+/// without interpreting presentation text from `git log`.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GitCommit {
+    /// Full object id of the commit.
+    pub id: String,
+    /// Full object ids of its parents, empty for a root commit.
+    pub parents: Vec<String>,
+    /// Author name recorded in the commit.
+    pub author: String,
+    /// Author time as Unix seconds.
+    pub authored_at: i64,
+    /// First line of the commit message.
+    pub summary: String,
+}
+
 impl FileChange {
     /// The path to show: a rename is best read as `old → new`.
     pub fn label(&self) -> String {

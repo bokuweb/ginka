@@ -300,6 +300,8 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 
 The Git surface keeps Pull and Push visible even when the worktree is clean. Pull is a daemon-owned fast-forward-only operation; dirty or diverged branches leave the worktree untouched and show the refusal inline without clearing a commit-message draft.
 
+History beside those controls expands a bounded newest-first commit list without hiding the current diff. Rows show the short object id, subject, author and relative age; the daemon also carries full parent ids so a future branch graph is a rendering change rather than a protocol redesign.
+
 ## 4. Component mapping
 
 | Region | Component source |

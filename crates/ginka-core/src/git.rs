@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
 pub use ginka_protocol::model::BranchStatus;
-use ginka_protocol::model::{ChangeSource, FileChange};
+use ginka_protocol::model::{ChangeSource, FileChange, GitCommit};
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -503,6 +503,61 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
     };
 
     Ok(crate::diff::parse(&patch))
+}
+
+/// Read recent commits newest first, retaining enough topology for a graph.
+///
+/// `limit` is capped because this crosses the daemon boundary and the Git
+/// surface is a recent-history reader, not an unbounded repository export.
+pub fn history(worktree: &Path, limit: usize) -> Result<Vec<GitCommit>> {
+    let limit = limit.min(200);
+    if limit == 0 || head_commit(worktree).is_none() {
+        return Ok(Vec::new());
+    }
+    let max_count = format!("--max-count={limit}");
+    let output = git(
+        worktree,
+        &[
+            "log",
+            &max_count,
+            "--no-color",
+            "--format=%H%x1f%P%x1f%an%x1f%at%x1f%s%x1e",
+        ],
+    )?;
+    output
+        .split('\x1e')
+        .filter_map(|record| {
+            let record = record.trim();
+            (!record.is_empty()).then_some(record)
+        })
+        .map(|record| {
+            let mut fields = record.splitn(5, '\x1f');
+            let id = fields.next().unwrap_or_default().to_string();
+            let parents = fields
+                .next()
+                .unwrap_or_default()
+                .split_whitespace()
+                .map(str::to_string)
+                .collect();
+            let author = fields.next().unwrap_or_default().to_string();
+            let authored_at = fields
+                .next()
+                .unwrap_or_default()
+                .parse::<i64>()
+                .context("parsing git commit author time")?;
+            let summary = fields.next().unwrap_or_default().to_string();
+            if id.is_empty() {
+                bail!("git log returned a commit without an object id");
+            }
+            Ok(GitCommit {
+                id,
+                parents,
+                author,
+                authored_at,
+                summary,
+            })
+        })
+        .collect()
 }
 
 /// Everything that has changed since `commit`, including untracked files.
@@ -1343,6 +1398,37 @@ prunable
 
         assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap(), local_head);
         assert!(!local.join("remote.txt").exists());
+    }
+
+    #[test]
+    fn history_is_newest_first_and_keeps_parent_topology() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let first = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(root.join("second.txt"), "second\n").unwrap();
+        git(&root, &["add", "second.txt"]).unwrap();
+        git(&root, &["commit", "-m", "second change"]).unwrap();
+        let second = git(&root, &["rev-parse", "HEAD"]).unwrap();
+
+        let commits = history(&root, 20).unwrap();
+
+        assert_eq!(commits.len(), 2);
+        assert_eq!(commits[0].id, second);
+        assert_eq!(commits[0].parents.as_slice(), std::slice::from_ref(&first));
+        assert_eq!(commits[0].summary, "second change");
+        assert_eq!(commits[0].author, "Test");
+        assert!(commits[0].authored_at > 0);
+        assert_eq!(commits[1].id, first);
+        assert!(commits[1].parents.is_empty());
+    }
+
+    #[test]
+    fn history_is_empty_before_the_first_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--initial-branch=main"]).unwrap();
+
+        assert!(history(dir.path(), 20).unwrap().is_empty());
     }
 
     #[test]

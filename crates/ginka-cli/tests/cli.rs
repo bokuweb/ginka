@@ -333,6 +333,28 @@ fn changes_are_readable_from_the_command_line() {
 }
 
 #[test]
+fn recent_history_is_readable_from_the_command_line() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let history = home.ok(&["history", "comet/main", "--limit", "1"]);
+    assert!(history.contains("Test"), "{history}");
+    assert!(history.contains("first"), "{history}");
+
+    let json = home.ok(&["--json", "history", "comet/main", "--limit", "1"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["result"], serde_json::json!("history"));
+    assert_eq!(parsed["commits"].as_array().unwrap().len(), 1);
+    assert!(
+        parsed["commits"][0]["parents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
 fn work_can_be_committed_once_it_has_been_read() {
     // The other half of the review loop: read the diff, then commit it,
     // without leaving the tool.

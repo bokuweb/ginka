@@ -231,6 +231,18 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_history",
+            description: "Read a workspace's recent commit history with parent topology.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "limit": {"type": "integer", "minimum": 0, "maximum": 200},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_commit",
             description: "Commit a workspace's work.",
             schema: json!({
@@ -512,6 +524,10 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 None if flag("staged") => ginka_protocol::model::ChangeSource::Staged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_history" => Request::WorkspaceHistory {
+            workspace: WorkspaceId(text("workspace")?),
+            limit: number("limit").map(|limit| limit as u32),
         },
         "ginka_commit" => Request::Commit {
             workspace: WorkspaceId(text("workspace")?),

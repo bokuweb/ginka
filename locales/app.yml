@@ -706,6 +706,15 @@ surface.git.push:
 surface.git.push_tooltip:
   en: Push this branch and create its upstream when needed
   ja: branchをpushし、必要ならupstreamを作成する
+surface.git.history:
+  en: History
+  ja: 履歴
+surface.git.history_tooltip:
+  en: Show or hide recent commits
+  ja: 最近のcommitを表示・非表示
+surface.git.history_empty:
+  en: No commits yet
+  ja: commitはまだありません
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"

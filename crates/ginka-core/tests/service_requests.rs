@@ -803,6 +803,36 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
+fn workspace_history_crosses_the_service_with_its_bound() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "history-reader".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let worktree = &workspace.worktree.path;
+    std::fs::write(worktree.join("second.txt"), "second\n").unwrap();
+    support::git(worktree, &["add", "second.txt"]);
+    support::git(worktree, &["commit", "-m", "second"]);
+
+    let commits = match fixture.ask(Request::WorkspaceHistory {
+        workspace: workspace.id(),
+        limit: Some(1),
+    }) {
+        Response::History { commits } => commits,
+        other => panic!("expected history, got {other:?}"),
+    };
+
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].summary, "second");
+    assert_eq!(commits[0].parents.len(), 1);
+}
+
+#[test]
 fn a_branch_can_be_listed_and_checked_out_without_re_keying_the_workspace() {
     // Rule 4: the id derives from the immutable name, so an agent — or a
     // person — switching branches inside a worktree changes the branch

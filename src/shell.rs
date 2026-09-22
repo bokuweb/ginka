@@ -518,6 +518,7 @@ impl Shell {
                 }
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
+                crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -1668,6 +1669,22 @@ impl Shell {
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
             });
+        })
+        .detach();
+    }
+
+    /// Refresh bounded history only while the reader has expanded it.
+    fn refresh_history(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let history = cx
+                .background_spawn(async move { link.history(&workspace, 50).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_history(history, cx));
         })
         .detach();
     }
@@ -8395,7 +8412,7 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (showing, wants_changes, wants_usage) = this
+    let (showing, wants_changes, wants_usage, wants_history) = this
         .update(cx, |this, cx| {
             let open = this.surfaces.read(cx).open_surface();
             (
@@ -8405,11 +8422,25 @@ async fn pull_rows(
                 // opened is not worth that on every tick.
                 open == Some(ginka_ui::surface::Surface::Git),
                 open == Some(ginka_ui::surface::Surface::Reports),
+                open == Some(ginka_ui::surface::Surface::Git)
+                    && this.surfaces.read(cx).history_is_open(),
             )
         })
         .map_err(|_| ())?;
-    let (rows, projects, agents, accounts, plans, usage, checkpoints, changes, staged, comments) =
-        cx.background_spawn(async move {
+    let (
+        rows,
+        projects,
+        agents,
+        accounts,
+        plans,
+        usage,
+        checkpoints,
+        changes,
+        staged,
+        comments,
+        history,
+    ) = cx
+        .background_spawn(async move {
             let rows = listing.workspaces(crate::daemon::now()).await;
             // Separately from the workspaces: a project with no worktree is
             // still a heading a chat can be started under.
@@ -8440,6 +8471,10 @@ async fn pull_rows(
                 ),
                 _ => (None, Vec::new(), Vec::new()),
             };
+            let history = match (&showing, wants_history) {
+                (Some(workspace), true) => listing.history(workspace, 50).await,
+                _ => Vec::new(),
+            };
             (
                 rows,
                 projects,
@@ -8451,6 +8486,7 @@ async fn pull_rows(
                 changes,
                 staged,
                 comments,
+                history,
             )
         })
         .await;
@@ -8478,6 +8514,7 @@ async fn pull_rows(
                 surfaces.set_changes(changes, cx);
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
+                surfaces.set_history(history, cx);
             });
         }
         this.sidebar

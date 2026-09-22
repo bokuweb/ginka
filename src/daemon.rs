@@ -476,6 +476,24 @@ impl DaemonLink {
         }
     }
 
+    /// Recent workspace commits, newest first and bounded by the daemon.
+    pub async fn history(
+        &self,
+        workspace: &WorkspaceId,
+        limit: u32,
+    ) -> Vec<ginka_protocol::model::GitCommit> {
+        match self
+            .ask(Request::WorkspaceHistory {
+                workspace: workspace.clone(),
+                limit: Some(limit),
+            })
+            .await
+        {
+            Some(Response::History { commits }) => commits,
+            _ => Vec::new(),
+        }
+    }
+
     /// Put a file into the next commit, or take it back out.
     /// Register a repository or folder.
     ///

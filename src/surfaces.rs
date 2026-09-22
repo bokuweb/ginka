@@ -6,8 +6,8 @@
 //! `DockArea` so surfaces can be dragged, split and persisted per workspace.
 
 use ginka_protocol::model::{
-    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, LineKind, Skill, SkillScope,
-    WorkspaceContentMatch, WorkspaceFileMatch,
+    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, GitCommit, LineKind, Skill,
+    SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
@@ -27,6 +27,7 @@ use gpui_component::input::{
     Editor, EditorState, Input, InputEvent, InputState, Replace, Search, TabSize, Textarea,
     TextareaState,
 };
+use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
 use std::rc::Rc;
@@ -49,6 +50,10 @@ pub struct SurfacePanel {
     open: Option<Surface>,
     /// What the workspace on screen has changed, as the shell last read it.
     changes: Option<Changes>,
+    /// Recent commits for the selected workspace, already bounded by the daemon.
+    history: Vec<GitCommit>,
+    /// Whether the reader asked to see recent commits above the current diff.
+    history_open: bool,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -147,6 +152,8 @@ pub enum SurfaceEvent {
     Pull,
     /// Push the workspace branch, creating its upstream when needed.
     Push,
+    /// Refresh recent commits after the reader expands history.
+    RefreshHistory,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -241,6 +248,8 @@ impl SurfacePanel {
             local_paths,
             open: None,
             changes: None,
+            history: Vec::new(),
+            history_open: false,
             expanded: None,
             comments: Vec::new(),
             commenting: None,
@@ -853,6 +862,11 @@ impl SurfacePanel {
         self.open
     }
 
+    /// Whether periodic refresh should include recent commit history.
+    pub fn history_is_open(&self) -> bool {
+        self.history_open
+    }
+
     /// Hand the panel what changed. Called from the shell's refresh.
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
@@ -865,6 +879,14 @@ impl SurfacePanel {
                 self.expanded = None;
             }
             self.changes = changes;
+            cx.notify();
+        }
+    }
+
+    /// Hand the Git surface the selected workspace's recent commits.
+    pub fn set_history(&mut self, history: Vec<GitCommit>, cx: &mut Context<Self>) {
+        if self.history != history {
+            self.history = history;
             cx.notify();
         }
     }
@@ -991,6 +1013,7 @@ impl SurfacePanel {
             return v_flex()
                 .flex_1()
                 .child(self.git_remote_actions(cx))
+                .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .child(
                     div()
                         .flex_1()
@@ -1010,6 +1033,7 @@ impl SurfacePanel {
             .flex_1()
             .overflow_y_scroll()
             .child(self.git_remote_actions(cx))
+            .when(self.history_open, |this| this.child(self.git_history(cx)))
             .child(
                 h_flex()
                     .w_full()
@@ -1054,6 +1078,7 @@ impl SurfacePanel {
     /// Remote operations stay visible even when the worktree is clean.
     fn git_remote_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let history_open = self.history_open;
         h_flex()
             .w_full()
             .px_3()
@@ -1077,6 +1102,86 @@ impl SurfacePanel {
                     .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
             )
+            .child(
+                Button::new("git-history")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.history").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.history_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.history_open = !history_open;
+                        if this.history_open {
+                            cx.emit(SurfaceEvent::RefreshHistory);
+                        }
+                        cx.notify();
+                    })),
+            )
+    }
+
+    /// Recent commits, with topology retained for the future graph renderer.
+    fn git_history(&self, cx: &App) -> impl IntoElement {
+        let tokens = Tokens::global(cx);
+        let now = crate::daemon::now();
+        v_flex()
+            .w_full()
+            .max_h(px(260.))
+            .overflow_y_scrollbar()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .when(self.history.is_empty(), |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.history_empty").to_string()),
+                )
+            })
+            .children(self.history.iter().map(|commit| {
+                let short = commit.id.chars().take(8).collect::<String>();
+                let topology = if commit.parents.len() > 1 {
+                    "◆"
+                } else {
+                    "●"
+                };
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().accent)
+                            .child(topology),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_secondary)
+                                    .truncate()
+                                    .child(commit.summary.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(format!(
+                                        "{} · {} · {}",
+                                        short,
+                                        commit.author,
+                                        ginka_ui::workspace::relative_age(now, commit.authored_at)
+                                    )),
+                            ),
+                    )
+            }))
     }
 
     /// The batch of comments, and the way to send it.

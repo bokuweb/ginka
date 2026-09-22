@@ -8,9 +8,10 @@
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
     Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint,
-    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, PlanSnapshot, Project,
-    ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand, TerminalInfo,
-    TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch, WorkspaceSummary,
+    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, GitCommit, PlanSnapshot,
+    Project, ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand,
+    TerminalInfo, TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch,
+    WorkspaceSummary,
 };
 use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -225,6 +226,13 @@ pub enum Request {
     WorkspaceChanges {
         workspace: WorkspaceId,
         source: ChangeSource,
+    },
+    /// Recent commits in a workspace, newest first and bounded by the daemon.
+    WorkspaceHistory {
+        workspace: WorkspaceId,
+        /// Maximum rows to return; defaults to 50 and never exceeds 200.
+        #[serde(default)]
+        limit: Option<u32>,
     },
 
     /// Commit a workspace's work.
@@ -538,6 +546,10 @@ pub enum Response {
     Changes {
         changes: Changes,
     },
+    /// Recent commits in newest-first order.
+    History {
+        commits: Vec<GitCommit>,
+    },
     Files {
         files: Vec<FileEntry>,
     },
@@ -696,6 +708,10 @@ mod tests {
             },
             Request::Pull {
                 workspace: WorkspaceId("comet/harbor".into()),
+            },
+            Request::WorkspaceHistory {
+                workspace: WorkspaceId("comet/harbor".into()),
+                limit: Some(25),
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),
