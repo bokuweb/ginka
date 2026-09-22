@@ -8,8 +8,8 @@
 mod support;
 
 use ginka_core::driver::{
-    AgentDriver, CommandSpec, ParseState, Registry, SessionSpec, claude::ClaudeDriver,
-    codex::CodexDriver,
+    AgentDriver, CommandSpec, CompactionSpec, ParseState, Registry, SessionSpec,
+    claude::ClaudeDriver, codex::CodexDriver,
 };
 use ginka_core::service::{EventSink, Service};
 use ginka_core::{Paths, db};
@@ -73,6 +73,15 @@ impl AgentDriver for ResponseDriver {
 
     fn models(&self) -> Vec<ginka_protocol::ProviderModel> {
         self.inner.models()
+    }
+
+    fn compaction(&self, spec: &SessionSpec, vendor_session_id: &str) -> Option<CompactionSpec> {
+        let mut compact = spec.clone();
+        compact.prompt = "/compact".into();
+        Some(CompactionSpec {
+            command: self.inner.resume_command(&compact, vendor_session_id),
+            input: Vec::new(),
+        })
     }
 
     fn program(&self) -> &str {
@@ -493,11 +502,111 @@ fn a_session_records_the_prompt_and_the_agents_answer() {
         transcript.iter().any(|entry| matches!(
             entry,
             TranscriptPayload::Agent {
+                event: AgentEvent::TurnStarted {
+                    provider: Some(provider),
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                }
+            } if provider == "claude"
+        )),
+        "the supervisor records effective turn provenance before vendor output: {transcript:?}"
+    );
+    assert!(
+        transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptPayload::Agent {
                 event: AgentEvent::TurnEnd { turn: 1 }
             }
         )),
         "the turn boundary is recorded: {transcript:?}"
     );
+}
+
+#[test]
+fn manual_compaction_is_an_idle_resumed_turn_owned_by_the_provider() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "response-agent",
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"compact-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"compact-1"}"#,
+        ]
+        .join("\n"),
+        "inspect the repository",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    assert_eq!(
+        fixture.ask(Request::CompactSession {
+            session: session.clone(),
+        }),
+        Response::Ack
+    );
+    fixture.wait_for(&session, |turns| turns.len() == 2);
+
+    assert!(
+        !fixture
+            .transcript(&session)
+            .iter()
+            .any(|entry| matches!(entry, TranscriptPayload::User { text } if text == "/compact")),
+        "provider controls are not ordinary user prompts"
+    );
+}
+
+#[test]
+fn manual_compaction_refuses_an_active_turn_instead_of_queuing() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "response-agent",
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"compact-busy"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+        ]
+        .join("\n"),
+        "keep working",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let error = fixture
+        .service
+        .handle(Request::CompactSession {
+            session: session.clone(),
+        })
+        .expect_err("compaction must not be queued behind a running turn");
+    assert_eq!(error.code, "failed");
+    assert!(error.message.contains("still working"));
+    fixture
+        .service
+        .handle(Request::CancelSession { session })
+        .unwrap();
+}
+
+#[test]
+fn manual_compaction_refuses_a_provider_without_an_explicit_operation() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"claude-compact"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"claude-compact"}"#,
+        ]
+        .join("\n"),
+        "inspect the repository",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let error = fixture
+        .service
+        .handle(Request::CompactSession { session })
+        .expect_err("unsupported providers must not receive a guessed command");
+    assert_eq!(error.code, "failed");
+    assert!(error.message.contains("does not support"));
 }
 
 #[test]
@@ -924,6 +1033,125 @@ fn a_follow_up_sent_while_the_agent_is_busy_runs_as_a_resume_afterwards() {
         assert!(
             Instant::now() < deadline,
             "the queued follow-up never ran: {transcript:?}"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_busy_sessions_queue_can_be_read_edited_reordered_and_trimmed() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "codex",
+        &[
+            r#"{"type":"thread.started","thread_id":"vendor-q"}"#,
+            "#sleep 1200",
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+    for text in ["second", "third", "remove me"] {
+        fixture.ask(Request::SendMessage {
+            session: session.clone(),
+            text: text.into(),
+        });
+    }
+
+    let (queued, can_send_now) = match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages {
+            messages,
+            can_send_now,
+        } => (messages, can_send_now),
+        other => panic!("expected queued messages, got {other:?}"),
+    };
+    assert!(
+        !can_send_now,
+        "Codex exec must advertise that it cannot inject into the live turn"
+    );
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["second", "third", "remove me"]
+    );
+    assert_eq!(
+        fixture
+            .transcript(&session)
+            .iter()
+            .filter(|entry| matches!(entry, TranscriptPayload::User { .. }))
+            .count(),
+        1,
+        "waiting prompts are queue rows, not immutable transcript entries"
+    );
+
+    fixture.ask(Request::EditQueuedMessage {
+        session: session.clone(),
+        id: queued[1].id,
+        text: "edited third".into(),
+    });
+    fixture.ask(Request::MoveQueuedMessage {
+        session: session.clone(),
+        id: queued[1].id,
+        index: 0,
+    });
+    fixture.ask(Request::RemoveQueuedMessage {
+        session: session.clone(),
+        id: queued[2].id,
+    });
+    let queued = match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages { messages, .. } => messages,
+        other => panic!("expected queued messages, got {other:?}"),
+    };
+    assert_eq!(
+        queued
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        vec!["edited third", "second"]
+    );
+
+    let send_now = fixture.service.handle(Request::SendQueuedMessageNow {
+        session: session.clone(),
+        id: queued[0].id,
+    });
+    assert!(
+        send_now.is_err(),
+        "Codex exec cannot receive unsolicited input, so useful work stays running"
+    );
+    assert_eq!(
+        match fixture.ask(Request::QueuedMessages {
+            session: session.clone(),
+        }) {
+            Response::QueuedMessages { messages, .. } => messages.len(),
+            other => panic!("expected queued messages, got {other:?}"),
+        },
+        2,
+        "a refused send-now leaves the queue untouched"
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let users = fixture
+            .transcript(&session)
+            .into_iter()
+            .filter_map(|entry| match entry {
+                TranscriptPayload::User { text } => Some(text),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if users.len() >= 2 {
+            assert_eq!(users[..2], ["first", "edited third"]);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the reordered prompt never dispatched"
         );
         std::thread::sleep(Duration::from_millis(25));
     }
@@ -2230,6 +2458,20 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
             .all()
             .contains(&DaemonEvent::AccountsChanged)
     );
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("claude-work".into()),
+    });
+    let accounts = accounts_of(&mut fixture);
+    assert!(
+        accounts
+            .iter()
+            .any(|account| { account.id.0 == "claude-work" && account.active })
+    );
+    assert!(
+        accounts
+            .iter()
+            .any(|account| { account.id.0 == "claude" && !account.active })
+    );
 
     // The agent says what it was given; the script is the same for both.
     std::fs::write(
@@ -2249,7 +2491,7 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         model: None,
         reasoning_effort: None,
         service_tier: None,
-        account: Some(ginka_protocol::AccountId("claude-work".into())),
+        account: None,
         access_mode: None,
         origin: None,
     }) {
@@ -2264,8 +2506,26 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         "the account's directory reached the agent: {said}"
     );
 
-    // And the default account points the CLI nowhere in particular: the
-    // variable is not set at all.
+    // Switching changes the default for new conversations. The existing
+    // record stays on the account that owns its vendor thread.
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("claude".into()),
+    });
+    let stored = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => sessions,
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let original = stored
+        .iter()
+        .find(|session| session.id == on_work.id)
+        .expect("the first conversation remains listed");
+    assert_eq!(original.account.0, "claude-work");
+
+    // And the active default account points the CLI nowhere in particular:
+    // its variable is not set at all.
     let on_default = fixture.start(
         &[
             r#"{"type":"system","subtype":"init","session_id":"d"}"#,
@@ -2372,6 +2632,15 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
     assert_eq!(login.args, vec!["login"]);
     assert_eq!(login.env[0].0, "CODEX_HOME");
 
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("codex-work".into()),
+    });
+    assert!(
+        accounts_of(&mut fixture)
+            .iter()
+            .any(|account| account.id.0 == "codex-work" && account.active)
+    );
+
     // Ids are slugs and never a provider's own.
     assert!(
         fixture
@@ -2399,12 +2668,18 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         delete_home: false,
     });
     assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert!(
+        accounts_of(&mut fixture)
+            .iter()
+            .any(|account| account.id.0 == "codex" && account.active)
+    );
     assert!(home.is_dir(), "the vendor's login is kept unless asked");
 
     // And what was written survives a daemon: it is in the settings file.
     let settings: ginka_core::settings::DaemonSettings =
         ginka_core::settings::load(&fixture.service.paths().daemon_settings());
     assert!(settings.accounts.is_empty());
+    assert!(settings.active_accounts.is_empty());
 }
 
 #[test]

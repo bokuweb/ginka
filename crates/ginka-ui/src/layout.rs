@@ -5,7 +5,8 @@
 //! column is not a panel — it can never be closed, so there is no arrangement
 //! that leaves the window empty.
 
-use ginka_core::settings::AppSettings;
+use ginka_core::settings::{AppSettings, WorkspaceLayoutSettings};
+use ginka_protocol::WorkspaceId;
 use gpui::{Pixels, px};
 
 /// How tall the strip across the top of each column is.
@@ -90,6 +91,21 @@ impl Layout {
         }
     }
 
+    /// Restore global navigation plus the arrangement saved for `workspace`.
+    pub fn for_workspace(settings: &AppSettings, workspace: Option<&WorkspaceId>) -> Self {
+        let mut layout = Self::from_settings(settings);
+        let Some(saved) =
+            workspace.and_then(|workspace| settings.workspace_layouts.get(&workspace.0))
+        else {
+            return layout;
+        };
+        layout.right_open = saved.right_panel_open;
+        layout.right_width = saved.right_panel_width;
+        layout.dock_open = saved.terminal_dock_open;
+        layout.dock_height = saved.terminal_dock_height;
+        layout
+    }
+
     /// Write the layout back over a settings value, leaving its other fields
     /// (the appearance, the locale) untouched.
     pub fn write_into(&self, settings: &mut AppSettings) {
@@ -99,6 +115,36 @@ impl Layout {
         settings.sidebar_width = self.sidebar_width;
         settings.right_panel_width = self.right_width;
         settings.terminal_dock_height = self.dock_height;
+    }
+
+    /// Save workspace-owned panels while leaving global navigation untouched.
+    pub fn write_workspace_into(&self, workspace: &WorkspaceId, settings: &mut AppSettings) {
+        let active_surface = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.active_surface.clone());
+        let terminal_split = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.terminal_split.clone());
+        let terminal_active = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.terminal_active.clone());
+        settings.workspace_layouts.insert(
+            workspace.0.clone(),
+            WorkspaceLayoutSettings {
+                right_panel_open: self.right_open,
+                right_panel_width: self.right_width,
+                terminal_dock_open: self.dock_open,
+                terminal_dock_height: self.dock_height,
+                active_surface,
+                terminal_split,
+                terminal_active,
+            },
+        );
+        settings.sidebar_open = self.sidebar_open;
+        settings.sidebar_width = self.sidebar_width;
     }
 
     pub fn is_open(&self, panel: Panel) -> bool {
@@ -320,6 +366,70 @@ mod tests {
         assert!(!restored.is_open(Panel::RightPanel));
         assert_eq!(restored.size(Panel::Sidebar), px(512.));
         assert_eq!(restored.size(Panel::TerminalDock), px(180.));
+    }
+
+    #[test]
+    fn workspace_arrangements_override_surfaces_but_share_navigation() {
+        let mut settings = all_open();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                right_panel_open: false,
+                right_panel_width: 560.0,
+                terminal_dock_open: true,
+                terminal_dock_height: 180.0,
+                active_surface: Some("files".into()),
+                terminal_split: None,
+                terminal_active: None,
+            },
+        );
+        let workspace = WorkspaceId("comet/main".into());
+        let layout = Layout::for_workspace(&settings, Some(&workspace));
+
+        assert!(layout.is_open(Panel::Sidebar));
+        assert!(!layout.is_open(Panel::RightPanel));
+        assert!(layout.is_open(Panel::TerminalDock));
+        assert_eq!(layout.size(Panel::RightPanel), px(560.0));
+        assert_eq!(layout.size(Panel::TerminalDock), px(180.0));
+    }
+
+    #[test]
+    fn saving_one_workspace_preserves_its_surface_and_other_arrangements() {
+        let mut settings = all_open();
+        settings.workspace_layouts.insert(
+            "comet/main".into(),
+            WorkspaceLayoutSettings {
+                active_surface: Some("files".into()),
+                terminal_split: Some(["left".into(), "right".into()]),
+                terminal_active: Some("right".into()),
+                ..WorkspaceLayoutSettings::default()
+            },
+        );
+        let other = WorkspaceLayoutSettings {
+            right_panel_open: true,
+            right_panel_width: 640.0,
+            terminal_dock_open: true,
+            terminal_dock_height: 300.0,
+            active_surface: Some("git".into()),
+            terminal_split: None,
+            terminal_active: None,
+        };
+        settings
+            .workspace_layouts
+            .insert("comet/review".into(), other.clone());
+
+        let workspace = WorkspaceId("comet/main".into());
+        let mut layout = Layout::for_workspace(&settings, Some(&workspace));
+        layout.set_open(Panel::RightPanel, true);
+        layout.set_size(Panel::RightPanel, px(510.0));
+        layout.write_workspace_into(&workspace, &mut settings);
+
+        let saved = settings.workspace_layouts.get(&workspace.0).unwrap();
+        assert_eq!(saved.active_surface.as_deref(), Some("files"));
+        assert_eq!(saved.terminal_split, Some(["left".into(), "right".into()]));
+        assert_eq!(saved.terminal_active.as_deref(), Some("right"));
+        assert_eq!(saved.right_panel_width, 510.0);
+        assert_eq!(settings.workspace_layouts.get("comet/review"), Some(&other));
     }
 
     #[test]
