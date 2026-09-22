@@ -6,7 +6,7 @@
 
 use ginka_core::driver::{ActivityKind, AgentEvent, ClaudeStream, DriverError};
 use ginka_protocol::model::SessionState;
-use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
+use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus, TaskItem, TaskStatus};
 
 fn events(lines: &[&str]) -> Vec<AgentEvent> {
     let mut stream = ClaudeStream::default();
@@ -80,6 +80,25 @@ fn a_tool_use_becomes_a_normalized_call() {
         }
         other => panic!("{other:?}"),
     }
+}
+
+#[test]
+fn a_todo_write_exposes_the_same_task_shape_as_other_drivers() {
+    let events = events(&[
+        r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tasks-1","name":"TodoWrite","input":{"todos":[{"content":"Inspect","status":"completed"},{"content":"Implement","status":"in_progress"}]}}]}}"#,
+    ]);
+
+    let AgentEvent::ToolCall { activity } = &events[0] else {
+        panic!("TodoWrite must remain a normalized tool call")
+    };
+    assert_eq!(activity.kind, ActivityKind::Plan);
+    assert_eq!(
+        activity.tasks,
+        Some(vec![
+            TaskItem::new("Inspect", TaskStatus::Completed),
+            TaskItem::new("Implement", TaskStatus::InProgress),
+        ])
+    );
 }
 
 #[test]
@@ -313,7 +332,6 @@ fn partial_deltas_stream_before_the_message_is_complete() {
     assert_eq!(
         events,
         [
-            AgentEvent::TurnStarted,
             AgentEvent::TextDelta { text: "par".into() },
             AgentEvent::Reasoning { text: "hmm".into() },
         ]

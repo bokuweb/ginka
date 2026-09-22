@@ -12,7 +12,7 @@
 //! detectable rather than silently swallowed.
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
-use ginka_protocol::{AgentEvent, SubagentStep, Usage};
+use ginka_protocol::{AgentEvent, ContextUsage, SubagentStep, TaskItem, TaskStatus, Usage};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -165,6 +165,11 @@ pub enum Block {
         output: Option<String>,
         is_error: bool,
     },
+    /// The newest complete snapshot from an agent-maintained task list.
+    Tasks {
+        /// Provider-neutral rows in the order chosen by the agent.
+        items: Vec<TaskItem>,
+    },
     /// A delegated agent and the bounded trail of work it reported.
     Subagent {
         /// Provider call id correlating steps and the final report.
@@ -202,6 +207,14 @@ pub enum Block {
         turn: u32,
         /// The inclusive transcript position copied by a fork from here.
         seq: u64,
+        /// Provider that ran this turn, retained independently of later turns.
+        provider: Option<String>,
+        /// Requested or provider-reported model for this turn.
+        model: Option<String>,
+        /// Requested reasoning level for this turn.
+        reasoning_effort: Option<String>,
+        /// Requested service tier for this turn.
+        service_tier: Option<String>,
     },
     /// How the session ended.
     Outcome {
@@ -236,6 +249,11 @@ pub struct Transcript {
     positions: Vec<Option<usize>>,
     cursor: u64,
     usage: Usage,
+    context_usage: Option<ContextUsage>,
+    turn_provider: Option<String>,
+    turn_model: Option<String>,
+    turn_reasoning_effort: Option<String>,
+    turn_service_tier: Option<String>,
 }
 
 impl Transcript {
@@ -334,6 +352,12 @@ impl Transcript {
             }) => Activity::Running {
                 tool: title.clone(),
             },
+            Some(Block::Tasks { items }) => items
+                .iter()
+                .find(|item| item.status == TaskStatus::InProgress)
+                .map_or(Activity::Thinking, |item| Activity::Running {
+                    tool: item.label.clone(),
+                }),
             _ => Activity::Thinking,
         }
     }
@@ -344,6 +368,12 @@ impl Transcript {
     /// middle of the conversation.
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// The latest provider-reported context occupancy, kept apart from
+    /// cumulative session accounting because compaction can reduce it.
+    pub fn context_usage(&self) -> Option<ContextUsage> {
+        self.context_usage
     }
 
     /// Fold one entry in.
@@ -402,6 +432,9 @@ impl Transcript {
             // keeps the kind as its label and the title as the line the reader
             // scans.
             AgentEvent::ToolCall { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    return self.upsert_tasks(tasks.clone());
+                }
                 self.blocks.push(Block::Tool {
                     id: activity.id.clone().unwrap_or_default(),
                     name: activity.kind_str().to_string(),
@@ -411,11 +444,17 @@ impl Transcript {
                 });
                 Some(self.blocks.len() - 1)
             }
-            AgentEvent::ToolResult { activity } => self.attach_result(
-                activity.id.as_deref().unwrap_or_default(),
-                activity.detail.as_deref().unwrap_or_default(),
-                activity.failed,
-            ),
+            AgentEvent::ToolResult { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    self.upsert_tasks(tasks.clone())
+                } else {
+                    self.attach_result(
+                        activity.id.as_deref().unwrap_or_default(),
+                        activity.detail.as_deref().unwrap_or_default(),
+                        activity.failed,
+                    )
+                }
+            }
             AgentEvent::SubagentStarted { id, title } => {
                 self.blocks.push(Block::Subagent {
                     id: id.clone(),
@@ -470,9 +509,20 @@ impl Transcript {
                 self.usage = *usage;
                 None
             }
+            AgentEvent::ContextUsage { usage } => {
+                self.context_usage = Some(*usage);
+                None
+            }
             AgentEvent::PlanUsage { .. } => None,
             AgentEvent::TurnEnd { turn } => {
-                self.blocks.push(Block::TurnEnd { turn: *turn, seq });
+                self.blocks.push(Block::TurnEnd {
+                    turn: *turn,
+                    seq,
+                    provider: self.turn_provider.take(),
+                    model: self.turn_model.take(),
+                    reasoning_effort: self.turn_reasoning_effort.take(),
+                    service_tier: self.turn_service_tier.take(),
+                });
                 Some(self.blocks.len() - 1)
             }
             AgentEvent::SessionResult { state, summary } => {
@@ -487,10 +537,28 @@ impl Transcript {
             AgentEvent::Unsupported { shape } => {
                 self.append_text(&format!("(not understood: {shape})"))
             }
+            AgentEvent::TurnStarted {
+                provider,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => {
+                self.turn_provider.clone_from(provider);
+                self.turn_model.clone_from(model);
+                self.turn_reasoning_effort.clone_from(reasoning_effort);
+                self.turn_service_tier.clone_from(service_tier);
+                None
+            }
+            // The provider's own answer wins over a requested alias. Keep the
+            // supervisor's model when a connection event names none.
+            AgentEvent::Connected { model, .. } => {
+                if model.is_some() {
+                    self.turn_model.clone_from(model);
+                }
+                None
+            }
             // Session bookkeeping the conversation does not render.
-            AgentEvent::Connected { .. }
-            | AgentEvent::Commands { .. }
-            | AgentEvent::TurnStarted
+            AgentEvent::Commands { .. }
             | AgentEvent::SteerAccepted
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::AgentTitle { .. }
@@ -587,6 +655,25 @@ impl Transcript {
                 Some(self.blocks.len() - 1)
             }
         }
+    }
+
+    /// Replace the current turn's task snapshot, or start its one task card.
+    fn upsert_tasks(&mut self, items: Vec<TaskItem>) -> Option<usize> {
+        let boundary = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::TurnEnd { .. }))
+            .map_or(0, |index| index + 1);
+        if let Some(index) = self.blocks[boundary..]
+            .iter()
+            .rposition(|block| matches!(block, Block::Tasks { .. }))
+            .map(|index| boundary + index)
+        {
+            self.blocks[index] = Block::Tasks { items };
+            return Some(index);
+        }
+        self.blocks.push(Block::Tasks { items });
+        Some(self.blocks.len() - 1)
     }
 
     /// Number of delegated-agent steps retained in one drawable row.
@@ -847,6 +934,56 @@ pub fn settled(text: &str) -> (&str, &str) {
     text.split_at(cut)
 }
 
+/// Choose the exact selected range for quoting, or the owning message.
+///
+/// Window text selection is allowed to contain leading and trailing space;
+/// only an all-whitespace selection is treated as absent.
+pub fn quote_target<'a>(message: &'a str, selection: &'a str) -> &'a str {
+    if selection.trim().is_empty() {
+        message
+    } else {
+        selection
+    }
+}
+
+/// Return an exact selection only when quoting it would add meaningful text.
+pub fn selected_quote(selection: &str) -> Option<&str> {
+    (!selection.trim().is_empty()).then_some(selection)
+}
+
+/// Completed and total actionable tasks for a compact progress label.
+///
+/// Cancelled work remains visible in the card but is not work left to finish.
+pub fn task_progress(items: &[TaskItem]) -> (usize, usize) {
+    let completed = items
+        .iter()
+        .filter(|item| item.status == TaskStatus::Completed)
+        .count();
+    let total = items
+        .iter()
+        .filter(|item| item.status != TaskStatus::Cancelled)
+        .count();
+    (completed, total)
+}
+
+/// One compact provenance label for a completed turn.
+///
+/// Empty legacy fields disappear rather than leaving punctuation behind.
+pub fn turn_provenance(
+    provider: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+) -> Option<String> {
+    let parts = [provider, model, reasoning_effort, service_tier]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
 /// Whether to pull the transcript to its foot, and whether it is still
 /// following.
 ///
@@ -886,6 +1023,32 @@ mod tests {
     use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    fn quoting_prefers_the_exact_selected_range_and_falls_back_to_the_message() {
+        assert_eq!(
+            quote_target("the whole answer", "chosen words"),
+            "chosen words"
+        );
+        assert_eq!(
+            quote_target("the whole answer", "  chosen words  \n"),
+            "  chosen words  \n"
+        );
+        assert_eq!(
+            quote_target("the whole answer", " \n\t"),
+            "the whole answer"
+        );
+    }
+
+    #[test]
+    fn the_selection_quote_action_exists_only_for_meaningful_text() {
+        assert_eq!(
+            selected_quote("  exact range  \n"),
+            Some("  exact range  \n")
+        );
+        assert_eq!(selected_quote(" \n\t"), None);
+        assert_eq!(selected_quote(""), None);
+    }
 
     #[test]
     fn prose_file_locations_become_internal_markdown_links() {
@@ -1137,6 +1300,62 @@ mod tests {
     }
 
     #[test]
+    fn task_updates_replace_the_live_card_and_hide_provider_tool_chrome() {
+        let task_activity = |id: &str, tasks: serde_json::Value| {
+            ActivityItem::from_tool(Some(id.into()), "TodoWrite", &json!({ "todos": tasks }))
+        };
+        let first = task_activity(
+            "tasks-1",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "in_progress"}
+            ]),
+        );
+        let second = task_activity(
+            "tasks-2",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "completed"},
+                {"content": "Verify", "status": "pending"}
+            ]),
+        );
+        let mut result = second.clone();
+        result.complete_with("tasks updated", false);
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(1, AgentEvent::ToolCall { activity: first }),
+            agent(2, AgentEvent::ToolCall { activity: second }),
+            agent(3, AgentEvent::ToolResult { activity: result }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::Tasks {
+                items: vec![
+                    TaskItem::new("Inspect", TaskStatus::Completed),
+                    TaskItem::new("Implement", TaskStatus::Completed),
+                    TaskItem::new("Verify", TaskStatus::Pending),
+                ],
+            }]
+        );
+        assert_eq!(transcript.block_index_for_seq(1), Some(0));
+        assert_eq!(transcript.block_index_for_seq(2), Some(0));
+        assert_eq!(transcript.block_index_for_seq(3), Some(0));
+    }
+
+    #[test]
+    fn task_progress_excludes_cancelled_work_from_the_completion_count() {
+        let items = vec![
+            TaskItem::new("Done", TaskStatus::Completed),
+            TaskItem::new("Current", TaskStatus::InProgress),
+            TaskItem::new("Later", TaskStatus::Pending),
+            TaskItem::new("Skipped", TaskStatus::Cancelled),
+        ];
+
+        assert_eq!(task_progress(&items), (1, 3));
+    }
+
+    #[test]
     fn subagent_steps_merge_by_id_and_finish_under_one_parent_row() {
         let mut transcript = Transcript::new();
         transcript.extend(&[
@@ -1383,6 +1602,34 @@ mod tests {
     }
 
     #[test]
+    fn context_usage_stays_out_of_the_conversation_and_keeps_the_latest_reading() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            text(1, "done"),
+            agent(
+                2,
+                AgentEvent::ContextUsage {
+                    usage: ContextUsage {
+                        used_tokens: 32_000,
+                        window_tokens: 128_000,
+                        can_compact: true,
+                    },
+                },
+            ),
+        ]);
+
+        assert_eq!(transcript.blocks().len(), 1);
+        assert_eq!(
+            transcript.context_usage(),
+            Some(ContextUsage {
+                used_tokens: 32_000,
+                window_tokens: 128_000,
+                can_compact: true,
+            })
+        );
+    }
+
+    #[test]
     fn turn_boundaries_and_outcomes_are_drawn() {
         let mut transcript = Transcript::new();
         transcript.extend(&[
@@ -1398,7 +1645,14 @@ mod tests {
         assert_eq!(
             transcript.blocks(),
             &[
-                Block::TurnEnd { turn: 1, seq: 1 },
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 1,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
                 Block::Outcome {
                     state: SessionState::Finished,
                     summary: Some("done".into()),
@@ -1408,11 +1662,81 @@ mod tests {
     }
 
     #[test]
+    fn each_turn_keeps_the_provider_and_model_that_actually_started_it() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::TurnStarted {
+                    provider: Some("claude".into()),
+                    model: Some("sonnet".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::Connected {
+                    session_id: Some("vendor-1".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                },
+            ),
+            agent(3, AgentEvent::TurnEnd { turn: 1 }),
+            agent(
+                4,
+                AgentEvent::TurnStarted {
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ),
+            agent(5, AgentEvent::TurnEnd { turn: 2 }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 3,
+                    provider: Some("claude".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+                Block::TurnEnd {
+                    turn: 2,
+                    seq: 5,
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            turn_provenance(Some("codex"), Some("gpt-5.4"), Some("high"), Some("fast")).as_deref(),
+            Some("codex · gpt-5.4 · high · fast")
+        );
+    }
+
+    #[test]
     fn a_turn_boundary_keeps_the_transcript_position_used_by_a_fork() {
         let mut transcript = Transcript::new();
         transcript.apply(&agent(1, AgentEvent::TurnEnd { turn: 3 }));
 
-        assert_eq!(transcript.blocks(), &[Block::TurnEnd { turn: 3, seq: 1 }]);
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::TurnEnd {
+                turn: 3,
+                seq: 1,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+            }]
+        );
     }
 
     #[test]
