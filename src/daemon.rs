@@ -443,6 +443,31 @@ impl DaemonLink {
         }
     }
 
+    /// Push a workspace branch through the daemon.
+    pub async fn push(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Push {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
+    /// Fetch and fast-forward a clean workspace branch through the daemon.
+    pub async fn pull(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Pull {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
+    async fn git_sync(&self, request: Request) -> Result<(), String> {
+        let client = self.client().await.ok_or("no daemon")?;
+        client
+            .request(request)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.message)
+    }
+
     /// The paths staged for the next commit.
     pub async fn staged_paths(&self, workspace: &WorkspaceId) -> Vec<String> {
         match self.changes(workspace, ChangeSource::Staged).await {

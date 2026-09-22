@@ -516,6 +516,8 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
+                crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
+                crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -1560,6 +1562,30 @@ impl Shell {
                 .await;
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_commit_result(outcome.err(), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Synchronize the selected branch through the daemon-owned git path.
+    fn sync_git(&mut self, push: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    if push {
+                        link.push(&workspace).await
+                    } else {
+                        link.pull(&workspace).await
+                    }
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
             });
         })
         .detach();

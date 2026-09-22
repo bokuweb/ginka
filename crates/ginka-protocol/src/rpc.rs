@@ -258,6 +258,8 @@ pub enum Request {
     },
     /// Push a workspace's branch, setting an upstream if it has none.
     Push { workspace: WorkspaceId },
+    /// Fetch and fast-forward a clean workspace branch from its upstream.
+    Pull { workspace: WorkspaceId },
 
     /// The files in a workspace, best matches for `query` first.
     ///
@@ -691,6 +693,9 @@ mod tests {
             },
             Request::CompactSession {
                 session: SessionId("s-1".into()),
+            },
+            Request::Pull {
+                workspace: WorkspaceId("comet/harbor".into()),
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),

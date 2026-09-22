@@ -698,6 +698,33 @@ pub fn push(worktree: &Path) -> Result<String> {
     }
 }
 
+/// Update a clean tracked branch without creating a merge commit or rebasing.
+///
+/// Dirty work is refused before contacting the remote. A missing upstream or
+/// divergence is an error for the caller to explain rather than a reason to
+/// guess which history the user wants rewritten.
+pub fn pull_fast_forward(worktree: &Path) -> Result<String> {
+    let branch = current_branch(worktree).context("a detached HEAD has no branch to pull")?;
+    if branch_status(worktree)?.dirty {
+        anyhow::bail!("branch {branch} has uncommitted work; commit or stash it before pulling");
+    }
+    let upstream = git(
+        worktree,
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
+    )
+    .with_context(|| format!("branch {branch} has no upstream to pull"))?;
+    let remote_key = format!("branch.{branch}.remote");
+    let remote = git(worktree, &["config", "--get", &remote_key])
+        .with_context(|| format!("branch {branch} has no remote to pull"))?;
+    git(worktree, &["fetch", "--prune", remote.trim()])?;
+    git(worktree, &["merge", "--ff-only", upstream.trim()])
+}
+
 /// Drop git's records of worktrees whose directories are gone.
 pub fn prune_worktrees(repo: &Path) -> Result<()> {
     git(repo, &["worktree", "prune"])?;
@@ -1206,6 +1233,98 @@ prunable
             root.join("first.txt").exists(),
             "the file is not the target"
         );
+    }
+
+    #[test]
+    fn pulling_fast_forwards_a_clean_tracked_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]).unwrap();
+        let local = dir.path().join("local");
+        repository(&local);
+        git(
+            &local,
+            &["remote", "add", "upstream", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["push", "--set-upstream", "upstream", "main"]).unwrap();
+
+        let peer = dir.path().join("peer");
+        git(
+            dir.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&peer, &["config", "user.email", "peer@example.com"]).unwrap();
+        git(&peer, &["config", "user.name", "Peer"]).unwrap();
+        std::fs::write(peer.join("remote.txt"), "from remote\n").unwrap();
+        git(&peer, &["add", "remote.txt"]).unwrap();
+        git(&peer, &["commit", "-m", "advance remote"]).unwrap();
+        git(&peer, &["push"]).unwrap();
+
+        pull_fast_forward(&local).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(local.join("remote.txt")).unwrap(),
+            "from remote\n"
+        );
+        assert_eq!(
+            git(&local, &["rev-parse", "HEAD"]).unwrap(),
+            git(&local, &["rev-parse", "@{upstream}"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn pulling_refuses_dirty_work_before_contacting_the_remote() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "keep this edit\n").unwrap();
+
+        let error = pull_fast_forward(&root).expect_err("dirty work must not be merged over");
+
+        assert!(error.to_string().contains("uncommitted"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "keep this edit\n"
+        );
+    }
+
+    #[test]
+    fn pulling_refuses_diverged_history_without_making_a_merge_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let remote = dir.path().join("remote.git");
+        git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]).unwrap();
+        let local = dir.path().join("local");
+        repository(&local);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["push", "--set-upstream", "origin", "main"]).unwrap();
+        let peer = dir.path().join("peer");
+        git(
+            dir.path(),
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&peer, &["config", "user.email", "peer@example.com"]).unwrap();
+        git(&peer, &["config", "user.name", "Peer"]).unwrap();
+
+        std::fs::write(local.join("local.txt"), "local\n").unwrap();
+        git(&local, &["add", "local.txt"]).unwrap();
+        git(&local, &["commit", "-m", "local commit"]).unwrap();
+        let local_head = git(&local, &["rev-parse", "HEAD"]).unwrap();
+        std::fs::write(peer.join("remote.txt"), "remote\n").unwrap();
+        git(&peer, &["add", "remote.txt"]).unwrap();
+        git(&peer, &["commit", "-m", "remote commit"]).unwrap();
+        git(&peer, &["push"]).unwrap();
+
+        pull_fast_forward(&local).expect_err("divergence must need an explicit user choice");
+
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]).unwrap(), local_head);
+        assert!(!local.join("remote.txt").exists());
     }
 
     #[test]

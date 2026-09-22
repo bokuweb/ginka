@@ -206,6 +206,11 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Fetch and fast-forward a clean workspace branch from its upstream.
+    Pull {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
     ///
     /// Spawned by the agent, not by the user: the state stays in the daemon
@@ -939,6 +944,9 @@ fn request_for(command: Command) -> Result<Request> {
             all: !staged,
         },
         Command::Push { workspace } => Request::Push {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Pull { workspace } => Request::Pull {
             workspace: WorkspaceId(workspace),
         },
         Command::Changes {

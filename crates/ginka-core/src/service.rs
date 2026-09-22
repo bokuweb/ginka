@@ -622,6 +622,14 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
+            Request::Pull { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                git::pull_fast_forward(&worktree.path).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
             Request::WorkspaceFiles {
                 workspace,
                 query,

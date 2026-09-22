@@ -36,7 +36,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 
 - **English and Japanese.** Every user-visible string is in `locales/app.yml` in both; the language follows `app.json`, then the environment, then English.
 
-- **The review loop.** The right panel draws the workspace's diff, marked word by word where a line was replaced, with per-file staging, a revert, and comments anchored to lines that go back to the agent as one message. `ginka review`, `stage`, `revert`, `commit`, `push`.
+- **The review loop.** The right panel draws the workspace's diff, marked word by word where a line was replaced, with per-file staging, a revert, and comments anchored to lines that go back to the agent as one message. Pull is deliberately clean and fast-forward-only so divergence remains an explicit decision. `ginka review`, `stage`, `revert`, `commit`, `pull`, `push`.
 - **Terminals.** A strip of shells per workspace, owned by the daemon, with a bounded scrollback replayed to a window that comes back to them.
 - **Finding and editing things.** A files surface shows a bounded, expandable file tree and searches the worktree by path (`nucleo`) and by content (`git grep`) from the same box. Its scope chips can search every active worktree in the selected project and open a hit by switching to its owning workspace. It keeps several independently editable `CodeEditor` tabs with back/forward visit history, previews the live Markdown buffer, finds/replaces, and saves through the daemon without overwriting a newer revision. Installed local language servers provide hover, workspace-local definition jumps across tabs and diagnostics for Rust, TypeScript/JavaScript, Python and Go; an absent server falls back to syntax-only editing. A saved selection can be added to chat as an exact file-line mention; dirty tabs cannot be closed silently. Markdown preview never loads images named by repository text. `ginka files [--limit]`, `ginka project search`, `ginka save` and the MCP file tools expose the same operations. ⌘K reaches every action, panel, surface and workspace by name; the title-bar arrows and ⌘[ / ⌘] traverse bounded project/session history; ⌘1–9 selects a visible session in the current project; ⌘⌥←/→ cycles surfaces.
 - **MCP.** `ginka mcp` serves the same requests to an agent over stdio, so rule 3's third client is real: what a person can do, an agent can — including a **fan-out**, which asks one question in a worktree per attempt.
@@ -102,6 +102,7 @@ cargo run -p ginka-cli -- session fork <session> --agent codex   # move a conver
 cargo run -p ginka-cli -- skills list           # the agents' own skills, and whether each is on
 cargo run -p ginka-cli -- workspace branches <workspace>          # and `checkout <branch> --create`
 cargo run -p ginka-cli -- commit <workspace> --generate           # an agent writes the message
+cargo run -p ginka-cli -- pull <workspace>                        # clean fast-forward only
 cargo run -p ginka-cli -- workspace index <workspace>            # zg index, so agents get semantic search
 cargo run -p ginka-cli -- project search <project> <query>       # search every active worktree
 cargo run -p ginka-cli -- --json show <workspace> <path>         # includes the revision required to save

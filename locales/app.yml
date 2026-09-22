@@ -694,6 +694,18 @@ surface.git.reading:
 surface.git.clean:
   en: Nothing has changed
   ja: 変更はありません
+surface.git.pull:
+  en: Pull
+  ja: Pull
+surface.git.pull_tooltip:
+  en: Fetch and fast-forward this clean branch
+  ja: cleanなbranchをfetchしてfast-forwardする
+surface.git.push:
+  en: Push
+  ja: Push
+surface.git.push_tooltip:
+  en: Push this branch and create its upstream when needed
+  ja: branchをpushし、必要ならupstreamを作成する
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"

@@ -143,6 +143,10 @@ pub enum SurfaceEvent {
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
     GenerateCommitMessage { only_staged: bool },
+    /// Fast-forward the workspace from its configured upstream.
+    Pull,
+    /// Push the workspace branch, creating its upstream when needed.
+    Push,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -800,6 +804,12 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Show a remote-sync error without disturbing a commit message draft.
+    pub fn set_git_sync_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
+        self.complaint = complaint.map(SharedString::from);
+        cx.notify();
+    }
+
     /// Show a surface, which is what the palette does when it is asked for
     /// one.
     pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
@@ -980,10 +990,13 @@ impl SurfacePanel {
         if changes.is_empty() {
             return v_flex()
                 .flex_1()
-                .items_center()
-                .justify_center()
+                .child(self.git_remote_actions(cx))
                 .child(
                     div()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .text_sm()
                         .text_color(tokens.colors().text_muted)
                         .child(rust_i18n::t!("surface.git.clean").to_string()),
@@ -996,6 +1009,7 @@ impl SurfacePanel {
             .id("git-surface")
             .flex_1()
             .overflow_y_scroll()
+            .child(self.git_remote_actions(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1035,6 +1049,34 @@ impl SurfacePanel {
             .children(self.review_bar(cx))
             .child(self.commit_box(cx))
             .into_any_element()
+    }
+
+    /// Remote operations stay visible even when the worktree is clean.
+    fn git_remote_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1p5()
+            .gap_2()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(
+                Button::new("git-pull")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.pull").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.pull_tooltip").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Pull))),
+            )
+            .child(
+                Button::new("git-push")
+                    .ghost()
+                    .compact()
+                    .label(rust_i18n::t!("surface.git.push").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
+            )
     }
 
     /// The batch of comments, and the way to send it.

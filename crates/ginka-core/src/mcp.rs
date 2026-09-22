@@ -244,6 +244,24 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_push",
+            description: "Push a workspace branch, setting its upstream on the first push.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_pull",
+            description: "Fetch and fast-forward a clean workspace branch. Refuses dirty or diverged work instead of merging or rebasing it.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_files",
             description: "Find files in a workspace by path.",
             schema: json!({
@@ -499,6 +517,12 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
             message: text("message")?,
             all: !flag("staged_only"),
+        },
+        "ginka_push" => Request::Push {
+            workspace: WorkspaceId(text("workspace")?),
+        },
+        "ginka_pull" => Request::Pull {
+            workspace: WorkspaceId(text("workspace")?),
         },
         "ginka_files" => Request::WorkspaceFiles {
             workspace: WorkspaceId(text("workspace")?),
