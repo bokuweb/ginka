@@ -1239,7 +1239,16 @@ prunable
     fn pulling_fast_forwards_a_clean_tracked_branch() {
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");
-        git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
         let local = dir.path().join("local");
         repository(&local);
         git(
@@ -1294,7 +1303,16 @@ prunable
     fn pulling_refuses_diverged_history_without_making_a_merge_commit() {
         let dir = tempfile::tempdir().unwrap();
         let remote = dir.path().join("remote.git");
-        git(dir.path(), &["init", "--bare", remote.to_str().unwrap()]).unwrap();
+        git(
+            dir.path(),
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
         let local = dir.path().join("local");
         repository(&local);
         git(
