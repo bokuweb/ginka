@@ -535,6 +535,12 @@ palette.surface:
 palette.terminal.new:
   en: New terminal
   ja: 新しいターミナル
+palette.terminal.next:
+  en: Next terminal tab
+  ja: 次のターミナルタブ
+palette.terminal.previous:
+  en: Previous terminal tab
+  ja: 前のターミナルタブ
 palette.workspace.index:
   en: Index workspace for semantic search
   ja: セマンティック検索用にワークスペースをインデックス

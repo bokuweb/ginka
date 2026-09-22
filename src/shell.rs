@@ -3174,20 +3174,27 @@ impl Shell {
         };
         let rows = self.sidebar.read(cx).rows().to_vec();
         let (can_go_back, can_go_forward) = self.navigation_capabilities(cx);
-        ginka_ui::palette::filter(
-            ginka_ui::palette::entries(
-                &self.layout,
-                &rows,
-                self.session.as_ref().map(|row| row.indexed),
-                self.session
-                    .as_ref()
-                    .and_then(|row| row.session.as_ref())
-                    .is_some(),
-                can_go_back,
-                can_go_forward,
-            ),
-            &palette.typed,
-        )
+        let mut entries = ginka_ui::palette::entries(
+            &self.layout,
+            &rows,
+            self.session.as_ref().map(|row| row.indexed),
+            self.session
+                .as_ref()
+                .and_then(|row| row.session.as_ref())
+                .is_some(),
+            can_go_back,
+            can_go_forward,
+        );
+        let active = self.terminals.active();
+        entries.extend(ginka_ui::palette::terminal_entries(
+            ginka_ui::palette::TerminalActions {
+                tabs: self.terminals.tabs().len(),
+                split: self.terminals.split_ids().is_some(),
+                browsing_history: active.is_some_and(|tab| tab.screen.display_offset() > 0),
+                close_armed: active.is_some_and(|tab| self.terminals.close_confirmation(&tab.id)),
+            },
+        ));
+        ginka_ui::palette::filter(entries, &palette.typed)
     }
 
     /// Move the cursor through the palette without leaving the keyboard.
@@ -3244,6 +3251,53 @@ impl Shell {
                     self.toggle(Panel::TerminalDock, cx);
                 }
                 self.open_terminal(window, cx);
+            }
+            Command::ToggleTerminalSplit => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.toggle_terminal_split(window, cx);
+            }
+            Command::FocusOtherTerminalPane => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.focus_other_terminal_pane(window, cx);
+            }
+            Command::FindTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.open_terminal_search(window, cx);
+            }
+            Command::NextTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.cycle_terminal_tab(false, cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::PreviousTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.cycle_terminal_tab(true, cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::TerminalToLive => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                self.terminal_to_live(cx);
+                self.terminal_focus.focus(window, cx);
+            }
+            Command::CloseTerminal => {
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                if let Some(terminal) = self.terminals.active_id() {
+                    self.request_terminal_close(terminal, cx);
+                }
             }
             Command::IndexWorkspace => self.index_workspace(window, cx),
             Command::AttachFiles => self.choose_attachments(window, cx),
