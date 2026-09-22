@@ -486,6 +486,9 @@ transcript.turn:
 transcript.tool:
   en: tool
   ja: ツール
+transcript.tasks:
+  en: Tasks
+  ja: タスク
 transcript.subagent:
   en: Subagent
   ja: サブエージェント

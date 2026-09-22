@@ -242,6 +242,7 @@ mod tests {
                         id: None,
                         kind: ActivityKind::FileChange,
                         title: path.to_string(),
+                        tasks: None,
                         detail: None,
                         failed: false,
                         complete: true,

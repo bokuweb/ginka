@@ -15,7 +15,7 @@ use ginka_core::settings::{self, AppSettings};
 use ginka_protocol::event::DaemonEvent;
 use ginka_protocol::model::{AgentStatus, Attachment, Checkpoint, SessionState, TranscriptEntry};
 use ginka_protocol::provider::ProviderModel;
-use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, SubagentStepStatus, TaskStatus, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::home;
 use ginka_ui::layout::{
@@ -4542,6 +4542,7 @@ impl Shell {
                 is_error,
                 ..
             } => self.tool_card(name, input, output.as_deref(), *is_error, cx),
+            TranscriptBlock::Tasks { items } => self.task_card(items, cx),
             TranscriptBlock::Subagent {
                 title,
                 steps,
@@ -4910,6 +4911,76 @@ impl Shell {
                     // conversation off the screen.
                     .child(head_of(output, 24))
             }))
+            .into_any_element()
+    }
+
+    /// The latest provider-neutral task snapshot for the current turn.
+    fn task_card(&self, items: &[ginka_protocol::TaskItem], cx: &App) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let (completed, total) = ginka_ui::transcript::task_progress(items);
+
+        v_flex()
+            .w_full()
+            .rounded(px(tokens.radius.row))
+            .border_1()
+            .border_color(tokens.colors().border_subtle)
+            .bg(tokens.colors().bg_surface)
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .items_center()
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .font_medium()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(rust_i18n::t!("transcript.tasks").to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{completed}/{total}")),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_1p5()
+                    .border_t_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .children(items.iter().map(|item| {
+                        let (mark, colour) = match item.status {
+                            TaskStatus::Pending => ("○", tokens.colors().text_muted),
+                            TaskStatus::InProgress => ("→", tokens.colors().status_working),
+                            TaskStatus::Completed => ("✓", tokens.colors().status_done),
+                            TaskStatus::Cancelled => ("×", tokens.colors().text_muted.opacity(0.7)),
+                        };
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_start()
+                            .text_sm()
+                            .text_color(colour)
+                            .child(div().min_w(px(14.)).child(mark))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_color(if item.status == TaskStatus::Cancelled {
+                                        tokens.colors().text_muted
+                                    } else {
+                                        tokens.colors().text_primary
+                                    })
+                                    .child(item.label.clone()),
+                            )
+                    })),
+            )
             .into_any_element()
     }
 

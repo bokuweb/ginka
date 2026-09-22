@@ -302,12 +302,16 @@ impl AgentDriver for CodexDriver {
         }
 
         match value.get("type").and_then(Value::as_str) {
-            Some(
-                "thread.started" | "session.created" | "turn.started" | "item.started"
-                | "item.updated",
-            ) => {
+            Some("thread.started" | "session.created" | "turn.started") => {
                 state.recognized += 1;
                 Vec::new()
+            }
+            Some("item.started" | "item.updated") => {
+                state.recognized += 1;
+                value
+                    .get("item")
+                    .map(|item| parse_live_item(item, false))
+                    .unwrap_or_default()
             }
             Some("item.completed") => {
                 state.recognized += 1;
@@ -418,7 +422,51 @@ fn parse_item(item: &Value) -> Vec<AgentEvent> {
                 &item.get("changes").cloned().unwrap_or(Value::Null),
             ),
         }],
+        "todo_list" => parse_live_item(item, true),
         _ => Vec::new(),
+    }
+}
+
+/// Normalize the one modern item whose updates matter before completion.
+fn parse_live_item(item: &Value, complete: bool) -> Vec<AgentEvent> {
+    let kind = item
+        .get("item_type")
+        .or_else(|| item.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if kind != "todo_list" {
+        return Vec::new();
+    }
+    let tasks = item
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|task| {
+            let text = task.get("text").and_then(Value::as_str)?;
+            Some(serde_json::json!({
+                "text": text,
+                "status": if task.get("completed").and_then(Value::as_bool) == Some(true) {
+                    "completed"
+                } else {
+                    "pending"
+                }
+            }))
+        })
+        .collect::<Vec<_>>();
+    let mut activity = ActivityItem::from_tool(
+        item.get("id").and_then(Value::as_str).map(str::to_string),
+        "update_plan",
+        &serde_json::json!({ "tasks": tasks }),
+    );
+    if activity.tasks.is_none() {
+        return Vec::new();
+    }
+    if complete {
+        activity.complete_with("", false);
+        vec![AgentEvent::ToolResult { activity }]
+    } else {
+        vec![AgentEvent::ToolCall { activity }]
     }
 }
 
@@ -790,6 +838,51 @@ mod tests {
                 text: "Done.".into()
             }]
         );
+    }
+
+    #[test]
+    fn live_todo_items_become_provider_neutral_task_updates() {
+        let (events, state) = parse(&[
+            r#"{"type":"item.started","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":false}]}}"#,
+            r#"{"type":"item.updated","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":true},{"text":"Verify","completed":false}]}}"#,
+            r#"{"type":"item.completed","item":{"id":"todo_1","type":"todo_list","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":true},{"text":"Verify","completed":true}]}}"#,
+        ]);
+
+        assert_eq!(state.unrecognized, 0);
+        assert_eq!(events.len(), 3);
+        let AgentEvent::ToolCall { activity } = &events[1] else {
+            panic!("a live task snapshot is a normalized plan call")
+        };
+        assert_eq!(activity.kind, ginka_protocol::event::ActivityKind::Plan);
+        assert_eq!(
+            activity.tasks.as_deref(),
+            Some(
+                [
+                    ginka_protocol::TaskItem::new(
+                        "Inspect",
+                        ginka_protocol::TaskStatus::Completed,
+                    ),
+                    ginka_protocol::TaskItem::new(
+                        "Implement",
+                        ginka_protocol::TaskStatus::Completed,
+                    ),
+                    ginka_protocol::TaskItem::new(
+                        "Verify",
+                        ginka_protocol::TaskStatus::Pending,
+                    ),
+                ]
+                .as_slice()
+            )
+        );
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::ToolResult { activity })
+                if activity.tasks.as_ref().is_some_and(|tasks| {
+                    tasks.iter().all(|task| {
+                        task.status == ginka_protocol::TaskStatus::Completed
+                    })
+                })
+        ));
     }
 
     #[test]

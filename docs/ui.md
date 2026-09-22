@@ -211,6 +211,11 @@ active conversation. With nothing selected, the rail stands alone.
   top-right without moving the conversation; its mouse path retains the range
   before the toolkit clears selection on press. Every path leaves a blank line
   for the reply and returns focus to the composer. A turn that
+  reports a structured todo/plan snapshot draws one shared **Tasks** card,
+  regardless of provider. Later snapshots replace that turn's card in place;
+  the provider's internal todo tool row stays hidden. Each visible row carries
+  a status mark as well as colour, and the header counts completed actionable
+  work while leaving cancelled rows visible but out of the denominator. A turn that
   succeeded prints no outcome of its own, because being
   answered is how a turn says it worked. A delegated agent is one bordered
   parent card rather than a second conversation: its reasoning, messages and

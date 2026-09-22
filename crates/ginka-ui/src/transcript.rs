@@ -12,7 +12,7 @@
 //! detectable rather than silently swallowed.
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
-use ginka_protocol::{AgentEvent, SubagentStep, Usage};
+use ginka_protocol::{AgentEvent, SubagentStep, TaskItem, TaskStatus, Usage};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -164,6 +164,11 @@ pub enum Block {
         /// `None` while the tool is still running.
         output: Option<String>,
         is_error: bool,
+    },
+    /// The newest complete snapshot from an agent-maintained task list.
+    Tasks {
+        /// Provider-neutral rows in the order chosen by the agent.
+        items: Vec<TaskItem>,
     },
     /// A delegated agent and the bounded trail of work it reported.
     Subagent {
@@ -334,6 +339,12 @@ impl Transcript {
             }) => Activity::Running {
                 tool: title.clone(),
             },
+            Some(Block::Tasks { items }) => items
+                .iter()
+                .find(|item| item.status == TaskStatus::InProgress)
+                .map_or(Activity::Thinking, |item| Activity::Running {
+                    tool: item.label.clone(),
+                }),
             _ => Activity::Thinking,
         }
     }
@@ -402,6 +413,9 @@ impl Transcript {
             // keeps the kind as its label and the title as the line the reader
             // scans.
             AgentEvent::ToolCall { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    return self.upsert_tasks(tasks.clone());
+                }
                 self.blocks.push(Block::Tool {
                     id: activity.id.clone().unwrap_or_default(),
                     name: activity.kind_str().to_string(),
@@ -411,11 +425,17 @@ impl Transcript {
                 });
                 Some(self.blocks.len() - 1)
             }
-            AgentEvent::ToolResult { activity } => self.attach_result(
-                activity.id.as_deref().unwrap_or_default(),
-                activity.detail.as_deref().unwrap_or_default(),
-                activity.failed,
-            ),
+            AgentEvent::ToolResult { activity } => {
+                if let Some(tasks) = &activity.tasks {
+                    self.upsert_tasks(tasks.clone())
+                } else {
+                    self.attach_result(
+                        activity.id.as_deref().unwrap_or_default(),
+                        activity.detail.as_deref().unwrap_or_default(),
+                        activity.failed,
+                    )
+                }
+            }
             AgentEvent::SubagentStarted { id, title } => {
                 self.blocks.push(Block::Subagent {
                     id: id.clone(),
@@ -587,6 +607,25 @@ impl Transcript {
                 Some(self.blocks.len() - 1)
             }
         }
+    }
+
+    /// Replace the current turn's task snapshot, or start its one task card.
+    fn upsert_tasks(&mut self, items: Vec<TaskItem>) -> Option<usize> {
+        let boundary = self
+            .blocks
+            .iter()
+            .rposition(|block| matches!(block, Block::TurnEnd { .. }))
+            .map_or(0, |index| index + 1);
+        if let Some(index) = self.blocks[boundary..]
+            .iter()
+            .rposition(|block| matches!(block, Block::Tasks { .. }))
+            .map(|index| boundary + index)
+        {
+            self.blocks[index] = Block::Tasks { items };
+            return Some(index);
+        }
+        self.blocks.push(Block::Tasks { items });
+        Some(self.blocks.len() - 1)
     }
 
     /// Number of delegated-agent steps retained in one drawable row.
@@ -862,6 +901,21 @@ pub fn quote_target<'a>(message: &'a str, selection: &'a str) -> &'a str {
 /// Return an exact selection only when quoting it would add meaningful text.
 pub fn selected_quote(selection: &str) -> Option<&str> {
     (!selection.trim().is_empty()).then_some(selection)
+}
+
+/// Completed and total actionable tasks for a compact progress label.
+///
+/// Cancelled work remains visible in the card but is not work left to finish.
+pub fn task_progress(items: &[TaskItem]) -> (usize, usize) {
+    let completed = items
+        .iter()
+        .filter(|item| item.status == TaskStatus::Completed)
+        .count();
+    let total = items
+        .iter()
+        .filter(|item| item.status != TaskStatus::Cancelled)
+        .count();
+    (completed, total)
 }
 
 /// Whether to pull the transcript to its foot, and whether it is still
@@ -1177,6 +1231,62 @@ mod tests {
                 is_error: false,
             }
         );
+    }
+
+    #[test]
+    fn task_updates_replace_the_live_card_and_hide_provider_tool_chrome() {
+        let task_activity = |id: &str, tasks: serde_json::Value| {
+            ActivityItem::from_tool(Some(id.into()), "TodoWrite", &json!({ "todos": tasks }))
+        };
+        let first = task_activity(
+            "tasks-1",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "in_progress"}
+            ]),
+        );
+        let second = task_activity(
+            "tasks-2",
+            json!([
+                {"content": "Inspect", "status": "completed"},
+                {"content": "Implement", "status": "completed"},
+                {"content": "Verify", "status": "pending"}
+            ]),
+        );
+        let mut result = second.clone();
+        result.complete_with("tasks updated", false);
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(1, AgentEvent::ToolCall { activity: first }),
+            agent(2, AgentEvent::ToolCall { activity: second }),
+            agent(3, AgentEvent::ToolResult { activity: result }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::Tasks {
+                items: vec![
+                    TaskItem::new("Inspect", TaskStatus::Completed),
+                    TaskItem::new("Implement", TaskStatus::Completed),
+                    TaskItem::new("Verify", TaskStatus::Pending),
+                ],
+            }]
+        );
+        assert_eq!(transcript.block_index_for_seq(1), Some(0));
+        assert_eq!(transcript.block_index_for_seq(2), Some(0));
+        assert_eq!(transcript.block_index_for_seq(3), Some(0));
+    }
+
+    #[test]
+    fn task_progress_excludes_cancelled_work_from_the_completion_count() {
+        let items = vec![
+            TaskItem::new("Done", TaskStatus::Completed),
+            TaskItem::new("Current", TaskStatus::InProgress),
+            TaskItem::new("Later", TaskStatus::Pending),
+            TaskItem::new("Skipped", TaskStatus::Cancelled),
+        ];
+
+        assert_eq!(task_progress(&items), (1, 3));
     }
 
     #[test]
