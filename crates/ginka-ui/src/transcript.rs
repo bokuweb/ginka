@@ -12,7 +12,7 @@
 //! detectable rather than silently swallowed.
 
 use ginka_protocol::model::{SessionState, TranscriptEntry, TranscriptPayload};
-use ginka_protocol::{AgentEvent, SubagentStep, TaskItem, TaskStatus, Usage};
+use ginka_protocol::{AgentEvent, ContextUsage, SubagentStep, TaskItem, TaskStatus, Usage};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -249,6 +249,7 @@ pub struct Transcript {
     positions: Vec<Option<usize>>,
     cursor: u64,
     usage: Usage,
+    context_usage: Option<ContextUsage>,
     turn_provider: Option<String>,
     turn_model: Option<String>,
     turn_reasoning_effort: Option<String>,
@@ -367,6 +368,12 @@ impl Transcript {
     /// middle of the conversation.
     pub fn usage(&self) -> Usage {
         self.usage
+    }
+
+    /// The latest provider-reported context occupancy, kept apart from
+    /// cumulative session accounting because compaction can reduce it.
+    pub fn context_usage(&self) -> Option<ContextUsage> {
+        self.context_usage
     }
 
     /// Fold one entry in.
@@ -500,6 +507,10 @@ impl Transcript {
             // and the account's windows belong to the account chip.
             AgentEvent::Usage { usage } => {
                 self.usage = *usage;
+                None
+            }
+            AgentEvent::ContextUsage { usage } => {
+                self.context_usage = Some(*usage);
                 None
             }
             AgentEvent::PlanUsage { .. } => None,
@@ -1588,6 +1599,32 @@ mod tests {
         ]);
         assert_eq!(transcript.blocks().len(), 1);
         assert_eq!(transcript.usage().input_tokens, 10);
+    }
+
+    #[test]
+    fn context_usage_stays_out_of_the_conversation_and_keeps_the_latest_reading() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            text(1, "done"),
+            agent(
+                2,
+                AgentEvent::ContextUsage {
+                    usage: ContextUsage {
+                        used_tokens: 32_000,
+                        window_tokens: 128_000,
+                    },
+                },
+            ),
+        ]);
+
+        assert_eq!(transcript.blocks().len(), 1);
+        assert_eq!(
+            transcript.context_usage(),
+            Some(ContextUsage {
+                used_tokens: 32_000,
+                window_tokens: 128_000,
+            })
+        );
     }
 
     #[test]

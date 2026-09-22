@@ -6690,6 +6690,11 @@ impl Shell {
             crate::daemon::now(),
         );
         let token_count = ginka_ui::reports::session_token_count(&self.transcript.usage());
+        let context = self
+            .transcript
+            .context_usage()
+            .as_ref()
+            .map(ginka_ui::reports::context_window_summary);
         let exhausted = headroom.as_ref().is_some_and(|headroom| headroom.exhausted);
         let headroom_label = headroom.as_ref().map(|headroom| {
             if headroom.exhausted {
@@ -6702,18 +6707,20 @@ impl Shell {
                 headroom.summary()
             }
         });
-        let label = match (token_count, headroom_label) {
-            (Some(count), Some(headroom)) => rust_i18n::t!(
-                "composer.usage.tokens_and_headroom",
-                count = count,
-                headroom = headroom
-            )
-            .to_string(),
-            (Some(count), None) => {
-                rust_i18n::t!("composer.usage.tokens", count = count).to_string()
-            }
-            (None, Some(headroom)) => headroom,
-            (None, None) => rust_i18n::t!("composer.usage.unknown").to_string(),
+        let mut labels = Vec::new();
+        if let Some(context) = context {
+            labels.push(rust_i18n::t!("composer.usage.context", summary = context).to_string());
+        }
+        if let Some(count) = token_count {
+            labels.push(rust_i18n::t!("composer.usage.tokens", count = count).to_string());
+        }
+        if let Some(headroom) = headroom_label {
+            labels.push(headroom);
+        }
+        let label = if labels.is_empty() {
+            rust_i18n::t!("composer.usage.unknown").to_string()
+        } else {
+            labels.join(" · ")
         };
         let account = account.id.clone();
 

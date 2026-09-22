@@ -207,6 +207,14 @@ and that reading is free. The labels are derived from the window's length
 (`5h`, `week`) rather than from the names `primary` and `secondary`, which
 say nothing to a reader.
 
+That event can also carry `last_token_usage` beside `model_context_window`.
+Those two values normalize into `AgentEvent::ContextUsage`; they are kept
+separate from cumulative `Usage`, because compaction can reduce context while
+session accounting continues to rise. The parser also accepts the app-server's
+camel-case spelling, but emits no context reading unless both occupancy and a
+non-zero capacity are present. The window therefore shows no guessed meter for
+a provider or transport that does not report one.
+
 **Corrected 2026-09-06, from running 0.142.5:** the modern stream — the
 `thread.*` / `turn.*` vocabulary, which is what a current CLI emits — carries
 no rate limits at all. The way to a reading on a current Codex is therefore

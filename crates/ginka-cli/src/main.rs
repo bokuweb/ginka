@@ -1862,6 +1862,12 @@ mod ginka_cli_format {
                 "usage: {} in, {} out",
                 usage.input_tokens, usage.output_tokens
             ),
+            AgentEvent::ContextUsage { usage } => format!(
+                "context: {}/{} ({:.0}%)",
+                usage.used_tokens,
+                usage.window_tokens,
+                usage.used_percent()
+            ),
             AgentEvent::PlanUsage { usage } => match usage.tightest() {
                 Some(window) => format!("plan: {} {:.0}% used", window.label, window.used_percent),
                 None => String::new(),

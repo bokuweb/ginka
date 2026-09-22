@@ -14,7 +14,7 @@ use super::{
 };
 use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
 use ginka_protocol::provider::{OptionOutcome, ProviderOption, SessionOptions};
-use ginka_protocol::{AgentEvent, Usage};
+use ginka_protocol::{AgentEvent, ContextUsage, Usage};
 use serde_json::Value;
 
 /// The Codex CLI.
@@ -325,6 +325,9 @@ impl AgentDriver for CodexDriver {
                         usage: usage_from(usage),
                     });
                 }
+                if let Some(usage) = context_usage_from(&value) {
+                    events.push(AgentEvent::ContextUsage { usage });
+                }
                 if let Some(usage) = value.get("rate_limits").and_then(plan_usage_from) {
                     events.push(AgentEvent::PlanUsage { usage });
                 }
@@ -542,9 +545,13 @@ fn parse_legacy(msg: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
         }
         Some("token_count") => {
             state.recognized += 1;
+            let info = msg.get("info").unwrap_or(msg);
             let mut events = vec![AgentEvent::Usage {
-                usage: usage_from(msg.get("info").unwrap_or(msg)),
+                usage: usage_from(info),
             }];
+            if let Some(usage) = context_usage_from(info) {
+                events.push(AgentEvent::ContextUsage { usage });
+            }
             // The older stream carries the account's windows beside the
             // counts; the reading is free, so it is taken.
             if let Some(usage) = msg.get("rate_limits").and_then(plan_usage_from) {
@@ -613,6 +620,10 @@ fn window_label(minutes: Option<i64>, fallback: &str) -> String {
 
 /// Codex's accounting, under whichever names this generation uses.
 fn usage_from(usage: &Value) -> Usage {
+    let usage = usage
+        .get("total_token_usage")
+        .or_else(|| usage.get("totalTokenUsage"))
+        .unwrap_or(usage);
     let number = |keys: &[&str]| -> u64 {
         keys.iter()
             .find_map(|key| usage.get(*key).and_then(Value::as_u64))
@@ -626,6 +637,43 @@ fn usage_from(usage: &Value) -> Usage {
         // Codex does not price a run, so a cost here would be invented.
         cost_usd: None,
     }
+}
+
+/// Read current context occupancy only when the vendor supplied a capacity and
+/// a last-request total together. Session totals are not context occupancy:
+/// they continue increasing after the provider compacts a thread.
+fn context_usage_from(value: &Value) -> Option<ContextUsage> {
+    let usage = value
+        .get("tokenUsage")
+        .or_else(|| value.get("usage"))
+        .unwrap_or(value);
+    let window_tokens = ["model_context_window", "modelContextWindow"]
+        .into_iter()
+        .find_map(|key| usage.get(key).and_then(Value::as_u64))?;
+    if window_tokens == 0 {
+        return None;
+    }
+    let last = ["last_token_usage", "lastTokenUsage", "last"]
+        .into_iter()
+        .find_map(|key| usage.get(key))?;
+    let used_tokens = ["total_tokens", "totalTokens"]
+        .into_iter()
+        .find_map(|key| last.get(key).and_then(Value::as_u64))
+        .unwrap_or_else(|| {
+            let input = ["input_tokens", "inputTokens"]
+                .into_iter()
+                .find_map(|key| last.get(key).and_then(Value::as_u64))
+                .unwrap_or(0);
+            let output = ["output_tokens", "outputTokens"]
+                .into_iter()
+                .find_map(|key| last.get(key).and_then(Value::as_u64))
+                .unwrap_or(0);
+            input.saturating_add(output)
+        });
+    Some(ContextUsage {
+        used_tokens,
+        window_tokens,
+    })
 }
 
 #[cfg(test)]
@@ -1029,6 +1077,55 @@ mod tests {
                 .any(|event| matches!(event, AgentEvent::PlanUsage { .. })),
             "nothing was reported, so nothing is claimed"
         );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ContextUsage { .. })),
+            "session totals without a context capacity are not a context reading"
+        );
+    }
+
+    #[test]
+    fn context_usage_accepts_the_app_server_spelling_without_guessing() {
+        assert_eq!(
+            context_usage_from(&serde_json::json!({
+                "tokenUsage": {
+                    "last": { "totalTokens": 48_000 },
+                    "modelContextWindow": 192_000
+                }
+            })),
+            Some(ContextUsage {
+                used_tokens: 48_000,
+                window_tokens: 192_000,
+            })
+        );
+        assert_eq!(
+            context_usage_from(&serde_json::json!({
+                "tokenUsage": { "last": { "totalTokens": 48_000 } }
+            })),
+            None
+        );
+    }
+
+    #[test]
+    fn the_older_stream_reports_current_context_separately_from_session_totals() {
+        let (events, _) = parse(&[
+            r#"{"id":"1","msg":{"type":"token_count","info":{"total_token_usage":{"input_tokens":90000,"output_tokens":10000},"last_token_usage":{"total_tokens":32000},"model_context_window":128000}}}"#,
+        ]);
+
+        assert!(events.contains(&AgentEvent::ContextUsage {
+            usage: ContextUsage {
+                used_tokens: 32_000,
+                window_tokens: 128_000,
+            },
+        }));
+        assert!(events.contains(&AgentEvent::Usage {
+            usage: Usage {
+                input_tokens: 90_000,
+                output_tokens: 10_000,
+                ..Usage::default()
+            },
+        }));
     }
 
     #[test]

@@ -104,6 +104,8 @@ pub enum AgentEvent {
     AgentTitle { title: String },
     /// Token and cost accounting for the turn so far.
     Usage { usage: Usage },
+    /// Current context-window occupancy when the provider reports both sides.
+    ContextUsage { usage: ContextUsage },
     /// The account's rate-limit windows, where the vendor reports them as it
     /// works (`docs/accounts.md` §6).
     PlanUsage { usage: PlanUsage },
@@ -138,6 +140,30 @@ pub struct Usage {
     pub reasoning_tokens: u64,
     /// `None` when the vendor does not price the request.
     pub cost_usd: Option<f64>,
+}
+
+/// One provider-reported context-window reading.
+///
+/// This is deliberately separate from [`Usage`]: session accounting is
+/// cumulative, while this gauge may fall after provider compaction.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    /// Tokens occupying the model's current context.
+    pub used_tokens: u64,
+    /// Total context capacity for the model that produced the reading.
+    pub window_tokens: u64,
+}
+
+impl ContextUsage {
+    /// Context occupancy as a display percentage, bounded against malformed
+    /// or over-capacity vendor readings.
+    pub fn used_percent(&self) -> f64 {
+        if self.window_tokens == 0 {
+            return 0.0;
+        }
+        (self.used_tokens as f64 * 100.0 / self.window_tokens as f64).clamp(0.0, 100.0)
+    }
 }
 
 /// The kind of information one delegated-agent step carries.
@@ -397,6 +423,16 @@ mod tests {
                 service_tier: None,
             }
         );
+    }
+
+    #[test]
+    fn context_percentage_is_bounded_even_when_a_vendor_reports_overage() {
+        let usage = ContextUsage {
+            used_tokens: 150,
+            window_tokens: 100,
+        };
+
+        assert_eq!(usage.used_percent(), 100.0);
     }
 
     #[test]

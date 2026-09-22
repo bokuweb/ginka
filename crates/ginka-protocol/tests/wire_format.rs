@@ -6,7 +6,7 @@
 //! literally rather than only round-tripped.
 
 use ginka_protocol::event::{ActivityItem, SubagentStep, SubagentStepKind, SubagentStepStatus};
-use ginka_protocol::event::{AgentEvent, DaemonEvent, Usage};
+use ginka_protocol::event::{AgentEvent, ContextUsage, DaemonEvent, Usage};
 use ginka_protocol::model::{
     AgentStatus, FileContent, FileImage, ProjectKind, SessionState, TranscriptPayload,
 };
@@ -368,6 +368,15 @@ fn agent_events_are_tagged_by_kind() {
                 },
             },
             "usage",
+        ),
+        (
+            AgentEvent::ContextUsage {
+                usage: ContextUsage {
+                    used_tokens: 32_000,
+                    window_tokens: 128_000,
+                },
+            },
+            "context_usage",
         ),
         (AgentEvent::TurnEnd { turn: 1 }, "turn_end"),
         (

@@ -6,8 +6,8 @@
 //! tests: a cost of `None` prints as nothing, never as `$0.00`, because zero
 //! would be a claim that the work was free.
 
-use ginka_protocol::Usage;
 use ginka_protocol::model::{PlanSnapshot, UsageRow, UsageTotals};
+use ginka_protocol::{ContextUsage, Usage};
 
 /// The usage report as the daemon answers it.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -88,6 +88,17 @@ pub fn session_token_count(usage: &Usage) -> Option<String> {
     (total > 0).then(|| compact(total))
 }
 
+/// A compact current-context reading kept visually distinct from cumulative
+/// session tokens.
+pub fn context_window_summary(usage: &ContextUsage) -> String {
+    format!(
+        "{:.0}% · {} / {}",
+        usage.used_percent(),
+        compact(usage.used_tokens),
+        compact(usage.window_tokens)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -139,6 +150,16 @@ mod tests {
 
         assert_eq!(session_token_count(&usage).as_deref(), Some("13.5k"));
         assert_eq!(session_token_count(&Usage::default()), None);
+    }
+
+    #[test]
+    fn context_summary_distinguishes_the_current_window_from_session_tokens() {
+        let usage = ContextUsage {
+            used_tokens: 32_000,
+            window_tokens: 128_000,
+        };
+
+        assert_eq!(context_window_summary(&usage), "25% · 32.0k / 128.0k");
     }
 
     #[test]

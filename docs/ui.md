@@ -333,9 +333,12 @@ given a bounded digest of the conversation so far.
 Usage is a separate composer chip and therefore remains visible even when a
 provider has only one login. The active transcript's cumulative input plus
 output tokens appear beside the tightest rate-limit window; cache and reasoning
-breakdowns are not counted twice. Turn events push both readings into it
-immediately; clicking requests a fresh rate-limit reading. It is never refreshed
-by a timer.
+breakdowns are not counted twice. When a provider reports both current-context
+tokens and its model capacity, the same chip adds their occupancy and percentage
+as a distinct reading — cumulative session totals are never divided by a model
+limit, because compaction would make that percentage false. Turn events push
+these readings into it immediately; clicking requests a fresh rate-limit
+reading. It is never refreshed by a timer.
 
 ## 5. What we build ourselves
 

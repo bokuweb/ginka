@@ -27,8 +27,8 @@ pub use envelope::{
     RpcError, Seq, ServerMessage,
 };
 pub use event::{
-    AgentEvent, DaemonEvent, SubagentStep, SubagentStepKind, SubagentStepStatus, TaskItem,
-    TaskStatus, Usage,
+    AgentEvent, ContextUsage, DaemonEvent, SubagentStep, SubagentStepKind, SubagentStepStatus,
+    TaskItem, TaskStatus, Usage,
 };
 pub use handshake::Handshake;
 pub use ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
