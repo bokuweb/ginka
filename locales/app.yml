@@ -644,8 +644,8 @@ terminal.search.placeholder:
   en: Find in terminal
   ja: ターミナル内を検索
 terminal.copy_output:
-  en: Copy visible terminal output
-  ja: 表示中のターミナル出力をコピー
+  en: Copy terminal selection or visible output
+  ja: ターミナルの選択範囲または表示中の出力をコピー
 terminal.split.open:
   en: Split terminal
   ja: ターミナルを分割

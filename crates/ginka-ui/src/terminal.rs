@@ -217,6 +217,8 @@ fn numeric_suffix(value: &str) -> (Option<&str>, Option<u32>) {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenCell {
     pub text: char,
+    /// Whether this grid column only occupies the second half of a wide glyph.
+    pub wide_spacer: bool,
     /// `None` means the theme's ordinary text colour.
     pub foreground: Option<TerminalColor>,
     /// `None` means the terminal's own background.
@@ -250,6 +252,55 @@ pub type ScreenRow = Vec<ScreenCell>;
 pub struct TerminalSearchMatch {
     line: i32,
     columns: Range<usize>,
+}
+
+/// One visible terminal-grid coordinate used by mouse selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct TerminalPoint {
+    /// Zero-based row in the visible viewport.
+    pub row: usize,
+    /// Zero-based character column.
+    pub column: usize,
+}
+
+impl TerminalPoint {
+    /// Build a viewport coordinate.
+    pub const fn new(row: usize, column: usize) -> Self {
+        Self { row, column }
+    }
+}
+
+/// An inclusive terminal selection, retaining the direction of its drag.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalSelection {
+    /// Where the drag began.
+    pub anchor: TerminalPoint,
+    /// Where the drag currently ends.
+    pub head: TerminalPoint,
+}
+
+impl TerminalSelection {
+    /// Begin or restore a selection between two visible cells.
+    pub const fn new(anchor: TerminalPoint, head: TerminalPoint) -> Self {
+        Self { anchor, head }
+    }
+
+    /// Whether a visible cell belongs to this inclusive selection.
+    pub fn contains(self, point: TerminalPoint) -> bool {
+        if self.anchor == self.head {
+            return false;
+        }
+        let (start, end) = self.ordered();
+        (start..=end).contains(&point)
+    }
+
+    fn ordered(self) -> (TerminalPoint, TerminalPoint) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
 }
 
 /// Paste shortcut for a terminal on the selected platform family.
@@ -570,6 +621,7 @@ impl TerminalScreen {
                 let cell = &self.term.grid()[point];
                 row.push(ScreenCell {
                     text: cell.c,
+                    wide_spacer: cell.flags.contains(Flags::WIDE_CHAR_SPACER),
                     foreground: colour(cell.fg),
                     background: colour(cell.bg),
                     bold: cell.flags.contains(Flags::BOLD),
@@ -605,6 +657,42 @@ impl TerminalScreen {
             .join("\n")
             .trim_end()
             .to_string()
+    }
+
+    /// Copy an inclusive visible-grid selection without right-side padding.
+    pub fn selection_text(&self, selection: TerminalSelection) -> Option<String> {
+        if selection.anchor == selection.head {
+            return None;
+        }
+        let rows = self.rows_of_cells();
+        let (mut start, mut end) = selection.ordered();
+        let last_row = rows.len().checked_sub(1)?;
+        start.row = start.row.min(last_row);
+        end.row = end.row.min(last_row);
+        let mut selected = Vec::with_capacity(end.row - start.row + 1);
+        for (row_index, row) in rows.iter().enumerate().take(end.row + 1).skip(start.row) {
+            let from = if row_index == start.row {
+                start.column.min(row.len())
+            } else {
+                0
+            };
+            let to = if row_index == end.row {
+                end.column.saturating_add(1).min(row.len())
+            } else {
+                row.len()
+            };
+            let mut text = row[from..to]
+                .iter()
+                .filter(|cell| !cell.wide_spacer)
+                .map(|cell| cell.text)
+                .collect::<String>();
+            if row_index != end.row {
+                text.truncate(text.trim_end().len());
+            }
+            selected.push(text);
+        }
+        let selected = selected.join("\n");
+        (!selected.is_empty()).then_some(selected)
     }
 }
 
@@ -990,6 +1078,63 @@ mod tests {
         let mut screen = TerminalScreen::new(4, 20);
         screen.feed("hello\r\nworld\r\n");
         assert_eq!(screen.text(), "hello\nworld");
+    }
+
+    #[test]
+    fn a_terminal_selection_copies_exact_columns_across_rows() {
+        let mut screen = TerminalScreen::new(3, 12);
+        screen.feed("alpha\r\nbeta\r\ngamma");
+
+        let selected = screen.selection_text(TerminalSelection::new(
+            TerminalPoint::new(0, 2),
+            TerminalPoint::new(2, 1),
+        ));
+
+        assert_eq!(selected.as_deref(), Some("pha\nbeta\nga"));
+    }
+
+    #[test]
+    fn dragging_a_terminal_selection_backwards_has_the_same_text() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.feed("alpha\r\nbeta");
+        let forward = TerminalSelection::new(TerminalPoint::new(0, 1), TerminalPoint::new(1, 2));
+        let backward = TerminalSelection::new(forward.head, forward.anchor);
+
+        assert_eq!(
+            screen.selection_text(forward),
+            screen.selection_text(backward)
+        );
+        assert_eq!(
+            screen.selection_text(backward).as_deref(),
+            Some("lpha\nbet")
+        );
+    }
+
+    #[test]
+    fn a_terminal_click_without_a_drag_is_not_a_selection() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.feed("alpha");
+        let point = TerminalPoint::new(0, 2);
+        let selection = TerminalSelection::new(point, point);
+
+        assert_eq!(screen.selection_text(selection), None);
+        assert!(!selection.contains(point));
+    }
+
+    #[test]
+    fn selecting_a_wide_terminal_character_does_not_copy_its_spacer_cell() {
+        let mut screen = TerminalScreen::new(2, 12);
+        screen.feed("猫");
+
+        assert_eq!(
+            screen
+                .selection_text(TerminalSelection::new(
+                    TerminalPoint::new(0, 0),
+                    TerminalPoint::new(0, 1),
+                ))
+                .as_deref(),
+            Some("猫")
+        );
     }
 
     #[test]

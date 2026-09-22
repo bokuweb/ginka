@@ -33,7 +33,7 @@ use gpui::*;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Disableable as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
+    Disableable as _, ElementExt as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState},
@@ -42,6 +42,7 @@ use gpui_component::{
     v_flex,
 };
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -226,6 +227,9 @@ const TRANSCRIPT_MEASURE: f32 = 780.;
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 17.;
 
+/// Width of one 12.5 px monospace cell in the terminal grid.
+const TERMINAL_CELL_WIDTH: f32 = 7.5;
+
 /// How wide a terminal is told it is.
 ///
 /// Fixed rather than measured: the dock's width changes with every window
@@ -262,6 +266,13 @@ struct TerminalSearch {
     query: Entity<InputState>,
     matches: Vec<ginka_ui::terminal::TerminalSearchMatch>,
     chosen: Option<usize>,
+}
+
+/// A mouse selection in one visible daemon terminal.
+#[derive(Clone)]
+struct TerminalDrag {
+    terminal: ginka_protocol::TerminalId,
+    selection: ginka_ui::terminal::TerminalSelection,
 }
 
 /// One daemon-owned upload waiting in the composer, plus an optional local thumbnail.
@@ -398,6 +409,10 @@ pub struct Shell {
     terminal_focus: FocusHandle,
     /// Present while the reader is finding text in the active terminal.
     terminal_search: Option<TerminalSearch>,
+    /// The visible terminal cells selected by the latest mouse drag.
+    terminal_selection: Option<TerminalDrag>,
+    /// Last painted bounds of each visible terminal pane.
+    terminal_bounds: HashMap<ginka_protocol::TerminalId, Bounds<Pixels>>,
     /// The command palette, while it is open: what is typed into it, the
     /// entries that match, and which one Return would run.
     palette: Option<Palette>,
@@ -916,6 +931,8 @@ impl Shell {
             palette: None,
             terminal_focus: cx.focus_handle(),
             terminal_search: None,
+            terminal_selection: None,
+            terminal_bounds: HashMap::new(),
             terminals: ginka_ui::terminal::TerminalTabs::new(),
             session_state: None,
             submitted: false,
@@ -2273,6 +2290,7 @@ impl Shell {
     /// bytes: what a terminal *is* is a program reading the bytes a keyboard
     /// produced.
     fn type_into_terminal(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        self.terminal_selection = None;
         if event.keystroke.modifiers.shift
             && matches!(event.keystroke.key.as_str(), "pageup" | "pagedown")
         {
@@ -2317,21 +2335,85 @@ impl Shell {
         if data.is_empty() {
             return;
         }
+        self.terminal_selection = None;
         cx.stop_propagation();
         let link = self.link.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
     }
 
-    /// Copy the active terminal viewport without terminal padding.
+    /// Copy the active selection, or the viewport when nothing is selected.
     fn copy_terminal_output(&self, cx: &mut Context<Self>) {
-        if let Some(text) = self
-            .terminals
-            .active()
-            .map(|tab| tab.screen.text())
-            .filter(|text| !text.is_empty())
-        {
+        if let Some(text) = self.terminals.active().and_then(|tab| {
+            self.terminal_selection
+                .as_ref()
+                .filter(|drag| drag.terminal == tab.id)
+                .and_then(|drag| tab.screen.selection_text(drag.selection))
+                .or_else(|| Some(tab.screen.text()).filter(|text| !text.is_empty()))
+        }) {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Translate a pointer position into the fixed terminal grid.
+    fn terminal_point(
+        &self,
+        terminal: &ginka_protocol::TerminalId,
+        position: Point<Pixels>,
+    ) -> Option<ginka_ui::terminal::TerminalPoint> {
+        let bounds = self.terminal_bounds.get(terminal)?;
+        let tab = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| &tab.id == terminal)?;
+        let x = (position.x - bounds.origin.x - px(8.)).max(px(0.));
+        let y = (position.y - bounds.origin.y - px(4.)).max(px(0.));
+        let column = (x.as_f32() / TERMINAL_CELL_WIDTH).floor() as usize;
+        let row = (y.as_f32() / TERMINAL_LINE_HEIGHT).floor() as usize;
+        Some(ginka_ui::terminal::TerminalPoint::new(
+            row.min(tab.screen.rows() as usize - 1),
+            column.min(tab.screen.cols() as usize - 1),
+        ))
+    }
+
+    fn begin_terminal_selection(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus_terminal(terminal, window, cx);
+        if let Some(point) = self.terminal_point(terminal, position) {
+            self.terminal_selection = Some(TerminalDrag {
+                terminal: terminal.clone(),
+                selection: ginka_ui::terminal::TerminalSelection::new(point, point),
+            });
+            cx.notify();
+        }
+    }
+
+    fn extend_terminal_selection(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        event: &MouseMoveEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if event.pressed_button != Some(MouseButton::Left) {
+            return;
+        }
+        let Some(point) = self.terminal_point(terminal, event.position) else {
+            return;
+        };
+        if let Some(drag) = self
+            .terminal_selection
+            .as_mut()
+            .filter(|drag| &drag.terminal == terminal)
+            && drag.selection.head != point
+        {
+            drag.selection.head = point;
+            cx.notify();
         }
     }
 
@@ -2355,6 +2437,7 @@ impl Shell {
         if pixels == 0.0 {
             return;
         }
+        self.terminal_selection = None;
         cx.stop_propagation();
         let lines = (pixels.abs() / 17.0).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
         if let Some(screen) = self
@@ -7782,9 +7865,17 @@ impl Shell {
                 .flatten()
         });
         let rows = screen.rows_of_cells_with_match(selected);
+        let selection = self
+            .terminal_selection
+            .as_ref()
+            .filter(|drag| drag.terminal == *terminal)
+            .map(|drag| drag.selection);
         let worktree = self.session.as_ref().map(|row| row.path.clone());
         let active = self.terminals.active_id().as_ref() == Some(terminal);
         let focus_terminal = terminal.clone();
+        let drag_terminal = terminal.clone();
+        let bounds_terminal = terminal.clone();
+        let shell = cx.entity();
         let scroll_terminal = terminal.clone();
         let terminal_key = terminal.clone();
 
@@ -7799,10 +7890,18 @@ impl Shell {
             .line_height(px(17.))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(move |this, _, window, cx| {
-                    this.focus_terminal(&focus_terminal, window, cx)
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    this.begin_terminal_selection(&focus_terminal, event.position, window, cx)
                 }),
             )
+            .on_mouse_move(cx.listener(move |this, event: &MouseMoveEvent, _, cx| {
+                this.extend_terminal_selection(&drag_terminal, event, cx)
+            }))
+            .on_prepaint(move |bounds, _, cx| {
+                shell.update(cx, |this, _| {
+                    this.terminal_bounds.insert(bounds_terminal.clone(), bounds);
+                });
+            })
             .on_scroll_wheel(cx.listener(move |this, event: &ScrollWheelEvent, _, cx| {
                 this.scroll_terminal(&scroll_terminal, event, cx)
             }))
@@ -7845,14 +7944,25 @@ impl Shell {
                             .h(px(17.))
                             .p_0()
                             .accessibility_label(label)
-                            .child(
-                                h_flex().children(
-                                    row[column..end]
-                                        .iter()
-                                        .cloned()
-                                        .map(|cell| terminal_cell(cell, &tokens, true)),
+                            .child(h_flex().children(
+                                row[column..end].iter().cloned().enumerate().map(
+                                    |(offset, cell)| {
+                                        terminal_cell(
+                                            cell,
+                                            &tokens,
+                                            true,
+                                            selection.is_some_and(|selection| {
+                                                selection.contains(
+                                                    ginka_ui::terminal::TerminalPoint::new(
+                                                        row_index,
+                                                        column + offset,
+                                                    ),
+                                                )
+                                            }),
+                                        )
+                                    },
                                 ),
-                            )
+                            ))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if let Some(range) = click_link.selection_range()
                                     && let Some(workspace) =
@@ -7875,7 +7985,16 @@ impl Shell {
                         );
                         column = end;
                     } else {
-                        elements.push(terminal_cell(row[column].clone(), &tokens, false));
+                        elements.push(terminal_cell(
+                            row[column].clone(),
+                            &tokens,
+                            false,
+                            selection.is_some_and(|selection| {
+                                selection.contains(ginka_ui::terminal::TerminalPoint::new(
+                                    row_index, column,
+                                ))
+                            }),
+                        ));
                         column += 1;
                     }
                 }
@@ -7950,6 +8069,7 @@ fn terminal_cell(
     cell: ginka_ui::terminal::ScreenCell,
     tokens: &Tokens,
     linked: bool,
+    selected: bool,
 ) -> AnyElement {
     div()
         .when(cell.search_match, |this| {
@@ -7975,6 +8095,9 @@ fn terminal_cell(
         .when(cell.bold, |this| this.font_semibold())
         .when(cell.italic, |this| this.italic())
         .when(cell.underline, |this| this.underline())
+        .when(selected && !cell.cursor, |this| {
+            this.bg(tokens.colors().accent.opacity(0.45))
+        })
         .child(if cell.text == ' ' {
             // A space with no width is a hole in a painted bar.
             SharedString::from("\u{00a0}")
