@@ -2317,6 +2317,18 @@ impl Shell {
             .detach();
     }
 
+    /// Copy the active terminal viewport without terminal padding.
+    fn copy_terminal_output(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.text())
+            .filter(|text| !text.is_empty())
+        {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
     /// Browse terminal history without sending wheel movement to the pty.
     fn scroll_terminal(
         &mut self,
@@ -3247,6 +3259,7 @@ impl Shell {
         entries.extend(ginka_ui::palette::terminal_entries(
             ginka_ui::palette::TerminalActions {
                 tabs: self.terminals.tabs().len(),
+                has_output: active.is_some_and(|tab| !tab.screen.text().is_empty()),
                 split: self.terminals.split_ids().is_some(),
                 browsing_history: active.is_some_and(|tab| tab.screen.display_offset() > 0),
                 close_armed: active.is_some_and(|tab| self.terminals.close_confirmation(&tab.id)),
@@ -3328,6 +3341,7 @@ impl Shell {
                 }
                 self.open_terminal_search(window, cx);
             }
+            Command::CopyTerminalOutput => self.copy_terminal_output(cx),
             Command::NextTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -7403,6 +7417,10 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let active = self.terminals.active_index();
         let split = self.terminals.split_ids();
+        let active_has_output = self
+            .terminals
+            .active()
+            .is_some_and(|tab| !tab.screen.text().is_empty());
         let history_offset = self
             .terminals
             .active()
@@ -7577,6 +7595,16 @@ impl Shell {
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.open_terminal_search(window, cx)
                             }))
+                    }))
+                    .children(active_has_output.then(|| {
+                        let label = rust_i18n::t!("terminal.copy_output").to_string();
+                        Button::new("copy-terminal-output")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
+                            .child(Icon::new(IconName::Copy).size_3())
+                            .on_click(cx.listener(|this, _, _, cx| this.copy_terminal_output(cx)))
                     }))
                     .children((history_offset > 0).then(|| {
                         Button::new("terminal-live")

@@ -31,6 +31,8 @@ pub enum Command {
     FocusOtherTerminalPane,
     /// Find text in the active terminal's bounded history.
     FindTerminal,
+    /// Copy the active terminal's visible output to the clipboard.
+    CopyTerminalOutput,
     /// Move to the next terminal tab.
     NextTerminal,
     /// Move to the previous terminal tab.
@@ -60,6 +62,8 @@ pub enum Command {
 pub struct TerminalActions {
     /// Number of daemon terminals shown in the shared tab strip.
     pub tabs: usize,
+    /// Whether the active viewport contains text worth copying.
+    pub has_output: bool,
     /// Whether two terminal panes are currently visible.
     pub split: bool,
     /// Whether the active terminal is browsing older output.
@@ -101,6 +105,17 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
             command: Command::CloseTerminal,
         },
     ];
+    if state.has_output {
+        entries.insert(
+            2,
+            Entry {
+                id: "terminal:copy-output".into(),
+                label: rust_i18n::t!("terminal.copy_output").to_string(),
+                hint: None,
+                command: Command::CopyTerminalOutput,
+            },
+        );
+    }
     if state.split {
         entries.push(Entry {
             id: "terminal:focus-other".into(),
@@ -491,12 +506,14 @@ mod tests {
 
         let one = terminal_entries(TerminalActions {
             tabs: 1,
+            has_output: true,
             browsing_history: true,
             ..TerminalActions::default()
         });
         for command in [
             Command::ToggleTerminalSplit,
             Command::FindTerminal,
+            Command::CopyTerminalOutput,
             Command::TerminalToLive,
             Command::CloseTerminal,
         ] {
@@ -541,6 +558,18 @@ mod tests {
             !split
                 .iter()
                 .any(|entry| entry.command == Command::TerminalToLive)
+        );
+    }
+
+    #[test]
+    fn a_blank_terminal_does_not_offer_a_no_op_copy_command() {
+        assert!(
+            !terminal_entries(TerminalActions {
+                tabs: 1,
+                ..TerminalActions::default()
+            })
+            .iter()
+            .any(|entry| entry.command == Command::CopyTerminalOutput)
         );
     }
 }

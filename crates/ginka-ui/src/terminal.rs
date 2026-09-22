@@ -585,7 +585,7 @@ impl TerminalScreen {
         screen
     }
 
-    /// The screen as plain text, for tests and for "copy all".
+    /// The visible viewport as plain text, for tests and clipboard copying.
     pub fn text(&self) -> String {
         self.rows_of_cells()
             .iter()
