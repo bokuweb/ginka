@@ -698,6 +698,8 @@ pub enum ChangeSource {
     /// Everything not committed, staged or not, including files git has never
     /// seen — an agent's new file is the change most worth reading.
     Uncommitted,
+    /// Changes in the worktree that are not yet in the index.
+    Unstaged,
     /// What is staged for the next commit.
     Staged,
     /// What has happened since a checkpoint: the answer to "what did this turn

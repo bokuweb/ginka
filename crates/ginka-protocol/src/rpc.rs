@@ -256,6 +256,18 @@ pub enum Request {
         /// `true` stages it, `false` takes it back out.
         staged: bool,
     },
+    /// Move one exact diff hunk into or out of the index.
+    ///
+    /// `header` is the complete `@@` line last read from the corresponding
+    /// unstaged or staged diff. A stale header is refused rather than matched
+    /// approximately to another change.
+    StageHunk {
+        workspace: WorkspaceId,
+        path: String,
+        header: String,
+        /// `true` stages it, `false` takes it back out.
+        staged: bool,
+    },
     /// Throw away one file's uncommitted work.
     ///
     /// Destructive and not undoable through git: a file the agent invented is
@@ -712,6 +724,12 @@ mod tests {
             Request::WorkspaceHistory {
                 workspace: WorkspaceId("comet/harbor".into()),
                 limit: Some(25),
+            },
+            Request::StageHunk {
+                workspace: WorkspaceId("comet/harbor".into()),
+                path: "src/main.rs".into(),
+                header: "@@ -1 +1 @@".into(),
+                staged: true,
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),

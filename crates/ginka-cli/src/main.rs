@@ -152,8 +152,11 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
         /// Show what is staged for the next commit instead of everything.
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["unstaged", "since"])]
         staged: bool,
+        /// Show only edits that are not staged yet.
+        #[arg(long, conflicts_with = "since")]
+        unstaged: bool,
         /// Show what has happened since a checkpoint, by its id.
         #[arg(long)]
         since: Option<String>,
@@ -179,6 +182,18 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
         /// Take it back out instead of putting it in.
+        #[arg(long)]
+        undo: bool,
+    },
+    /// Put one exact diff hunk into the next commit, or take it back out.
+    StageHunk {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Complete `@@` header printed by `changes --patch`.
+        header: String,
+        /// Take the hunk back out instead of putting it in.
         #[arg(long)]
         undo: bool,
     },
@@ -937,6 +952,17 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             staged: !undo,
         },
+        Command::StageHunk {
+            workspace,
+            path,
+            header,
+            undo,
+        } => Request::StageHunk {
+            workspace: WorkspaceId(workspace),
+            path,
+            header,
+            staged: !undo,
+        },
         Command::Revert { workspace, path } => Request::RevertFile {
             workspace: WorkspaceId(workspace),
             path,
@@ -960,16 +986,19 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Changes {
             workspace,
             staged,
+            unstaged,
             since,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
-            source: match (staged, since) {
-                (_, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+            source: match (staged, unstaged, since) {
+                (_, _, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
-                (true, None) => ChangeSource::Staged,
-                (false, None) => ChangeSource::Uncommitted,
+                (true, false, None) => ChangeSource::Staged,
+                (false, true, None) => ChangeSource::Unstaged,
+                (false, false, None) => ChangeSource::Uncommitted,
+                (true, true, None) => unreachable!("clap rejects conflicting diff sources"),
             },
         },
         Command::History { workspace, limit } => Request::WorkspaceHistory {

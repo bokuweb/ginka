@@ -803,6 +803,102 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
+fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let baseline = (1..=30)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    std::fs::write(fixture.repo().join("README.md"), &baseline).unwrap();
+    support::git(&fixture.repo(), &["add", "README.md"]);
+    support::git(&fixture.repo(), &["commit", "-m", "long fixture"]);
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "partial-review".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let id = workspace.id();
+    let edited = baseline
+        .replace("line 2\n", "line two\n")
+        .replace("line 29\n", "line twenty-nine\n");
+    std::fs::write(workspace.worktree.path.join("README.md"), edited).unwrap();
+
+    let unstaged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id.clone(),
+        source: ChangeSource::Unstaged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(unstaged.files[0].hunks.len(), 2);
+    let first_header = unstaged.files[0].hunks[0].header.clone();
+
+    assert_eq!(
+        fixture.ask(Request::StageHunk {
+            workspace: id.clone(),
+            path: "README.md".into(),
+            header: first_header.clone(),
+            staged: true,
+        }),
+        Response::Ack
+    );
+    let staged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id.clone(),
+        source: ChangeSource::Staged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    let left = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id.clone(),
+        source: ChangeSource::Unstaged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(staged.files[0].hunks.len(), 1);
+    assert!(
+        staged.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.text == "line two")
+    );
+    assert_eq!(left.files[0].hunks.len(), 1);
+    assert!(
+        left.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.text == "line twenty-nine")
+    );
+
+    fixture.ask(Request::StageHunk {
+        workspace: id.clone(),
+        path: "README.md".into(),
+        header: first_header,
+        staged: false,
+    });
+    let staged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id.clone(),
+        source: ChangeSource::Staged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    let unstaged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id,
+        source: ChangeSource::Unstaged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert!(staged.is_empty());
+    assert_eq!(unstaged.files[0].hunks.len(), 2);
+}
+
+#[test]
 fn workspace_history_crosses_the_service_with_its_bound() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

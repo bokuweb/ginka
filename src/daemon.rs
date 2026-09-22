@@ -468,14 +468,6 @@ impl DaemonLink {
             .map_err(|error| error.message)
     }
 
-    /// The paths staged for the next commit.
-    pub async fn staged_paths(&self, workspace: &WorkspaceId) -> Vec<String> {
-        match self.changes(workspace, ChangeSource::Staged).await {
-            Some(changes) => changes.files.into_iter().map(|file| file.path).collect(),
-            None => Vec::new(),
-        }
-    }
-
     /// Recent workspace commits, newest first and bounded by the daemon.
     pub async fn history(
         &self,
@@ -518,6 +510,23 @@ impl DaemonLink {
             staged,
         })
         .await;
+    }
+
+    /// Move one current diff hunk into or out of the index.
+    pub async fn stage_hunk(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        header: &str,
+        staged: bool,
+    ) -> Result<(), String> {
+        self.git_sync(Request::StageHunk {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            header: header.to_string(),
+            staged,
+        })
+        .await
     }
 
     /// Throw away a file's uncommitted work.

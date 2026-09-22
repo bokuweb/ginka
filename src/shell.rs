@@ -522,6 +522,11 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
+                crate::surfaces::SurfaceEvent::StageHunk {
+                    path,
+                    header,
+                    staged,
+                } => this.stage_hunk(path.clone(), header.clone(), *staged, cx),
                 crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
                 crate::surfaces::SurfaceEvent::FindFiles(query) => {
                     this.find_files(query.clone(), cx)
@@ -1631,6 +1636,27 @@ impl Shell {
         .detach();
     }
 
+    /// Move one exact hunk across the index boundary and surface stale views.
+    fn stage_hunk(&mut self, path: String, header: String, staged: bool, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move {
+                    link.stage_hunk(&workspace, &path, &header, staged).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
+            });
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
     /// Throw away a file's uncommitted work.
     fn revert(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
@@ -1654,18 +1680,25 @@ impl Shell {
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
-            let (changes, staged, comments) = cx
+            let (changes, staged_changes, comments) = cx
                 .background_spawn(async move {
                     let changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .changes(&workspace, ginka_protocol::ChangeSource::Unstaged)
                         .await;
-                    let staged = link.staged_paths(&workspace).await;
+                    let staged_changes = link
+                        .changes(&workspace, ginka_protocol::ChangeSource::Staged)
+                        .await;
                     let comments = link.comments(&workspace).await;
-                    (changes, staged, comments)
+                    (changes, staged_changes, comments)
                 })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_changes(changes, cx);
+                let staged = staged_changes
+                    .as_ref()
+                    .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())
+                    .unwrap_or_default();
+                surfaces.set_staged_changes(staged_changes, cx);
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
             });
@@ -8436,7 +8469,7 @@ async fn pull_rows(
         usage,
         checkpoints,
         changes,
-        staged,
+        staged_changes,
         comments,
         history,
     ) = cx
@@ -8461,15 +8494,17 @@ async fn pull_rows(
                 Some(workspace) => listing.checkpoints(workspace).await,
                 None => Vec::new(),
             };
-            let (changes, staged, comments) = match (&showing, wants_changes) {
+            let (changes, staged_changes, comments) = match (&showing, wants_changes) {
                 (Some(workspace), true) => (
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Uncommitted)
+                        .changes(workspace, ginka_protocol::ChangeSource::Unstaged)
                         .await,
-                    listing.staged_paths(workspace).await,
+                    listing
+                        .changes(workspace, ginka_protocol::ChangeSource::Staged)
+                        .await,
                     listing.comments(workspace).await,
                 ),
-                _ => (None, Vec::new(), Vec::new()),
+                _ => (None, None, Vec::new()),
             };
             let history = match (&showing, wants_history) {
                 (Some(workspace), true) => listing.history(workspace, 50).await,
@@ -8484,7 +8519,7 @@ async fn pull_rows(
                 usage,
                 checkpoints,
                 changes,
-                staged,
+                staged_changes,
                 comments,
                 history,
             )
@@ -8511,7 +8546,12 @@ async fn pull_rows(
             .update(cx, |sidebar, cx| sidebar.set_projects(listed, cx));
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
+                let staged = staged_changes
+                    .as_ref()
+                    .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())
+                    .unwrap_or_default();
                 surfaces.set_changes(changes, cx);
+                surfaces.set_staged_changes(staged_changes, cx);
                 surfaces.set_staged(staged, cx);
                 surfaces.set_comments(comments, cx);
                 surfaces.set_history(history, cx);

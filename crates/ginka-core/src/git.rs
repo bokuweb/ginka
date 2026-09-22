@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use std::ffi::OsStr;
+use std::io::Write as _;
 
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
@@ -17,7 +18,7 @@ pub use ginka_protocol::model::BranchStatus;
 use ginka_protocol::model::{ChangeSource, FileChange, GitCommit};
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,56 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
         .output()
         .with_context(|| format!("running git {}", args.join(" ")))?;
 
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            complaint(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Run git without trimming stdout, for patch text whose final whitespace is data.
+fn git_raw(repo: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .output()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    if !output.status.success() {
+        bail!(
+            "git {} failed in {}: {}",
+            args.join(" "),
+            repo.display(),
+            complaint(&output)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run git with text on stdin, for operations such as applying one hunk.
+fn git_with_input(repo: &Path, args: &[&str], input: &str) -> Result<String> {
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("running git {}", args.join(" ")))?;
+    child
+        .stdin
+        .take()
+        .context("git stdin was not piped")?
+        .write_all(input.as_bytes())
+        .context("writing a patch to git")?;
+    let output = child
+        .wait_with_output()
+        .with_context(|| format!("waiting for git {}", args.join(" ")))?;
     if !output.status.success() {
         bail!(
             "git {} failed in {}: {}",
@@ -492,6 +543,12 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
                 }
             }
         }
+        ChangeSource::Unstaged => {
+            git(worktree, &["add", "--intent-to-add", "--all"]).ok();
+            let mut args = vec!["diff"];
+            args.extend(common);
+            git(worktree, &args)?
+        }
         ChangeSource::Staged => {
             let mut args = vec!["diff", "--cached"];
             args.extend(common);
@@ -503,6 +560,72 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
     };
 
     Ok(crate::diff::parse(&patch))
+}
+
+/// Move one exact hunk into or out of the index.
+///
+/// The patch is regenerated from the current repository state and selected by
+/// its complete `@@` header. If the view is stale, no other hunk is guessed:
+/// the operation fails before `git apply` can touch the index.
+pub fn stage_hunk(worktree: &Path, path: &str, header: &str, staged: bool) -> Result<()> {
+    if staged {
+        // Make a new file visible to `git diff` without staging its contents.
+        git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+    }
+    let mut args = vec!["diff"];
+    if !staged {
+        args.push("--cached");
+    }
+    args.extend(["--no-color", "--no-ext-diff", "-U3", "--", path]);
+    let patch = git_raw(worktree, &args)?;
+    let selected = select_hunk_patch(&patch, header)
+        .with_context(|| format!("hunk {header} no longer exists in {path}"))?;
+    let mut apply = vec!["apply", "--cached", "--whitespace=nowarn"];
+    if !staged {
+        apply.push("--reverse");
+    }
+    apply.push("-");
+    git_with_input(worktree, &apply, &selected)?;
+    Ok(())
+}
+
+/// Keep a diff's file prelude and exactly one hunk.
+fn select_hunk_patch(patch: &str, header: &str) -> Option<String> {
+    let mut prelude = Vec::new();
+    let mut selected = Vec::new();
+    let mut before_hunks = true;
+    let mut found = false;
+
+    for line in patch.lines() {
+        if line.starts_with("@@") {
+            before_hunks = false;
+            if found {
+                break;
+            }
+            if line == header {
+                found = true;
+                selected.push(line);
+            }
+            continue;
+        }
+        if line.starts_with("diff --git ") && !before_hunks {
+            break;
+        }
+        if before_hunks {
+            prelude.push(line);
+        } else if found {
+            selected.push(line);
+        }
+    }
+
+    found.then(|| {
+        prelude
+            .into_iter()
+            .chain(selected)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n"
+    })
 }
 
 /// Read recent commits newest first, retaining enough topology for a graph.
@@ -1429,6 +1552,64 @@ prunable
         git(dir.path(), &["init", "--initial-branch=main"]).unwrap();
 
         assert!(history(dir.path(), 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_hunk_can_move_between_the_worktree_and_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let original = (1..=24)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(root.join("tracked.txt"), &original).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        git(&root, &["commit", "-m", "add enough context"]).unwrap();
+        let edited = original
+            .replace("line 2\n", "line two\n")
+            .replace("line 20\n", "line twenty\n");
+        std::fs::write(root.join("tracked.txt"), edited).unwrap();
+
+        let unstaged = changes(&root, &ChangeSource::Unstaged).unwrap();
+        assert_eq!(unstaged[0].hunks.len(), 2);
+        let first = unstaged[0].hunks[0].header.clone();
+
+        stage_hunk(&root, "tracked.txt", &first, true).unwrap();
+        assert_eq!(
+            changes(&root, &ChangeSource::Staged).unwrap()[0]
+                .hunks
+                .len(),
+            1
+        );
+        assert_eq!(
+            changes(&root, &ChangeSource::Unstaged).unwrap()[0]
+                .hunks
+                .len(),
+            1
+        );
+
+        stage_hunk(&root, "tracked.txt", &first, false).unwrap();
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+        assert_eq!(
+            changes(&root, &ChangeSource::Unstaged).unwrap()[0]
+                .hunks
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn a_stale_hunk_header_is_refused_without_moving_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+
+        let error = stage_hunk(&root, "tracked.txt", "@@ -99 +99 @@ stale", true)
+            .expect_err("a stale view must not stage another hunk");
+
+        assert!(error.to_string().contains("no longer exists"));
+        assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
     }
 
     #[test]

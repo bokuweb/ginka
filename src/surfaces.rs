@@ -50,6 +50,8 @@ pub struct SurfacePanel {
     open: Option<Surface>,
     /// What the workspace on screen has changed, as the shell last read it.
     changes: Option<Changes>,
+    /// What is already in the index, shown separately from worktree-only edits.
+    staged_changes: Option<Changes>,
     /// Recent commits for the selected workspace, already bounded by the daemon.
     history: Vec<GitCommit>,
     /// Whether the reader asked to see recent commits above the current diff.
@@ -195,6 +197,12 @@ pub enum SurfaceEvent {
     SetSkillEnabled { name: String, enabled: bool },
     /// Put a file into the next commit, or take it back out.
     Stage { path: String, staged: bool },
+    /// Put one exact hunk into the next commit, or take it back out.
+    StageHunk {
+        path: String,
+        header: String,
+        staged: bool,
+    },
     /// Throw away a file's uncommitted work.
     Revert { path: String },
 }
@@ -248,6 +256,7 @@ impl SurfacePanel {
             local_paths,
             open: None,
             changes: None,
+            staged_changes: None,
             history: Vec::new(),
             history_open: false,
             expanded: None,
@@ -870,15 +879,15 @@ impl SurfacePanel {
     /// Hand the panel what changed. Called from the shell's refresh.
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
-            // A file that is no longer in the list cannot stay expanded.
-            if let Some(path) = &self.expanded
-                && !changes
-                    .as_ref()
-                    .is_some_and(|changes| changes.files.iter().any(|file| &file.path == path))
-            {
-                self.expanded = None;
-            }
             self.changes = changes;
+            cx.notify();
+        }
+    }
+
+    /// Hand the panel the index-only diff, separate from worktree edits.
+    pub fn set_staged_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
+        if self.staged_changes != changes {
+            self.staged_changes = changes;
             cx.notify();
         }
     }
@@ -1008,8 +1017,21 @@ impl SurfacePanel {
                 )
                 .into_any_element();
         };
+        let Some(staged_changes) = self.staged_changes.clone() else {
+            return v_flex()
+                .flex_1()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.reading").to_string()),
+                )
+                .into_any_element();
+        };
 
-        if changes.is_empty() {
+        if changes.is_empty() && staged_changes.is_empty() {
             return v_flex()
                 .flex_1()
                 .child(self.git_remote_actions(cx))
@@ -1027,7 +1049,17 @@ impl SurfacePanel {
                 .into_any_element();
         }
 
-        let (added, removed) = changes.totals();
+        let (unstaged_added, unstaged_removed) = changes.totals();
+        let (staged_added, staged_removed) = staged_changes.totals();
+        let added = unstaged_added + staged_added;
+        let removed = unstaged_removed + staged_removed;
+        let files = changes
+            .files
+            .iter()
+            .chain(&staged_changes.files)
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
         v_flex()
             .id("git-surface")
             .flex_1()
@@ -1046,10 +1078,7 @@ impl SurfacePanel {
                             .flex_1()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child(
-                                rust_i18n::t!("surface.git.summary", files = changes.files.len())
-                                    .to_string(),
-                            ),
+                            .child(rust_i18n::t!("surface.git.summary", files = files).to_string()),
                     )
                     .child(
                         div()
@@ -1064,15 +1093,47 @@ impl SurfacePanel {
                             .child(format!("-{removed}")),
                     ),
             )
+            .when(!changes.is_empty(), |this| {
+                this.child(self.change_section(&changes, false, cx))
+            })
+            .when(!staged_changes.is_empty(), |this| {
+                this.child(self.change_section(&staged_changes, true, cx))
+            })
+            .children(self.review_bar(cx))
+            .child(self.commit_box(cx))
+            .into_any_element()
+    }
+
+    /// One side of the index boundary and the files on that side.
+    fn change_section(
+        &self,
+        changes: &Changes,
+        staged: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .w_full()
+            .child(
+                div()
+                    .w_full()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .bg(tokens.colors().bg_surface)
+                    .child(if staged {
+                        rust_i18n::t!("surface.git.section.staged").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.section.unstaged").to_string()
+                    }),
+            )
             .children(
                 changes
                     .files
                     .iter()
-                    .map(|file| self.file_row(file, cx).into_any_element()),
+                    .map(|file| self.file_row(file, staged, cx).into_any_element()),
             )
-            .children(self.review_bar(cx))
-            .child(self.commit_box(cx))
-            .into_any_element()
     }
 
     /// Remote operations stay visible even when the worktree is clean.
@@ -1484,10 +1545,10 @@ impl SurfacePanel {
     fn file_actions(
         &self,
         file: &ginka_protocol::model::FileChange,
+        staged: bool,
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let tokens = Tokens::global(cx).clone();
-        let staged = self.staged.iter().any(|path| path == &file.path);
         let asking = self.reverting.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
         let to_stage = path.clone();
@@ -1496,7 +1557,7 @@ impl SurfacePanel {
 
         let mut actions: Vec<AnyElement> = vec![
             div()
-                .id(SharedString::from(format!("stage:{path}")))
+                .id(SharedString::from(format!("stage:{staged}:{path}")))
                 .px(px(7.))
                 .py(px(2.))
                 .rounded(px(tokens.radius.row))
@@ -1526,7 +1587,7 @@ impl SurfacePanel {
                 .into_any_element(),
         ];
 
-        if asking {
+        if asking && !staged {
             actions.push(
                 div()
                     .id(SharedString::from(format!("revert-yes:{path}")))
@@ -1548,32 +1609,34 @@ impl SurfacePanel {
                     .into_any_element(),
             );
         }
-        actions.push(
-            div()
-                .id(SharedString::from(format!("revert:{path}")))
-                .px(px(7.))
-                .py(px(2.))
-                .rounded(px(tokens.radius.row))
-                .text_xs()
-                .text_color(if asking {
-                    tokens.colors().text_primary
-                } else {
-                    tokens.colors().text_muted.opacity(0.7)
-                })
-                .cursor_pointer()
-                .hover(|this| this.bg(tokens.colors().row_hover()))
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.reverting = (!asking).then(|| to_arm.clone());
-                    cx.notify();
-                }))
-                .child(if asking {
-                    rust_i18n::t!("surface.git.revert.no").to_string()
-                } else {
-                    rust_i18n::t!("surface.git.revert").to_string()
-                })
-                .into_any_element(),
-        );
+        if !staged {
+            actions.push(
+                div()
+                    .id(SharedString::from(format!("revert:{path}")))
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(if asking {
+                        tokens.colors().text_primary
+                    } else {
+                        tokens.colors().text_muted.opacity(0.7)
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.reverting = (!asking).then(|| to_arm.clone());
+                        cx.notify();
+                    }))
+                    .child(if asking {
+                        rust_i18n::t!("surface.git.revert.no").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.revert").to_string()
+                    })
+                    .into_any_element(),
+            );
+        }
         actions
     }
 
@@ -1581,18 +1644,24 @@ impl SurfacePanel {
     fn file_row(
         &self,
         file: &ginka_protocol::model::FileChange,
+        staged: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let expanded = self.expanded.as_deref() == Some(file.path.as_str());
-        let path = file.path.clone();
+        let row_key = format!(
+            "{}:{}",
+            if staged { "staged" } else { "unstaged" },
+            file.path
+        );
+        let expanded = self.expanded.as_deref() == Some(row_key.as_str());
+        let expand_key = row_key.clone();
         let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
 
         v_flex()
             .w_full()
             .child(
                 h_flex()
-                    .id(SharedString::from(format!("file:{}", file.path)))
+                    .id(SharedString::from(format!("file:{row_key}")))
                     .w_full()
                     .px_3()
                     .py_1p5()
@@ -1602,7 +1671,7 @@ impl SurfacePanel {
                     .when(expanded, |this| this.bg(tokens.colors().row_active()))
                     .hover(|this| this.bg(tokens.colors().row_hover()))
                     .on_click(cx.listener(move |this, _, _, cx| {
-                        this.expanded = (!expanded).then(|| path.clone());
+                        this.expanded = (!expanded).then(|| expand_key.clone());
                         cx.notify();
                     }))
                     .child(
@@ -1642,7 +1711,7 @@ impl SurfacePanel {
                             .text_color(tokens.colors().status_error)
                             .child(format!("-{}", file.removed)),
                     )
-                    .children(self.file_actions(file, cx)),
+                    .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
                 this.child(
@@ -1656,18 +1725,50 @@ impl SurfacePanel {
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
+                    let hunk_path = file.path.clone();
+                    let hunk_header = hunk.header.clone();
+                    let action_header = hunk_header.clone();
                     v_flex()
                         .w_full()
                         .child(
-                            div()
+                            h_flex()
                                 .w_full()
                                 .px_3()
                                 .py_0p5()
-                                .font_family(mono.clone())
-                                .text_xs()
-                                .text_color(tokens.colors().text_muted)
                                 .bg(tokens.colors().bg_surface)
-                                .child(hunk.header.clone()),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .font_family(mono.clone())
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(hunk_header),
+                                )
+                                .child(
+                                    Button::new(format!(
+                                        "hunk:{}:{}:{}",
+                                        if staged { "unstage" } else { "stage" },
+                                        file.path,
+                                        hunk.header
+                                    ))
+                                    .ghost()
+                                    .compact()
+                                    .label(if staged {
+                                        rust_i18n::t!("surface.git.hunk.unstage").to_string()
+                                    } else {
+                                        rust_i18n::t!("surface.git.hunk.stage").to_string()
+                                    })
+                                    .on_click(cx.listener(
+                                        move |_, _, _, cx| {
+                                            cx.stop_propagation();
+                                            cx.emit(SurfaceEvent::StageHunk {
+                                                path: hunk_path.clone(),
+                                                header: action_header.clone(),
+                                                staged: !staged,
+                                            });
+                                        },
+                                    )),
+                                ),
                         )
                         .children(hunk.lines.iter().map(|line| {
                             let anchor = match line.kind {

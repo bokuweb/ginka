@@ -302,6 +302,8 @@ The Git surface keeps Pull and Push visible even when the worktree is clean. Pul
 
 History beside those controls expands a bounded newest-first commit list without hiding the current diff. Rows show the short object id, subject, author and relative age; the daemon also carries full parent ids so a future branch graph is a rendering change rather than a protocol redesign.
 
+The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and a stale header reports its refusal inline instead of applying another hunk.
+
 ## 4. Component mapping
 
 | Region | Component source |

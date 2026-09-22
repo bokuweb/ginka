@@ -610,6 +610,16 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
+            Request::StageHunk {
+                workspace,
+                path,
+                header,
+                staged,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                git::stage_hunk(&worktree.path, &path, &header, staged).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::RevertFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
                 git::revert_file(&worktree.path, &path).map_err(failed)?;

@@ -225,9 +225,24 @@ pub fn tools() -> Vec<Tool> {
                 "properties": {
                     "workspace": workspace,
                     "staged": {"type": "boolean", "description": "Only what is staged for the next commit"},
+                    "unstaged": {"type": "boolean", "description": "Only worktree edits not yet in the index"},
                     "since_checkpoint": {"type": "string"},
                 },
                 "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_stage_hunk",
+            description: "Stage or unstage one exact hunk from the current diff. Stale hunk headers are refused.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "header": {"type": "string"},
+                    "staged": {"type": "boolean"},
+                },
+                "required": ["workspace", "path", "header", "staged"],
             }),
         },
         Tool {
@@ -522,8 +537,18 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                     checkpoint: CheckpointId(checkpoint),
                 },
                 None if flag("staged") => ginka_protocol::model::ChangeSource::Staged,
+                None if flag("unstaged") => ginka_protocol::model::ChangeSource::Unstaged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_stage_hunk" => Request::StageHunk {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            header: text("header")?,
+            staged: arguments
+                .get("staged")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("ginka_stage_hunk needs `staged`"))?,
         },
         "ginka_history" => Request::WorkspaceHistory {
             workspace: WorkspaceId(text("workspace")?),
@@ -672,6 +697,8 @@ mod tests {
                 "message": "a commit",
                 "query": "needle",
                 "path": "src/main.rs",
+                "header": "@@ -1 +1 @@",
+                "staged": true,
                 "expected_revision": "abc123",
                 "checkpoint": "c-1",
                 "prefix": "attempt",

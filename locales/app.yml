@@ -718,6 +718,18 @@ surface.git.history_empty:
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"
+surface.git.section.unstaged:
+  en: Changes
+  ja: 未ステージの変更
+surface.git.section.staged:
+  en: Staged changes
+  ja: ステージ済みの変更
+surface.git.hunk.stage:
+  en: Stage hunk
+  ja: hunkをステージ
+surface.git.hunk.unstage:
+  en: Unstage hunk
+  ja: hunkを戻す
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。
