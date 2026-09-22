@@ -60,6 +60,7 @@ pub struct SurfacePanel {
     /// Latest inspected element, held above the native child view until sent.
     browser_capture: Option<ginka_core::browser::BrowserCapture>,
     /// Requested design change paired with the inspected element.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     browser_feedback: Entity<TextareaState>,
     /// What the workspace on screen has changed, as the shell last read it.
     changes: Option<Changes>,
@@ -207,6 +208,7 @@ pub enum SurfaceEvent {
     /// Paste an editor selection into the active terminal.
     WriteTerminalSelection(String),
     /// Add one sanitized inspect-mode bundle to the active chat draft.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     AddBrowserContext(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
@@ -255,6 +257,7 @@ impl SurfacePanel {
             }
         })
         .detach();
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let browser_feedback = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.browser.feedback").to_string())
@@ -283,6 +286,7 @@ impl SurfacePanel {
             browser_workspace: None,
             browser_suspended: false,
             browser_capture: None,
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             browser_feedback,
             changes: None,
             staged_changes: None,

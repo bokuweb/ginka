@@ -676,6 +676,7 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
                 crate::surfaces::SurfaceEvent::AddBrowserContext(context) => {
                     this.add_browser_context(context, window, cx)
                 }
@@ -2244,6 +2245,7 @@ impl Shell {
     }
 
     /// Add a sanitized inspect-mode bundle to the current chat draft.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn add_browser_context(&mut self, context: &str, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.composer.read(cx).value();
         let draft = ginka_ui::browser::append_context(&draft, context);
