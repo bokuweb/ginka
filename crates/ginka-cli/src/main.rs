@@ -387,6 +387,8 @@ enum AccountCommand {
         #[arg(long)]
         delete_home: bool,
     },
+    /// Select the login future sessions of its provider use.
+    Select { id: String },
     /// Run the vendor's own sign-in for a login, here in this terminal.
     Login { id: String },
     /// Ask the provider how much of a login's rate-limit windows is left.
@@ -461,7 +463,7 @@ enum SessionCommand {
         /// Service tier advertised for the selected model.
         #[arg(long)]
         service_tier: Option<String>,
-        /// Which login to run on, by id. The provider's default otherwise.
+        /// Which login to run on, by id. The provider's active account otherwise.
         #[arg(long)]
         account: Option<String>,
         /// What the agent may touch: read-only, ask (edit freely, commands
@@ -811,6 +813,9 @@ fn request_for(command: Command) -> Result<Request> {
             id: AccountId(id),
             delete_home,
         },
+        Command::Account(AccountCommand::Select { id }) => {
+            Request::SelectAccount { id: AccountId(id) }
+        }
         Command::Account(AccountCommand::Refresh { id }) => Request::RefreshPlanUsage {
             account: AccountId(id),
         },
@@ -1697,7 +1702,11 @@ fn print_accounts(accounts: &[Account], plans: &[PlanSnapshot]) {
             .unwrap_or_default();
         println!(
             "{:<18} {:<8} {:<16} {:<12} {}",
-            account.id.0,
+            if account.active {
+                format!("* {}", account.id.0)
+            } else {
+                account.id.0.clone()
+            },
             account.provider.as_str(),
             account.label,
             state,

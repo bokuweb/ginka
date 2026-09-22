@@ -219,6 +219,11 @@ pub struct DaemonSettings {
     /// (`docs/accounts.md` §3). A provider's default account is never here:
     /// it is the vendor's own home, configured by `agents` above.
     pub accounts: BTreeMap<String, AccountSettings>,
+    /// Account selected for future sessions, keyed by provider id.
+    ///
+    /// Missing means the provider's system default. Existing sessions keep
+    /// the account recorded on them when this changes.
+    pub active_accounts: BTreeMap<String, ginka_protocol::AccountId>,
     /// Chat connectors: which platforms the daemon listens to, in which
     /// channels, and who may speak (`docs/connectors.md` §4.2). Tokens are
     /// never here.
@@ -308,6 +313,7 @@ impl Default for DaemonSettings {
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),
+            active_accounts: BTreeMap::new(),
             connectors: crate::connector::ConnectorsSettings::default(),
             tools: crate::tools::ToolSettings::default(),
         }

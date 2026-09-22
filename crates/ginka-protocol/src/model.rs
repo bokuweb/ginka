@@ -396,6 +396,10 @@ pub struct Account {
     pub home: Option<PathBuf>,
     /// The provider's own default, which cannot be removed.
     pub is_default: bool,
+    /// Selected for new sessions of this provider. Running sessions keep the
+    /// account they started on.
+    #[serde(default)]
+    pub active: bool,
     /// The *names* of the variables the account's `env` sets. The values never
     /// cross the wire (`docs/accounts.md` §10).
     pub env_keys: Vec<String>,

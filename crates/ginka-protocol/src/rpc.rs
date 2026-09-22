@@ -90,6 +90,9 @@ pub enum Request {
     /// thing a person least wants deleted by accident, so it stays unless
     /// `delete_home` says otherwise.
     RemoveAccount { id: AccountId, delete_home: bool },
+    /// Select the account future sessions of its provider use. Existing
+    /// sessions retain the account they started on.
+    SelectAccount { id: AccountId },
     /// Run the vendor's own sign-in for an account, in a terminal in
     /// `workspace`'s dock, with the account's directory in its environment.
     LoginAccount {
@@ -122,7 +125,7 @@ pub enum Request {
         /// Provider service tier, when the selected model accepts one.
         #[serde(default)]
         service_tier: Option<String>,
-        /// Which login to run on; the provider's default when absent.
+        /// Which login to run on; the provider's active account when absent.
         account: Option<AccountId>,
         /// What the agent may do without asking. `Ask` when absent.
         #[serde(default)]
@@ -501,7 +504,7 @@ pub struct Attempt {
     /// A driver id: `claude`, `codex`, …
     pub agent: String,
     pub model: Option<String>,
-    /// Which login to run on; the provider's default when absent.
+    /// Which login to run on; the provider's active account when absent.
     #[serde(default)]
     pub account: Option<AccountId>,
 }
@@ -739,6 +742,9 @@ mod tests {
                 path: "src/main.rs".into(),
                 header: "@@ -1 +1 @@".into(),
                 staged: true,
+            },
+            Request::SelectAccount {
+                id: AccountId("codex-work".into()),
             },
             Request::RevertHunk {
                 workspace: WorkspaceId("comet/harbor".into()),

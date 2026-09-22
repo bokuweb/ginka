@@ -316,6 +316,14 @@ impl DaemonLink {
         }
     }
 
+    /// Select the login future sessions of its provider use.
+    pub async fn select_account(&self, account: &AccountId) -> Result<(), String> {
+        self.git_sync(Request::SelectAccount {
+            id: account.clone(),
+        })
+        .await
+    }
+
     /// The latest reading of every account's rate-limit windows.
     ///
     /// Comes with the usage report, of which the readings are the part the

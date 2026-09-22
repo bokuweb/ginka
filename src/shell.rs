@@ -857,7 +857,19 @@ impl Shell {
                         // A login was added, removed or signed in: the list
                         // is re-read with the rest.
                         DaemonEvent::AccountsChanged => {
-                            pull_rows(&this, &link, cx).await.map(|_| ())
+                            match pull_rows(&this, &link, cx).await {
+                                Err(()) => Err(()),
+                                Ok(_) => this
+                                    .update(cx, |this, cx| {
+                                        // The daemon's active marker is
+                                        // authoritative, including when
+                                        // another client made the choice.
+                                        this.chosen_account = None;
+                                        this.sync_footer(cx);
+                                        cx.notify();
+                                    })
+                                    .map_err(|_| ()),
+                            }
                         }
                         // The agent's commit message, for the box that asked
                         // for it — if it is still the workspace on screen.
@@ -6627,7 +6639,7 @@ impl Shell {
     /// A conversation stays on the login it started on — the vendor's thread
     /// lives in that login's directory — so while one is being continued the
     /// answer is its account. A fresh chat takes what the reader picked, or
-    /// the provider's default.
+    /// the provider's persisted active account.
     fn account_to_start(&self) -> Option<&ginka_protocol::model::Account> {
         let provider = self.agent_to_start()?;
         let continuing = self
@@ -6951,6 +6963,12 @@ impl Shell {
                     cx.listener(move |this, _, window, cx| {
                         this.chosen_account = Some(id.clone());
                         this.picker = None;
+                        let link = this.link.clone();
+                        let selected = id.clone();
+                        cx.background_spawn(async move {
+                            let _ = link.select_account(&selected).await;
+                        })
+                        .detach();
                         // Choosing a login that is signed out is asking to
                         // sign in: the vendor's own command opens in the
                         // dock, pointed at the login's directory.
@@ -7061,7 +7079,15 @@ impl Shell {
                 typed_label.trim().to_string()
             };
             let added = cx
-                .background_spawn(async move { link.add_account(id, provider, label).await })
+                .background_spawn(async move {
+                    let added = link.add_account(id, provider, label).await;
+                    if let Ok(account) = &added {
+                        // A newly added login is the one the reader is about
+                        // to sign into, so future conversations should adopt it.
+                        let _ = link.select_account(&account.id).await;
+                    }
+                    added
+                })
                 .await;
             this.update(cx, |this, cx| {
                 match added {

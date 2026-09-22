@@ -416,6 +416,13 @@ impl Service {
                 self.events.emit(DaemonEvent::AccountsChanged);
                 Ok(Response::Ack)
             }
+            Request::SelectAccount { id } => {
+                crate::account::select(&mut self.settings, &id).map_err(account_error)?;
+                self.save_settings()?;
+                self.accounts = None;
+                self.events.emit(DaemonEvent::AccountsChanged);
+                Ok(Response::Ack)
+            }
             Request::LoginAccount {
                 id,
                 workspace,
@@ -1406,8 +1413,8 @@ impl Service {
             Some(account) => crate::account::resolve(&self.settings, driver.id(), Some(&account))
                 .map_err(account_error)?,
             // No login named: the original's where the agent is the same,
-            // the provider's default where it is not — the original's login
-            // belongs to another provider.
+            // the provider's active account where it is not — the original's
+            // login belongs to another provider.
             None if same_agent => original.account.clone(),
             None => {
                 crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?

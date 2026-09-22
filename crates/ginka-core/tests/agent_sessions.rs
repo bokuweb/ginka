@@ -2339,6 +2339,20 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
             .all()
             .contains(&DaemonEvent::AccountsChanged)
     );
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("claude-work".into()),
+    });
+    let accounts = accounts_of(&mut fixture);
+    assert!(
+        accounts
+            .iter()
+            .any(|account| { account.id.0 == "claude-work" && account.active })
+    );
+    assert!(
+        accounts
+            .iter()
+            .any(|account| { account.id.0 == "claude" && !account.active })
+    );
 
     // The agent says what it was given; the script is the same for both.
     std::fs::write(
@@ -2358,7 +2372,7 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         model: None,
         reasoning_effort: None,
         service_tier: None,
-        account: Some(ginka_protocol::AccountId("claude-work".into())),
+        account: None,
         access_mode: None,
         origin: None,
     }) {
@@ -2373,8 +2387,26 @@ fn a_session_on_a_named_account_runs_with_that_accounts_directory() {
         "the account's directory reached the agent: {said}"
     );
 
-    // And the default account points the CLI nowhere in particular: the
-    // variable is not set at all.
+    // Switching changes the default for new conversations. The existing
+    // record stays on the account that owns its vendor thread.
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("claude".into()),
+    });
+    let stored = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => sessions,
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let original = stored
+        .iter()
+        .find(|session| session.id == on_work.id)
+        .expect("the first conversation remains listed");
+    assert_eq!(original.account.0, "claude-work");
+
+    // And the active default account points the CLI nowhere in particular:
+    // its variable is not set at all.
     let on_default = fixture.start(
         &[
             r#"{"type":"system","subtype":"init","session_id":"d"}"#,
@@ -2481,6 +2513,15 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
     assert_eq!(login.args, vec!["login"]);
     assert_eq!(login.env[0].0, "CODEX_HOME");
 
+    fixture.ask(Request::SelectAccount {
+        id: ginka_protocol::AccountId("codex-work".into()),
+    });
+    assert!(
+        accounts_of(&mut fixture)
+            .iter()
+            .any(|account| account.id.0 == "codex-work" && account.active)
+    );
+
     // Ids are slugs and never a provider's own.
     assert!(
         fixture
@@ -2508,12 +2549,18 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         delete_home: false,
     });
     assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert!(
+        accounts_of(&mut fixture)
+            .iter()
+            .any(|account| account.id.0 == "codex" && account.active)
+    );
     assert!(home.is_dir(), "the vendor's login is kept unless asked");
 
     // And what was written survives a daemon: it is in the settings file.
     let settings: ginka_core::settings::DaemonSettings =
         ginka_core::settings::load(&fixture.service.paths().daemon_settings());
     assert!(settings.accounts.is_empty());
+    assert!(settings.active_accounts.is_empty());
 }
 
 #[test]

@@ -158,6 +158,51 @@ fn a_project_registered_through_the_daemon_is_visible_to_the_next_command() {
 }
 
 #[test]
+fn an_account_selection_is_persistent_and_visible() {
+    let home = Home::new();
+    home.ok(&[
+        "account",
+        "add",
+        "codex-work",
+        "--provider",
+        "codex",
+        "--label",
+        "Work",
+    ]);
+
+    home.ok(&["account", "select", "codex-work"]);
+    let selected = home.ok(&["account", "list"]);
+    assert!(
+        selected
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{selected}"
+    );
+
+    home.ok(&["daemon", "stop"]);
+    let after_restart = home.ok(&["account", "list"]);
+    assert!(
+        after_restart
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{after_restart}"
+    );
+
+    home.ok(&["account", "select", "codex"]);
+    let restored = home.ok(&["account", "list"]);
+    assert!(
+        restored.lines().any(|line| line.starts_with("* codex ")),
+        "{restored}"
+    );
+    assert!(
+        !restored
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{restored}"
+    );
+}
+
+#[test]
 fn a_project_search_finds_paths_and_content_across_its_worktrees() {
     let home = Home::new();
     let repository = home.repository("comet");

@@ -253,8 +253,11 @@ active conversation. With nothing selected, the rail stands alone.
   prints the selected effort when that model supports it, so a collapsed
   picker still says what the next turn will run. The percentage is
   printed and *at the wall* appears as a word beside it, never as colour alone
-  (`docs/accounts.md` §11). While a session is working, the circular action is
-  Stop when the draft is empty and Send as soon as a follow-up has been typed;
+  (`docs/accounts.md` §11). Choosing an account persists it as that provider's
+  default for future chats in every client; a continuing session keeps and
+  displays its original account. Removing the active named account falls back
+  to the provider's implicit default. While a session is working, the circular
+  action is Stop when the draft is empty and Send as soon as a follow-up has been typed;
   that send steers or queues according to the driver's existing policy. The
   attachment button selects several files, and files dropped anywhere on the
   composer take the same upload path. Pasting an image while the composer has

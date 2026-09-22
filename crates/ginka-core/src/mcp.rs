@@ -91,6 +91,15 @@ pub fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
+            name: "ginka_account_select",
+            description: "Select the login future sessions of its provider use. Running sessions keep their original login.",
+            schema: json!({
+                "type": "object",
+                "properties": {"account": {"type": "string"}},
+                "required": ["account"],
+            }),
+        },
+        Tool {
             name: "ginka_sessions",
             description: "List agent sessions, newest first.",
             schema: json!({
@@ -111,7 +120,7 @@ pub fn tools() -> Vec<Tool> {
                     "reasoning_effort": {"type": "string", "description": "A value advertised for the selected model"},
                     "service_tier": {"type": "string", "description": "A value advertised for the selected model"},
                     "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands sandboxed or refused) otherwise"},
-                    "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's default otherwise"},
+                    "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's active account otherwise"},
                 },
                 "required": ["workspace", "agent", "prompt"],
             }),
@@ -461,6 +470,9 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         },
         "ginka_agents" => Request::ListAgents,
         "ginka_accounts" => Request::Accounts,
+        "ginka_account_select" => Request::SelectAccount {
+            id: ginka_protocol::AccountId(text("account")?),
+        },
         "ginka_sessions" => Request::ListSessions {
             workspace: maybe("workspace").map(WorkspaceId),
             origin: None,
@@ -710,6 +722,7 @@ mod tests {
                 "request_id": "ask-1",
                 "response": "yes",
                 "agent": "claude",
+                "account": "claude-work",
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
