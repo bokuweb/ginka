@@ -529,6 +529,21 @@ impl DaemonLink {
         .await
     }
 
+    /// Permanently discard one current unstaged hunk.
+    pub async fn revert_hunk(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        header: &str,
+    ) -> Result<(), String> {
+        self.git_sync(Request::RevertHunk {
+            workspace: workspace.clone(),
+            path: path.to_string(),
+            header: header.to_string(),
+        })
+        .await
+    }
+
     /// Throw away a file's uncommitted work.
     pub async fn revert(&self, workspace: &WorkspaceId, path: &str) {
         self.ask(Request::RevertFile {

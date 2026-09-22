@@ -803,7 +803,7 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
-fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
+fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
     let baseline = (1..=30)
@@ -821,10 +821,11 @@ fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
         other => panic!("expected a workspace, got {other:?}"),
     };
     let id = workspace.id();
+    let worktree = workspace.worktree.path.clone();
     let edited = baseline
         .replace("line 2\n", "line two\n")
         .replace("line 29\n", "line twenty-nine\n");
-    std::fs::write(workspace.worktree.path.join("README.md"), edited).unwrap();
+    std::fs::write(worktree.join("README.md"), edited).unwrap();
 
     let unstaged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
@@ -877,7 +878,7 @@ fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
     fixture.ask(Request::StageHunk {
         workspace: id.clone(),
         path: "README.md".into(),
-        header: first_header,
+        header: first_header.clone(),
         staged: false,
     });
     let staged = match fixture.ask(Request::WorkspaceChanges {
@@ -888,7 +889,7 @@ fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
         other => panic!("expected changes, got {other:?}"),
     };
     let unstaged = match fixture.ask(Request::WorkspaceChanges {
-        workspace: id,
+        workspace: id.clone(),
         source: ChangeSource::Unstaged,
     }) {
         Response::Changes { changes } => changes,
@@ -896,6 +897,31 @@ fn one_hunk_can_cross_the_service_boundary_without_staging_the_whole_file() {
     };
     assert!(staged.is_empty());
     assert_eq!(unstaged.files[0].hunks.len(), 2);
+
+    fixture.ask(Request::RevertHunk {
+        workspace: id.clone(),
+        path: "README.md".into(),
+        header: first_header,
+    });
+    let left = match fixture.ask(Request::WorkspaceChanges {
+        workspace: id,
+        source: ChangeSource::Unstaged,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(left.files[0].hunks.len(), 1);
+    assert!(
+        left.files[0].hunks[0]
+            .lines
+            .iter()
+            .any(|line| line.text == "line twenty-nine")
+    );
+    assert!(
+        !std::fs::read_to_string(worktree.join("README.md"))
+            .unwrap()
+            .contains("line two")
+    );
 }
 
 #[test]

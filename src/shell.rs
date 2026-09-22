@@ -527,6 +527,9 @@ impl Shell {
                     header,
                     staged,
                 } => this.stage_hunk(path.clone(), header.clone(), *staged, cx),
+                crate::surfaces::SurfaceEvent::RevertHunk { path, header } => {
+                    this.revert_hunk(path.clone(), header.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::Revert { path } => this.revert(path.clone(), cx),
                 crate::surfaces::SurfaceEvent::FindFiles(query) => {
                     this.find_files(query.clone(), cx)
@@ -1648,6 +1651,25 @@ impl Shell {
                 .background_spawn(async move {
                     link.stage_hunk(&workspace, &path, &header, staged).await
                 })
+                .await;
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_git_sync_result(outcome.err(), cx)
+            });
+            this.update(cx, |this, cx| this.refresh_changes(cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Permanently discard one exact unstaged hunk and surface stale views.
+    fn revert_hunk(&mut self, path: String, header: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_spawn(async move { link.revert_hunk(&workspace, &path, &header).await })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.set_git_sync_result(outcome.err(), cx)

@@ -197,6 +197,17 @@ enum Command {
         #[arg(long)]
         undo: bool,
     },
+    /// Throw away one exact unstaged diff hunk.
+    ///
+    /// This cannot be undone through git. A stale hunk header is refused.
+    RevertHunk {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// Complete `@@` header printed by `changes --unstaged --patch`.
+        header: String,
+    },
     /// Throw away a file's uncommitted work.
     ///
     /// A file the agent created is deleted, which git cannot undo.
@@ -962,6 +973,15 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             header,
             staged: !undo,
+        },
+        Command::RevertHunk {
+            workspace,
+            path,
+            header,
+        } => Request::RevertHunk {
+            workspace: WorkspaceId(workspace),
+            path,
+            header,
         },
         Command::Revert { workspace, path } => Request::RevertFile {
             workspace: WorkspaceId(workspace),

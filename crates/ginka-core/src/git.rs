@@ -589,6 +589,28 @@ pub fn stage_hunk(worktree: &Path, path: &str, header: &str, staged: bool) -> Re
     Ok(())
 }
 
+/// Discard one exact unstaged hunk while preserving the index.
+///
+/// The worktree-versus-index patch is regenerated immediately before the
+/// reverse apply. A header that disappeared or changed is refused so a stale
+/// review cannot discard a neighbouring edit.
+pub fn revert_hunk(worktree: &Path, path: &str, header: &str) -> Result<()> {
+    // Make a new file visible without moving its contents into the index.
+    git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+    let patch = git_raw(
+        worktree,
+        &["diff", "--no-color", "--no-ext-diff", "-U3", "--", path],
+    )?;
+    let selected = select_hunk_patch(&patch, header)
+        .with_context(|| format!("hunk {header} no longer exists in {path}"))?;
+    git_with_input(
+        worktree,
+        &["apply", "--reverse", "--whitespace=nowarn", "-"],
+        &selected,
+    )?;
+    Ok(())
+}
+
 /// Keep a diff's file prelude and exactly one hunk.
 fn select_hunk_patch(patch: &str, header: &str) -> Option<String> {
     let mut prelude = Vec::new();
@@ -1610,6 +1632,77 @@ prunable
 
         assert!(error.to_string().contains("no longer exists"));
         assert!(changes(&root, &ChangeSource::Staged).unwrap().is_empty());
+    }
+
+    #[test]
+    fn one_unstaged_hunk_can_be_discarded_without_touching_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let original = (1..=30)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        std::fs::write(root.join("tracked.txt"), &original).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        git(&root, &["commit", "-m", "add discard fixture"]).unwrap();
+
+        let with_staged_edit = original.replace("line 2\n", "line two\n");
+        std::fs::write(root.join("tracked.txt"), &with_staged_edit).unwrap();
+        git(&root, &["add", "tracked.txt"]).unwrap();
+        let with_both_edits = with_staged_edit.replace("line 29\n", "line twenty-nine\n");
+        std::fs::write(root.join("tracked.txt"), with_both_edits).unwrap();
+        let header = changes(&root, &ChangeSource::Unstaged).unwrap()[0].hunks[0]
+            .header
+            .clone();
+
+        revert_hunk(&root, "tracked.txt", &header).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            with_staged_edit
+        );
+        let staged = changes(&root, &ChangeSource::Staged).unwrap();
+        assert_eq!(staged[0].hunks.len(), 1);
+        assert!(
+            staged[0].hunks[0]
+                .lines
+                .iter()
+                .any(|line| line.text == "line two")
+        );
+        assert!(changes(&root, &ChangeSource::Unstaged).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_stale_discard_header_leaves_the_worktree_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("tracked.txt"), "keep this edit\n").unwrap();
+
+        let error = revert_hunk(&root, "tracked.txt", "@@ -99 +99 @@ stale")
+            .expect_err("a stale view must not discard another hunk");
+
+        assert!(error.to_string().contains("no longer exists"));
+        assert_eq!(
+            std::fs::read_to_string(root.join("tracked.txt")).unwrap(),
+            "keep this edit\n"
+        );
+    }
+
+    #[test]
+    fn discarding_an_untracked_files_only_hunk_removes_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("new.txt"), "new work\n").unwrap();
+        let header = changes(&root, &ChangeSource::Unstaged).unwrap()[0].hunks[0]
+            .header
+            .clone();
+
+        revert_hunk(&root, "new.txt", &header).unwrap();
+
+        assert!(!root.join("new.txt").exists());
+        assert!(changes(&root, &ChangeSource::Unstaged).unwrap().is_empty());
     }
 
     #[test]

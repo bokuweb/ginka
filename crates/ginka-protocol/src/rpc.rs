@@ -268,6 +268,15 @@ pub enum Request {
         /// `true` stages it, `false` takes it back out.
         staged: bool,
     },
+    /// Throw away one exact unstaged hunk.
+    ///
+    /// `header` is the complete `@@` line last read from the unstaged diff. A
+    /// stale header is refused rather than matched approximately.
+    RevertHunk {
+        workspace: WorkspaceId,
+        path: String,
+        header: String,
+    },
     /// Throw away one file's uncommitted work.
     ///
     /// Destructive and not undoable through git: a file the agent invented is
@@ -730,6 +739,11 @@ mod tests {
                 path: "src/main.rs".into(),
                 header: "@@ -1 +1 @@".into(),
                 staged: true,
+            },
+            Request::RevertHunk {
+                workspace: WorkspaceId("comet/harbor".into()),
+                path: "src/main.rs".into(),
+                header: "@@ -1 +1 @@".into(),
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),

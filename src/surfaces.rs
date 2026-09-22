@@ -77,6 +77,8 @@ pub struct SurfacePanel {
     /// Two steps, like a rewind: a revert deletes a file the agent wrote, and
     /// git has nothing to undo it with.
     reverting: Option<String>,
+    /// The exact unstaged hunk whose destructive discard awaits confirmation.
+    reverting_hunk: Option<String>,
     /// The commit message being written, if the box is open.
     message: Option<Entity<TextareaState>>,
     /// Why the last commit did not happen.
@@ -203,6 +205,8 @@ pub enum SurfaceEvent {
         header: String,
         staged: bool,
     },
+    /// Permanently discard one exact unstaged hunk.
+    RevertHunk { path: String, header: String },
     /// Throw away a file's uncommitted work.
     Revert { path: String },
 }
@@ -264,6 +268,7 @@ impl SurfacePanel {
             commenting: None,
             staged: Vec::new(),
             reverting: None,
+            reverting_hunk: None,
             message: None,
             generating: false,
             generated: None,
@@ -1728,6 +1733,10 @@ impl SurfacePanel {
                     let hunk_path = file.path.clone();
                     let hunk_header = hunk.header.clone();
                     let action_header = hunk_header.clone();
+                    let discard_path = file.path.clone();
+                    let discard_header = hunk.header.clone();
+                    let discard_key = format!("{}\0{}", file.path, hunk.header);
+                    let discard_armed = self.reverting_hunk.as_deref() == Some(&discard_key);
                     v_flex()
                         .w_full()
                         .child(
@@ -1768,7 +1777,38 @@ impl SurfacePanel {
                                             });
                                         },
                                     )),
-                                ),
+                                )
+                                .when(!staged, |this| {
+                                    this.child(
+                                        Button::new(format!(
+                                            "discard-hunk:{}:{}",
+                                            file.path, hunk.header
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .label(if discard_armed {
+                                            rust_i18n::t!("surface.git.hunk.discard_confirm")
+                                                .to_string()
+                                        } else {
+                                            rust_i18n::t!("surface.git.hunk.discard").to_string()
+                                        })
+                                        .on_click(
+                                            cx.listener(move |this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                if discard_armed {
+                                                    this.reverting_hunk = None;
+                                                    cx.emit(SurfaceEvent::RevertHunk {
+                                                        path: discard_path.clone(),
+                                                        header: discard_header.clone(),
+                                                    });
+                                                } else {
+                                                    this.reverting_hunk = Some(discard_key.clone());
+                                                    cx.notify();
+                                                }
+                                            }),
+                                        ),
+                                    )
+                                }),
                         )
                         .children(hunk.lines.iter().map(|line| {
                             let anchor = match line.kind {

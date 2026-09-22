@@ -333,7 +333,7 @@ fn changes_are_readable_from_the_command_line() {
 }
 
 #[test]
-fn one_hunk_can_be_staged_and_unstaged_from_the_command_line() {
+fn one_hunk_can_be_staged_unstaged_and_discarded_from_the_command_line() {
     let home = Home::new();
     let repository = home.repository("comet");
     let baseline = (1..=30)
@@ -384,6 +384,11 @@ fn one_hunk_can_be_staged_and_unstaged_from_the_command_line() {
     let restored = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
     assert!(restored.contains("line two"), "{restored}");
     assert!(restored.contains("line twenty-nine"), "{restored}");
+
+    home.ok(&["revert-hunk", "comet/partial-review", "README.md", &header]);
+    let left = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
+    assert!(!left.contains("line two"), "{left}");
+    assert!(left.contains("line twenty-nine"), "{left}");
 }
 
 #[test]

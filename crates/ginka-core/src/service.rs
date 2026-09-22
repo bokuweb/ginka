@@ -620,6 +620,18 @@ impl Service {
                 git::stage_hunk(&worktree.path, &path, &header, staged).map_err(failed)?;
                 Ok(Response::Ack)
             }
+            Request::RevertHunk {
+                workspace,
+                path,
+                header,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                git::revert_hunk(&worktree.path, &path, &header).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            }
             Request::RevertFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
                 git::revert_file(&worktree.path, &path).map_err(failed)?;

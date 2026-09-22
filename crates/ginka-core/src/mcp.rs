@@ -246,6 +246,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_revert_hunk",
+            description: "Permanently discard one exact unstaged hunk. Stale hunk headers are refused.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "header": {"type": "string"},
+                },
+                "required": ["workspace", "path", "header"],
+            }),
+        },
+        Tool {
             name: "ginka_history",
             description: "Read a workspace's recent commit history with parent topology.",
             schema: json!({
@@ -549,6 +562,11 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 .get("staged")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| anyhow!("ginka_stage_hunk needs `staged`"))?,
+        },
+        "ginka_revert_hunk" => Request::RevertHunk {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            header: text("header")?,
         },
         "ginka_history" => Request::WorkspaceHistory {
             workspace: WorkspaceId(text("workspace")?),

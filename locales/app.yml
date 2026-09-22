@@ -730,6 +730,12 @@ surface.git.hunk.stage:
 surface.git.hunk.unstage:
   en: Unstage hunk
   ja: hunkを戻す
+surface.git.hunk.discard:
+  en: Discard hunk
+  ja: hunkを破棄
+surface.git.hunk.discard_confirm:
+  en: Discard?
+  ja: 破棄しますか？
 surface.git.binary:
   en: A binary file. There is nothing to read.
   ja: バイナリファイルです。表示できる内容はありません。
