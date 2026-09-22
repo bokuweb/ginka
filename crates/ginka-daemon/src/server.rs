@@ -18,6 +18,7 @@ use async_tungstenite::tungstenite::handshake::server::{
     ErrorResponse, Request as HandshakeRequest, Response as HandshakeResponse,
 };
 use async_tungstenite::tungstenite::http::StatusCode;
+use async_tungstenite::tungstenite::protocol::WebSocketConfig;
 use futures_util::StreamExt;
 use ginka_core::Paths;
 use ginka_core::service::Service;
@@ -423,7 +424,7 @@ impl Connection {
         stream: async_net::TcpStream,
     ) -> Result<WebSocketStream<async_net::TcpStream>> {
         let expected = format!("Bearer {}", self.token);
-        let socket = async_tungstenite::accept_hdr_async(
+        let socket = async_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &HandshakeRequest, response: HandshakeResponse| {
                 let presented = request
@@ -442,6 +443,7 @@ impl Connection {
                     Err(refusal)
                 }
             },
+            Some(wire_config()),
         )
         .await
         .context("websocket upgrade")?;
@@ -522,9 +524,34 @@ impl Connection {
     }
 }
 
+/// Apply the protocol's message bound to everything received from a client.
+///
+/// One attachment can occupy one frame, so the frame and assembled-message
+/// bounds intentionally match instead of inheriting tungstenite's smaller
+/// default frame limit.
+fn wire_config() -> WebSocketConfig {
+    WebSocketConfig::default()
+        .max_message_size(Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES))
+        .max_frame_size(Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_daemon_bounds_client_messages_and_their_frames() {
+        let config = wire_config();
+
+        assert_eq!(
+            config.max_message_size,
+            Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES)
+        );
+        assert_eq!(
+            config.max_frame_size,
+            Some(ginka_protocol::MAX_WIRE_MESSAGE_BYTES)
+        );
+    }
 
     #[test]
     fn a_frame_that_will_not_parse_is_still_answered_to_its_sender() {

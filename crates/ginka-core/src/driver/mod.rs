@@ -64,6 +64,15 @@ pub struct ModelCatalogueProbe {
     pub input: Vec<String>,
 }
 
+/// One provider-owned manual compaction process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompactionSpec {
+    /// The long-running provider endpoint to start.
+    pub command: CommandSpec,
+    /// Protocol messages written to the endpoint after it starts.
+    pub input: Vec<String>,
+}
+
 /// A command to run, described rather than executed.
 ///
 /// Returning this instead of a `std::process::Command` is what lets a test
@@ -328,6 +337,14 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// One user message, in whatever the transport reads from its input.
     /// `None` where there is no such thing.
     fn encode_user_message(&self, _text: &str) -> Option<String> {
+        None
+    }
+
+    /// Build the provider-owned operation that compacts an idle conversation.
+    ///
+    /// `None` means manual compaction is not exposed by this transport. The
+    /// daemon never guesses a slash command for an unsupported provider.
+    fn compaction(&self, _spec: &SessionSpec, _vendor_session_id: &str) -> Option<CompactionSpec> {
         None
     }
 

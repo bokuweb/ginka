@@ -375,6 +375,19 @@ fn excerpt(payload: &str, query: &str) -> String {
             TranscriptPayload::Agent { event } => match event {
                 ginka_protocol::AgentEvent::TextDelta { text }
                 | ginka_protocol::AgentEvent::Reasoning { text } => text,
+                ginka_protocol::AgentEvent::ToolCall { activity }
+                | ginka_protocol::AgentEvent::ToolResult { activity }
+                    if activity.tasks.is_some() =>
+                {
+                    activity
+                        .tasks
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|task| task.label.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                }
                 ginka_protocol::AgentEvent::ToolResult { activity } => {
                     activity.detail.clone().unwrap_or_default()
                 }
@@ -511,6 +524,7 @@ mod tests {
     use super::*;
     use crate::db;
     use ginka_protocol::AgentEvent;
+    use ginka_protocol::event::ActivityItem;
 
     fn session(id: &str, workspace: &str, at: i64) -> Session {
         Session {
@@ -702,6 +716,43 @@ mod tests {
         let after_first = transcript(&conn, &id, Some(1), None).unwrap();
         assert_eq!(after_first.len(), 1);
         assert_eq!(after_first[0].seq, 2);
+    }
+
+    #[test]
+    fn persisted_task_labels_are_searchable_with_a_readable_excerpt() {
+        let conn = db::open_in_memory().unwrap();
+        insert(&conn, &session("s", "comet/harbor", 100)).unwrap();
+        let id = SessionId("s".into());
+        let mut activity = ActivityItem::from_tool(
+            Some("tasks-1".into()),
+            "TodoWrite",
+            &serde_json::json!({
+                "todos": [
+                    {"content": "Inspect transport", "status": "completed"},
+                    {"content": "Verify websocket reconnect", "status": "in_progress"}
+                ]
+            }),
+        );
+        activity.complete_with("", false);
+        append(
+            &conn,
+            &id,
+            &TranscriptPayload::Agent {
+                event: AgentEvent::ToolResult { activity },
+            },
+            101,
+        )
+        .unwrap();
+
+        let matches = search(&conn, None, "websocket reconnect", 10).unwrap();
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].seq, 1);
+        assert!(
+            matches[0].excerpt.contains("Verify websocket reconnect"),
+            "task labels, not empty tool output, explain the match: {}",
+            matches[0].excerpt
+        );
     }
 
     #[test]
