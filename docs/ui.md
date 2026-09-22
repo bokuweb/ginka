@@ -338,7 +338,11 @@ tokens and its model capacity, the same chip adds their occupancy and percentage
 as a distinct reading — cumulative session totals are never divided by a model
 limit, because compaction would make that percentage false. Turn events push
 these readings into it immediately; clicking requests a fresh rate-limit
-reading. It is never refreshed by a timer.
+reading. It is never refreshed by a timer. When the same provider reading says
+manual compaction is supported, an adjacent **Compact** control starts the
+provider-owned operation as a separate resumed turn. The control disappears
+while a turn is active; compaction never enters the ordinary steer-or-queue
+path.
 
 ## 5. What we build ourselves
 

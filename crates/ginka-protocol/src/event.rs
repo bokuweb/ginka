@@ -153,6 +153,9 @@ pub struct ContextUsage {
     pub used_tokens: u64,
     /// Total context capacity for the model that produced the reading.
     pub window_tokens: u64,
+    /// Whether this provider exposes an explicit manual compaction operation.
+    #[serde(default)]
+    pub can_compact: bool,
 }
 
 impl ContextUsage {
@@ -430,6 +433,7 @@ mod tests {
         let usage = ContextUsage {
             used_tokens: 150,
             window_tokens: 100,
+            can_compact: false,
         };
 
         assert_eq!(usage.used_percent(), 100.0);

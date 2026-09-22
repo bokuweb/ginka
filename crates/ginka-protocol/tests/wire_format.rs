@@ -374,6 +374,7 @@ fn agent_events_are_tagged_by_kind() {
                 usage: ContextUsage {
                     used_tokens: 32_000,
                     window_tokens: 128_000,
+                    can_compact: true,
                 },
             },
             "context_usage",

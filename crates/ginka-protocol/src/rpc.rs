@@ -160,6 +160,11 @@ pub enum Request {
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
     SendMessage { session: SessionId, text: String },
+    /// Ask the provider to compact an idle conversation's context.
+    ///
+    /// This is deliberately distinct from a follow-up: it is refused while a
+    /// turn is running and on providers without an explicit compact command.
+    CompactSession { session: SessionId },
     /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser), approve a
     /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal), or resolve a
     /// [`Permission`](crate::event::AgentEvent::Permission) request.
@@ -683,6 +688,9 @@ mod tests {
                 session: SessionId("s-1".into()),
                 after: Some(10),
                 limit: None,
+            },
+            Request::CompactSession {
+                session: SessionId("s-1".into()),
             },
             Request::ForkSession {
                 session: SessionId("s-1".into()),

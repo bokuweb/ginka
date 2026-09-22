@@ -803,6 +803,20 @@ impl DaemonLink {
         .await;
     }
 
+    /// Ask the provider to compact an idle conversation's context.
+    pub async fn compact_session(&self, session: &SessionId) -> Result<(), String> {
+        match self
+            .ask_result(Request::CompactSession {
+                session: session.clone(),
+            })
+            .await
+        {
+            Ok(Response::Ack) => Ok(()),
+            Ok(other) => Err(format!("unexpected compact response: {other:?}")),
+            Err(error) => Err(error),
+        }
+    }
+
     /// Copy a conversation through a transcript position onto another agent.
     pub async fn fork_session(
         &self,

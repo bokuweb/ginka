@@ -481,6 +481,7 @@ impl Service {
                 attempts,
             } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
+            Request::CompactSession { session } => self.compact_session(&session),
             Request::RespondToAgent {
                 session,
                 request_id,
@@ -1478,6 +1479,46 @@ impl Service {
         }
         self.sessions
             .send(id.clone(), driver, spec, stored.vendor_session_id)
+            .map_err(failed)?;
+        Ok(Response::Ack)
+    }
+
+    /// Compact one provider thread as its own resumed turn.
+    ///
+    /// Refusing active sessions is load-bearing: a compact command must never
+    /// be steered into, or queued behind, ordinary work where it could be
+    /// interpreted as user text at the wrong boundary.
+    fn compact_session(&mut self, id: &SessionId) -> Result<Response, RpcError> {
+        let stored = self.session(id)?;
+        if self.sessions.is_running(id) {
+            return Err(RpcError::failed(
+                "the session is still working; compact after the turn finishes",
+            ));
+        }
+        if stored.vendor_session_id.is_none() {
+            return Err(RpcError::failed(
+                "the session has no provider thread to compact",
+            ));
+        }
+        let vendor_session_id = stored.vendor_session_id.as_deref().expect("checked above");
+        let worktree = self.worktree(&stored.workspace)?;
+        let driver = self.driver(&stored.agent)?;
+        let mut spec = SessionSpec::new(&worktree.path, "")
+            .with_model(stored.model.clone())
+            .with_reasoning_effort(stored.reasoning_effort.clone())
+            .with_service_tier(stored.service_tier.clone())
+            .with_access_mode(stored.access_mode)
+            .with_mcp_servers(self.mcp_servers(&worktree.path));
+        for (key, value) in crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &stored.account,
+            driver.home_variable(),
+        ) {
+            spec = spec.with_env(key, value);
+        }
+        self.sessions
+            .compact(id.clone(), driver, spec, vendor_session_id)
             .map_err(failed)?;
         Ok(Response::Ack)
     }

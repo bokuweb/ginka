@@ -232,6 +232,12 @@ composer.usage.context:
 composer.usage.refresh:
   en: Session tokens and context update live; click to refresh rate-limit headroom
   ja: セッションのトークン数とコンテキストは随時更新・クリックで残量を再取得
+composer.usage.compact:
+  en: Compact
+  ja: 圧縮
+composer.usage.compact_tooltip:
+  en: Compact this provider thread to free context
+  ja: providerのスレッドを圧縮してコンテキストを空ける
 composer.account.age:
   en: "read %{age} ago"
   ja: "%{age}前に取得"

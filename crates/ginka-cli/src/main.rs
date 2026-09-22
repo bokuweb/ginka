@@ -432,6 +432,8 @@ enum SessionCommand {
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send { session: String, text: String },
+    /// Compact an idle provider conversation's context.
+    Compact { session: String },
     /// Answer a question, plan or permission request in a running turn.
     Respond {
         session: String,
@@ -981,6 +983,9 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
             session: SessionId(session),
             text,
+        },
+        Command::Session(SessionCommand::Compact { session }) => Request::CompactSession {
+            session: SessionId(session),
         },
         Command::Session(SessionCommand::Respond {
             session,

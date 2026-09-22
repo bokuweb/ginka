@@ -9,8 +9,8 @@
 //! than by a live session.
 
 use super::{
-    ActivityItem, AgentDriver, CommandSpec, ModelCatalogueProbe, ParseState, PlanUsageProbe,
-    ProviderModel, SessionSpec,
+    ActivityItem, AgentDriver, CommandSpec, CompactionSpec, ModelCatalogueProbe, ParseState,
+    PlanUsageProbe, ProviderModel, SessionSpec,
 };
 use ginka_protocol::model::{PlanUsage, PlanWindow, SessionState};
 use ginka_protocol::provider::{OptionOutcome, ProviderOption, SessionOptions};
@@ -89,6 +89,26 @@ impl AgentDriver for CodexDriver {
 
     fn display_name(&self) -> &'static str {
         "Codex"
+    }
+
+    fn compaction(&self, _spec: &SessionSpec, vendor_session_id: &str) -> Option<CompactionSpec> {
+        Some(CompactionSpec {
+            command: CommandSpec::new(&self.program).arg("app-server"),
+            input: vec![
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                    "params": {"clientInfo": {"name": "ginka", "title": "Ginka", "version": env!("CARGO_PKG_VERSION")}}
+                })
+                .to_string(),
+                serde_json::json!({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+                    .to_string(),
+                serde_json::json!({
+                    "jsonrpc": "2.0", "id": 2, "method": "thread/compact/start",
+                    "params": {"threadId": vendor_session_id}
+                })
+                .to_string(),
+            ],
+        })
     }
 
     fn models(&self) -> Vec<ProviderModel> {
@@ -281,10 +301,68 @@ impl AgentDriver for CodexDriver {
         if line.is_empty() {
             return Vec::new();
         }
-        let Ok(value) = serde_json::from_str::<Value>(line) else {
+        let Ok(mut value) = serde_json::from_str::<Value>(line) else {
             state.unrecognized += 1;
             return Vec::new();
         };
+
+        // The app-server spells the same lifecycle as JSON-RPC notifications.
+        // Normalize its standard turn/item events; request responses are
+        // acknowledgements rather than transcript content.
+        if let Some(method) = value.get("method").and_then(Value::as_str) {
+            if method == "turn/failed" {
+                state.recognized += 1;
+                state.turn += 1;
+                let summary = value
+                    .pointer("/params/turn/error/message")
+                    .or_else(|| value.pointer("/params/error/message"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                return vec![
+                    AgentEvent::TurnEnd { turn: state.turn },
+                    AgentEvent::SessionResult {
+                        state: SessionState::Failed,
+                        summary,
+                    },
+                ];
+            }
+            let event_type = match method {
+                "turn/started" => Some("turn.started"),
+                "turn/completed" => Some("turn.completed"),
+                "item/started" => Some("item.started"),
+                "item/updated" => Some("item.updated"),
+                "item/completed" => Some("item.completed"),
+                _ => None,
+            };
+            if let Some(event_type) = event_type {
+                let mut normalized = value.get("params").cloned().unwrap_or_default();
+                normalized["type"] = Value::String(event_type.to_string());
+                value = normalized;
+            } else {
+                state.recognized += 1;
+                return Vec::new();
+            }
+        } else if value.get("id").is_some()
+            && value.get("msg").is_none()
+            && value.get("type").is_none()
+        {
+            state.recognized += 1;
+            if let Some(message) = value
+                .get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+            {
+                state.turn += 1;
+                return vec![
+                    AgentEvent::TurnEnd { turn: state.turn },
+                    AgentEvent::SessionResult {
+                        state: SessionState::Failed,
+                        summary: Some(message.to_string()),
+                    },
+                ];
+            }
+            return Vec::new();
+        }
 
         if let Some(id) = value
             .get("thread_id")
@@ -673,6 +751,7 @@ fn context_usage_from(value: &Value) -> Option<ContextUsage> {
     Some(ContextUsage {
         used_tokens,
         window_tokens,
+        can_compact: true,
     })
 }
 
@@ -702,6 +781,66 @@ mod tests {
         assert_eq!(
             command.args.last().map(String::as_str),
             Some("do the thing")
+        );
+    }
+
+    #[test]
+    fn manual_compaction_uses_the_provider_command() {
+        let driver = CodexDriver::default();
+        let compact = driver
+            .compaction(&SessionSpec::new("/tmp/wt", ""), "thread-1")
+            .expect("codex exposes app-server compaction");
+        assert_eq!(compact.command.args, vec!["app-server"]);
+        assert!(compact.input[2].contains("thread/compact/start"));
+        assert!(compact.input[2].contains("thread-1"));
+    }
+
+    #[test]
+    fn app_server_compaction_lifecycle_finishes_the_control_turn() {
+        let (events, state) = parse(&[
+            r#"{"method":"turn/started","params":{"threadId":"thread-1","turn":{"id":"turn-1"}}}"#,
+            r#"{"method":"item/completed","params":{"threadId":"thread-1","item":{"id":"compact-1","type":"contextCompaction"}}}"#,
+            r#"{"method":"turn/completed","params":{"threadId":"thread-1","turn":{"id":"turn-1","status":"completed"}}}"#,
+        ]);
+
+        assert_eq!(state.turn, 1);
+        assert!(events.contains(&AgentEvent::TurnEnd { turn: 1 }));
+        assert!(events.contains(&AgentEvent::SessionResult {
+            state: SessionState::Finished,
+            summary: None,
+        }));
+    }
+
+    #[test]
+    fn app_server_compaction_error_closes_the_control_turn() {
+        let (events, state) =
+            parse(&[r#"{"id":2,"error":{"code":-32602,"message":"thread is busy"}}"#]);
+
+        assert_eq!(state.turn, 1);
+        assert_eq!(events[0], AgentEvent::TurnEnd { turn: 1 });
+        assert_eq!(
+            events[1],
+            AgentEvent::SessionResult {
+                state: SessionState::Failed,
+                summary: Some("thread is busy".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn app_server_compaction_failure_notification_closes_the_control_turn() {
+        let (events, state) = parse(&[
+            r#"{"method":"turn/failed","params":{"turn":{"error":{"message":"compact failed"}}}}"#,
+        ]);
+
+        assert_eq!(state.turn, 1);
+        assert_eq!(events[0], AgentEvent::TurnEnd { turn: 1 });
+        assert_eq!(
+            events[1],
+            AgentEvent::SessionResult {
+                state: SessionState::Failed,
+                summary: Some("compact failed".into()),
+            }
         );
     }
 
@@ -1097,6 +1236,7 @@ mod tests {
             Some(ContextUsage {
                 used_tokens: 48_000,
                 window_tokens: 192_000,
+                can_compact: true,
             })
         );
         assert_eq!(
@@ -1117,6 +1257,7 @@ mod tests {
             usage: ContextUsage {
                 used_tokens: 32_000,
                 window_tokens: 128_000,
+                can_compact: true,
             },
         }));
         assert!(events.contains(&AgentEvent::Usage {

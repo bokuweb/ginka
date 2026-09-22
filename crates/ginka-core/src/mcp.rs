@@ -160,6 +160,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_session_compact",
+            description: "Compact an idle provider conversation's context. Refused while a turn is running or when the provider has no explicit compact operation.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}},
+                "required": ["session"],
+            }),
+        },
+        Tool {
             name: "ginka_session_respond",
             description: "Answer a question, plan or permission request inside a running turn. Use the request id from the transcript event.",
             schema: json!({
@@ -453,6 +462,9 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_session_send" => Request::SendMessage {
             session: SessionId(text("session")?),
             text: text("text")?,
+        },
+        "ginka_session_compact" => Request::CompactSession {
+            session: SessionId(text("session")?),
         },
         "ginka_session_respond" => Request::RespondToAgent {
             session: SessionId(text("session")?),

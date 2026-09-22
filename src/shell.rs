@@ -5175,6 +5175,7 @@ impl Shell {
         let agent_chip = self.agent_chip_button(cx);
         let account_chip = self.account_chip_button(cx);
         let usage_chip = self.usage_chip_button(cx);
+        let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
         let attachment_chips = self
             .attachments
@@ -5304,6 +5305,7 @@ impl Shell {
                             .child(agent_chip)
                             .children(account_chip)
                             .children(usage_chip)
+                            .children(compact_chip)
                             .child(
                                 if primary_action == ginka_ui::composer::PrimaryAction::Stop {
                                     // With no follow-up waiting, stopping is the
@@ -6754,6 +6756,36 @@ impl Shell {
                     .detach();
                 }))
                 .child(label),
+        )
+    }
+
+    /// Manual context compaction, only when the provider explicitly reported
+    /// support and no turn can be interrupted by it.
+    fn compact_context_button(&self, cx: &mut Context<Self>) -> Option<impl IntoElement + use<>> {
+        let session = self.transcript_of.clone()?;
+        let busy = self.is_working()
+            || matches!(
+                self.session_state,
+                Some(SessionState::Starting | SessionState::Running | SessionState::AwaitingInput)
+            );
+        if !ginka_ui::reports::can_compact_context(self.transcript.context_usage().as_ref(), busy) {
+            return None;
+        }
+
+        Some(
+            Button::new("compact-context")
+                .ghost()
+                .compact()
+                .tooltip(rust_i18n::t!("composer.usage.compact_tooltip").to_string())
+                .label(rust_i18n::t!("composer.usage.compact").to_string())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let link = this.link.clone();
+                    let session = session.clone();
+                    cx.background_spawn(async move {
+                        let _ = link.compact_session(&session).await;
+                    })
+                    .detach();
+                })),
         )
     }
 

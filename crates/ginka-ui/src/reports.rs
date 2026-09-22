@@ -99,6 +99,11 @@ pub fn context_window_summary(usage: &ContextUsage) -> String {
     )
 }
 
+/// Whether the current context can be compacted without interrupting a turn.
+pub fn can_compact_context(usage: Option<&ContextUsage>, session_busy: bool) -> bool {
+    !session_busy && usage.is_some_and(|usage| usage.can_compact)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -157,9 +162,28 @@ mod tests {
         let usage = ContextUsage {
             used_tokens: 32_000,
             window_tokens: 128_000,
+            can_compact: false,
         };
 
         assert_eq!(context_window_summary(&usage), "25% · 32.0k / 128.0k");
+    }
+
+    #[test]
+    fn compact_is_offered_only_for_an_idle_supported_context() {
+        let supported = ContextUsage {
+            used_tokens: 32_000,
+            window_tokens: 128_000,
+            can_compact: true,
+        };
+        let unsupported = ContextUsage {
+            can_compact: false,
+            ..supported
+        };
+
+        assert!(can_compact_context(Some(&supported), false));
+        assert!(!can_compact_context(Some(&supported), true));
+        assert!(!can_compact_context(Some(&unsupported), false));
+        assert!(!can_compact_context(None, false));
     }
 
     #[test]

@@ -334,6 +334,22 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Start the provider's manual compaction operation as its own turn.
+    pub fn compact(
+        &self,
+        session: SessionId,
+        driver: Arc<dyn AgentDriver>,
+        spec: SessionSpec,
+        vendor_session_id: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.is_running(&session), "the session is still working");
+        let compact = driver
+            .compaction(&spec, vendor_session_id)
+            .context("the provider does not support manual context compaction")?;
+        self.run_process(session, driver, spec, compact.command, compact.input);
+        Ok(())
+    }
+
     /// Answer a question, plan or permission request inside a running turn.
     ///
     /// The request id is checked before anything is written, so clicking a
@@ -434,7 +450,18 @@ impl Supervisor {
             Some(vendor) => driver.resume_command(&spec, vendor),
             None => driver.start_command(&spec),
         };
+        self.run_process(session, driver, spec, command, Vec::new());
+    }
 
+    /// Spawn one ordinary or provider-control turn and the task that pumps it.
+    fn run_process(
+        &self,
+        session: SessionId,
+        driver: Arc<dyn AgentDriver>,
+        spec: SessionSpec,
+        command: CommandSpec,
+        initial_input: Vec<String>,
+    ) {
         let context = self.context.clone();
         let running = self.running.clone();
         let queued = self.queued.clone();
@@ -443,7 +470,7 @@ impl Supervisor {
         let mut child = match spawn(
             &command,
             &spec,
-            driver.supports_steer() || driver.supports_responses(),
+            driver.supports_steer() || driver.supports_responses() || !initial_input.is_empty(),
         ) {
             Ok(child) => child,
             Err(error) => {
@@ -465,10 +492,13 @@ impl Supervisor {
         // channel is the supervisor's end of that pipe; dropping it closes the
         // agent's input, which is how the turn is ended.
         let steer: Arc<Mutex<Option<async_channel::Sender<String>>>> = Arc::new(Mutex::new(None));
-        if (driver.supports_steer() || driver.supports_responses())
+        if (driver.supports_steer() || driver.supports_responses() || !initial_input.is_empty())
             && let Some(mut stdin) = child.stdin.take()
         {
             let (sender, lines) = async_channel::unbounded::<String>();
+            for line in initial_input {
+                let _ = sender.try_send(line);
+            }
             if driver.supports_steer()
                 && let Some(first) = driver.encode_user_message(&spec.agent_prompt())
             {

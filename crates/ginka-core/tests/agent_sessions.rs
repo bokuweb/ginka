@@ -8,8 +8,8 @@
 mod support;
 
 use ginka_core::driver::{
-    AgentDriver, CommandSpec, ParseState, Registry, SessionSpec, claude::ClaudeDriver,
-    codex::CodexDriver,
+    AgentDriver, CommandSpec, CompactionSpec, ParseState, Registry, SessionSpec,
+    claude::ClaudeDriver, codex::CodexDriver,
 };
 use ginka_core::service::{EventSink, Service};
 use ginka_core::{Paths, db};
@@ -73,6 +73,15 @@ impl AgentDriver for ResponseDriver {
 
     fn models(&self) -> Vec<ginka_protocol::ProviderModel> {
         self.inner.models()
+    }
+
+    fn compaction(&self, spec: &SessionSpec, vendor_session_id: &str) -> Option<CompactionSpec> {
+        let mut compact = spec.clone();
+        compact.prompt = "/compact".into();
+        Some(CompactionSpec {
+            command: self.inner.resume_command(&compact, vendor_session_id),
+            input: Vec::new(),
+        })
     }
 
     fn program(&self) -> &str {
@@ -512,6 +521,92 @@ fn a_session_records_the_prompt_and_the_agents_answer() {
         )),
         "the turn boundary is recorded: {transcript:?}"
     );
+}
+
+#[test]
+fn manual_compaction_is_an_idle_resumed_turn_owned_by_the_provider() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "response-agent",
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"compact-1"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"done"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"compact-1"}"#,
+        ]
+        .join("\n"),
+        "inspect the repository",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    assert_eq!(
+        fixture.ask(Request::CompactSession {
+            session: session.clone(),
+        }),
+        Response::Ack
+    );
+    fixture.wait_for(&session, |turns| turns.len() == 2);
+
+    assert!(
+        !fixture
+            .transcript(&session)
+            .iter()
+            .any(|entry| matches!(entry, TranscriptPayload::User { text } if text == "/compact")),
+        "provider controls are not ordinary user prompts"
+    );
+}
+
+#[test]
+fn manual_compaction_refuses_an_active_turn_instead_of_queuing() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with(
+        "response-agent",
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"compact-busy"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+        ]
+        .join("\n"),
+        "keep working",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let error = fixture
+        .service
+        .handle(Request::CompactSession {
+            session: session.clone(),
+        })
+        .expect_err("compaction must not be queued behind a running turn");
+    assert_eq!(error.code, "failed");
+    assert!(error.message.contains("still working"));
+    fixture
+        .service
+        .handle(Request::CancelSession { session })
+        .unwrap();
+}
+
+#[test]
+fn manual_compaction_refuses_a_provider_without_an_explicit_operation() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"claude-compact"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"claude-compact"}"#,
+        ]
+        .join("\n"),
+        "inspect the repository",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let error = fixture
+        .service
+        .handle(Request::CompactSession { session })
+        .expect_err("unsupported providers must not receive a guessed command");
+    assert_eq!(error.code, "failed");
+    assert!(error.message.contains("does not support"));
 }
 
 #[test]

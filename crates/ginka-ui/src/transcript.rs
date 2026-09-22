@@ -1612,6 +1612,7 @@ mod tests {
                     usage: ContextUsage {
                         used_tokens: 32_000,
                         window_tokens: 128_000,
+                        can_compact: true,
                     },
                 },
             ),
@@ -1623,6 +1624,7 @@ mod tests {
             Some(ContextUsage {
                 used_tokens: 32_000,
                 window_tokens: 128_000,
+                can_compact: true,
             })
         );
     }
