@@ -151,6 +151,10 @@ pub fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-pageup", PreviousTerminalTab, Some("Terminal")),
         #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-v", Paste, Some("Terminal")),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-v", Paste, Some("Terminal")),
+        #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-alt-up", NavigateBack, Some(CONTEXT)),
@@ -2281,6 +2285,30 @@ impl Shell {
         let Some(data) = keystroke_bytes(&event.keystroke) else {
             return;
         };
+        let link = self.link.clone();
+        cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
+            .detach();
+    }
+
+    /// Paste clipboard text using the active terminal's negotiated paste mode.
+    fn paste_into_terminal(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(text) = cx
+            .read_from_clipboard()
+            .and_then(|clipboard| clipboard.text())
+        else {
+            return;
+        };
+        let Some((terminal, data)) = self
+            .terminals
+            .active()
+            .map(|tab| (tab.id.clone(), tab.screen.paste_input(&text)))
+        else {
+            return;
+        };
+        if data.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
         let link = self.link.clone();
         cx.background_spawn(async move { link.write_terminal(&terminal, data).await })
             .detach();
@@ -7708,6 +7736,7 @@ impl Shell {
             .when(active, |this| {
                 this.track_focus(&self.terminal_focus)
                     .key_context("Terminal")
+                    .on_action(cx.listener(Self::paste_into_terminal))
                     .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| {
                         this.type_into_terminal(event, cx)
                     }))

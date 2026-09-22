@@ -16,7 +16,7 @@ use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, viewport_to_point};
+use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
 use ginka_protocol::TerminalId;
 use ginka_protocol::model::TerminalInfo;
@@ -357,6 +357,15 @@ impl TerminalScreen {
             }
         }
         matches
+    }
+
+    /// Encode clipboard text for the terminal's current input mode.
+    pub fn paste_input(&self, text: &str) -> String {
+        if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', ""))
+        } else {
+            text.replace("\r\n", "\n").replace('\n', "\r")
+        }
     }
 
     /// Move the viewport far enough for a search match to be visible.
@@ -960,6 +969,24 @@ mod tests {
         let mut screen = TerminalScreen::new(2, 10);
         screen.feed("output");
         assert!(screen.search("").is_empty());
+    }
+
+    #[test]
+    fn ordinary_terminal_paste_uses_carriage_returns_for_shell_lines() {
+        let screen = TerminalScreen::new(2, 20);
+
+        assert_eq!(screen.paste_input("one\ntwo\r\nthree"), "one\rtwo\rthree");
+    }
+
+    #[test]
+    fn bracketed_terminal_paste_is_bounded_and_cannot_inject_an_end_marker() {
+        let mut screen = TerminalScreen::new(2, 20);
+        screen.feed("\x1b[?2004h");
+
+        assert_eq!(
+            screen.paste_input("one\ntwo\x1b[201~three"),
+            "\x1b[200~one\ntwo[201~three\x1b[201~"
+        );
     }
 
     #[test]
