@@ -7311,113 +7311,119 @@ impl Shell {
                     .items_center()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .children(
-                        self.terminals
-                            .tabs()
-                            .iter()
-                            .enumerate()
-                            .map(|(index, tab)| {
-                                let showing = index == active;
-                                let id = tab.id.clone();
-                                let closing = tab.id.clone();
-                                let confirming = self.terminals.close_confirmation(&tab.id);
-                                let show_label =
-                                    rust_i18n::t!("terminal.show", title = tab.title.clone())
-                                        .to_string();
-                                let close_label = if confirming {
-                                    rust_i18n::t!("terminal.close.confirm").to_string()
-                                } else {
-                                    rust_i18n::t!("terminal.close").to_string()
-                                };
-                                h_flex()
-                                    .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
-                                    .px_2()
-                                    .py_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .rounded(px(tokens.radius.row))
-                                    .when(showing, |this| this.bg(tokens.colors().row_active()))
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "show-terminal:{id}"
-                                        )))
-                                        .ghost()
-                                        .compact()
-                                        .accessibility_label(show_label)
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.show_terminal(index, window, cx)
-                                        }))
+                    .child(
+                        h_flex()
+                            .id("terminal-tabs")
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .overflow_x_scroll()
+                            .children(self.terminals.tabs().iter().enumerate().map(
+                                |(index, tab)| {
+                                    let showing = index == active;
+                                    let id = tab.id.clone();
+                                    let closing = tab.id.clone();
+                                    let confirming = self.terminals.close_confirmation(&tab.id);
+                                    let show_label =
+                                        rust_i18n::t!("terminal.show", title = tab.title.clone())
+                                            .to_string();
+                                    let close_label = if confirming {
+                                        rust_i18n::t!("terminal.close.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("terminal.close").to_string()
+                                    };
+                                    h_flex()
+                                        .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
+                                        .px_2()
+                                        .py_1()
+                                        .gap_2()
+                                        .items_center()
+                                        .rounded(px(tokens.radius.row))
+                                        .when(showing, |this| this.bg(tokens.colors().row_active()))
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
                                         .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(
-                                                    Icon::new(IconName::SquareTerminal)
-                                                        .size_3()
-                                                        .text_color(tokens.colors().text_secondary),
-                                                )
-                                                .child(
+                                            Button::new(SharedString::from(format!(
+                                                "show-terminal:{id}"
+                                            )))
+                                            .ghost()
+                                            .compact()
+                                            .accessibility_label(show_label)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.show_terminal(index, window, cx)
+                                            }))
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        Icon::new(IconName::SquareTerminal)
+                                                            .size_3()
+                                                            .text_color(
+                                                                tokens.colors().text_secondary,
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .text_color(if showing {
+                                                                tokens.colors().text_primary
+                                                            } else {
+                                                                tokens.colors().text_secondary
+                                                            })
+                                                            .child(tab.title.clone()),
+                                                    ),
+                                            ),
+                                        )
+                                        .child(
+                                            Button::new(SharedString::from(format!(
+                                                "close-terminal:{id}"
+                                            )))
+                                            .ghost()
+                                            .compact()
+                                            .tooltip(close_label.clone())
+                                            .accessibility_label(close_label)
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.request_terminal_close(closing.clone(), cx)
+                                            }))
+                                            .child(
+                                                if confirming {
                                                     div()
                                                         .text_xs()
-                                                        .text_color(if showing {
-                                                            tokens.colors().text_primary
-                                                        } else {
-                                                            tokens.colors().text_secondary
-                                                        })
-                                                        .child(tab.title.clone()),
-                                                ),
-                                        ),
-                                    )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "close-terminal:{id}"
-                                        )))
-                                        .ghost()
-                                        .compact()
-                                        .tooltip(close_label.clone())
-                                        .accessibility_label(close_label)
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.request_terminal_close(closing.clone(), cx)
-                                        }))
-                                        .child(
-                                            if confirming {
-                                                div()
-                                                    .text_xs()
-                                                    .text_color(tokens.colors().status_attention)
-                                                    .child(
-                                                        rust_i18n::t!("terminal.close.short")
-                                                            .to_string(),
-                                                    )
-                                                    .into_any_element()
-                                            } else {
-                                                Icon::new(IconName::Close)
-                                                    .size_3()
-                                                    .text_color(tokens.colors().text_muted)
-                                                    .into_any_element()
-                                            },
-                                        ),
-                                    )
-                            }),
+                                                        .text_color(
+                                                            tokens.colors().status_attention,
+                                                        )
+                                                        .child(
+                                                            rust_i18n::t!("terminal.close.short")
+                                                                .to_string(),
+                                                        )
+                                                        .into_any_element()
+                                                } else {
+                                                    Icon::new(IconName::Close)
+                                                        .size_3()
+                                                        .text_color(tokens.colors().text_muted)
+                                                        .into_any_element()
+                                                },
+                                            ),
+                                        )
+                                },
+                            )),
                     )
                     .children((!self.terminals.is_empty()).then(|| {
-                        div()
-                            .id("new-terminal")
-                            .px_1p5()
-                            .py_1()
-                            .rounded(px(tokens.radius.row))
-                            .cursor_pointer()
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
-                            )
+                        let label = rust_i18n::t!("terminal.open").to_string();
+                        Button::new("new-terminal")
+                            .ghost()
+                            .compact()
+                            .tooltip(label.clone())
+                            .accessibility_label(label)
                             .child(
                                 Icon::new(IconName::Plus)
                                     .size_3()
                                     .text_color(tokens.colors().text_muted),
                             )
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_terminal(window, cx)),
+                            )
                     }))
-                    .child(div().flex_1())
                     .children(split.is_some().then(|| {
                         let label = rust_i18n::t!("terminal.split.focus_other").to_string();
                         Button::new("focus-other-terminal-pane")

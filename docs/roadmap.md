@@ -416,7 +416,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 Goal: the loop that makes the app useful daily — read the diff, comment, send back.
 
 - [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`), with the shell surviving the window that opened it
-- [x] Terminal tabs; reattach with replay in stable daemon creation order, with workspace-local generated titles that do not collide after an earlier tab closes
+- [x] Terminal tabs; reattach with replay in stable daemon creation order, with workspace-local generated titles that do not collide after an earlier tab closes, and a horizontally scrolling strip that leaves new/split/find controls fixed
 - [x] Terminal scrollback browsing by wheel and `Shift+PageUp` / `Shift+PageDown`, with a visible history offset and a keyboard-accessible return to live output
 - [x] Terminal scrollback search: `⌘F` while the terminal has focus (or its find control) searches the live grid and bounded history with smart case, highlights the selected literal match and wraps through results with Enter / Shift+Enter
 - [x] Terminal titles and close actions are independent keyboard-focusable controls. Closing a running terminal is an explicit two-step action: the first activation arms that tab and changes its accessible label, the second removes it and sends the shared close request to the daemon; moving to another tab cancels the pending close
