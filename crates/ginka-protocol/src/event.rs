@@ -25,8 +25,26 @@ pub enum AgentEvent {
     /// Slash commands the provider defines for itself, merged with the ones on
     /// disk by the composer.
     Commands { commands: Vec<String> },
-    /// A turn began. Drivers that cannot tell emit nothing here.
-    TurnStarted,
+    /// A turn began under these effective session options.
+    ///
+    /// The supervisor emits this before reading vendor output so every driver
+    /// has the same provenance. Fields default for transcripts written before
+    /// protocol 10; a provider may refine the model later through
+    /// [`Connected`](Self::Connected).
+    TurnStarted {
+        /// Stable provider/driver id, such as `claude` or `codex`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Requested model id, absent when the provider chooses its default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Requested reasoning level for this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        /// Requested service tier for this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_tier: Option<String>,
+    },
     /// A fragment of assistant text. Deltas are emitted as they arrive and are
     /// never buffered into whole messages by the driver — the UI folds them,
     /// because it is the only layer that knows what is on screen.
@@ -86,6 +104,8 @@ pub enum AgentEvent {
     AgentTitle { title: String },
     /// Token and cost accounting for the turn so far.
     Usage { usage: Usage },
+    /// Current context-window occupancy when the provider reports both sides.
+    ContextUsage { usage: ContextUsage },
     /// The account's rate-limit windows, where the vendor reports them as it
     /// works (`docs/accounts.md` §6).
     PlanUsage { usage: PlanUsage },
@@ -120,6 +140,33 @@ pub struct Usage {
     pub reasoning_tokens: u64,
     /// `None` when the vendor does not price the request.
     pub cost_usd: Option<f64>,
+}
+
+/// One provider-reported context-window reading.
+///
+/// This is deliberately separate from [`Usage`]: session accounting is
+/// cumulative, while this gauge may fall after provider compaction.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextUsage {
+    /// Tokens occupying the model's current context.
+    pub used_tokens: u64,
+    /// Total context capacity for the model that produced the reading.
+    pub window_tokens: u64,
+    /// Whether this provider exposes an explicit manual compaction operation.
+    #[serde(default)]
+    pub can_compact: bool,
+}
+
+impl ContextUsage {
+    /// Context occupancy as a display percentage, bounded against malformed
+    /// or over-capacity vendor readings.
+    pub fn used_percent(&self) -> f64 {
+        if self.window_tokens == 0 {
+            return 0.0;
+        }
+        (self.used_tokens as f64 * 100.0 / self.window_tokens as f64).clamp(0.0, 100.0)
+    }
 }
 
 /// The kind of information one delegated-agent step carries.
@@ -236,6 +283,12 @@ pub enum DaemonEvent {
         session: SessionId,
         state: SessionState,
     },
+    /// A session's editable follow-up queue changed. Clients re-read the
+    /// ordered rows so concurrent edits from another client cannot diverge.
+    SessionQueueChanged {
+        /// Session whose queue clients should re-read.
+        session: SessionId,
+    },
     /// A terminal printed something.
     ///
     /// The bytes as the shell wrote them, escapes and all: what they mean is
@@ -301,6 +354,98 @@ mod tests {
     }
 
     #[test]
+    fn plan_tools_expose_a_bounded_provider_neutral_task_list() {
+        let activity = ActivityItem::from_tool(
+            Some("tasks-1".into()),
+            "TodoWrite",
+            &serde_json::json!({
+                "todos": [
+                    {"content": "Inspect the parser", "status": "completed"},
+                    {"content": "Implement the card", "status": "in_progress"},
+                    {"content": "Run the suite", "status": "pending"},
+                    {"content": "Discarded approach", "status": "cancelled"}
+                ]
+            }),
+        );
+
+        assert_eq!(
+            activity.tasks,
+            Some(vec![
+                TaskItem::new("Inspect the parser", TaskStatus::Completed),
+                TaskItem::new("Implement the card", TaskStatus::InProgress),
+                TaskItem::new("Run the suite", TaskStatus::Pending),
+                TaskItem::new("Discarded approach", TaskStatus::Cancelled),
+            ])
+        );
+    }
+
+    #[test]
+    fn task_snapshots_bound_rows_and_labels_on_unicode_boundaries() {
+        let long = "界".repeat(TaskItem::MAX_LABEL_CHARS + 1);
+        let todos = (0..=ActivityItem::MAX_TASKS)
+            .map(|index| {
+                serde_json::json!({
+                    "content": if index == 0 { long.as_str() } else { "task" },
+                    "status": "pending"
+                })
+            })
+            .collect::<Vec<_>>();
+        let activity =
+            ActivityItem::from_tool(None, "update_plan", &serde_json::json!({ "plan": todos }));
+        let tasks = activity.tasks.expect("the plan has visible work");
+
+        assert_eq!(tasks.len(), ActivityItem::MAX_TASKS);
+        assert_eq!(
+            tasks[0].label.chars().count(),
+            TaskItem::MAX_LABEL_CHARS + 1,
+            "the ellipsis follows the bounded label"
+        );
+        assert!(tasks[0].label.ends_with('…'));
+    }
+
+    #[test]
+    fn activity_from_protocol_eight_defaults_to_no_task_snapshot() {
+        let activity: ActivityItem = serde_json::from_value(serde_json::json!({
+            "id": null,
+            "kind": "tool",
+            "title": "Read",
+            "detail": null,
+            "failed": false,
+            "complete": false
+        }))
+        .unwrap();
+
+        assert_eq!(activity.tasks, None);
+    }
+
+    #[test]
+    fn an_old_turn_started_event_defaults_to_unknown_provenance() {
+        let event: AgentEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "turn_started" })).unwrap();
+
+        assert_eq!(
+            event,
+            AgentEvent::TurnStarted {
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+            }
+        );
+    }
+
+    #[test]
+    fn context_percentage_is_bounded_even_when_a_vendor_reports_overage() {
+        let usage = ContextUsage {
+            used_tokens: 150,
+            window_tokens: 100,
+            can_compact: false,
+        };
+
+        assert_eq!(usage.used_percent(), 100.0);
+    }
+
+    #[test]
     fn a_subagent_step_is_bounded_on_a_character_boundary() {
         let text = "界".repeat(SubagentStep::MAX_TEXT_CHARS + 1);
         let step = SubagentStep::new("step", SubagentStepKind::Message, text);
@@ -328,6 +473,53 @@ mod tests {
 }
 
 // ---------------------------------------------------------------------------
+
+/// Lifecycle state of one provider-neutral task.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    /// Work has not started.
+    Pending,
+    /// Work is the provider's current step.
+    InProgress,
+    /// Work finished successfully.
+    Completed,
+    /// Work was deliberately skipped or abandoned.
+    Cancelled,
+}
+
+/// One bounded item from an agent-maintained task list.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskItem {
+    /// Human-readable work description, bounded by [`Self::MAX_LABEL_CHARS`].
+    pub label: String,
+    /// Current lifecycle state reported by the provider.
+    pub status: TaskStatus,
+}
+
+impl TaskItem {
+    /// Maximum Unicode scalar count retained for one task label.
+    pub const MAX_LABEL_CHARS: usize = 500;
+
+    /// Build one task while preserving a valid UTF-8 boundary at the cap.
+    pub fn new(label: impl Into<String>, status: TaskStatus) -> Self {
+        let label = label.into();
+        let mut characters = label.chars();
+        let mut bounded = characters
+            .by_ref()
+            .take(Self::MAX_LABEL_CHARS)
+            .collect::<String>();
+        if characters.next().is_some() {
+            bounded.push('…');
+        }
+        Self {
+            label: bounded,
+            status,
+        }
+    }
+}
 
 /// What kind of work a tool call is, as far as a reader cares.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
@@ -358,6 +550,13 @@ pub struct ActivityItem {
     pub kind: ActivityKind,
     /// One line, always non-empty: this is the row a reader scans.
     pub title: String,
+    /// A normalized task-list snapshot for plan/todo tools.
+    ///
+    /// Absent on ordinary tools and on plan calls whose provider shape does
+    /// not expose structured items. The cap prevents an agent-controlled list
+    /// from owning an unbounded transcript row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tasks: Option<Vec<TaskItem>>,
     /// The result, once there is one.
     pub detail: Option<String>,
     pub failed: bool,
@@ -388,6 +587,9 @@ impl ActivityItem {
     /// bounded so one `yes` cannot own the transcript or the database.
     pub const MAX_DETAIL_BYTES: usize = 16 * 1024;
 
+    /// Maximum number of structured task rows retained from one update.
+    pub const MAX_TASKS: usize = 100;
+
     /// Normalize a call from the tool's name and its arguments.
     pub fn from_tool(id: Option<String>, tool: &str, input: &serde_json::Value) -> Self {
         let kind = kind_of(tool);
@@ -395,6 +597,9 @@ impl ActivityItem {
             id,
             kind,
             title: title_of(kind, tool, input),
+            tasks: (kind == ActivityKind::Plan)
+                .then(|| tasks_from(input))
+                .filter(|tasks| !tasks.is_empty()),
             detail: None,
             failed: false,
             complete: false,
@@ -407,6 +612,7 @@ impl ActivityItem {
             id: None,
             kind,
             title: single_line(&title.into()),
+            tasks: None,
             detail: None,
             failed: false,
             complete: true,
@@ -420,6 +626,41 @@ impl ActivityItem {
         self.failed = failed;
         self.complete = true;
     }
+}
+
+fn tasks_from(input: &serde_json::Value) -> Vec<TaskItem> {
+    let Some(items) = ["todos", "tasks", "plan"]
+        .into_iter()
+        .find_map(|key| input.get(key).and_then(serde_json::Value::as_array))
+    else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| {
+            let label = ["content", "text", "step", "label", "activeForm"]
+                .into_iter()
+                .find_map(|key| item.get(key).and_then(serde_json::Value::as_str))?;
+            let label = label.trim();
+            if label.is_empty() {
+                return None;
+            }
+            let status = match item
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase()
+                .as_str()
+            {
+                "completed" | "complete" | "done" => TaskStatus::Completed,
+                "in_progress" | "in-progress" | "active" | "running" => TaskStatus::InProgress,
+                "cancelled" | "canceled" | "skipped" => TaskStatus::Cancelled,
+                _ => TaskStatus::Pending,
+            };
+            Some(TaskItem::new(label, status))
+        })
+        .take(ActivityItem::MAX_TASKS)
+        .collect()
 }
 
 fn kind_of(tool: &str) -> ActivityKind {

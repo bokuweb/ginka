@@ -8,6 +8,8 @@ pub enum Surface {
     Terminal,
     Git,
     Files,
+    /// The selected workspace's embedded browser and design feedback tools.
+    Browser,
     /// What the work cost, and how close each login is to its wall
     /// (`docs/accounts.md` §11).
     Reports,
@@ -21,6 +23,7 @@ impl Surface {
         Surface::Terminal,
         Surface::Git,
         Surface::Files,
+        Surface::Browser,
         Surface::Reports,
         Surface::Skills,
     ];
@@ -30,6 +33,7 @@ impl Surface {
             Self::Terminal => "Terminal",
             Self::Git => "Git",
             Self::Files => "Files",
+            Self::Browser => "Browser",
             Self::Reports => "Reports",
             Self::Skills => "Skills",
         }
@@ -41,6 +45,7 @@ impl Surface {
             Self::Terminal => "terminal",
             Self::Git => "git",
             Self::Files => "files",
+            Self::Browser => "browser",
             Self::Reports => "reports",
             Self::Skills => "skills",
         }
@@ -77,6 +82,7 @@ impl Surface {
             Self::Terminal => Icon::new(IconName::SquareTerminal),
             Self::Git => Icon::empty().path(icon::GIT_BRANCH),
             Self::Files => Icon::new(IconName::Folder),
+            Self::Browser => Icon::new(IconName::Globe),
             Self::Reports => Icon::empty().path(icon::GAUGE),
             Self::Skills => Icon::empty().path(icon::LIST_CHECK),
         }
@@ -91,6 +97,7 @@ impl Surface {
             Self::Terminal => rust_i18n::t!("surface.terminal.pending").to_string(),
             Self::Git => rust_i18n::t!("surface.git.pending").to_string(),
             Self::Files => rust_i18n::t!("surface.files.pending").to_string(),
+            Self::Browser => rust_i18n::t!("surface.browser.pending").to_string(),
             Self::Reports => rust_i18n::t!("surface.reports.pending").to_string(),
             Self::Skills => rust_i18n::t!("surface.skills.pending").to_string(),
         }
@@ -103,7 +110,7 @@ mod tests {
 
     #[test]
     fn every_surface_is_offered_and_labelled() {
-        assert_eq!(Surface::ALL.len(), 5);
+        assert_eq!(Surface::ALL.len(), 6);
         for surface in Surface::ALL {
             assert!(!surface.label().is_empty());
             assert!(!surface.availability().is_empty());
