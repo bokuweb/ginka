@@ -332,7 +332,6 @@ fn partial_deltas_stream_before_the_message_is_complete() {
     assert_eq!(
         events,
         [
-            AgentEvent::TurnStarted,
             AgentEvent::TextDelta { text: "par".into() },
             AgentEvent::Reasoning { text: "hmm".into() },
         ]

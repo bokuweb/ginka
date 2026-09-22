@@ -4561,7 +4561,22 @@ impl Shell {
             }
             // A turn boundary is where a checkpoint was taken, which is what
             // makes it worth drawing — and what makes it the way back.
-            TranscriptBlock::TurnEnd { turn, seq } => self.turn_rule(*turn, *seq, cx),
+            TranscriptBlock::TurnEnd {
+                turn,
+                seq,
+                provider,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => {
+                let provenance = ginka_ui::transcript::turn_provenance(
+                    provider.as_deref(),
+                    model.as_deref(),
+                    reasoning_effort.as_deref(),
+                    service_tier.as_deref(),
+                );
+                self.turn_rule(*turn, *seq, provenance, cx)
+            }
             // A turn that worked says so by being answered. Only an outcome
             // the user has to do something about is worth a line of its own.
             TranscriptBlock::Outcome { state, summary } => match state {
@@ -4661,7 +4676,13 @@ impl Shell {
     /// A transcript position maps both to a checkpointed working tree and to
     /// the inclusive event range a fork copies. Rewind is confirmed because it
     /// changes files; a fork is additive and can run immediately.
-    fn turn_rule(&self, turn: u32, seq: u64, cx: &mut Context<Self>) -> AnyElement {
+    fn turn_rule(
+        &self,
+        turn: u32,
+        seq: u64,
+        provenance: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let checkpoint = self
             .checkpoints
@@ -4787,6 +4808,12 @@ impl Shell {
                                     .child(rust_i18n::t!("transcript.rewind.no").to_string()),
                             )
                     }))
+            }))
+            .children(provenance.map(|provenance| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted.opacity(0.7))
+                    .child(provenance)
             }))
             .children(has_targets.then(|| {
                 h_flex()

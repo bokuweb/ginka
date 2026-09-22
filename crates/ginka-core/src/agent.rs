@@ -512,6 +512,10 @@ impl Supervisor {
                         session: &session,
                         workspace_path: &workspace_path,
                         turns_so_far,
+                        provider: driver.id(),
+                        model: spec.model.as_deref(),
+                        reasoning_effort: spec.reasoning_effort.as_deref(),
+                        service_tier: spec.service_tier.as_deref(),
                         cancelled: &cancelled,
                         steer: &steer,
                         requests: &requests,
@@ -595,6 +599,12 @@ struct Turn<'a> {
     /// Turns already completed, so the reader's own per-process count carries
     /// on rather than restarting at one.
     turns_so_far: u32,
+    /// Effective options recorded before vendor output so provenance exists
+    /// for every driver and survives later option changes.
+    provider: &'a str,
+    model: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
+    service_tier: Option<&'a str>,
     /// Set when the user cancelled, so the exit is not read as a crash.
     cancelled: &'a AtomicBool,
     /// The way into the turn while it runs, cleared when it ends.
@@ -613,11 +623,28 @@ async fn pump(
         session,
         workspace_path,
         turns_so_far,
+        provider,
+        model,
+        reasoning_effort,
+        service_tier,
         cancelled,
         steer,
         requests,
     } = turn;
     context.set_state(session, SessionState::Running, None);
+    if let Err(error) = context.record(
+        session,
+        TranscriptPayload::Agent {
+            event: AgentEvent::TurnStarted {
+                provider: Some(provider.to_string()),
+                model: model.map(str::to_string),
+                reasoning_effort: reasoning_effort.map(str::to_string),
+                service_tier: service_tier.map(str::to_string),
+            },
+        },
+    ) {
+        tracing::error!(%error, "could not record turn provenance");
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();

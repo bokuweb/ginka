@@ -226,6 +226,10 @@ active conversation. With nothing selected, the rail stands alone.
   signed-in agent is available. Choosing one copies the transcript through
   that exact turn and continues in the same workspace with the receiving
   agent; the turn's transcript sequence, not its visual index, is the boundary.
+  The same divider retains the provider, model, reasoning effort and service
+  tier captured when that process started. A provider-reported actual model
+  refines a requested alias, while later option changes cannot rewrite an
+  earlier turn's provenance.
   ⌘F (Ctrl+F elsewhere) opens daemon-side find-in-page above the transcript;
   Enter/Shift+Enter or its buttons move through open-session matches in reading
   order, show the current excerpt and count, and reveal the folded block that

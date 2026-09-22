@@ -207,6 +207,14 @@ pub enum Block {
         turn: u32,
         /// The inclusive transcript position copied by a fork from here.
         seq: u64,
+        /// Provider that ran this turn, retained independently of later turns.
+        provider: Option<String>,
+        /// Requested or provider-reported model for this turn.
+        model: Option<String>,
+        /// Requested reasoning level for this turn.
+        reasoning_effort: Option<String>,
+        /// Requested service tier for this turn.
+        service_tier: Option<String>,
     },
     /// How the session ended.
     Outcome {
@@ -241,6 +249,10 @@ pub struct Transcript {
     positions: Vec<Option<usize>>,
     cursor: u64,
     usage: Usage,
+    turn_provider: Option<String>,
+    turn_model: Option<String>,
+    turn_reasoning_effort: Option<String>,
+    turn_service_tier: Option<String>,
 }
 
 impl Transcript {
@@ -492,7 +504,14 @@ impl Transcript {
             }
             AgentEvent::PlanUsage { .. } => None,
             AgentEvent::TurnEnd { turn } => {
-                self.blocks.push(Block::TurnEnd { turn: *turn, seq });
+                self.blocks.push(Block::TurnEnd {
+                    turn: *turn,
+                    seq,
+                    provider: self.turn_provider.take(),
+                    model: self.turn_model.take(),
+                    reasoning_effort: self.turn_reasoning_effort.take(),
+                    service_tier: self.turn_service_tier.take(),
+                });
                 Some(self.blocks.len() - 1)
             }
             AgentEvent::SessionResult { state, summary } => {
@@ -507,10 +526,28 @@ impl Transcript {
             AgentEvent::Unsupported { shape } => {
                 self.append_text(&format!("(not understood: {shape})"))
             }
+            AgentEvent::TurnStarted {
+                provider,
+                model,
+                reasoning_effort,
+                service_tier,
+            } => {
+                self.turn_provider.clone_from(provider);
+                self.turn_model.clone_from(model);
+                self.turn_reasoning_effort.clone_from(reasoning_effort);
+                self.turn_service_tier.clone_from(service_tier);
+                None
+            }
+            // The provider's own answer wins over a requested alias. Keep the
+            // supervisor's model when a connection event names none.
+            AgentEvent::Connected { model, .. } => {
+                if model.is_some() {
+                    self.turn_model.clone_from(model);
+                }
+                None
+            }
             // Session bookkeeping the conversation does not render.
-            AgentEvent::Connected { .. }
-            | AgentEvent::Commands { .. }
-            | AgentEvent::TurnStarted
+            AgentEvent::Commands { .. }
             | AgentEvent::SteerAccepted
             | AgentEvent::SteerRejected { .. }
             | AgentEvent::AgentTitle { .. }
@@ -916,6 +953,24 @@ pub fn task_progress(items: &[TaskItem]) -> (usize, usize) {
         .filter(|item| item.status != TaskStatus::Cancelled)
         .count();
     (completed, total)
+}
+
+/// One compact provenance label for a completed turn.
+///
+/// Empty legacy fields disappear rather than leaving punctuation behind.
+pub fn turn_provenance(
+    provider: Option<&str>,
+    model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    service_tier: Option<&str>,
+) -> Option<String> {
+    let parts = [provider, model, reasoning_effort, service_tier]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// Whether to pull the transcript to its foot, and whether it is still
@@ -1551,7 +1606,14 @@ mod tests {
         assert_eq!(
             transcript.blocks(),
             &[
-                Block::TurnEnd { turn: 1, seq: 1 },
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 1,
+                    provider: None,
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
                 Block::Outcome {
                     state: SessionState::Finished,
                     summary: Some("done".into()),
@@ -1561,11 +1623,81 @@ mod tests {
     }
 
     #[test]
+    fn each_turn_keeps_the_provider_and_model_that_actually_started_it() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            agent(
+                1,
+                AgentEvent::TurnStarted {
+                    provider: Some("claude".into()),
+                    model: Some("sonnet".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+            ),
+            agent(
+                2,
+                AgentEvent::Connected {
+                    session_id: Some("vendor-1".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                },
+            ),
+            agent(3, AgentEvent::TurnEnd { turn: 1 }),
+            agent(
+                4,
+                AgentEvent::TurnStarted {
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ),
+            agent(5, AgentEvent::TurnEnd { turn: 2 }),
+        ]);
+
+        assert_eq!(
+            transcript.blocks(),
+            &[
+                Block::TurnEnd {
+                    turn: 1,
+                    seq: 3,
+                    provider: Some("claude".into()),
+                    model: Some("claude-sonnet-4-6".into()),
+                    reasoning_effort: None,
+                    service_tier: None,
+                },
+                Block::TurnEnd {
+                    turn: 2,
+                    seq: 5,
+                    provider: Some("codex".into()),
+                    model: Some("gpt-5.4".into()),
+                    reasoning_effort: Some("high".into()),
+                    service_tier: Some("fast".into()),
+                },
+            ]
+        );
+        assert_eq!(
+            turn_provenance(Some("codex"), Some("gpt-5.4"), Some("high"), Some("fast")).as_deref(),
+            Some("codex · gpt-5.4 · high · fast")
+        );
+    }
+
+    #[test]
     fn a_turn_boundary_keeps_the_transcript_position_used_by_a_fork() {
         let mut transcript = Transcript::new();
         transcript.apply(&agent(1, AgentEvent::TurnEnd { turn: 3 }));
 
-        assert_eq!(transcript.blocks(), &[Block::TurnEnd { turn: 3, seq: 1 }]);
+        assert_eq!(
+            transcript.blocks(),
+            &[Block::TurnEnd {
+                turn: 3,
+                seq: 1,
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+            }]
+        );
     }
 
     #[test]

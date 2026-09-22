@@ -493,6 +493,20 @@ fn a_session_records_the_prompt_and_the_agents_answer() {
         transcript.iter().any(|entry| matches!(
             entry,
             TranscriptPayload::Agent {
+                event: AgentEvent::TurnStarted {
+                    provider: Some(provider),
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                }
+            } if provider == "claude"
+        )),
+        "the supervisor records effective turn provenance before vendor output: {transcript:?}"
+    );
+    assert!(
+        transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptPayload::Agent {
                 event: AgentEvent::TurnEnd { turn: 1 }
             }
         )),

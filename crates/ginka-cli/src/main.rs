@@ -1893,9 +1893,9 @@ mod ginka_cli_format {
             // know is how a vendor's format change first shows up.
             AgentEvent::Unsupported { shape } => format!("-- not understood: {shape} --"),
             // Nothing a transcript reader needs to see.
-            AgentEvent::Commands { .. } | AgentEvent::TurnStarted | AgentEvent::SteerAccepted => {
-                String::new()
-            }
+            AgentEvent::Commands { .. }
+            | AgentEvent::TurnStarted { .. }
+            | AgentEvent::SteerAccepted => String::new(),
         }
     }
 

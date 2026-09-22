@@ -25,8 +25,26 @@ pub enum AgentEvent {
     /// Slash commands the provider defines for itself, merged with the ones on
     /// disk by the composer.
     Commands { commands: Vec<String> },
-    /// A turn began. Drivers that cannot tell emit nothing here.
-    TurnStarted,
+    /// A turn began under these effective session options.
+    ///
+    /// The supervisor emits this before reading vendor output so every driver
+    /// has the same provenance. Fields default for transcripts written before
+    /// protocol 10; a provider may refine the model later through
+    /// [`Connected`](Self::Connected).
+    TurnStarted {
+        /// Stable provider/driver id, such as `claude` or `codex`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// Requested model id, absent when the provider chooses its default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// Requested reasoning level for this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
+        /// Requested service tier for this turn.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        service_tier: Option<String>,
+    },
     /// A fragment of assistant text. Deltas are emitted as they arrive and are
     /// never buffered into whole messages by the driver — the UI folds them,
     /// because it is the only layer that knows what is on screen.
@@ -363,6 +381,22 @@ mod tests {
         .unwrap();
 
         assert_eq!(activity.tasks, None);
+    }
+
+    #[test]
+    fn an_old_turn_started_event_defaults_to_unknown_provenance() {
+        let event: AgentEvent =
+            serde_json::from_value(serde_json::json!({ "kind": "turn_started" })).unwrap();
+
+        assert_eq!(
+            event,
+            AgentEvent::TurnStarted {
+                provider: None,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+            }
+        );
     }
 
     #[test]
