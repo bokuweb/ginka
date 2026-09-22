@@ -360,6 +360,18 @@ impl TerminalScreen {
         matches
     }
 
+    /// Re-run an unchanged search while retaining its current result number.
+    pub fn refresh_search(
+        &self,
+        query: &str,
+        current: Option<usize>,
+    ) -> (Vec<TerminalSearchMatch>, Option<usize>) {
+        let matches = self.search(query);
+        let chosen = (!matches.is_empty())
+            .then(|| current.unwrap_or(0).min(matches.len().saturating_sub(1)));
+        (matches, chosen)
+    }
+
     /// Encode clipboard text for the terminal's current input mode.
     pub fn paste_input(&self, text: &str) -> String {
         if self.term.mode().contains(TermMode::BRACKETED_PASTE) {
@@ -1085,6 +1097,31 @@ mod tests {
                 .collect::<String>(),
             "needle"
         );
+    }
+
+    #[test]
+    fn refreshing_terminal_search_keeps_the_result_being_read() {
+        let mut screen = TerminalScreen::new(4, 20);
+        screen.feed("first needle\r\nsecond needle");
+        let (matches, chosen) = screen.refresh_search("needle", Some(1));
+        assert_eq!(matches.len(), 2);
+        assert_eq!(chosen, Some(1));
+
+        screen.feed("\r\nthird needle");
+        let (matches, chosen) = screen.refresh_search("needle", chosen);
+        assert_eq!(matches.len(), 3);
+        assert_eq!(chosen, Some(1), "new output must not move the reader");
+    }
+
+    #[test]
+    fn refreshing_terminal_search_clamps_or_clears_a_stale_result_number() {
+        let mut screen = TerminalScreen::new(3, 20);
+        screen.feed("needle");
+
+        let (matches, chosen) = screen.refresh_search("needle", Some(9));
+        assert_eq!(matches.len(), 1);
+        assert_eq!(chosen, Some(0));
+        assert_eq!(screen.refresh_search("missing", chosen).1, None);
     }
 
     #[test]

@@ -849,6 +849,7 @@ impl Shell {
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
                                 if this.terminals.feed(&terminal, &data) {
+                                    this.refresh_terminal_search(&terminal, cx);
                                     cx.notify();
                                 }
                             })
@@ -2405,16 +2406,43 @@ impl Shell {
             .tabs()
             .iter()
             .find(|tab| tab.id == terminal)
-            .map(|tab| tab.screen.search(&query))
+            .map(|tab| tab.screen.refresh_search(&query, None))
             .unwrap_or_default();
         let search = self
             .terminal_search
             .as_mut()
             .expect("the terminal search was read above");
-        search.matches = matches;
-        search.chosen = (!search.matches.is_empty()).then_some(0);
+        (search.matches, search.chosen) = matches;
         self.reveal_terminal_search();
         cx.notify();
+    }
+
+    /// Recompute an open terminal search after that shell prints more output.
+    fn refresh_terminal_search(
+        &mut self,
+        terminal: &ginka_protocol::TerminalId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((query, chosen)) = self
+            .terminal_search
+            .as_ref()
+            .filter(|search| &search.terminal == terminal)
+            .map(|search| (search.query.read(cx).value().to_string(), search.chosen))
+        else {
+            return;
+        };
+        let Some(results) = self
+            .terminals
+            .tabs()
+            .iter()
+            .find(|tab| &tab.id == terminal)
+            .map(|tab| tab.screen.refresh_search(&query, chosen))
+        else {
+            return;
+        };
+        if let Some(search) = self.terminal_search.as_mut() {
+            (search.matches, search.chosen) = results;
+        }
     }
 
     /// Move to another terminal match, wrapping at either end.
