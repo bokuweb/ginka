@@ -17,7 +17,7 @@ use anyhow::{Context, Result};
 use futures_lite::io::BufReader;
 use futures_lite::{AsyncBufReadExt, StreamExt};
 use ginka_protocol::model::{
-    PlanSource, PlanUsage, SessionState, TranscriptEntry, TranscriptPayload,
+    PlanSource, PlanUsage, QueuedMessage, SessionState, TranscriptEntry, TranscriptPayload,
 };
 use ginka_protocol::{AgentEvent, DaemonEvent, SessionId};
 use rusqlite::Connection;
@@ -38,13 +38,28 @@ const STDERR_KEPT: usize = 4096;
 struct Shared {
     conn: Arc<Mutex<Connection>>,
     events: Arc<dyn EventSink>,
+    /// Provider-emitted binary payloads, owned by the daemon host.
+    blobs: crate::blob::BlobStore,
     /// How many checkpoints a workspace keeps, from the daemon's settings.
     checkpoint_limit: u32,
 }
 
 impl Shared {
     /// Append to the transcript and push the event to every client.
-    fn record(&self, session: &SessionId, payload: TranscriptPayload) -> Result<u64> {
+    fn record(&self, session: &SessionId, mut payload: TranscriptPayload) -> Result<u64> {
+        if let TranscriptPayload::Agent { event } = &mut payload
+            && let Err(error) = self.blobs.externalize_event(event)
+        {
+            // A malformed provider payload is worth surfacing in the log, but
+            // dropping the whole transcript entry would hide more than it
+            // protects. The ordinary transcript bounds still apply.
+            tracing::warn!(%error, session = %session, "could not externalize provider payload");
+            if let AgentEvent::ToolCall { activity } | AgentEvent::ToolResult { activity } = event
+                && let Some(detail) = activity.detail.clone()
+            {
+                activity.complete_with(&detail, activity.failed);
+            }
+        }
         let at = now();
         let seq = {
             let conn = self.conn.lock().unwrap_or_else(|e| e.into_inner());
@@ -197,6 +212,68 @@ struct Running {
     _task: smol::Task<()>,
 }
 
+/// One session's editable FIFO of follow-ups.
+///
+/// The sequence remains monotonic after the queue becomes empty so a stale UI
+/// action can never address a later message that happened to reuse an id.
+#[derive(Debug, Default)]
+struct PendingQueue {
+    next_id: u64,
+    items: VecDeque<QueuedMessage>,
+}
+
+impl PendingQueue {
+    /// Append a message and return the stable row clients address.
+    fn push(&mut self, text: String) -> QueuedMessage {
+        self.next_id = self.next_id.saturating_add(1);
+        let message = QueuedMessage {
+            id: self.next_id,
+            text,
+        };
+        self.items.push_back(message.clone());
+        message
+    }
+
+    /// Edit one queued prompt without moving it.
+    fn edit(&mut self, id: u64, text: String) -> Result<()> {
+        let message = self
+            .items
+            .iter_mut()
+            .find(|message| message.id == id)
+            .with_context(|| format!("queued message {id} does not exist"))?;
+        message.text = text;
+        Ok(())
+    }
+
+    /// Remove one prompt, returning what was removed.
+    fn remove(&mut self, id: u64) -> Result<QueuedMessage> {
+        let index = self
+            .items
+            .iter()
+            .position(|message| message.id == id)
+            .with_context(|| format!("queued message {id} does not exist"))?;
+        Ok(self.items.remove(index).expect("the index was just found"))
+    }
+
+    /// Move a prompt to a zero-based position, clamped to the queue's end.
+    fn move_to(&mut self, id: u64, index: usize) -> Result<()> {
+        let message = self.remove(id)?;
+        let index = index.min(self.items.len());
+        self.items.insert(index, message);
+        Ok(())
+    }
+
+    /// Remove the next prompt to dispatch.
+    fn pop_front(&mut self) -> Option<QueuedMessage> {
+        self.items.pop_front()
+    }
+
+    /// Current rows in dispatch order.
+    fn items(&self) -> Vec<QueuedMessage> {
+        self.items.iter().cloned().collect()
+    }
+}
+
 /// Owns every running agent process.
 ///
 /// One per daemon. It is driven from `Service`, which is itself serialised, so
@@ -205,7 +282,7 @@ pub struct Supervisor {
     context: Shared,
     running: Arc<Mutex<HashMap<SessionId, Running>>>,
     /// Follow-ups that arrived while a turn was still going.
-    queued: Arc<Mutex<HashMap<SessionId, VecDeque<String>>>>,
+    queued: Arc<Mutex<HashMap<SessionId, PendingQueue>>>,
 }
 
 impl Supervisor {
@@ -214,11 +291,13 @@ impl Supervisor {
         conn: Arc<Mutex<Connection>>,
         events: Arc<dyn EventSink>,
         checkpoint_limit: u32,
+        blobs: crate::blob::BlobStore,
     ) -> Self {
         Self {
             context: Shared {
                 conn,
                 events,
+                blobs,
                 checkpoint_limit,
             },
             running: Arc::new(Mutex::new(HashMap::new())),
@@ -232,6 +311,125 @@ impl Supervisor {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(session)
+    }
+
+    /// Follow-ups waiting behind this session's current turn.
+    pub fn queued_messages(&self, session: &SessionId) -> Vec<QueuedMessage> {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .map(PendingQueue::items)
+            .unwrap_or_default()
+    }
+
+    /// Whether this session's active transport can receive a queued prompt.
+    pub fn can_send_queued_message_now(&self, session: &SessionId) -> bool {
+        self.running
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .is_some_and(|entry| {
+                entry.driver.supports_steer()
+                    && entry
+                        .steer
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .is_some()
+            })
+    }
+
+    /// Replace one queued prompt without changing its dispatch position.
+    pub fn edit_queued_message(&self, session: &SessionId, id: u64, text: String) -> Result<()> {
+        anyhow::ensure!(!text.trim().is_empty(), "a queued message cannot be blank");
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(session)
+            .with_context(|| format!("session {session} has no queued messages"))?
+            .edit(id, text)?;
+        self.queue_changed(session);
+        Ok(())
+    }
+
+    /// Remove one queued prompt before it reaches the transcript.
+    pub fn remove_queued_message(&self, session: &SessionId, id: u64) -> Result<()> {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(session)
+            .with_context(|| format!("session {session} has no queued messages"))?
+            .remove(id)?;
+        self.queue_changed(session);
+        Ok(())
+    }
+
+    /// Move one queued prompt to a zero-based dispatch position.
+    pub fn move_queued_message(&self, session: &SessionId, id: u64, index: usize) -> Result<()> {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(session)
+            .with_context(|| format!("session {session} has no queued messages"))?
+            .move_to(id, index)?;
+        self.queue_changed(session);
+        Ok(())
+    }
+
+    /// Inject one queued prompt into the current turn.
+    ///
+    /// Transports without live unsolicited input refuse this operation and
+    /// leave the item in place; stopping useful work is never an implicit
+    /// consequence of pressing "send now".
+    pub fn send_queued_message_now(&self, session: &SessionId, id: u64) -> Result<()> {
+        let (sender, driver) = {
+            let running = self
+                .running
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let entry = running
+                .get(session)
+                .with_context(|| format!("session {session} has no running turn"))?;
+            let sender = entry
+                .steer
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+                .context("the running transport cannot receive a message now")?;
+            (sender, entry.driver.clone())
+        };
+        let mut queues = self
+            .queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let queue = queues
+            .get_mut(session)
+            .with_context(|| format!("session {session} has no queued messages"))?;
+        let message = queue
+            .items
+            .iter()
+            .find(|message| message.id == id)
+            .cloned()
+            .with_context(|| format!("queued message {id} does not exist"))?;
+        let line = driver
+            .encode_user_message(&message.text)
+            .context("the running transport cannot receive a message now")?;
+        sender
+            .try_send(line)
+            .context("the running transport stopped before receiving the message")?;
+        queue.remove(id)?;
+        drop(queues);
+        self.context
+            .record(session, TranscriptPayload::User { text: message.text })?;
+        self.queue_changed(session);
+        Ok(())
+    }
+
+    /// Announce one queue mutation; the ordered rows remain daemon-owned.
+    fn queue_changed(&self, session: &SessionId) {
+        self.context.events.emit(DaemonEvent::SessionQueueChanged {
+            session: session.clone(),
+        });
     }
 
     /// Start the first turn of a session, recording the opening prompt.
@@ -264,11 +462,9 @@ impl Supervisor {
 
     /// Send a follow-up.
     ///
-    /// While a turn is running the message is queued and sent when it ends —
-    /// interrupting the agent to deliver it would throw away the work in
-    /// progress. The prompt is recorded immediately either way, so the user
-    /// sees what they sent in the transcript rather than a message that
-    /// vanishes until the agent is free.
+    /// While a turn is running a capable transport receives the message in
+    /// place; otherwise the editable queue owns it until dispatch. Queued
+    /// text enters the immutable transcript only when its turn starts.
     pub fn send(
         &self,
         session: SessionId,
@@ -276,13 +472,6 @@ impl Supervisor {
         spec: SessionSpec,
         vendor_session_id: Option<String>,
     ) -> Result<()> {
-        self.context.record(
-            &session,
-            TranscriptPayload::User {
-                text: spec.prompt.clone(),
-            },
-        )?;
-
         if self.is_running(&session) {
             // Into the running turn where the transport can take it; the queue
             // is what happens when it cannot (§3.3 N1).
@@ -302,18 +491,47 @@ impl Supervisor {
                 if let Some(sender) = sender
                     && sender.try_send(line).is_ok()
                 {
+                    self.context.record(
+                        &session,
+                        TranscriptPayload::User {
+                            text: spec.prompt.clone(),
+                        },
+                    )?;
                     return Ok(());
                 }
             }
             self.queued
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .entry(session)
+                .entry(session.clone())
                 .or_default()
-                .push_back(spec.prompt);
+                .push(spec.prompt);
+            self.queue_changed(&session);
             return Ok(());
         }
+        self.context.record(
+            &session,
+            TranscriptPayload::User {
+                text: spec.prompt.clone(),
+            },
+        )?;
         self.run_turn(session, driver, spec, vendor_session_id);
+        Ok(())
+    }
+
+    /// Start the provider's manual compaction operation as its own turn.
+    pub fn compact(
+        &self,
+        session: SessionId,
+        driver: Arc<dyn AgentDriver>,
+        spec: SessionSpec,
+        vendor_session_id: &str,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.is_running(&session), "the session is still working");
+        let compact = driver
+            .compaction(&spec, vendor_session_id)
+            .context("the provider does not support manual context compaction")?;
+        self.run_process(session, driver, spec, compact.command, compact.input);
         Ok(())
     }
 
@@ -392,10 +610,19 @@ impl Supervisor {
             }
         };
         // A queued follow-up must not start after a cancel.
-        self.queued
+        let cleared = self
+            .queued
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .remove(session);
+            .get_mut(session)
+            .is_some_and(|queue| {
+                let had_messages = !queue.items.is_empty();
+                queue.items.clear();
+                had_messages
+            });
+        if cleared {
+            self.queue_changed(session);
+        }
 
         match pid {
             Some(pid) => stop_process_tree(pid),
@@ -417,7 +644,18 @@ impl Supervisor {
             Some(vendor) => driver.resume_command(&spec, vendor),
             None => driver.start_command(&spec),
         };
+        self.run_process(session, driver, spec, command, Vec::new());
+    }
 
+    /// Spawn one ordinary or provider-control turn and the task that pumps it.
+    fn run_process(
+        &self,
+        session: SessionId,
+        driver: Arc<dyn AgentDriver>,
+        spec: SessionSpec,
+        command: CommandSpec,
+        initial_input: Vec<String>,
+    ) {
         let context = self.context.clone();
         let running = self.running.clone();
         let queued = self.queued.clone();
@@ -426,7 +664,7 @@ impl Supervisor {
         let mut child = match spawn(
             &command,
             &spec,
-            driver.supports_steer() || driver.supports_responses(),
+            driver.supports_steer() || driver.supports_responses() || !initial_input.is_empty(),
         ) {
             Ok(child) => child,
             Err(error) => {
@@ -448,10 +686,13 @@ impl Supervisor {
         // channel is the supervisor's end of that pipe; dropping it closes the
         // agent's input, which is how the turn is ended.
         let steer: Arc<Mutex<Option<async_channel::Sender<String>>>> = Arc::new(Mutex::new(None));
-        if (driver.supports_steer() || driver.supports_responses())
+        if (driver.supports_steer() || driver.supports_responses() || !initial_input.is_empty())
             && let Some(mut stdin) = child.stdin.take()
         {
             let (sender, lines) = async_channel::unbounded::<String>();
+            for line in initial_input {
+                let _ = sender.try_send(line);
+            }
             if driver.supports_steer()
                 && let Some(first) = driver.encode_user_message(&spec.agent_prompt())
             {
@@ -495,6 +736,10 @@ impl Supervisor {
                         session: &session,
                         workspace_path: &workspace_path,
                         turns_so_far,
+                        provider: driver.id(),
+                        model: spec.model.as_deref(),
+                        reasoning_effort: spec.reasoning_effort.as_deref(),
+                        service_tier: spec.service_tier.as_deref(),
                         cancelled: &cancelled,
                         steer: &steer,
                         requests: &requests,
@@ -509,18 +754,42 @@ impl Supervisor {
                 // A turn that ended cleanly hands over to whatever the user
                 // sent while it was working.
                 if state == SessionState::Cancelled || state == SessionState::Failed {
-                    queued
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&session);
+                    let mut queues = queued.lock().unwrap_or_else(|e| e.into_inner());
+                    if let Some(queue) = queues.get_mut(&session)
+                        && !queue.items.is_empty()
+                    {
+                        queue.items.clear();
+                        context.events.emit(DaemonEvent::SessionQueueChanged {
+                            session: session.clone(),
+                        });
+                    }
                     return;
                 }
                 let next = queued
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .get_mut(&session)
-                    .and_then(VecDeque::pop_front);
-                if let Some(prompt) = next {
+                    .and_then(PendingQueue::pop_front);
+                if let Some(message) = next {
+                    if context
+                        .record(
+                            &session,
+                            TranscriptPayload::User {
+                                text: message.text.clone(),
+                            },
+                        )
+                        .is_err()
+                    {
+                        context.set_state(
+                            &session,
+                            SessionState::Failed,
+                            Some("could not record the queued follow-up"),
+                        );
+                        return;
+                    }
+                    context.events.emit(DaemonEvent::SessionQueueChanged {
+                        session: session.clone(),
+                    });
                     let supervisor = Supervisor {
                         context: context.clone(),
                         running,
@@ -531,7 +800,7 @@ impl Supervisor {
                         session::get(&conn, &session).ok().flatten()
                     };
                     let mut next_spec = spec.clone();
-                    next_spec.prompt = prompt;
+                    next_spec.prompt = message.text;
                     // Whatever the first turn was told, this one was not
                     // forked from anywhere.
                     next_spec.preamble = None;
@@ -578,6 +847,12 @@ struct Turn<'a> {
     /// Turns already completed, so the reader's own per-process count carries
     /// on rather than restarting at one.
     turns_so_far: u32,
+    /// Effective options recorded before vendor output so provenance exists
+    /// for every driver and survives later option changes.
+    provider: &'a str,
+    model: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
+    service_tier: Option<&'a str>,
     /// Set when the user cancelled, so the exit is not read as a crash.
     cancelled: &'a AtomicBool,
     /// The way into the turn while it runs, cleared when it ends.
@@ -596,11 +871,28 @@ async fn pump(
         session,
         workspace_path,
         turns_so_far,
+        provider,
+        model,
+        reasoning_effort,
+        service_tier,
         cancelled,
         steer,
         requests,
     } = turn;
     context.set_state(session, SessionState::Running, None);
+    if let Err(error) = context.record(
+        session,
+        TranscriptPayload::Agent {
+            event: AgentEvent::TurnStarted {
+                provider: Some(provider.to_string()),
+                model: model.map(str::to_string),
+                reasoning_effort: reasoning_effort.map(str::to_string),
+                service_tier: service_tier.map(str::to_string),
+            },
+        },
+    ) {
+        tracing::error!(%error, "could not record turn provenance");
+    }
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -927,6 +1219,51 @@ fn now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn queued_messages_can_be_edited_removed_and_reordered_by_stable_id() {
+        let mut queue = PendingQueue::default();
+        let first = queue.push("first".into());
+        let second = queue.push("second".into());
+        let third = queue.push("third".into());
+
+        queue.edit(second.id, "edited".into()).unwrap();
+        queue.move_to(third.id, 0).unwrap();
+        assert_eq!(
+            queue
+                .items()
+                .iter()
+                .map(|message| (message.id, message.text.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (third.id, "third"),
+                (first.id, "first"),
+                (second.id, "edited")
+            ]
+        );
+
+        assert_eq!(queue.remove(first.id).unwrap().text, "first");
+        assert_eq!(
+            queue
+                .items()
+                .iter()
+                .map(|message| message.id)
+                .collect::<Vec<_>>(),
+            vec![third.id, second.id]
+        );
+    }
+
+    #[test]
+    fn a_stale_queue_id_never_changes_another_message() {
+        let mut queue = PendingQueue::default();
+        let removed = queue.push("old".into());
+        queue.remove(removed.id).unwrap();
+        let current = queue.push("current".into());
+
+        assert!(queue.edit(removed.id, "wrong".into()).is_err());
+        assert!(queue.move_to(removed.id, 0).is_err());
+        assert_eq!(queue.items(), vec![current]);
+    }
 
     fn exited(code: i32) -> std::io::Result<std::process::ExitStatus> {
         // A status is only constructible by running something, so run the

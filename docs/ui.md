@@ -152,6 +152,9 @@ active conversation. With nothing selected, the rail stands alone.
   reader-facing project name and source-folder chooser in one card; selecting
   a folder prefills its basename, and successful registration selects the new
   project immediately. Escape, the close control and Cancel all dismiss it.
+  The `+` and the equivalent composer row are absent for an externally
+  addressed daemon: a folder picked on the client is not a path on that
+  daemon's host.
 - **Project heading** — folder icon + project name, muted, and **selectable**:
   a project is something the reader picks *before* there is a conversation, and
   picking one shows the home screen aimed at it. It stays highlighted while a
@@ -199,9 +202,20 @@ active conversation. With nothing selected, the rail stands alone.
   tool-call cards, reasoning blocks (dimmed), diff sidecars, plan-approval and
   ask-user cards with inline buttons. The reader's own words are a tinted
   bubble, right-aligned within the column. User messages and visible answers
-  carry compact copy and quote actions. Quote normalizes the complete visible
-  message into a Markdown blockquote at the end of the existing draft, leaves
-  a blank line for the reply, and returns focus to the composer. A turn that
+  carry compact copy and quote actions. Quote prefers an exact non-blank text
+  selection, falling back to the complete visible message, and normalizes it
+  into a Markdown blockquote at the end of the existing draft. The command
+  palette captures a selection before taking focus and offers the same action,
+  so choosing it with the mouse cannot lose the range. While meaningful text
+  is selected, a compact keyboard-focusable action floats at the transcript's
+  top-right without moving the conversation; its mouse path retains the range
+  before the toolkit clears selection on press. Every path leaves a blank line
+  for the reply and returns focus to the composer. A turn that
+  reports a structured todo/plan snapshot draws one shared **Tasks** card,
+  regardless of provider. Later snapshots replace that turn's card in place;
+  the provider's internal todo tool row stays hidden. Each visible row carries
+  a status mark as well as colour, and the header counts completed actionable
+  work while leaving cancelled rows visible but out of the denominator. A turn that
   succeeded prints no outcome of its own, because being
   answered is how a turn says it worked. A delegated agent is one bordered
   parent card rather than a second conversation: its reasoning, messages and
@@ -212,6 +226,10 @@ active conversation. With nothing selected, the rail stands alone.
   signed-in agent is available. Choosing one copies the transcript through
   that exact turn and continues in the same workspace with the receiving
   agent; the turn's transcript sequence, not its visual index, is the boundary.
+  The same divider retains the provider, model, reasoning effort and service
+  tier captured when that process started. A provider-reported actual model
+  refines a requested alias, while later option changes cannot rewrite an
+  earlier turn's provenance.
   ⌘F (Ctrl+F elsewhere) opens daemon-side find-in-page above the transcript;
   Enter/Shift+Enter or its buttons move through open-session matches in reading
   order, show the current excerpt and count, and reveal the folded block that
@@ -219,7 +237,11 @@ active conversation. With nothing selected, the rail stands alone.
   compact *Prompts (N)* strip expands into a bounded, numbered outline of
   top-level user prompts; choosing one reveals its folded block. Answers to an
   inline question or plan are not promoted into separate outline turns. The
-  same toggle is available from the command palette.
+  same toggle is available from the command palette. Workspace file locations
+  in settled assistant prose, including inline-code locations, are links into
+  the Files editor at the optional line and column. They use the terminal's
+  worktree-bound detector; ordinary web links still open normally, and fenced
+  code is not rewritten.
 - **Activity line** — under the transcript while an agent works: a breathing dot
   and what it is doing (thinking, or the tool it is waiting on). Hidden while
   text is arriving, when the words are the indicator.
@@ -231,16 +253,31 @@ active conversation. With nothing selected, the rail stands alone.
   prints the selected effort when that model supports it, so a collapsed
   picker still says what the next turn will run. The percentage is
   printed and *at the wall* appears as a word beside it, never as colour alone
-  (`docs/accounts.md` §11). While a session is working, the circular action is
-  Stop when the draft is empty and Send as soon as a follow-up has been typed;
+  (`docs/accounts.md` §11). Choosing an account persists it as that provider's
+  default for future chats in every client; a continuing session keeps and
+  displays its original account. Removing the active named account falls back
+  to the provider's implicit default. While a session is working, the circular
+  action is Stop when the draft is empty and Send as soon as a follow-up has been typed;
   that send steers or queues according to the driver's existing policy. The
-  attachment button selects several files, uploads their bytes into the
-  daemon-owned store, and shows removable filename chips without putting
-  opaque references into the editable draft. An attachment by itself is a
-  sendable prompt; upload errors stay beside the chips. `@`
+  attachment button selects several files, and files dropped anywhere on the
+  composer take the same upload path. Pasting an image while the composer has
+  focus attaches the clipboard bytes without changing an ordinary text paste.
+  Each route uploads into the daemon-owned store and shows removable filename
+  chips without putting opaque references into the editable draft. PNG, JPEG,
+  GIF and WebP bytes up
+  to 4 MiB carry a local thumbnail in that chip; format detection uses the
+  signature rather than the filename, and every other file remains a filename
+  chip. An attachment by itself is a sendable prompt; upload errors stay beside
+  the chips. `@`
   file mentions and `/` slash commands have an inline filtered menu. `↩`
   sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
-  available.
+  available. Those pending prompts appear as one compact card immediately
+  above the composer, in dispatch order. Each row has a stable daemon-owned
+  identity and can be edited in the composer, removed, or moved earlier and
+  later without creating a transcript entry. *Send now* is enabled only when
+  the current live transport accepts steering; a refusal leaves the row in
+  place. A queued prompt becomes immutable transcript history at dispatch,
+  never at enqueue time.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on
@@ -257,7 +294,9 @@ active conversation. With nothing selected, the rail stands alone.
   Beside it, an explicit *Indexed* or *Index workspace* word reports whether
   semantic search is ready. Activating it starts `zg index` in the workspace's
   daemon-owned terminal, opening the dock so progress and failures stay visible.
-- **Terminal dock** — tab strip (tab title + close, `+`, overflow chevron) over a terminal surface. Collapsible; its visibility and height are remembered per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking.
+- **Terminal dock** — a horizontally scrolling tab strip over a terminal surface, followed by fixed `+`, pane, split and find controls that never scroll out with a long tab list. The `+` remains available in an empty workspace dock so the first terminal can be opened there. Each tab title, its close action and `+` are separate keyboard-focusable buttons with action labels. The command palette exposes New Terminal only while a workspace can own it, then the terminal actions that can do something in the current state: split/single, other pane, find, previous/next tab, return to live output and two-step close; choosing one opens a hidden dock before acting. Tabs remain in daemon creation order across reattachment, independent of how their titles sort, and generated shell numbers are not reused while that daemon is alive. Collapsible; its visibility and height are remembered per workspace. The shells belong to the workspace and to the daemon, not to the window: a dock that opens adopts whatever is still running there and replays what it printed while nobody was looking. *Split* opens a second daemon-owned PTY on the right; the active pane has the active tab and focus edge, clicking either pane or activating the keyboard-focusable *Other pane* control changes the keyboard target, choosing a hidden terminal tab replaces only that focused pane, and *Single* returns to the focused pane without stopping the other shell. `⌘⇧[` / `⌘⇧]` (`Ctrl+PageUp` / `Ctrl+PageDown` elsewhere) move through terminal tabs with wrap-around and obey the same focused-pane replacement rule. Terminal input follows the emulated mode for application-cursor keys and encodes reverse Tab, Insert, F1–F12, Ctrl symbols and Alt text; Ctrl/Shift/Alt combinations on navigation and function keys use xterm modifier codes, Shift+Enter and Ctrl+Backspace retain their CLI control bytes, and window-level Cmd/Super shortcuts never leak their printable key into the PTY. `⌘V` (`Ctrl+Shift+V` elsewhere) pastes clipboard text into the active daemon terminal, leaving non-macOS `Ctrl+V` available to the shell as quoted insert; ordinary mode converts line breaks to the carriage returns a PTY expects, while negotiated bracketed-paste mode preserves the block between terminal markers and strips embedded escape bytes so pasted text cannot close that block early. The left/right pair and active pane are remembered per workspace and restored after navigation or a window restart only while the daemon still lists both PTYs. Both PTYs are resized to half width while split and back to full width when the split ends. The wheel and `Shift+PageUp` / `Shift+PageDown` browse that bounded history without sending input to the PTY; an accessible *N lines back* control reports the offset and returns directly to live output. `⌘F` while the terminal has focus, or the find control, searches the live grid and bounded history as literal text: lowercase queries ignore ASCII case, uppercase makes the query exact, Enter / Shift+Enter wrap through the results, and the selected occurrence is highlighted and revealed. Results update as the searched PTY prints, retaining the result number being read and clamping it only when the result set shrinks. Closing is a two-step keyboard-accessible action because it stops a running daemon process: the first activation changes that tab's control to *Close?*, the second closes it, and selecting another tab cancels the pending close. Workspace-relative file locations and absolute locations beneath the daemon-host worktree are underlined links; activating one opens the Files editor at its optional line and column. Links are buttons so keyboard focus and the visible focus ring work without a mouse. Parent traversal, URLs and absolute paths outside the worktree stay plain terminal text.
+
+Dragging across the terminal grid selects exact character cells in either direction and highlights the range; copying prefers that selection, including its line breaks, then falls back to the visible viewport. A non-blank selection can also be quoted into the existing chat draft from the fixed toolbar or command palette without replacing what was already typed. The copy action is exposed whenever the active viewport contains text; `⌘C` (`Ctrl+Shift+C` elsewhere) invokes it, while non-macOS `Ctrl+C` continues to interrupt the foreground process. A click without a drag remains ordinary terminal focus, and blank terminals do not offer no-op copy or quote actions.
 
 > **Defaults.** The right panel and the terminal dock start closed. Their
 > surfaces land in M3, and two empty panels either side of the conversation is
@@ -266,7 +305,13 @@ active conversation. With nothing selected, the rail stands alone.
 
 ### 3.4 Right panel — "surfaces"
 
-A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (show a directory-first expandable tree while the query is empty; typing switches to fuzzy path and full-text results; scope chips search either this workspace or every active workspace in its project, and a project hit switches workspace before opening; keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, and add a saved selection's exact line location to chat; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading), and **Skills** (the selected project's and user's agent skills, grouped by name with every install path and one all-copies enable/disable action). The tree retains at most 2,000 files, says when it was truncated, and leaves search able to reach the complete daemon catalogue. Project search is globally bounded and excludes archived worktrees. Skills search matches names, descriptions, provider roots and daemon-host paths; scope and grouped enablement facets compose with the query, keep the catalogue's stable order, and show the visible/total count. Each path has a copy action. Installed local language servers provide hover, diagnostics and definition jumps across workspace file tabs; targets outside the canonical worktree are not opened, and missing or failed servers leave the editor in syntax-only mode. **Browser** lands in M5. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. Empty state is a centred title, one line of help, and a stacked list of large surface buttons; the toolbar plus returns to it, while `⌘⌥←/→` cycles directly and wraps at either end. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + diff + commit + per-file staging and review comments), **Files** (show a directory-first expandable tree while the query is empty; typing switches to fuzzy path and full-text results; scope chips search either this workspace or every active workspace in its project, and a project hit switches workspace before opening; keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, add a saved selection's exact line location to chat, or paste the current selection into the active terminal; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close), **Browser** (one native child view per workspace on macOS and Windows, with address, back/forward/reload and inspect controls), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading), and **Skills** (the selected project's and user's agent skills, grouped by name with every install path and one all-copies enable/disable action). Sending a selection to the terminal opens the dock and a daemon-owned shell when necessary, preserves the selected text including its own newlines, and never appends an extra Return. The tree retains at most 2,000 files, says when it was truncated, and leaves search able to reach the complete daemon catalogue. Project search is globally bounded and excludes archived worktrees. Skills search matches names, descriptions, provider roots and daemon-host paths; scope and grouped enablement facets compose with the query, keep the catalogue's stable order, and show the visible/total count. Each path has a copy action. Installed local language servers provide hover, diagnostics and definition jumps across workspace file tabs; targets outside the canonical worktree are not opened, and missing or failed servers leave the editor in syntax-only mode. An externally addressed daemon also stays syntax-only because its daemon-host worktree path is never handed to a client-host language-server process. Browser inspect mode highlights the hovered DOM element, intercepts one click, and presents bounded selector, HTML, curated computed style, accessibility, bounds and development source context for review before appending it to the composer; page-provided content is validated again in Rust. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. An image attachment opens a full-size annotation dialog from its thumbnail. The dialog offers pen, highlight, arrow, rectangle, ellipse and text tools plus undo and clear; attaching replaces that draft item with a self-contained SVG containing the immutable source image and marks, uploaded through the ordinary daemon attachment path. Empty state is a centred title, one line of help, and a stacked list of large surface buttons; the toolbar plus returns to it, while `⌘⌥←/→` cycles directly and wraps at either end. Surfaces are draggable between the right panel and the centre dock, and the arrangement persists per workspace.
+
+The Git surface keeps Pull and Push visible even when the worktree is clean. Pull is a daemon-owned fast-forward-only operation; dirty or diverged branches leave the worktree untouched and show the refusal inline without clearing a commit-message draft.
+
+History beside those controls expands a bounded newest-first commit list without hiding the current diff. Rows show the short object id, subject, author and relative age; the daemon also carries full parent ids so a future branch graph is a rendering change rather than a protocol redesign.
+
+The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and unstaged hunks also have a two-step Discard action. Stage, unstage and discard all regenerate the corresponding side of the diff; a stale header reports its refusal inline instead of applying to another hunk. Discard reverses only the worktree-versus-index patch, preserving already staged edits in the same file.
 
 ## 4. Component mapping
 
@@ -285,7 +330,7 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 | Terminal grid | our `ginka-terminal` view over `alacritty_terminal` |
 | Agent status glyphs | ours (see §5) |
 | Charts (Reports) | `gpui-component` charts |
-| Embedded browser (M5) | `gpui-component` `webview` crate |
+| Embedded browser (M5) | same-revision `gpui-wry` crate from `gpui-component` |
 
 The model picker is a searchable popover with a provider rail. It renders only
 installed, usable CLI catalogues and their supported option metadata, never a
@@ -301,8 +346,18 @@ When it cannot, the same row adopts a replacement session whose first turn is
 given a bounded digest of the conversation so far.
 
 Usage is a separate composer chip and therefore remains visible even when a
-provider has only one login. Turn events push new readings into it immediately;
-clicking it requests a fresh reading. It is never refreshed by a timer.
+provider has only one login. The active transcript's cumulative input plus
+output tokens appear beside the tightest rate-limit window; cache and reasoning
+breakdowns are not counted twice. When a provider reports both current-context
+tokens and its model capacity, the same chip adds their occupancy and percentage
+as a distinct reading — cumulative session totals are never divided by a model
+limit, because compaction would make that percentage false. Turn events push
+these readings into it immediately; clicking requests a fresh rate-limit
+reading. It is never refreshed by a timer. When the same provider reading says
+manual compaction is supported, an adjacent **Compact** control starts the
+provider-owned operation as a separate resumed turn. The control disappears
+while a turn is active; compaction never enters the ordinary steer-or-queue
+path.
 
 ## 5. What we build ourselves
 
@@ -315,7 +370,7 @@ Four things are not in any library and are load-bearing for the product's identi
 
 ## 6. Interaction rules
 
-- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, `⌘[` / `⌘]` moves through project/session history (`Ctrl+Alt+↑/↓` elsewhere), and `⌘⌥←/→` cycles surfaces. Session numbers follow the same attention-first stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
+- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, `⌘[` / `⌘]` moves through project/session history (`Ctrl+Alt+↑/↓` elsewhere), `⌘⇧[` / `⌘⇧]` cycles terminal tabs while the terminal is focused (`Ctrl+PageUp/PageDown` elsewhere), and `⌘⌥←/→` cycles surfaces. Session numbers follow the same attention-first stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
 - **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size. Sidebar visibility and width are global navigation preferences; right-panel visibility/width, terminal visibility/height and the active surface persist by immutable workspace id in `app.json`, so switching or restarting restores what that workspace last showed. The centre column is not a panel and cannot be closed.
 - **Focus is explicit.** A visible ring on the focused pane; `⌘K` never steals focus from a running terminal without returning it.
 - **No blocking modals** except destructive confirmations (delete worktree, force push).

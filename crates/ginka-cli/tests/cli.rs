@@ -158,6 +158,51 @@ fn a_project_registered_through_the_daemon_is_visible_to_the_next_command() {
 }
 
 #[test]
+fn an_account_selection_is_persistent_and_visible() {
+    let home = Home::new();
+    home.ok(&[
+        "account",
+        "add",
+        "codex-work",
+        "--provider",
+        "codex",
+        "--label",
+        "Work",
+    ]);
+
+    home.ok(&["account", "select", "codex-work"]);
+    let selected = home.ok(&["account", "list"]);
+    assert!(
+        selected
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{selected}"
+    );
+
+    home.ok(&["daemon", "stop"]);
+    let after_restart = home.ok(&["account", "list"]);
+    assert!(
+        after_restart
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{after_restart}"
+    );
+
+    home.ok(&["account", "select", "codex"]);
+    let restored = home.ok(&["account", "list"]);
+    assert!(
+        restored.lines().any(|line| line.starts_with("* codex ")),
+        "{restored}"
+    );
+    assert!(
+        !restored
+            .lines()
+            .any(|line| line.starts_with("* codex-work")),
+        "{restored}"
+    );
+}
+
+#[test]
 fn a_project_search_finds_paths_and_content_across_its_worktrees() {
     let home = Home::new();
     let repository = home.repository("comet");
@@ -329,6 +374,87 @@ fn changes_are_readable_from_the_command_line() {
     assert_eq!(
         parsed["changes"]["source"]["against"],
         serde_json::json!("uncommitted")
+    );
+}
+
+#[test]
+fn one_hunk_can_be_staged_unstaged_and_discarded_from_the_command_line() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    let baseline = (1..=30)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    std::fs::write(repository.join("README.md"), &baseline).unwrap();
+    git(&repository, &["add", "README.md"]);
+    git(&repository, &["commit", "-m", "long fixture"]);
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "partial-review"]);
+    let worktree = home
+        .root()
+        .join("worktrees")
+        .join("comet")
+        .join("partial-review");
+    let edited = baseline
+        .replace("line 2\n", "line two\n")
+        .replace("line 29\n", "line twenty-nine\n");
+    std::fs::write(worktree.join("README.md"), edited).unwrap();
+
+    let before = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
+    let header = before
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("@@"))
+        .expect("the CLI prints the exact hunk header")
+        .to_string();
+    home.ok(&["stage-hunk", "comet/partial-review", "README.md", &header]);
+
+    let staged = home.ok(&["changes", "comet/partial-review", "--staged", "--patch"]);
+    let unstaged = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
+    assert!(staged.contains("line two"), "{staged}");
+    assert!(!staged.contains("line twenty-nine"), "{staged}");
+    assert!(unstaged.contains("line twenty-nine"), "{unstaged}");
+    assert!(!unstaged.contains("line two"), "{unstaged}");
+
+    home.ok(&[
+        "stage-hunk",
+        "comet/partial-review",
+        "README.md",
+        &header,
+        "--undo",
+    ]);
+    assert!(
+        home.ok(&["changes", "comet/partial-review", "--staged"])
+            .contains("nothing has changed")
+    );
+    let restored = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
+    assert!(restored.contains("line two"), "{restored}");
+    assert!(restored.contains("line twenty-nine"), "{restored}");
+
+    home.ok(&["revert-hunk", "comet/partial-review", "README.md", &header]);
+    let left = home.ok(&["changes", "comet/partial-review", "--unstaged", "--patch"]);
+    assert!(!left.contains("line two"), "{left}");
+    assert!(left.contains("line twenty-nine"), "{left}");
+}
+
+#[test]
+fn recent_history_is_readable_from_the_command_line() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let history = home.ok(&["history", "comet/main", "--limit", "1"]);
+    assert!(history.contains("Test"), "{history}");
+    assert!(history.contains("first"), "{history}");
+
+    let json = home.ok(&["--json", "history", "comet/main", "--limit", "1"]);
+    let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(parsed["result"], serde_json::json!("history"));
+    assert_eq!(parsed["commits"].as_array().unwrap().len(), 1);
+    assert!(
+        parsed["commits"][0]["parents"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
 }
 
