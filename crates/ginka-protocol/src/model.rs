@@ -722,6 +722,13 @@ pub enum ChangeSource {
     /// What has happened since a checkpoint: the answer to "what did this turn
     /// actually do".
     SinceCheckpoint { checkpoint: CheckpointId },
+    /// What one commit did, against its first parent: what a row of the
+    /// history opens. A merge reads as what it brought into the branch.
+    ///
+    /// `commit` is a hexadecimal object name, never a ref or a range: it is
+    /// handed to git as an argument, and anything that could be read as an
+    /// option or a revision expression is refused before it gets there.
+    Commit { commit: String },
 }
 
 /// How one file changed.
@@ -1072,4 +1079,23 @@ mod tests {
         let summary: WorkspaceSummary = serde_json::from_value(object.into()).unwrap();
         assert!(!summary.indexed);
     }
+}
+
+/// A markdown note, kept by the daemon.
+///
+/// MonoCode's notebook (`docs/monocode-parity.md`): somewhere to keep what a
+/// session taught the reader that is not code. Belongs to a project, or to
+/// none — a note written before a project exists is still worth keeping.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Note {
+    pub id: String,
+    pub project: Option<ProjectName>,
+    pub title: String,
+    /// Markdown.
+    pub body: String,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds; notes are listed most recently touched first.
+    pub updated_at: i64,
 }

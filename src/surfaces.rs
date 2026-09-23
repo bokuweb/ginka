@@ -27,7 +27,6 @@ use gpui_component::input::{
     Editor, EditorState, Input, InputEvent, InputState, Replace, Search, TabSize, Textarea,
     TextareaState,
 };
-use gpui_component::scroll::ScrollableElement;
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -70,6 +69,13 @@ pub struct SurfacePanel {
     history: Vec<GitCommit>,
     /// Whether the reader asked to see recent commits above the current diff.
     history_open: bool,
+    /// A commit opened from the history, and what it did once that is read.
+    /// Shown in place of the uncommitted diff while it is set.
+    commit_view: Option<(GitCommit, Option<Changes>)>,
+    /// Where the last pull request is, or why it could not be opened.
+    pull_request: Option<(SharedString, bool)>,
+    /// A pull request is being opened.
+    opening_pull_request: bool,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -172,6 +178,11 @@ pub enum SurfaceEvent {
     Push,
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
+    /// Read what one commit did; it comes back through
+    /// [`SurfacePanel::show_commit`].
+    OpenCommit(GitCommit),
+    /// Push the branch and open a pull request for it.
+    CreatePullRequest,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -292,6 +303,9 @@ impl SurfacePanel {
             staged_changes: None,
             history: Vec::new(),
             history_open: false,
+            commit_view: None,
+            pull_request: None,
+            opening_pull_request: false,
             expanded: None,
             comments: Vec::new(),
             commenting: None,
@@ -862,6 +876,40 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Show what a commit did. `changes` is `None` while it is being read; a
+    /// late answer for a commit the reader has since left is dropped.
+    pub fn show_commit(
+        &mut self,
+        commit: GitCommit,
+        changes: Option<Changes>,
+        cx: &mut Context<Self>,
+    ) {
+        if changes.is_some()
+            && self
+                .commit_view
+                .as_ref()
+                .is_none_or(|(shown, _)| shown.id != commit.id)
+        {
+            return;
+        }
+        self.expanded = changes
+            .as_ref()
+            .and_then(|changes| changes.files.first())
+            .map(|file| file.path.clone());
+        self.commit_view = Some((commit, changes));
+        cx.notify();
+    }
+
+    /// Where the pull request is, or why it could not be opened.
+    pub fn set_pull_request(&mut self, result: Result<String, String>, cx: &mut Context<Self>) {
+        self.opening_pull_request = false;
+        self.pull_request = Some(match result {
+            Ok(url) => (url.into(), true),
+            Err(error) => (error.into(), false),
+        });
+        cx.notify();
+    }
+
     /// Show a surface, which is what the palette does when it is asked for
     /// one.
     pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
@@ -1101,6 +1149,9 @@ impl SurfacePanel {
 
     /// What the agent changed, file by file.
     fn git(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        if let Some(view) = self.commit_view(cx) {
+            return view;
+        }
         let tokens = Tokens::global(cx).clone();
         let Some(changes) = self.changes.clone() else {
             return v_flex()
@@ -1133,6 +1184,7 @@ impl SurfacePanel {
             return v_flex()
                 .flex_1()
                 .child(self.git_remote_actions(cx))
+                .children(self.pull_request_line(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .child(
                     div()
@@ -1163,6 +1215,7 @@ impl SurfacePanel {
             .flex_1()
             .overflow_y_scroll()
             .child(self.git_remote_actions(cx))
+            .children(self.pull_request_line(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
             .child(
                 h_flex()
@@ -1262,6 +1315,24 @@ impl SurfacePanel {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
             )
             .child(
+                Button::new("git-create-pr")
+                    .ghost()
+                    .compact()
+                    .label(if self.opening_pull_request {
+                        rust_i18n::t!("surface.git.create_pr.working").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.create_pr").to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.create_pr_tooltip").to_string())
+                    .disabled(self.opening_pull_request)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.opening_pull_request = true;
+                        this.pull_request = None;
+                        cx.emit(SurfaceEvent::CreatePullRequest);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 Button::new("git-history")
                     .ghost()
                     .compact()
@@ -1277,14 +1348,59 @@ impl SurfacePanel {
             )
     }
 
-    /// Recent commits, with topology retained for the future graph renderer.
-    fn git_history(&self, cx: &App) -> impl IntoElement {
+    /// Where the last pull request is, or why it could not be opened: a link
+    /// to it, or git's and `gh`'s own words.
+    fn pull_request_line(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        let (text, link) = self.pull_request.clone()?;
         let tokens = Tokens::global(cx);
+        let url = text.to_string();
+        Some(
+            div()
+                .id("git-pull-request")
+                .w_full()
+                .px_3()
+                .py_1()
+                .text_xs()
+                .text_color(if link {
+                    tokens.colors().accent
+                } else {
+                    tokens.colors().status_error
+                })
+                .when(link, |this| {
+                    this.cursor_pointer()
+                        .on_click(move |_, _, cx| cx.open_url(&url))
+                })
+                .child(text),
+        )
+    }
+
+    /// Recent commits as a graph: a lane per line of history, a dot per
+    /// commit, and the curves where branches fork and merge
+    /// (`ginka_ui::graph`). A row opens what that commit did.
+    fn git_history(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
         let now = crate::daemon::now();
+        let rows = ginka_ui::graph::layout(&self.history);
+        let lanes = rows.iter().map(|row| row.width).max().unwrap_or(1).min(6);
+        let lane_width = px(10. + lanes as f32 * GRAPH_LANE);
+        // One colour a lane, from the palette the rest of the window already
+        // uses, so the graph adds no colours of its own.
+        let palette = [
+            tokens.colors().accent,
+            tokens.colors().status_attention,
+            tokens.colors().status_done,
+            tokens.colors().status_working,
+            tokens.colors().status_error,
+        ];
+        let opened = self
+            .commit_view
+            .as_ref()
+            .map(|(commit, _)| commit.id.clone());
         v_flex()
+            .id("git-history")
             .w_full()
-            .max_h(px(260.))
-            .overflow_y_scrollbar()
+            .max_h(px(320.))
+            .overflow_y_scroll()
             .border_b_1()
             .border_color(tokens.colors().border_subtle)
             .when(self.history.is_empty(), |this| {
@@ -1297,32 +1413,45 @@ impl SurfacePanel {
                         .child(rust_i18n::t!("surface.git.history_empty").to_string()),
                 )
             })
-            .children(self.history.iter().map(|commit| {
-                let short = commit.id.chars().take(8).collect::<String>();
-                let topology = if commit.parents.len() > 1 {
-                    "◆"
-                } else {
-                    "●"
-                };
-                h_flex()
-                    .w_full()
-                    .px_3()
-                    .py_1p5()
-                    .gap_2()
-                    .border_b_1()
-                    .border_color(tokens.colors().border_subtle)
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(tokens.colors().accent)
-                            .child(topology),
-                    )
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .min_w_0()
+            .children(
+                self.history
+                    .iter()
+                    .zip(rows)
+                    .enumerate()
+                    .map(|(index, (commit, row))| {
+                        let short = commit.id.chars().take(8).collect::<String>();
+                        let picked = commit.clone();
+                        let on = opened.as_deref() == Some(commit.id.as_str());
+                        h_flex()
+                            .id(("history-row", index))
+                            .w_full()
+                            .h(px(GRAPH_ROW))
+                            .pr_3()
+                            .gap_1()
+                            .items_center()
+                            .cursor_pointer()
+                            .when(on, |this| this.bg(tokens.colors().row_active()))
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.commit_view = Some((picked.clone(), None));
+                                cx.emit(SurfaceEvent::OpenCommit(picked.clone()));
+                                cx.notify();
+                            }))
+                            .child(
+                                canvas(
+                                    |_, _, _| {},
+                                    move |bounds, _, window, _| {
+                                        paint_graph_row(&row, bounds, &palette, window);
+                                    },
+                                )
+                                .w(lane_width)
+                                .h_full()
+                                .flex_shrink_0(),
+                            )
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w_0()
                                     .text_sm()
                                     .text_color(tokens.colors().text_secondary)
                                     .truncate()
@@ -1330,17 +1459,123 @@ impl SurfacePanel {
                             )
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .text_xs()
                                     .text_color(tokens.colors().text_muted)
                                     .child(format!(
-                                        "{} · {} · {}",
+                                        "{} · {}",
                                         short,
-                                        commit.author,
                                         ginka_ui::workspace::relative_age(now, commit.authored_at)
                                     )),
-                            ),
+                            )
+                    }),
+            )
+    }
+
+    /// What one commit did, read-only: its heading, the way back to the
+    /// uncommitted diff, and its files with the one being read expanded.
+    fn commit_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (commit, changes) = self.commit_view.clone()?;
+        let tokens = Tokens::global(cx).clone();
+        let now = crate::daemon::now();
+        let head = v_flex()
+            .w_full()
+            .px_3()
+            .py_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("commit-back")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::ArrowLeft)
+                            .tooltip(rust_i18n::t!("surface.git.commit_back").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.commit_view = None;
+                                this.expanded = None;
+                                cx.notify();
+                            })),
                     )
-            }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(commit.summary.clone()),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(format!(
+                        "{} · {} · {}",
+                        commit.id.chars().take(12).collect::<String>(),
+                        commit.author,
+                        ginka_ui::workspace::relative_age(now, commit.authored_at)
+                    )),
+            );
+        let body: Vec<AnyElement> = match changes {
+            None => vec![
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.git.reading").to_string())
+                    .into_any_element(),
+            ],
+            Some(changes) => {
+                let (added, removed) = changes.totals();
+                let mut rows = vec![
+                    h_flex()
+                        .px_3()
+                        .py_1p5()
+                        .gap_2()
+                        .text_xs()
+                        .child(
+                            div().flex_1().text_color(tokens.colors().text_muted).child(
+                                rust_i18n::t!("surface.git.summary", files = changes.files.len())
+                                    .to_string(),
+                            ),
+                        )
+                        .child(
+                            div()
+                                .text_color(tokens.colors().status_done)
+                                .child(format!("+{added}")),
+                        )
+                        .child(
+                            div()
+                                .text_color(tokens.colors().status_error)
+                                .child(format!("-{removed}")),
+                        )
+                        .into_any_element(),
+                ];
+                rows.extend(
+                    changes
+                        .files
+                        .iter()
+                        .map(|file| self.file_row_read_only(file, cx).into_any_element()),
+                );
+                rows
+            }
+        };
+        Some(
+            v_flex()
+                .id("commit-view")
+                .flex_1()
+                .overflow_y_scroll()
+                .child(head)
+                .children(body)
+                .into_any_element(),
+        )
     }
 
     /// The batch of comments, and the way to send it.
@@ -1739,6 +1974,119 @@ impl SurfacePanel {
     }
 
     /// One file, and its diff when it is the one being read.
+    /// One file of a commit: history is read, not staged or reverted, so the
+    /// row opens its diff and nothing else.
+    fn file_row_read_only(
+        &self,
+        file: &ginka_protocol::model::FileChange,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let expanded = self.expanded.as_deref() == Some(file.path.as_str());
+        let path = file.path.clone();
+        let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
+        v_flex()
+            .w_full()
+            .child(
+                h_flex()
+                    .id(SharedString::from(format!("commit-file:{}", file.path)))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .cursor_pointer()
+                    .when(expanded, |this| this.bg(tokens.colors().row_active()))
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.expanded = (!expanded).then(|| path.clone());
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .w(px(26.))
+                            .text_xs()
+                            .text_color(match file.kind {
+                                ChangeKind::Added => tokens.colors().status_done,
+                                ChangeKind::Deleted => tokens.colors().status_error,
+                                _ => tokens.colors().text_muted,
+                            })
+                            .child(match file.kind {
+                                ChangeKind::Added => "A",
+                                ChangeKind::Modified => "M",
+                                ChangeKind::Deleted => "D",
+                                ChangeKind::Renamed => "R",
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(file.label()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_done)
+                            .child(format!("+{}", file.added)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(format!("-{}", file.removed)),
+                    ),
+            )
+            .when(expanded && !file.binary, |this| {
+                this.children(file.hunks.iter().map(|hunk| {
+                    v_flex()
+                        .w_full()
+                        .child(
+                            div()
+                                .w_full()
+                                .px_3()
+                                .py_0p5()
+                                .bg(tokens.colors().bg_surface)
+                                .font_family(mono.clone())
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(hunk.header.clone()),
+                        )
+                        .children(hunk.lines.iter().map(|line| {
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .gap_2()
+                                .font_family(mono.clone())
+                                .text_xs()
+                                .line_height(px(17.))
+                                .when(line.kind == LineKind::Added, |this| {
+                                    this.bg(tokens.colors().status_done.opacity(0.10))
+                                })
+                                .when(line.kind == LineKind::Removed, |this| {
+                                    this.bg(tokens.colors().status_error.opacity(0.10))
+                                })
+                                .child(
+                                    div()
+                                        .w(px(34.))
+                                        .text_color(tokens.colors().text_muted.opacity(0.7))
+                                        .child(
+                                            match line.kind {
+                                                LineKind::Removed => line.old_line,
+                                                _ => line.new_line,
+                                            }
+                                            .map(|at| at.to_string())
+                                            .unwrap_or_default(),
+                                        ),
+                                )
+                                .child(diff_text(line, &tokens))
+                        }))
+                }))
+            })
+    }
+
     fn file_row(
         &self,
         file: &ginka_protocol::model::FileChange,
@@ -3357,4 +3705,72 @@ impl Render for SurfacePanel {
                 Some(surface) => self.placeholder(surface, cx).into_any_element(),
             })
     }
+}
+
+/// How tall one history row is: the lanes are drawn to it.
+const GRAPH_ROW: f32 = 30.;
+/// How far apart the lanes are.
+const GRAPH_LANE: f32 = 12.;
+
+/// Draw one row of the git graph: the lanes passing through, the lanes
+/// ending at the commit, the ones leaving it for its parents, and its dot —
+/// ringed for a merge.
+fn paint_graph_row(
+    row: &ginka_ui::graph::GraphRow,
+    bounds: Bounds<Pixels>,
+    palette: &[Hsla; 5],
+    window: &mut Window,
+) {
+    let x = |lane: usize| bounds.origin.x + px(10. + lane.min(5) as f32 * GRAPH_LANE);
+    let top = bounds.origin.y;
+    let middle = bounds.origin.y + bounds.size.height / 2.;
+    let bottom = bounds.origin.y + bounds.size.height;
+    let color = |lane: usize| palette[lane % palette.len()];
+    let stroke = |from: Point<Pixels>, to: Point<Pixels>, color: Hsla, window: &mut Window| {
+        let mut path = PathBuilder::stroke(px(1.5));
+        path.move_to(from);
+        if from.x == to.x {
+            path.line_to(to);
+        } else {
+            // A curve out of the row's middle, so a lane bends into its
+            // neighbour rather than kinking.
+            path.curve_to(to, point(to.x, from.y));
+        }
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    };
+    for lane in &row.through {
+        stroke(
+            point(x(*lane), top),
+            point(x(*lane), bottom),
+            color(*lane),
+            window,
+        );
+    }
+    for lane in &row.into {
+        stroke(
+            point(x(*lane), top),
+            point(x(row.lane), middle),
+            color(*lane),
+            window,
+        );
+    }
+    for lane in &row.out {
+        stroke(
+            point(x(row.lane), middle),
+            point(x(*lane), bottom),
+            color(*lane),
+            window,
+        );
+    }
+    let merge = row.out.len() > 1;
+    let radius = px(if merge { 4. } else { 3.5 });
+    window.paint_quad(
+        fill(
+            Bounds::centered_at(point(x(row.lane), middle), size(radius * 2., radius * 2.)),
+            color(row.lane),
+        )
+        .corner_radii(radius),
+    );
 }

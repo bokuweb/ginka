@@ -36,6 +36,14 @@ gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
+
+# The GitHub client, mounted as the Inbox (`docs/ui.md` §3.5). A git
+# dependency pinned by rev rather than a submodule: the rev lands in
+# `Cargo.lock` and Cargo resolves e1's graph into ours. `.cargo/config.toml`
+# may patch these to `../e1` for local work.
+e1-github = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
+e1-ui = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
+e1-views = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
 raw-window-handle = "0.6"
 wry = { version = "0.53.3", package = "lb-wry" }
 
@@ -81,13 +89,25 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 
+[features]
+# Ginka alone by default: no `e1` in the dependency graph. The orchestrator is
+# the product; hosting the GitHub client is opt-in until it is finished.
+default = []
+# The GitHub client mounted as the Inbox (`docs/ui.md` §3.5). Without it the
+# Inbox says how to build it in.
+github = ["dep:e1-github", "dep:e1-ui", "dep:e1-views"]
+
 [dependencies]
+e1-github = { workspace = true, optional = true }
+e1-ui = { workspace = true, optional = true }
+e1-views = { workspace = true, optional = true }
 ginka-client.workspace = true
 rust-i18n.workspace = true
 ginka-core.workspace = true
 ginka-protocol.workspace = true
 ginka-ui.workspace = true
 anyhow.workspace = true
+chrono.workspace = true
 async-channel.workspace = true
 base64.workspace = true
 gpui.workspace = true
@@ -111,3 +131,11 @@ unsafe_code = "deny"
 
 [lints]
 workspace = true
+
+# e1 names the toolkit by URL alone and Ginka by rev; Cargo reads those as two
+# sources and would link two copies of `gpui-component`, whose globals e1's
+# views could not see. Point e1's at Ginka's rev so there is one toolkit.
+[patch."https://github.com/longbridge/gpui-component"]
+gpui-component = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
+gpui-component-assets = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
+gpui-base = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }

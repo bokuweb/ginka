@@ -27,6 +27,7 @@ pub mod i18n;
 pub mod logging;
 pub mod lsp;
 pub mod mcp;
+pub mod notes;
 pub mod paths;
 pub mod project;
 pub mod registry;

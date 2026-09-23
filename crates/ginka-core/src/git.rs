@@ -557,6 +557,15 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
         ChangeSource::SinceCheckpoint { .. } => {
             unreachable!("a checkpoint is resolved to a commit before this is called")
         }
+        ChangeSource::Commit { commit } => {
+            anyhow::ensure!(is_object_name(commit), "{commit:?} is not a commit id");
+            // Against the first parent, so a merge reads as what it brought
+            // into the branch; a root commit is shown against nothing.
+            let mut args = vec!["show", "--format=", "--diff-merges=first-parent"];
+            args.extend(common);
+            args.push(commit);
+            git(worktree, &args)?
+        }
     };
 
     Ok(crate::diff::parse(&patch))
@@ -898,6 +907,52 @@ pub fn push(worktree: &Path) -> Result<String> {
     }
 }
 
+/// Whether `text` is a hexadecimal object name, abbreviated or not.
+///
+/// The only shape a client may name a commit in. A ref or a revision
+/// expression would be read by git as something else — `--output=…` as an
+/// option, `HEAD~3..` as a range — and a commit id is all the history ever
+/// hands back anyway.
+pub fn is_object_name(text: &str) -> bool {
+    (4..=64).contains(&text.len()) && text.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Push the branch and open a pull request for it with the GitHub CLI.
+///
+/// Answers with the pull request's address. A branch that already has one
+/// open is not a failure — the reader wanted to get to it, and `gh` says where
+/// it is in its refusal — so that address is the answer too.
+pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
+    push(worktree)?;
+    let mut command = Command::new("gh");
+    command
+        .current_dir(worktree)
+        .args(["pr", "create", "--fill"]);
+    if draft {
+        command.arg("--draft");
+    }
+    let output = command
+        .output()
+        .context("running gh: the GitHub CLI is what opens a pull request")?;
+    let said = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    if let Some(url) = pull_request_url(&said) {
+        return Ok(url);
+    }
+    bail!("gh pr create failed: {}", complaint(&output))
+}
+
+/// The pull request address in what `gh` printed, if there is one.
+pub fn pull_request_url(said: &str) -> Option<String> {
+    said.split_whitespace()
+        .map(|word| word.trim_matches(|c: char| !c.is_ascii_graphic() || c == '"'))
+        .find(|word| word.starts_with("https://") && word.contains("/pull/"))
+        .map(str::to_string)
+}
+
 /// Update a clean tracked branch without creating a merge commit or rebasing.
 ///
 /// Dirty work is refused before contacting the remote. A missing upstream or
@@ -934,6 +989,32 @@ pub fn prune_worktrees(repo: &Path) -> Result<()> {
 #[cfg(test)]
 pub mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_hexadecimal_name_is_taken_as_a_commit() {
+        assert!(is_object_name("b6c49339b3b998d228"));
+        assert!(is_object_name("ABCDEF12"));
+        // An option, a range and a ref are all things git would read as
+        // something other than the commit a history row stands for.
+        assert!(!is_object_name("--output=/tmp/x"));
+        assert!(!is_object_name("HEAD~3"));
+        assert!(!is_object_name("main"));
+        assert!(!is_object_name("abc"));
+    }
+
+    #[test]
+    fn the_address_is_found_in_what_gh_said_either_way() {
+        assert_eq!(
+            pull_request_url("https://github.com/o/r/pull/12\n").as_deref(),
+            Some("https://github.com/o/r/pull/12")
+        );
+        let refused = "a pull request for branch \"x\" into branch \"main\" already exists:\nhttps://github.com/o/r/pull/9";
+        assert_eq!(
+            pull_request_url(refused).as_deref(),
+            Some("https://github.com/o/r/pull/9")
+        );
+        assert_eq!(pull_request_url("no remote"), None);
+    }
     use ginka_protocol::model::ChangeKind;
 
     #[test]

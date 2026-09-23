@@ -295,8 +295,31 @@ pub fn tools() -> Vec<Tool> {
                     "staged": {"type": "boolean", "description": "Only what is staged for the next commit"},
                     "unstaged": {"type": "boolean", "description": "Only worktree edits not yet in the index"},
                     "since_checkpoint": {"type": "string"},
+                    "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
                 },
                 "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_notes",
+            description: "The reader's markdown notes, most recently touched first; one project's when project is given.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}},
+            }),
+        },
+        Tool {
+            name: "ginka_note_save",
+            description: "Write a markdown note. Without an id it is a new one; with one, it replaces that note's title and body.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "string"},
+                    "project": {"type": "string"},
+                    "title": {"type": "string"},
+                    "body": {"type": "string"},
+                },
+                "required": ["body"],
             }),
         },
         Tool {
@@ -640,6 +663,9 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_changes" => Request::WorkspaceChanges {
             workspace: WorkspaceId(text("workspace")?),
             source: match maybe("since_checkpoint") {
+                _ if maybe("commit").is_some() => ginka_protocol::model::ChangeSource::Commit {
+                    commit: maybe("commit").unwrap_or_default(),
+                },
                 Some(checkpoint) => ginka_protocol::model::ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
@@ -647,6 +673,15 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 None if flag("unstaged") => ginka_protocol::model::ChangeSource::Unstaged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_notes" => Request::ListNotes {
+            project: maybe("project").map(ProjectName),
+        },
+        "ginka_note_save" => Request::SaveNote {
+            id: maybe("id"),
+            project: maybe("project").map(ProjectName),
+            title: maybe("title").unwrap_or_default(),
+            body: text("body")?,
         },
         "ginka_stage_hunk" => Request::StageHunk {
             workspace: WorkspaceId(text("workspace")?),
@@ -810,6 +845,7 @@ mod tests {
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
+                "body": "# Release\nsteps",
                 "query": "needle",
                 "path": "src/main.rs",
                 "header": "@@ -1 +1 @@",

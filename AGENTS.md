@@ -76,6 +76,7 @@ What is *not* there yet: dockable/persisted centre and right surfaces (M4), a vi
 
 ```bash
 cargo run                                   # the desktop app
+cargo run --features github                 # …with the GitHub client as its Inbox
 cargo test --workspace                      # run this rather than `-p`: the CLI's
                                             # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings
@@ -110,6 +111,9 @@ cargo run -p ginka-cli -- skills list           # the agents' own skills, and wh
 cargo run -p ginka-cli -- workspace branches <workspace>          # and `checkout <branch> --create`
 cargo run -p ginka-cli -- commit <workspace> --generate           # an agent writes the message
 cargo run -p ginka-cli -- pull <workspace>                        # clean fast-forward only
+cargo run -p ginka-cli -- pr <workspace> [--draft]                # push and open a PR with gh
+cargo run -p ginka-cli -- changes <workspace> --commit <id>       # what one commit did
+cargo run -p ginka-cli -- notes list [--project <p>]              # and add|show|edit|remove
 cargo run -p ginka-cli -- history <workspace>                     # bounded recent commits
 cargo run -p ginka-cli -- stage-hunk <workspace> <path> '<header>' # exact partial stage
 cargo run -p ginka-cli -- revert-hunk <workspace> <path> '<header>' # exact partial discard

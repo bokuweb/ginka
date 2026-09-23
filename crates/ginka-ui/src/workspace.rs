@@ -596,9 +596,67 @@ pub fn session_shortcuts(
         .collect()
 }
 
+/// Which sessions the list shows, by what they are doing — MonoCode's
+/// status filter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusFilter {
+    #[default]
+    All,
+    Working,
+    NeedsAttention,
+    Idle,
+}
+
+impl StatusFilter {
+    /// Whether a row in this state is listed.
+    pub fn admits(self, state: AgentState) -> bool {
+        match self {
+            Self::All => true,
+            Self::Working => state == AgentState::Working,
+            Self::NeedsAttention => state == AgentState::NeedsAttention,
+            Self::Idle => state == AgentState::Idle,
+        }
+    }
+
+    /// The next choice, for a chip that cycles through them.
+    pub fn next(self) -> Self {
+        match self {
+            Self::All => Self::Working,
+            Self::Working => Self::NeedsAttention,
+            Self::NeedsAttention => Self::Idle,
+            Self::Idle => Self::All,
+        }
+    }
+
+    /// What the chip says.
+    pub fn label(self) -> SharedString {
+        match self {
+            Self::All => rust_i18n::t!("sessions.filter.all"),
+            Self::Working => rust_i18n::t!("sessions.filter.working"),
+            Self::NeedsAttention => rust_i18n::t!("sessions.filter.attention"),
+            Self::Idle => rust_i18n::t!("sessions.filter.idle"),
+        }
+        .to_string()
+        .into()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_status_filter_admits_its_own_state_and_cycles_back() {
+        assert!(StatusFilter::All.admits(AgentState::Idle));
+        assert!(StatusFilter::Working.admits(AgentState::Working));
+        assert!(!StatusFilter::Working.admits(AgentState::Idle));
+        assert!(StatusFilter::NeedsAttention.admits(AgentState::NeedsAttention));
+        let mut filter = StatusFilter::All;
+        for _ in 0..4 {
+            filter = filter.next();
+        }
+        assert_eq!(filter, StatusFilter::All);
+    }
 
     #[test]
     fn numbered_shortcuts_follow_the_visible_projects_attention_order() {

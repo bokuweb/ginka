@@ -57,6 +57,14 @@ const ICONS: &[(&str, &str)] = &[
         "icons/gauge.svg",
         include_str!("../../../assets/icons/gauge.svg"),
     ),
+    (
+        "icons/notebook.svg",
+        include_str!("../../../assets/icons/notebook.svg"),
+    ),
+    (
+        "icons/file-plus.svg",
+        include_str!("../../../assets/icons/file-plus.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -77,6 +85,10 @@ pub mod icon {
     pub const BUG: &str = "icons/bug.svg";
     /// The Reports surface: how close each login is to its wall.
     pub const GAUGE: &str = "icons/gauge.svg";
+    /// Notes, in the project rail.
+    pub const NOTEBOOK: &str = "icons/notebook.svg";
+    /// A new note.
+    pub const FILE_PLUS: &str = "icons/file-plus.svg";
 }
 
 impl AssetSource for Assets {
@@ -129,6 +141,8 @@ mod tests {
             icon::HAMMER,
             icon::LIST_CHECK,
             icon::BUG,
+            icon::NOTEBOOK,
+            icon::FILE_PLUS,
         ] {
             assert!(
                 ICONS.iter().any(|(name, _)| *name == path),

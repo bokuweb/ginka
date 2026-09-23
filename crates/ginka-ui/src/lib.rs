@@ -18,6 +18,7 @@ pub mod composer;
 pub mod editor;
 pub mod file_search;
 pub mod file_tree;
+pub mod graph;
 pub mod handoff;
 pub mod home;
 pub mod layout;
