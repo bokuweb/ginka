@@ -692,6 +692,38 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
+            Request::CreatePullRequest { workspace, draft } => {
+                let worktree = self.worktree(&workspace)?;
+                let url = git::create_pull_request(&worktree.path, draft).map_err(failed)?;
+                // The push moved the branch's upstream, which the sidebar shows.
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::PullRequest { url })
+            }
+            Request::ListNotes { project } => Ok(Response::Notes {
+                notes: crate::notes::list(&self.conn(), project.as_ref()).map_err(failed)?,
+            }),
+            Request::SaveNote {
+                id,
+                project,
+                title,
+                body,
+            } => Ok(Response::Note {
+                note: crate::notes::save(
+                    &self.conn(),
+                    id.as_deref(),
+                    project.as_ref(),
+                    &title,
+                    &body,
+                    now(),
+                )
+                .map_err(failed)?,
+            }),
+            Request::RemoveNote { id } => {
+                crate::notes::remove(&self.conn(), &id).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::Pull { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 git::pull_fast_forward(&worktree.path).map_err(failed)?;

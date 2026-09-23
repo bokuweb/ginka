@@ -160,6 +160,9 @@ enum Command {
         /// Show what has happened since a checkpoint, by its id.
         #[arg(long)]
         since: Option<String>,
+        /// Show what one commit did, by the id `history` prints.
+        #[arg(long, conflicts_with_all = ["since", "staged", "unstaged"])]
+        commit: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
@@ -245,6 +248,18 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Push a workspace's branch and open a pull request for it with `gh`,
+    /// titled from its commits. Prints the pull request's address.
+    Pr {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Open it as a draft.
+        #[arg(long)]
+        draft: bool,
+    },
+    /// Markdown notes, kept by the daemon.
+    #[command(subcommand)]
+    Notes(NotesCommand),
     /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
     ///
     /// Spawned by the agent, not by the user: the state stays in the daemon
@@ -414,6 +429,40 @@ enum SlackCommand {
         /// The conversation id (`C…`), not the name.
         channel: String,
     },
+}
+
+#[derive(Subcommand)]
+enum NotesCommand {
+    /// List notes, most recently touched first.
+    List {
+        /// Only this project's notes.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Print one note's markdown.
+    Show { id: String },
+    /// Write a new note. The body is read from stdin when `--body` is absent.
+    Add {
+        /// What it is called. Its first line otherwise.
+        #[arg(long, default_value = "")]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+        /// The project it belongs to.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Replace a note's title and body. The body is read from stdin when
+    /// `--body` is absent.
+    Edit {
+        id: String,
+        #[arg(long, default_value = "")]
+        title: String,
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Forget a note.
+    Remove { id: String },
 }
 
 #[derive(Subcommand)]
@@ -611,6 +660,10 @@ fn main() -> Result<()> {
             // Read before the command is consumed: how a diff is printed is
             // the one thing the response alone does not say.
             let patch = matches!(command, Command::Changes { patch: true, .. });
+            let showing_note = match &command {
+                Command::Notes(NotesCommand::Show { id }) => Some(id.clone()),
+                _ => None,
+            };
             let request = request_for(command)?;
             let response = smol::block_on(async {
                 let client = connect(&paths).await?;
@@ -619,6 +672,20 @@ fn main() -> Result<()> {
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))
             })?;
+            let response = match (showing_note, response) {
+                (Some(id), Response::Notes { notes }) => {
+                    let note = notes
+                        .into_iter()
+                        .find(|note| note.id == id)
+                        .ok_or_else(|| anyhow::anyhow!("no note with id {id}"))?;
+                    if !cli.json {
+                        println!("{}", note.body);
+                        return Ok(());
+                    }
+                    Response::Note { note }
+                }
+                (_, response) => response,
+            };
             if cli.json {
                 println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
@@ -739,6 +806,20 @@ async fn connect(paths: &Paths) -> Result<Client> {
 }
 
 /// Turn a subcommand into the one request that carries it out.
+/// A note's body: the flag's, or everything on stdin, so `ginka notes add <
+/// steps.md` keeps a file as a note.
+fn body_or_stdin(body: Option<String>) -> Result<String> {
+    use std::io::Read as _;
+    match body {
+        Some(body) => Ok(body),
+        None => {
+            let mut text = String::new();
+            std::io::stdin().read_to_string(&mut text)?;
+            Ok(text)
+        }
+    }
+}
+
 fn request_for(command: Command) -> Result<Request> {
     Ok(match command {
         Command::Project(ProjectCommand::Add { path, label }) => Request::AddProject {
@@ -1031,10 +1112,14 @@ fn request_for(command: Command) -> Result<Request> {
             staged,
             unstaged,
             since,
+            commit,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
             source: match (staged, unstaged, since) {
+                _ if commit.is_some() => ChangeSource::Commit {
+                    commit: commit.unwrap_or_default(),
+                },
                 (_, _, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
@@ -1044,6 +1129,33 @@ fn request_for(command: Command) -> Result<Request> {
                 (true, true, None) => unreachable!("clap rejects conflicting diff sources"),
             },
         },
+        Command::Pr { workspace, draft } => Request::CreatePullRequest {
+            workspace: WorkspaceId(workspace),
+            draft,
+        },
+        Command::Notes(NotesCommand::List { project }) => Request::ListNotes {
+            project: project.map(ProjectName),
+        },
+        // One note is the list read and filtered: the window never needs one
+        // alone, so the daemon has no request for it.
+        Command::Notes(NotesCommand::Show { .. }) => Request::ListNotes { project: None },
+        Command::Notes(NotesCommand::Add {
+            title,
+            body,
+            project,
+        }) => Request::SaveNote {
+            id: None,
+            project: project.map(ProjectName),
+            title,
+            body: body_or_stdin(body)?,
+        },
+        Command::Notes(NotesCommand::Edit { id, title, body }) => Request::SaveNote {
+            id: Some(id),
+            project: None,
+            title,
+            body: body_or_stdin(body)?,
+        },
+        Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
         Command::History { workspace, limit } => Request::WorkspaceHistory {
             workspace: WorkspaceId(workspace),
             limit: Some(limit),
@@ -1373,6 +1485,21 @@ fn print(response: Response, patch: bool) {
         Response::Agents { agents } => print_agents(&agents),
         Response::Accounts { accounts } => print_accounts(&accounts, &[]),
         Response::Connectors { connectors } => print_connectors(&connectors),
+        Response::PullRequest { url } => println!("{url}"),
+        Response::Notes { notes } => {
+            if notes.is_empty() {
+                println!("{}", rust_i18n::t!("cli.notes.empty"));
+            }
+            for note in notes {
+                println!(
+                    "{}  {:<12} {}",
+                    note.id,
+                    note.project.map(|project| project.0).unwrap_or_default(),
+                    note.title
+                );
+            }
+        }
+        Response::Note { note } => println!("{}", note.id),
         Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
         Response::PlanUsage { snapshot } => match snapshot {
             Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),

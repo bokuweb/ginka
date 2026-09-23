@@ -9,10 +9,13 @@
 // linking a UI toolkit.
 rust_i18n::i18n!("locales", fallback = "en");
 
+mod assets;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod browser;
 mod daemon;
+mod inbox;
 mod lsp;
+mod notes;
 mod shell;
 mod sidebar;
 mod surfaces;
@@ -34,12 +37,21 @@ fn main() -> Result<()> {
     tracing::info!(%locale, "language");
     let shell_paths = paths.clone();
 
-    let application = gpui_platform::application().with_assets(ginka_ui::Assets);
+    let application = gpui_platform::application().with_assets(assets::Assets);
 
     application.run(move |cx: &mut App| {
         gpui_component::init(cx);
         shell::init(cx);
         ginka_ui::theme::apply(ginka_ui::Mode::Dark, cx);
+        #[cfg(feature = "github")]
+        {
+            // The GitHub client binds its own chords, in its own key context.
+            e1_views::init(cx);
+            // Its tokens are a second global of a different type, read from the
+            // same palette, so both apps resolve a colour the same way. Only
+            // Ginka's `apply` installs the toolkit's own theme.
+            e1_ui::Tokens::install(e1_ui::Mode::Dark, cx);
+        }
 
         cx.spawn(async move |cx| {
             // No title bar of any kind: the columns run to the top of the

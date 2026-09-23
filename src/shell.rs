@@ -62,7 +62,8 @@ actions!(
         PreviousTerminalTab,
         CopyTerminalOutput,
         NavigateBack,
-        NavigateForward
+        NavigateForward,
+        OpenSettings
     ]
 );
 
@@ -163,6 +164,10 @@ pub fn init(cx: &mut App) {
             CopyTerminalOutput,
             Some("Terminal"),
         ),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-,", OpenSettings, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -566,6 +571,13 @@ pub struct Shell {
     index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
+    /// The notebook, for the Notes place (`docs/ui.md` §3.6).
+    notes: Entity<crate::notes::NotesView>,
+    /// The GitHub client, built the first time the Inbox is opened: it
+    /// reaches for a token and the network, and a window that opened on a
+    /// project has no business doing either.
+    #[cfg(feature = "github")]
+    inbox: Option<Entity<crate::inbox::Inbox>>,
     /// Dropping these stops the app following the system appearance and the
     /// sidebar's selection.
     _subscriptions: Vec<Subscription>,
@@ -583,16 +595,21 @@ impl Shell {
         let local_paths = link.allows_local_paths();
         // The window knows the real system appearance; the App-level default
         // applied at startup was a guess made before any window existed.
-        ginka_ui::theme::apply(
+        apply_theme(
             ginka_ui::Mode::resolve(settings.appearance, window.appearance()),
             cx,
         );
 
-        let choice = settings.appearance;
-        let appearance = window.observe_window_appearance(move |window, cx| {
-            ginka_ui::theme::apply(ginka_ui::Mode::resolve(choice, window.appearance()), cx);
+        // The choice is read when the system changes rather than captured now:
+        // the settings page can change it while the window is open.
+        let appearance = cx.observe_window_appearance(window, |this, window, cx| {
+            apply_theme(
+                ginka_ui::Mode::resolve(this.settings.appearance, window.appearance()),
+                cx,
+            );
             window.refresh();
         });
+        let notes = cx.new(|cx| crate::notes::NotesView::new(link.clone(), window, cx));
 
         // The centre column shows whichever row the sidebar has selected; until
         // selection is wired up that is simply the first.
@@ -634,6 +651,10 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
+                crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
+                    this.open_commit(commit.clone(), cx)
+                }
+                crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -701,7 +722,13 @@ impl Shell {
                     // itself, the project of the selected workspace, or none
                     // at all. The column clears and the next message opens a
                     // session rather than continuing the last one.
+                    // The inbox, the notes, the settings — or a project, which
+                    // the rail also announces as a selection.
+                    SidebarEvent::Open(place) => this.open_place(*place, window, cx),
                     SidebarEvent::NewChatRequested => {
+                        sidebar.update(cx, |sidebar, cx| {
+                            sidebar.set_place(crate::sidebar::Place::Workspace, cx)
+                        });
                         let project = sidebar.read(cx).selected_project().cloned();
                         this.start_new_chat(project, window, cx);
                     }
@@ -1151,6 +1178,9 @@ impl Shell {
             session,
             sidebar,
             surfaces,
+            notes,
+            #[cfg(feature = "github")]
+            inbox: None,
             _subscriptions: vec![
                 appearance,
                 selection,
@@ -2026,6 +2056,62 @@ impl Shell {
     }
 
     /// Refresh bounded history only while the reader has expanded it.
+    /// Read what one commit did, for the Git surface's commit view.
+    fn open_commit(&mut self, commit: ginka_protocol::model::GitCommit, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let id = commit.id.clone();
+            let changes = cx
+                .background_spawn(async move {
+                    link.changes(
+                        &workspace,
+                        ginka_protocol::ChangeSource::Commit { commit: id },
+                    )
+                    .await
+                })
+                .await;
+            // An empty answer rather than none: a commit git could not show
+            // is still one the reader asked about, and "reading…" forever
+            // would be a lie.
+            let changes = changes.unwrap_or(ginka_protocol::model::Changes {
+                source: ginka_protocol::ChangeSource::Commit {
+                    commit: commit.id.clone(),
+                },
+                files: Vec::new(),
+            });
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.show_commit(commit, Some(changes), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Push the branch and open a pull request for it (`gh pr create`).
+    fn create_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_pull_request(
+                    Err(rust_i18n::t!("surface.git.create_pr.no_workspace").to_string()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move { link.create_pull_request(&workspace).await })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_pull_request(result, cx));
+        })
+        .detach();
+    }
+
     fn refresh_history(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
@@ -3478,6 +3564,236 @@ impl Shell {
             self.layout.write_into(&mut self.settings);
         }
         self.save_settings();
+    }
+
+    /// Show one of the places beside the projects. `docs/ui.md` §3.5–3.7.
+    fn open_place(
+        &mut self,
+        place: crate::sidebar::Place,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::sidebar::Place;
+        match place {
+            Place::Notes => {
+                let project = self.target_project.clone();
+                self.notes
+                    .update(cx, |notes, cx| notes.show_project(project, cx));
+            }
+            Place::Inbox =>
+            {
+                #[cfg(feature = "github")]
+                if self.inbox.is_none() {
+                    let inbox = cx.new(|cx| crate::inbox::Inbox::new(window, cx));
+                    cx.subscribe(&inbox, |this, _, unread: &crate::inbox::InboxUnread, cx| {
+                        let unread = unread.0;
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_inbox_unread(unread, cx));
+                    })
+                    .detach();
+                    self.inbox = Some(inbox);
+                }
+            }
+            Place::Settings | Place::Workspace => {}
+        }
+        let _ = window;
+        cx.notify();
+    }
+
+    fn on_open_settings(&mut self, _: &OpenSettings, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_place(crate::sidebar::Place::Settings, cx)
+        });
+        self.open_place(crate::sidebar::Place::Settings, window, cx);
+    }
+
+    /// The settings page: appearance and language. `docs/ui.md` §3.7.
+    fn settings_page(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let appearance = self.settings.appearance;
+        let locale = self.settings.locale.clone();
+        let choice = |id: String, label: String, on: bool| {
+            div()
+                .id(SharedString::from(id))
+                .px_3()
+                .py_1()
+                .rounded(px(7.))
+                .text_size(px(12.5))
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        let row = |title: String, detail: String, control: AnyElement| {
+            h_flex()
+                .w_full()
+                .py_3()
+                .gap_4()
+                .items_center()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(tokens.colors().text_primary)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.5))
+                                .text_color(tokens.colors().text_muted)
+                                .child(detail),
+                        ),
+                )
+                .child(control)
+        };
+        let appearances = [
+            (
+                settings::Appearance::System,
+                rust_i18n::t!("settings.appearance.system"),
+            ),
+            (
+                settings::Appearance::Dark,
+                rust_i18n::t!("settings.appearance.dark"),
+            ),
+            (
+                settings::Appearance::Light,
+                rust_i18n::t!("settings.appearance.light"),
+            ),
+        ];
+        let locales: [(Option<&str>, String); 3] = [
+            (None, rust_i18n::t!("settings.language.system").to_string()),
+            (Some("en"), "English".to_string()),
+            (Some("ja"), "日本語".to_string()),
+        ];
+        let appearance_control = h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().bg_surface)
+            .children(appearances.into_iter().map(|(mode, label)| {
+                choice(
+                    format!("appearance:{mode:?}"),
+                    label.to_string(),
+                    appearance == mode,
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.settings.appearance = mode;
+                    this.save_settings();
+                    apply_theme(ginka_ui::Mode::resolve(mode, window.appearance()), cx);
+                    window.refresh();
+                }))
+            }))
+            .into_any_element();
+        let language_control = h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().bg_surface)
+            .children(locales.into_iter().map(|(tag, label)| {
+                let on = locale.as_deref() == tag;
+                let tag = tag.map(str::to_string);
+                choice(format!("locale:{tag:?}"), label, on).on_click(cx.listener(
+                    move |this, _, window, cx| {
+                        this.settings.locale = tag.clone();
+                        this.save_settings();
+                        let resolved = ginka_core::i18n::init(tag.as_deref());
+                        rust_i18n::set_locale(&resolved);
+                        window.refresh();
+                        cx.notify();
+                    },
+                ))
+            }))
+            .into_any_element();
+
+        v_flex()
+            .size_full()
+            .child(
+                self.draggable(
+                    h_flex()
+                        .id("settings-header")
+                        .h(HEADER_HEIGHT)
+                        .flex_shrink_0()
+                        .px_6()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(
+                            div()
+                                .text_size(px(14.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(tokens.colors().text_primary)
+                                .child(rust_i18n::t!("nav.settings").to_string()),
+                        ),
+                    cx,
+                ),
+            )
+            .child(
+                v_flex()
+                    .id("settings-body")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .max_w(px(720.))
+                            .mx_auto()
+                            .px_6()
+                            .py_5()
+                            .child(
+                                div()
+                                    .pb_1()
+                                    .text_size(px(11.5))
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("settings.general").to_string()),
+                            )
+                            .child(row(
+                                rust_i18n::t!("settings.appearance").to_string(),
+                                rust_i18n::t!("settings.appearance.note").to_string(),
+                                appearance_control,
+                            ))
+                            .child(row(
+                                rust_i18n::t!("settings.language").to_string(),
+                                rust_i18n::t!("settings.language.note").to_string(),
+                                language_control,
+                            ))
+                            .child(row(
+                                rust_i18n::t!("settings.version").to_string(),
+                                self.paths.root().display().to_string(),
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(tokens.colors().text_secondary)
+                                    .child(env!("CARGO_PKG_VERSION"))
+                                    .into_any_element(),
+                            )),
+                    ),
+            )
+    }
+
+    /// The Inbox: the GitHub client when it is built in, and how to build it
+    /// in when it is not.
+    fn inbox_view(&self, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(feature = "github")]
+        {
+            let _ = cx;
+            match &self.inbox {
+                Some(inbox) => inbox.clone().into_any_element(),
+                None => div().into_any_element(),
+            }
+        }
+        #[cfg(not(feature = "github"))]
+        {
+            crate::inbox::unavailable(cx).into_any_element()
+        }
     }
 
     fn save_settings(&self) {
@@ -5132,6 +5448,30 @@ impl Shell {
                     reasoning_effort.as_deref(),
                     service_tier.as_deref(),
                 );
+                // Who answered, how long they worked, and when it ended:
+                // MonoCode's "worked for 3s" beside the turn's own provenance.
+                let timing = self.transcript.turn_timing(index).map(|timing| {
+                    let when = chrono::DateTime::from_timestamp(timing.ended_at, 0)
+                        .map(|time| {
+                            time.with_timezone(&chrono::Local)
+                                .format("%H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_default();
+                    match timing.seconds {
+                        Some(seconds) => rust_i18n::t!(
+                            "transcript.worked",
+                            time = ginka_ui::transcript::duration_label(seconds),
+                            at = when
+                        )
+                        .to_string(),
+                        None => when,
+                    }
+                });
+                let provenance = match (provenance, timing) {
+                    (Some(provenance), Some(timing)) => Some(format!("{provenance} · {timing}")),
+                    (provenance, timing) => provenance.or(timing),
+                };
                 self.turn_rule(*turn, *seq, provenance, cx)
             }
             // A turn that worked says so by being answered. Only an outcome
@@ -9510,8 +9850,12 @@ impl Render for Shell {
         // borrow of the theme held across that is a borrow held across the
         // whole window.
         let tokens = Tokens::global(cx).clone();
-        let sidebar_open = self.layout.is_open(Panel::Sidebar);
-        let right_open = self.layout.is_open(Panel::RightPanel);
+        let place = self.sidebar.read(cx).place();
+        let in_workspace = place == crate::sidebar::Place::Workspace;
+        // Only a project can do without the rail: the other places have
+        // nothing else on screen to get back from.
+        let sidebar_open = self.layout.is_open(Panel::Sidebar) || !in_workspace;
+        let right_open = self.layout.is_open(Panel::RightPanel) && in_workspace;
         let project_selected = self.sidebar.read(cx).has_project_selection();
         let sidebar_width = navigator_width(project_selected, self.layout.size(Panel::Sidebar));
         let sidebar_range = if project_selected {
@@ -9531,10 +9875,33 @@ impl Render for Shell {
                 .child(self.window_controls(cx))
                 .into_any_element()
         });
-        let column_header = self.column_header(cx).into_any_element();
-        let selected_text = TextSelection::selected_text(window, cx);
-        let selected_text = ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned);
-        let centre = self.center(selected_text, cx).into_any_element();
+        let main: AnyElement = match place {
+            crate::sidebar::Place::Workspace => {
+                let column_header = self.column_header(cx).into_any_element();
+                let selected_text = TextSelection::selected_text(window, cx);
+                let selected_text =
+                    ginka_ui::transcript::selected_quote(&selected_text).map(str::to_owned);
+                let centre = self.center(selected_text, cx).into_any_element();
+                v_flex()
+                    .size_full()
+                    .child(column_header)
+                    .child(centre)
+                    .into_any_element()
+            }
+            crate::sidebar::Place::Notes => self.notes.clone().into_any_element(),
+            crate::sidebar::Place::Settings => self.settings_page(cx).into_any_element(),
+            crate::sidebar::Place::Inbox => self.inbox_view(cx),
+        };
+        let slots: Vec<Option<Panel>> = self
+            .layout
+            .columns()
+            .into_iter()
+            .filter(|slot| match slot {
+                Some(Panel::RightPanel) => right_open,
+                Some(Panel::Sidebar) => sidebar_open,
+                _ => true,
+            })
+            .collect();
 
         v_flex()
             .key_context(CONTEXT)
@@ -9550,16 +9917,17 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_navigate_back))
             .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))
+            .on_action(cx.listener(Self::on_open_settings))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
             .text_color(tokens.colors().text_primary)
             .child(
                 div().flex_1().w_full().overflow_hidden().child(
-                    h_resizable("shell-columns")
+                    h_resizable(SharedString::from(format!("shell-columns:{}", slots.len())))
                         .on_resize({
                             let this = cx.entity();
-                            let slots = self.layout.columns();
+                            let slots = slots.clone();
                             move |state, _, cx| {
                                 let slots = slots.clone();
                                 let state = state.clone();
@@ -9586,15 +9954,7 @@ impl Render for Shell {
                                     ),
                             )
                         })
-                        .child(
-                            resizable_panel().child(
-                                v_flex()
-                                    .size_full()
-                                    .child(column_header)
-                                    .child(centre)
-                                    .into_any_element(),
-                            ),
-                        )
+                        .child(resizable_panel().child(main))
                         .when(right_open, |this| {
                             this.child(
                                 resizable_panel()
@@ -9774,4 +10134,20 @@ fn access_note(mode: ginka_protocol::AccessMode) -> String {
         ginka_protocol::AccessMode::Auto => rust_i18n::t!("composer.access.auto.note"),
     }
     .to_string()
+}
+
+/// Install a theme for Ginka and, when it is built in, for the GitHub client:
+/// both read the same palette (`docs/ui.md` §2), from two globals of two
+/// types, and one following the system while the other did not would be two
+/// windows in one.
+fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
+    ginka_ui::theme::apply(mode, cx);
+    #[cfg(feature = "github")]
+    e1_ui::Tokens::install(
+        match mode {
+            ginka_ui::Mode::Dark => e1_ui::Mode::Dark,
+            ginka_ui::Mode::Light => e1_ui::Mode::Light,
+        },
+        cx,
+    );
 }

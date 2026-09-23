@@ -254,9 +254,47 @@ pub struct Transcript {
     turn_model: Option<String>,
     turn_reasoning_effort: Option<String>,
     turn_service_tier: Option<String>,
+    /// When the prompt being answered was sent, so the turn's end can say
+    /// how long it took.
+    asked_at: Option<i64>,
+    /// When the entry being folded was recorded.
+    folding_at: i64,
+    /// How long each turn took and when it ended, by the index of its
+    /// `TurnEnd` block. Kept beside the blocks rather than in them: it is a
+    /// reading of the entries' clocks, not something the agent said.
+    turn_times: std::collections::HashMap<usize, TurnTiming>,
+}
+
+/// How long a turn took, and when it ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TurnTiming {
+    /// From the prompt to the turn's end. `None` when the prompt is not in
+    /// this transcript — a session that began before it was recorded.
+    pub seconds: Option<u64>,
+    /// When the turn ended, in Unix seconds.
+    pub ended_at: i64,
+}
+
+/// How long a turn took, as the line under it says it: `3s`, `2m 5s`,
+/// `1h 4m`. Seconds are dropped past an hour — nobody waiting an hour is
+/// counting them.
+pub fn duration_label(seconds: u64) -> String {
+    match seconds {
+        0..=59 => format!("{seconds}s"),
+        60..=3599 => match seconds % 60 {
+            0 => format!("{}m", seconds / 60),
+            rest => format!("{}m {rest}s", seconds / 60),
+        },
+        _ => format!("{}h {}m", seconds / 3600, (seconds % 3600) / 60),
+    }
 }
 
 impl Transcript {
+    /// How long the turn that ends at block `index` took, and when it ended.
+    pub fn turn_timing(&self, index: usize) -> Option<TurnTiming> {
+        self.turn_times.get(&index).copied()
+    }
+
     /// An empty transcript, positioned before the first entry.
     pub fn new() -> Self {
         Self::default()
@@ -387,9 +425,11 @@ impl Transcript {
             };
         }
         self.cursor = entry.seq;
+        self.folding_at = entry.at;
 
         let block = match &entry.payload {
             TranscriptPayload::User { text } => {
+                self.asked_at = Some(entry.at);
                 self.blocks.push(Block::User { text: text.clone() });
                 let index = self.blocks.len() - 1;
                 self.prompt_indices.push(index);
@@ -523,7 +563,19 @@ impl Transcript {
                     reasoning_effort: self.turn_reasoning_effort.take(),
                     service_tier: self.turn_service_tier.take(),
                 });
-                Some(self.blocks.len() - 1)
+                let index = self.blocks.len() - 1;
+                let seconds = self
+                    .asked_at
+                    .take()
+                    .map(|asked| (self.folding_at - asked).max(0) as u64);
+                self.turn_times.insert(
+                    index,
+                    TurnTiming {
+                        seconds,
+                        ended_at: self.folding_at,
+                    },
+                );
+                Some(index)
             }
             AgentEvent::SessionResult { state, summary } => {
                 self.blocks.push(Block::Outcome {
@@ -2149,5 +2201,49 @@ mod mentions {
     #[test]
     fn completing_when_nothing_is_being_typed_changes_nothing() {
         assert_eq!(complete_mention("plain text", "x.rs"), "plain text");
+    }
+
+    #[test]
+    fn a_turn_says_how_long_it_took_and_when_it_ended() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            TranscriptEntry {
+                seq: 1,
+                at: 100,
+                payload: TranscriptPayload::User { text: "hi".into() },
+            },
+            TranscriptEntry {
+                seq: 2,
+                at: 103,
+                payload: TranscriptPayload::Agent {
+                    event: AgentEvent::TurnEnd { turn: 1 },
+                },
+            },
+            TranscriptEntry {
+                seq: 3,
+                at: 200,
+                payload: TranscriptPayload::Agent {
+                    event: AgentEvent::TurnEnd { turn: 2 },
+                },
+            },
+        ]);
+        assert_eq!(
+            transcript.turn_timing(1),
+            Some(TurnTiming {
+                seconds: Some(3),
+                ended_at: 103
+            })
+        );
+        // A second end with no prompt of its own says when, not how long.
+        assert_eq!(transcript.turn_timing(2).and_then(|t| t.seconds), None);
+        assert_eq!(transcript.turn_timing(0), None);
+    }
+
+    #[test]
+    fn a_duration_reads_at_the_scale_it_is() {
+        assert_eq!(duration_label(3), "3s");
+        assert_eq!(duration_label(60), "1m");
+        assert_eq!(duration_label(125), "2m 5s");
+        assert_eq!(duration_label(3840), "1h 4m");
     }
 }

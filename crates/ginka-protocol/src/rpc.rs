@@ -8,7 +8,7 @@
 use crate::ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
     Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint,
-    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, GitCommit, PlanSnapshot,
+    ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, GitCommit, Note, PlanSnapshot,
     Project, ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand,
     TerminalInfo, TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch,
     WorkspaceSummary,
@@ -330,6 +330,37 @@ pub enum Request {
     Push { workspace: WorkspaceId },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull { workspace: WorkspaceId },
+    /// Push the workspace's branch and open a pull request for it with the
+    /// GitHub CLI, titled and described from its commits. Answers with the
+    /// pull request's address — the existing one's, when the branch already
+    /// has one open.
+    ///
+    /// `gh` rather than the API: it is already signed in wherever someone
+    /// reviews on GitHub, and Ginka never holds the token (rule 7).
+    CreatePullRequest {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        draft: bool,
+    },
+
+    /// The notes of a project, or every note when `project` is absent, most
+    /// recently touched first.
+    ListNotes {
+        #[serde(default)]
+        project: Option<ProjectName>,
+    },
+    /// Write a note. Without an `id` it is a new one; with one it replaces the
+    /// title and body of the note that has it.
+    SaveNote {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        project: Option<ProjectName>,
+        title: String,
+        body: String,
+    },
+    /// Forget a note.
+    RemoveNote { id: String },
 
     /// The files in a workspace, best matches for `query` first.
     ///
@@ -684,6 +715,16 @@ pub enum Response {
     },
     Connectors {
         connectors: Vec<ConnectorState>,
+    },
+    /// A pull request exists for the branch, and this is where.
+    PullRequest {
+        url: String,
+    },
+    Notes {
+        notes: Vec<Note>,
+    },
+    Note {
+        note: Note,
     },
 }
 

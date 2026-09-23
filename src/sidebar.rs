@@ -44,6 +44,25 @@ pub enum SidebarEvent {
     /// nothing at all, which is a scratch worktree. What that costs is the
     /// shell's to decide.
     NewChatRequested,
+    /// The reader picked one of the places beside the projects: the inbox,
+    /// the notes, the settings — or a project again.
+    Open(Place),
+}
+
+/// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
+///
+/// A project is a place; the inbox, the notes and the settings are the
+/// others, each bringing a column of its own. MonoCode's navigation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Place {
+    /// A project's sessions and conversations.
+    Workspace,
+    /// Pull requests and issues, from the GitHub client.
+    Inbox,
+    /// The reader's markdown notes.
+    Notes,
+    /// Appearance and language.
+    Settings,
 }
 
 impl EventEmitter<SidebarEvent> for SessionSidebar {}
@@ -78,6 +97,13 @@ pub struct SessionSidebar {
     search_query: String,
     /// Whether a locally picked project path names the daemon's filesystem.
     local_paths: bool,
+    /// Which place the window is showing.
+    place: Place,
+    /// Whether the inbox has something unread. Known only once the GitHub
+    /// client has been opened; the dot is never a guess.
+    inbox_unread: bool,
+    /// Which sessions are listed, by what they are doing.
+    status: ginka_ui::workspace::StatusFilter,
 }
 
 impl SessionSidebar {
@@ -93,6 +119,9 @@ impl SessionSidebar {
             search,
             search_query: String::new(),
             local_paths,
+            place: Place::Workspace,
+            inbox_unread: false,
+            status: ginka_ui::workspace::StatusFilter::All,
         }
     }
 
@@ -166,7 +195,86 @@ impl SessionSidebar {
 
     /// Whether the contextual sessions column should be visible.
     pub fn has_project_selection(&self) -> bool {
-        self.selected_project.is_some()
+        self.selected_project.is_some() && self.place == Place::Workspace
+    }
+
+    /// Which place the window is showing.
+    pub fn place(&self) -> Place {
+        self.place
+    }
+
+    /// Say which place the window is showing, without announcing it.
+    pub fn set_place(&mut self, place: Place, cx: &mut Context<Self>) {
+        if self.place != place {
+            self.place = place;
+            cx.notify();
+        }
+    }
+
+    /// Say whether the inbox has anything unread, for the dot beside it.
+    #[cfg_attr(not(feature = "github"), allow(dead_code))]
+    pub fn set_inbox_unread(&mut self, unread: bool, cx: &mut Context<Self>) {
+        if self.inbox_unread != unread {
+            self.inbox_unread = unread;
+            cx.notify();
+        }
+    }
+
+    /// Go to a place, and tell the shell.
+    fn open(&mut self, place: Place, cx: &mut Context<Self>) {
+        self.set_place(place, cx);
+        cx.emit(SidebarEvent::Open(place));
+    }
+
+    /// One of the fixed places in the rail: an icon and a word, lit while it
+    /// is the one on screen.
+    fn place_row(
+        &self,
+        place: Place,
+        icon: Icon,
+        label: String,
+        hint: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx);
+        let on = self.place == place;
+        h_flex()
+            .id(SharedString::from(format!("place:{place:?}")))
+            .w_full()
+            .px_2p5()
+            .py_1p5()
+            .gap_2()
+            .items_center()
+            .rounded(px(tokens.radius.row))
+            .cursor_pointer()
+            .when(on, |this| this.bg(tokens.colors().row_active()))
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| this.open(place, cx)))
+            .child(icon.size_3p5().text_color(if on {
+                tokens.colors().text_primary
+            } else {
+                tokens.colors().text_muted
+            }))
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .text_color(if on {
+                        tokens.colors().text_primary
+                    } else {
+                        tokens.colors().text_secondary
+                    })
+                    .child(label),
+            )
+            .when(place == Place::Inbox && self.inbox_unread, |this| {
+                this.child(div().size(px(7.)).rounded_full().bg(tokens.colors().accent))
+            })
+            .children(hint.map(|hint| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(hint)
+            }))
     }
 
     /// The rows as they stand, for the palette to offer.
@@ -176,9 +284,10 @@ impl SessionSidebar {
 
     /// Select a workspace by name, which is how the palette switches to one.
     pub fn select_workspace(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
-        if self.selected.as_ref() == Some(workspace) {
+        if self.selected.as_ref() == Some(workspace) && self.place == Place::Workspace {
             return;
         }
+        self.place = Place::Workspace;
         self.adopt_workspace(workspace.clone(), cx);
         cx.emit(SidebarEvent::Selected);
     }
@@ -188,7 +297,15 @@ impl SessionSidebar {
         let Some(project) = self.selected_project.as_ref() else {
             return;
         };
-        let Some(workspace) = session_shortcuts(&self.rows, project, &self.search_query)
+        // The rows the list shows, which the status filter narrows too: a
+        // chord must never pick a row the reader cannot see.
+        let rows: Vec<SessionRow> = self
+            .rows
+            .iter()
+            .filter(|row| self.status.admits(row.state))
+            .cloned()
+            .collect();
+        let Some(workspace) = session_shortcuts(&rows, project, &self.search_query)
             .get(index)
             .cloned()
         else {
@@ -223,6 +340,7 @@ impl SessionSidebar {
 
     /// Pick a project, and nothing in it.
     pub fn select_project(&mut self, project: ProjectName, cx: &mut Context<Self>) {
+        self.place = Place::Workspace;
         self.aim_at(Some(project), cx);
         cx.emit(SidebarEvent::ProjectSelected);
     }
@@ -384,7 +502,8 @@ impl SessionSidebar {
         let tokens = Tokens::global(cx);
         // The project rail and the session list are separate navigation
         // levels, so both stay selected while a conversation is open.
-        let selected = self.selected_project.as_ref() == Some(&project);
+        let selected =
+            self.place == Place::Workspace && self.selected_project.as_ref() == Some(&project);
         h_flex()
             .id(SharedString::from(format!("project:{}", project.0)))
             .w_full()
@@ -733,6 +852,7 @@ impl Render for SessionSidebar {
             .iter()
             .enumerate()
             .filter(|(_, row)| !row.archived)
+            .filter(|(_, row)| self.status.admits(row.state))
             .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
             .map(|(index, row)| (index, row.clone()))
             .collect();
@@ -779,7 +899,33 @@ impl Render for SessionSidebar {
             groups.iter().all(|group| group.rows.is_empty()) && archived_count == 0;
 
         let project_rows = self.projects.clone();
-        let selected_project = selected_project_name.is_some();
+        let selected_project = selected_project_name.is_some() && self.place == Place::Workspace;
+        let settings_hint = if cfg!(target_os = "macos") {
+            "⌘,"
+        } else {
+            "Ctrl ,"
+        };
+        let inbox = self.place_row(
+            Place::Inbox,
+            Icon::new(IconName::Inbox),
+            rust_i18n::t!("nav.inbox").to_string(),
+            None,
+            cx,
+        );
+        let notes = self.place_row(
+            Place::Notes,
+            Icon::empty().path(ginka_ui::assets::icon::NOTEBOOK),
+            rust_i18n::t!("nav.notes").to_string(),
+            None,
+            cx,
+        );
+        let settings = self.place_row(
+            Place::Settings,
+            Icon::new(IconName::Settings),
+            rust_i18n::t!("nav.settings").to_string(),
+            Some(settings_hint),
+            cx,
+        );
 
         h_flex()
             .size_full()
@@ -794,6 +940,7 @@ impl Render for SessionSidebar {
                     .border_r_1()
                     .border_color(border)
                     .child(self.header(cx))
+                    .child(v_flex().px_1p5().pb_1().gap_0p5().child(inbox).child(notes))
                     .child(
                         v_flex()
                             .flex_1()
@@ -808,7 +955,8 @@ impl Render for SessionSidebar {
                             .children(project_rows.into_iter().map(|project| {
                                 self.project_header(project.name, project.label, cx)
                             })),
-                    ),
+                    )
+                    .child(div().px_1p5().py_1p5().child(settings)),
             )
             .when(selected_project, |this| {
                 this.child(
@@ -834,6 +982,26 @@ impl Render for SessionSidebar {
                                         .text_color(tokens.colors().text_muted),
                                 )
                                 .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                                .child(
+                                    div()
+                                        .id("session-status-filter")
+                                        .px_1p5()
+                                        .py_0p5()
+                                        .rounded(px(tokens.radius.control()))
+                                        .cursor_pointer()
+                                        .when(
+                                            self.status != ginka_ui::workspace::StatusFilter::All,
+                                            |this| this.bg(tokens.colors().row_active()),
+                                        )
+                                        .hover(|this| this.bg(tokens.colors().row_active()))
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(self.status.label())
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.status = this.status.next();
+                                            cx.notify();
+                                        })),
+                                )
                                 .when(!self.search_query.is_empty(), |this| {
                                     this.child(
                                         div()

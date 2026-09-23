@@ -434,3 +434,29 @@ fn an_unknown_method_is_a_parse_error_rather_than_a_silent_default() {
     let parsed = serde_json::from_str::<Request>(r#"{"method":"teleport"}"#);
     assert!(parsed.is_err());
 }
+
+#[test]
+fn a_commit_is_named_as_a_change_source_and_a_note_as_a_request() {
+    assert_eq!(
+        wire(&ginka_protocol::model::ChangeSource::Commit {
+            commit: "abc123".into()
+        }),
+        json!({"against": "commit", "commit": "abc123"})
+    );
+    assert_eq!(
+        wire(&Request::SaveNote {
+            id: None,
+            project: None,
+            title: "t".into(),
+            body: "b".into(),
+        }),
+        json!({"method": "save_note", "id": null, "project": null, "title": "t", "body": "b"})
+    );
+    assert_eq!(
+        wire(&Request::CreatePullRequest {
+            workspace: WorkspaceId("comet/harbor".into()),
+            draft: false,
+        }),
+        json!({"method": "create_pull_request", "workspace": "comet/harbor", "draft": false})
+    );
+}

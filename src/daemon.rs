@@ -16,8 +16,8 @@ use std::path::PathBuf;
 
 use ginka_protocol::model::{
     Account, AgentStatus, Attachment, BranchInfo, ChangeSource, Changes, Checkpoint, ContentMatch,
-    FileContent, FileEntry, PlanSnapshot, Project, ReviewComment, Session, SessionMatch, Skill,
-    SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
+    FileContent, FileEntry, Note, PlanSnapshot, Project, ReviewComment, Session, SessionMatch,
+    Skill, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
 use ginka_protocol::rpc::{Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
@@ -1020,6 +1020,56 @@ impl DaemonLink {
 
     /// Ask the daemon one question and keep its refusal, for the callers
     /// that show one: a refused request is an answer, not a lost connection.
+    /// Push the branch and open a pull request for it. The refusal is the
+    /// one `gh` or git gave, because it is the one the reader can act on.
+    pub async fn create_pull_request(&self, workspace: &WorkspaceId) -> Result<String, String> {
+        match self
+            .ask_result(Request::CreatePullRequest {
+                workspace: workspace.clone(),
+                draft: false,
+            })
+            .await?
+        {
+            Response::PullRequest { url } => Ok(url),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
+    /// A project's notes, or every note.
+    pub async fn notes(&self, project: Option<ProjectName>) -> Vec<Note> {
+        match self.ask(Request::ListNotes { project }).await {
+            Some(Response::Notes { notes }) => notes,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Write a note, new or not.
+    pub async fn save_note(
+        &self,
+        id: Option<String>,
+        project: Option<ProjectName>,
+        title: String,
+        body: String,
+    ) -> Option<Note> {
+        match self
+            .ask(Request::SaveNote {
+                id,
+                project,
+                title,
+                body,
+            })
+            .await
+        {
+            Some(Response::Note { note }) => Some(note),
+            _ => None,
+        }
+    }
+
+    /// Forget a note.
+    pub async fn remove_note(&self, id: String) {
+        self.ask(Request::RemoveNote { id }).await;
+    }
+
     async fn ask_result(&self, request: Request) -> Result<Response, String> {
         let client = self
             .client()

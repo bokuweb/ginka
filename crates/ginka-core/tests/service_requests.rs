@@ -1191,3 +1191,108 @@ fn the_poller_pushes_a_status_that_changed_and_stays_quiet_otherwise() {
         .collect();
     assert_eq!(dirty.len(), 1, "{dirty:?}");
 }
+
+#[test]
+fn a_history_row_opens_what_that_commit_did_and_nothing_else_is_taken_as_one() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "graph".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let path = workspace.worktree.path.clone();
+    std::fs::write(path.join("added.txt"), "one\ntwo\n").unwrap();
+    for args in [
+        vec!["add", "-A"],
+        vec![
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "-m",
+            "Add a file",
+        ],
+    ] {
+        assert!(
+            std::process::Command::new("git")
+                .args(&args)
+                .current_dir(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let commits = match fixture.ask(Request::WorkspaceHistory {
+        workspace: workspace.id(),
+        limit: Some(5),
+    }) {
+        Response::History { commits } => commits,
+        other => panic!("expected history, got {other:?}"),
+    };
+    let changes = match fixture.ask(Request::WorkspaceChanges {
+        workspace: workspace.id(),
+        source: ChangeSource::Commit {
+            commit: commits[0].id.clone(),
+        },
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(changes.files.len(), 1);
+    assert_eq!(changes.files[0].path, "added.txt");
+    assert_eq!(changes.files[0].added, 2);
+
+    // Anything but a commit id is refused before git sees it.
+    assert!(
+        fixture
+            .service
+            .handle(Request::WorkspaceChanges {
+                workspace: workspace.id(),
+                source: ChangeSource::Commit {
+                    commit: "--output=/tmp/ginka-pwned".into(),
+                },
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn notes_are_kept_per_project_and_survive_an_edit() {
+    let mut fixture = Fixture::new();
+    let project = ProjectName("comet".into());
+    let note = match fixture.ask(Request::SaveNote {
+        id: None,
+        project: Some(project.clone()),
+        title: String::new(),
+        body: "# Release\nrun the script".into(),
+    }) {
+        Response::Note { note } => note,
+        other => panic!("expected a note, got {other:?}"),
+    };
+    assert_eq!(note.title, "Release", "an untitled note is its first line");
+    fixture.ask(Request::SaveNote {
+        id: Some(note.id.clone()),
+        project: None,
+        title: "Release steps".into(),
+        body: "changed".into(),
+    });
+    match fixture.ask(Request::ListNotes {
+        project: Some(project),
+    }) {
+        Response::Notes { notes } => {
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0].title, "Release steps");
+            assert_eq!(notes[0].body, "changed");
+        }
+        other => panic!("expected notes, got {other:?}"),
+    }
+    fixture.ask(Request::RemoveNote { id: note.id });
+    match fixture.ask(Request::ListNotes { project: None }) {
+        Response::Notes { notes } => assert!(notes.is_empty()),
+        other => panic!("expected notes, got {other:?}"),
+    }
+}

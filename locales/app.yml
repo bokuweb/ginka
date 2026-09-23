@@ -920,6 +920,9 @@ cli.committed:
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
+cli.notes.empty:
+  en: "No notes yet."
+  ja: "ノートはまだありません。"
 cli.review.empty:
   en: no comments are waiting
   ja: 保留中のコメントはありません
@@ -995,3 +998,132 @@ cli.daemon.stopping:
 cli.daemon.none:
   en: no daemon is running
   ja: デーモンは実行されていません
+surface.git.create_pr:
+  en: Create PR
+  ja: PR を作成
+surface.git.create_pr.working:
+  en: Opening PR…
+  ja: PR を作成中…
+surface.git.create_pr_tooltip:
+  en: Push this branch and open a pull request with gh, titled from its commits
+  ja: このブランチをプッシュし、コミットからタイトルを付けて gh で PR を作成します
+surface.git.create_pr.no_workspace:
+  en: Pick a workspace first.
+  ja: 先にワークスペースを選んでください。
+surface.git.commit_back:
+  en: Back to the uncommitted changes
+  ja: 未コミットの変更に戻る
+explorer.refresh:
+  en: Refresh
+  ja: 再読み込み
+inbox.add_connection:
+  en: Add connection
+  ja: 接続を追加
+inbox.add_connection.later:
+  en: GitHub is the only connection for now
+  ja: 現在の接続先は GitHub のみです
+inbox.pick:
+  en: Pick a pull request or an issue to read it.
+  ja: プルリクエストか Issue を選ぶと表示されます。
+inbox.section.assigned:
+  en: Assigned
+  ja: 担当
+inbox.section.inbox:
+  en: Inbox
+  ja: 受信箱
+inbox.section.mine:
+  en: My PRs
+  ja: 自分の PR
+inbox.section.reviews:
+  en: Reviews
+  ja: レビュー依頼
+inbox.unavailable:
+  en: "This build has no GitHub client. Build it in with:"
+  ja: "このビルドには GitHub クライアントが含まれていません。次のコマンドで組み込めます:"
+nav.inbox:
+  en: Inbox
+  ja: 受信箱
+nav.notes:
+  en: Notes
+  ja: ノート
+nav.settings:
+  en: Settings
+  ja: 設定
+notes.all:
+  en: All projects
+  ja: すべてのプロジェクト
+notes.body:
+  en: Write in markdown…
+  ja: Markdown で書く…
+notes.edit:
+  en: Edit
+  ja: 編集
+notes.empty:
+  en: No notes yet.
+  ja: ノートはまだありません。
+notes.new:
+  en: New note
+  ja: 新しいノート
+notes.pick:
+  en: Pick a note, or start a new one.
+  ja: ノートを選ぶか、新しく書き始めてください。
+notes.preview:
+  en: Preview
+  ja: プレビュー
+notes.remove:
+  en: Delete
+  ja: 削除
+notes.remove.confirm:
+  en: Delete for good?
+  ja: 本当に削除しますか？
+notes.title:
+  en: Title
+  ja: タイトル
+notes.untitled:
+  en: Untitled
+  ja: 無題
+settings.appearance:
+  en: Appearance
+  ja: 外観
+settings.appearance.dark:
+  en: Dark
+  ja: ダーク
+settings.appearance.light:
+  en: Light
+  ja: ライト
+settings.appearance.note:
+  en: Follow the system, or keep one theme.
+  ja: システムに合わせるか、固定するか。
+settings.appearance.system:
+  en: System
+  ja: システム
+settings.general:
+  en: General
+  ja: 一般
+settings.language:
+  en: Language
+  ja: 言語
+settings.language.note:
+  en: What the window is written in.
+  ja: 画面の表示言語。
+settings.language.system:
+  en: System
+  ja: システム
+settings.version:
+  en: Version
+  ja: バージョン
+transcript.worked:
+  en: "worked for %{time} · %{at}"
+  ja: "%{time} 作業 · %{at}"
+sessions.filter.all:
+  en: All
+  ja: すべて
+sessions.filter.working:
+  en: Working
+  ja: 作業中
+sessions.filter.attention:
+  en: Needs you
+  ja: 対応待ち
+sessions.filter.idle:
+  en: Done
+  ja: 完了

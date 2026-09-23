@@ -134,9 +134,16 @@ session list appears and changes with the selected project, matching the
 spatial model used by e1 and leaving the centre column exclusively for the
 active conversation. With nothing selected, the rail stands alone.
 
-- **Project rail** — app header, the `Projects` action row, then selectable
-  project rows. The selected project remains highlighted while one of its
-  sessions is open.
+- **Project rail** — app header, then the places that are not projects —
+  **Inbox** and **Notes** — the `Projects` action row, selectable project
+  rows, and **Settings** (`⌘,`) at its foot. MonoCode's navigation: a place
+  replaces the session list, the centre column and the right panel with
+  columns of its own (§3.5–3.7), and picking a project comes back. The
+  selected project remains highlighted while one of its sessions is open, and
+  a lit place outranks it. The rail cannot be closed while a place other than
+  a project is showing: there would be nothing on screen to get back from.
+- **Status filter** — a chip beside the session search cycles *All*,
+  *Working*, *Needs you* and *Done*; `⌘1–9` pick only the rows it shows.
 - **Session list header** — `Workspace` and a `+` for a new session. The whole
   sessions column is absent until a project is selected.
 - **Conversation search** — directly below the header, with the rail's search
@@ -309,9 +316,38 @@ A dock area that hosts one or more surfaces: **Terminal**, **Git** (status + dif
 
 The Git surface keeps Pull and Push visible even when the worktree is clean. Pull is a daemon-owned fast-forward-only operation; dirty or diverged branches leave the worktree untouched and show the refusal inline without clearing a commit-message draft.
 
-History beside those controls expands a bounded newest-first commit list without hiding the current diff. Rows show the short object id, subject, author and relative age; the daemon also carries full parent ids so a future branch graph is a rendering change rather than a protocol redesign.
+History beside those controls expands a bounded newest-first commit graph without hiding the current diff. Each row is a lane drawing — a dot per commit, a lane per line of history, curves where branches fork and merge, laid out by `ginka_ui::graph` from the parent ids alone and coloured from the status palette — then the subject, short id and relative age. A row opens a read-only view of what that commit did against its first parent, with the way back to the uncommitted diff at its head. *Create PR* beside Push pushes the branch and opens a pull request with `gh`; the answer is a link to it, or the refusal in `gh`'s own words.
 
 The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and unstaged hunks also have a two-step Discard action. Stage, unstage and discard all regenerate the corresponding side of the diff; a stale header reports its refusal inline instead of applying to another hunk. Discard reverses only the worktree-versus-index patch, preserving already staged edits in the same file.
+
+### 3.5 Inbox
+
+Built with `--features github`: the e1 GitHub client, mounted as pieces rather
+than as its window. A 380 px list column — the place's header, the
+connections (GitHub, and *Add connection*, which says GitHub is the one there
+is), section chips (Inbox, My PRs, Reviews, Assigned) and e1's list — then e1's
+detail in the centre and its *Ask* pane at the far right while open. e1's own
+navigation, window controls and palette stay behind. The rail shows a dot
+beside *Inbox* while anything is unread, known only once the client has been
+opened. Without the feature, the list column keeps its header and the centre
+names the build command.
+
+Both apps read one palette: Ginka installs e1's tokens alongside its own on
+every theme change, so a system appearance switch reaches both.
+
+### 3.6 Notes
+
+A 300 px list of the notes — the chosen project's, or every one — most
+recently touched first, with a new-note action, and the note being written in
+the centre at 720 px: its title, then its markdown, with *Edit / Preview*
+segments and a two-step delete. Typing saves after a 600 ms pause; there is no
+save button. The daemon keeps them (`ginka notes`, MCP).
+
+### 3.7 Settings
+
+Appearance (System, Dark, Light) and language (System, English, 日本語), each
+a segmented control that applies at once and persists to `app.json`, and the
+version with the state directory. Opened from the rail or `⌘,`.
 
 ## 4. Component mapping
 
