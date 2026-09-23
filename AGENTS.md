@@ -100,6 +100,10 @@ cargo run -p ginka-cli -- session queue-edit <session> <id> "replacement"
 cargo run -p ginka-cli -- session queue-remove <session> <id>
 cargo run -p ginka-cli -- session queue-move <session> <id> <zero-based-index>
 cargo run -p ginka-cli -- session queue-send-now <session> <id>
+cargo run -p ginka-cli -- session queue-add <session> "<text>"      # queue even where it could steer
+cargo run -p ginka-cli -- session queue-interrupt <session> <id>    # stop the turn, send this next
+cargo run -p ginka-cli -- session queue-pause <session> [--resume]  # hold or let go
+cargo run -p ginka-cli -- session queue-clear <session>
 cargo run -p ginka-cli -- session compact <session>
 cargo run -p ginka-cli -- checkpoint list <workspace>
 cargo run -p ginka-cli -- --json project list   # the protocol's own shapes, for agents

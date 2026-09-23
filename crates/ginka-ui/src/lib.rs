@@ -25,6 +25,7 @@ pub mod layout;
 pub mod markup;
 pub mod models;
 pub mod navigation;
+pub mod notify;
 pub mod palette;
 pub mod reports;
 pub mod search;

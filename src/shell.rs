@@ -477,6 +477,17 @@ pub struct Shell {
     queued_messages: Vec<ginka_protocol::model::QueuedMessage>,
     /// Whether the active transport can accept a waiting prompt immediately.
     queue_can_send_now: bool,
+    /// Whether the session's queue is held (a stopped turn, a restart).
+    queue_paused: bool,
+    /// Whether this window is the one in front: a notification is for a
+    /// change the reader is not already looking at.
+    window_active: bool,
+    /// The last state each session was seen in, so a notification is for a
+    /// move out of work rather than for every reading.
+    session_states: std::collections::HashMap<SessionId, SessionState>,
+    /// Set by ⌘↩: the next prompt goes to the back of the queue even where
+    /// the running turn could take it now — the Codex CLI's Tab.
+    queue_next: bool,
     /// Stable id of the queued prompt currently being edited in the composer.
     editing_queued_message: Option<u64>,
     /// The ordinary draft displaced while a queued prompt is edited.
@@ -602,6 +613,10 @@ impl Shell {
 
         // The choice is read when the system changes rather than captured now:
         // the settings page can change it while the window is open.
+        cx.observe_window_activation(window, |this, window, _| {
+            this.window_active = window.is_window_active();
+        })
+        .detach();
         let appearance = cx.observe_window_appearance(window, |this, window, cx| {
             apply_theme(
                 ginka_ui::Mode::resolve(this.settings.appearance, window.appearance()),
@@ -640,7 +655,8 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::Commit {
                     message,
                     only_staged,
-                } => this.commit(message.clone(), *only_staged, cx),
+                    then,
+                } => this.commit(message.clone(), *only_staged, *then, cx),
                 crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
                     this.leave_comment(path.clone(), *line, text.clone(), cx)
                 }
@@ -725,6 +741,33 @@ impl Shell {
                     // The inbox, the notes, the settings — or a project, which
                     // the rail also announces as a selection.
                     SidebarEvent::Open(place) => this.open_place(*place, window, cx),
+                    SidebarEvent::Pin { workspace, pinned } => {
+                        let (link, workspace, pinned) =
+                            (this.link.clone(), workspace.clone(), *pinned);
+                        this.after_row_change(
+                            async move { link.pin_workspace(&workspace, pinned).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::Archive {
+                        workspace,
+                        archived,
+                    } => {
+                        let (link, workspace, archived) =
+                            (this.link.clone(), workspace.clone(), *archived);
+                        this.after_row_change(
+                            async move { link.archive_workspace(&workspace, archived).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::Rename { session, title } => {
+                        let (link, session, title) =
+                            (this.link.clone(), session.clone(), title.clone());
+                        this.after_row_change(
+                            async move { link.rename_session(&session, title).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::NewChatRequested => {
                         sidebar.update(cx, |sidebar, cx| {
                             sidebar.set_place(crate::sidebar::Place::Workspace, cx)
@@ -874,6 +917,15 @@ impl Shell {
             &composer,
             window,
             |this, _, event: &InputEvent, window, cx| match event {
+                // ⌘↩ while an agent works: to the back of the queue, even
+                // where the turn could take it now.
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: false,
+                } if this.is_working() && this.picker.is_none() => {
+                    this.queue_next = true;
+                    this.submit(window, cx);
+                }
                 InputEvent::PressEnter { shift: false, .. } => {
                     // A mention being chosen is not a message being sent.
                     // Something being chosen is not a message being sent.
@@ -980,6 +1032,13 @@ impl Shell {
                         // it. The sidebar's own rows follow on the next tick.
                         DaemonEvent::SessionStateChanged { session, state } => this
                             .update(cx, |this, cx| {
+                                let before = this.session_states.insert(session.clone(), state);
+                                if this.settings.notifications
+                                    && !this.window_active
+                                    && let Some(notable) = ginka_ui::notify::notable(before, state)
+                                {
+                                    this.notify_desktop(&session, notable, cx);
+                                }
                                 if this.session.as_ref().and_then(|row| row.session.as_ref())
                                     == Some(&session)
                                 {
@@ -1136,6 +1195,10 @@ impl Shell {
             commands: Vec::new(),
             queued_messages: Vec::new(),
             queue_can_send_now: false,
+            queue_paused: false,
+            window_active: true,
+            session_states: std::collections::HashMap::new(),
+            queue_next: false,
             editing_queued_message: None,
             queue_edit_draft: None,
             queue_error: None,
@@ -1884,20 +1947,48 @@ impl Shell {
     }
 
     /// Commit the workspace's work, and say so if git would not.
-    fn commit(&mut self, message: String, only_staged: bool, cx: &mut Context<Self>) {
+    fn commit(
+        &mut self,
+        message: String,
+        only_staged: bool,
+        then: crate::surfaces::CommitThen,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::surfaces::CommitThen;
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
-            let outcome = cx
-                .background_spawn(
-                    async move { link.commit(&workspace, message, !only_staged).await },
-                )
+            let (committed, after) = cx
+                .background_spawn(async move {
+                    let committed = link.commit(&workspace, message, !only_staged).await;
+                    // Only after a commit that went in: pushing or opening a
+                    // pull request for the previous state is not what was asked.
+                    let after = match (&committed, then) {
+                        (Err(_), _) | (Ok(_), CommitThen::Nothing) => None,
+                        (Ok(_), CommitThen::Push) => {
+                            Some(link.push(&workspace).await.map(|_| None))
+                        }
+                        (Ok(_), CommitThen::PullRequest) => {
+                            Some(link.create_pull_request(&workspace).await.map(Some))
+                        }
+                    };
+                    (committed, after)
+                })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_commit_result(outcome.err(), cx)
+                surfaces.set_commit_result(committed.clone().err(), cx);
+                match after {
+                    Some(Ok(Some(url))) => surfaces.set_pull_request(Ok(url), cx),
+                    Some(Err(error)) if then == CommitThen::PullRequest => {
+                        surfaces.set_pull_request(Err(error), cx)
+                    }
+                    Some(Err(error)) => surfaces.set_git_sync_result(Some(error), cx),
+                    None if then == CommitThen::PullRequest => surfaces.abandon_pull_request(cx),
+                    _ => {}
+                }
             });
         })
         .detach();
@@ -3291,6 +3382,29 @@ impl Shell {
         .detach();
     }
 
+    /// Run one queue operation against the session on screen, keep its
+    /// refusal where the panel shows it, and read the queue again.
+    fn queue_op<F, Fut>(&mut self, op: F, cx: &mut Context<Self>)
+    where
+        F: FnOnce(Arc<DaemonLink>, SessionId) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(op(link, session)).await;
+            this.update(cx, |this, cx| {
+                this.queue_error = result.err();
+                this.refresh_queue(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Move one queued prompt to a zero-based dispatch position.
     fn move_queued_message(&mut self, id: u64, index: u32, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
@@ -3481,8 +3595,27 @@ impl Shell {
         let account = self.account_to_start().map(|account| account.id.clone());
         let fresh = self.start_fresh;
         self.start_fresh = false;
+        let queue = std::mem::take(&mut self.queue_next);
         cx.spawn(async move |this, cx| {
             match row.session.clone().filter(|_| !fresh) {
+                Some(session) if queue => {
+                    let sending = link.clone();
+                    let text = text.clone();
+                    let queued = cx
+                        .background_spawn(
+                            async move { sending.queue_message(&session, text).await },
+                        )
+                        .await;
+                    this.update(cx, |this, cx| {
+                        this.submitted = false;
+                        if let Err(error) = queued {
+                            this.queue_error = Some(error);
+                        }
+                        this.refresh_queue(cx);
+                        cx.notify();
+                    })
+                    .ok();
+                }
                 Some(session) => {
                     let sending = link.clone();
                     let text = text.clone();
@@ -3564,6 +3697,56 @@ impl Shell {
             self.layout.write_into(&mut self.settings);
         }
         self.save_settings();
+    }
+
+    /// Tell the desktop a session moved (`ginka_ui::notify`). macOS only for
+    /// now, through `osascript`; elsewhere the rule is kept and nothing is
+    /// shown until a platform path is written.
+    fn notify_desktop(
+        &self,
+        session: &SessionId,
+        notable: ginka_ui::notify::Notable,
+        cx: &mut Context<Self>,
+    ) {
+        let title = self
+            .sidebar
+            .read(cx)
+            .rows()
+            .iter()
+            .find(|row| row.session.as_ref() == Some(session))
+            .map(|row| row.title.to_string())
+            .unwrap_or_else(|| "Ginka".to_string());
+        let script = ginka_ui::notify::applescript(&notable.heading(), &title);
+        if cfg!(target_os = "macos") {
+            cx.background_spawn(async move {
+                if let Err(error) = std::process::Command::new("osascript")
+                    .args(["-e", &script])
+                    .output()
+                {
+                    tracing::warn!(%error, "could not post a notification");
+                }
+            })
+            .detach();
+        }
+    }
+
+    /// Run a change to a sidebar row through the daemon, then read the rows
+    /// again: the daemon's listing is what the sidebar draws, so a pin or a
+    /// rename shows once it is true rather than when it was asked for.
+    fn after_row_change(
+        &mut self,
+        change: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let outcome = cx.background_spawn(change).await;
+            if let Err(error) = outcome {
+                tracing::warn!(%error, "the daemon refused a sidebar change");
+            }
+            pull_rows(&this, &link, cx).await.ok();
+        })
+        .detach();
     }
 
     /// Show one of the places beside the projects. `docs/ui.md` §3.5–3.7.
@@ -3694,6 +3877,29 @@ impl Shell {
                 }))
             }))
             .into_any_element();
+        let notifying = self.settings.notifications;
+        let notifications_control = h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().bg_surface)
+            .children(
+                [(true, "settings.on"), (false, "settings.off")]
+                    .into_iter()
+                    .map(|(value, key)| {
+                        choice(
+                            format!("notifications:{value}"),
+                            rust_i18n::t!(key).to_string(),
+                            notifying == value,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings.notifications = value;
+                            this.save_settings();
+                            cx.notify();
+                        }))
+                    }),
+            )
+            .into_any_element();
         let language_control = h_flex()
             .p_0p5()
             .gap_0p5()
@@ -3765,6 +3971,11 @@ impl Shell {
                                 rust_i18n::t!("settings.language").to_string(),
                                 rust_i18n::t!("settings.language.note").to_string(),
                                 language_control,
+                            ))
+                            .child(row(
+                                rust_i18n::t!("settings.notifications").to_string(),
+                                rust_i18n::t!("settings.notifications.note").to_string(),
+                                notifications_control,
                             ))
                             .child(row(
                                 rust_i18n::t!("settings.version").to_string(),
@@ -6050,6 +6261,7 @@ impl Shell {
         }
         let tokens = Tokens::global(cx).clone();
         let count = self.queued_messages.len();
+        let paused = self.queue_paused;
         let rows = self
             .queued_messages
             .iter()
@@ -6080,6 +6292,21 @@ impl Shell {
                             .text_sm()
                             .text_color(tokens.colors().text_primary)
                             .child(message.text),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("queue-interrupt-{send_id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("composer.queue.interrupt").to_string())
+                            .tooltip(rust_i18n::t!("composer.queue.interrupt_tooltip").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.queue_op(
+                                    move |link, session| async move {
+                                        link.interrupt_with_queued(&session, send_id).await
+                                    },
+                                    cx,
+                                )
+                            })),
                     )
                     .child(
                         Button::new(SharedString::from(format!("queue-now-{send_id}")))
@@ -6148,15 +6375,63 @@ impl Shell {
                 .border_1()
                 .border_color(tokens.colors().border_subtle)
                 .child(
-                    h_flex().w_full().items_center().child(
-                        div()
-                            .flex_1()
-                            .text_xs()
-                            .text_color(tokens.colors().text_secondary)
-                            .child(
-                                rust_i18n::t!("composer.queue.title", count = count).to_string(),
-                            ),
-                    ),
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(
+                                    rust_i18n::t!("composer.queue.title", count = count)
+                                        .to_string(),
+                                ),
+                        )
+                        .when(paused, |this| {
+                            this.child(
+                                div()
+                                    .px_1p5()
+                                    .rounded(px(tokens.radius.control()))
+                                    .bg(tokens.colors().status_attention.opacity(0.18))
+                                    .text_xs()
+                                    .text_color(tokens.colors().status_attention)
+                                    .child(rust_i18n::t!("composer.queue.held").to_string()),
+                            )
+                        })
+                        .child(
+                            Button::new("queue-pause")
+                                .ghost()
+                                .compact()
+                                .label(if paused {
+                                    rust_i18n::t!("composer.queue.resume").to_string()
+                                } else {
+                                    rust_i18n::t!("composer.queue.pause").to_string()
+                                })
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.queue_op(
+                                        move |link, session| async move {
+                                            link.set_queue_paused(&session, !paused).await
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        )
+                        .child(
+                            Button::new("queue-clear")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("composer.queue.clear").to_string())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.queue_op(
+                                        |link, session| async move {
+                                            link.clear_queue(&session).await
+                                        },
+                                        cx,
+                                    )
+                                })),
+                        ),
                 )
                 .children(rows)
                 .children(self.queue_error.clone().map(|error| {
@@ -9811,13 +10086,14 @@ async fn pull_queue(
 ) -> Result<(), ()> {
     let listing = link.clone();
     let requested = session.clone();
-    let (messages, can_send_now) = cx
+    let (messages, can_send_now, paused) = cx
         .background_spawn(async move { listing.queued_messages(&requested).await })
         .await;
     this.update(cx, |this, cx| {
         if this.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&session) {
             this.queued_messages = messages;
             this.queue_can_send_now = can_send_now;
+            this.queue_paused = paused;
             this.queue_error = None;
             cx.notify();
         }

@@ -2782,6 +2782,7 @@ dependencies = [
  "dirs",
  "futures-lite",
  "ginka-protocol",
+ "globset",
  "lsp-types",
  "nucleo-matcher",
  "parking_lot",

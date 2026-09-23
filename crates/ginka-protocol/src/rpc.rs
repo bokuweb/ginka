@@ -202,6 +202,20 @@ pub enum Request {
         /// Stable session-local row id.
         id: u64,
     },
+    /// Put a follow-up in the queue even where the running turn could take
+    /// it now — the Codex CLI's Tab. With nothing running and nothing
+    /// waiting ahead of it, it starts at once, like `SendMessage`.
+    QueueMessage { session: SessionId, text: String },
+    /// Stop the running turn and send this queued prompt next — opencodex's
+    /// Steer. The rest of the queue keeps its order and keeps going. With
+    /// nothing running it is sent at once.
+    InterruptWithQueuedMessage { session: SessionId, id: u64 },
+    /// Hold the queue, or let it go. A stopped or failed turn holds it; a
+    /// restarted daemon brings it back held. Letting a held queue go while
+    /// nothing is running sends its first prompt.
+    SetQueuePaused { session: SessionId, paused: bool },
+    /// Throw away every waiting follow-up.
+    ClearQueue { session: SessionId },
     /// Ask the provider to compact an idle conversation's context.
     ///
     /// This is deliberately distinct from a follow-up: it is refused while a
@@ -638,6 +652,9 @@ pub enum Response {
         messages: Vec<crate::model::QueuedMessage>,
         /// Whether the active transport can receive a waiting prompt now.
         can_send_now: bool,
+        /// Whether the queue is held: nothing dispatches until it is let go.
+        #[serde(default)]
+        paused: bool,
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,

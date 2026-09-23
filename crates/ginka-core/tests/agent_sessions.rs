@@ -189,6 +189,10 @@ impl AgentDriver for RestartDriver {
 
 struct Fixture {
     service: Service,
+    /// What a restart needs to build the same daemon again: its state
+    /// directory, its database file and its drivers.
+    paths: Paths,
+    db_path: std::path::PathBuf,
     recorder: Arc<Recorder>,
     workspace: WorkspaceId,
     script: std::path::PathBuf,
@@ -210,21 +214,11 @@ impl Fixture {
         // reads it when it starts, so a follow-up re-runs whatever is there.
         let script = work.path().join("agent-script.txt");
         let recorder = Arc::new(Recorder::default());
-        let mut drivers = Registry::with_defaults();
-        drivers.insert(Arc::new(
-            ClaudeDriver::with_program(FAKE_AGENT)
-                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
-        ));
-        // The same fake agent behind a driver that cannot steer, so the
-        // fallback — queue the follow-up, resume afterwards — stays covered.
-        drivers.insert(Arc::new(
-            ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
-                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
-        ));
-        drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, &script)));
-        drivers.insert(Arc::new(ResponseDriver::new(FAKE_AGENT, &script)));
-        let mut service = Service::new(paths, db::open_in_memory().unwrap(), recorder.clone())
-            .with_drivers(drivers);
+        let drivers = Self::drivers(&script);
+        let db_path = home.path().join("fixture.db");
+        let mut service =
+            Service::new(paths.clone(), db::open(&db_path).unwrap(), recorder.clone())
+                .with_drivers(drivers);
 
         let root = work.path().join("comet");
         support::repository(&root);
@@ -248,12 +242,44 @@ impl Fixture {
 
         Self {
             service,
+            paths,
+            db_path,
             recorder,
             workspace,
             script,
             _home: home,
             _work: work,
         }
+    }
+
+    /// Stop this daemon and start another over the same state, the way a
+    /// restart does: nothing held in memory survives, only what was stored.
+    fn restart(&mut self) {
+        let service = Service::new(
+            self.paths.clone(),
+            db::open(&self.db_path).unwrap(),
+            self.recorder.clone(),
+        )
+        .with_drivers(Self::drivers(&self.script));
+        self.service = service;
+    }
+
+    /// The drivers every fixture daemon runs: the fake agent behind each.
+    fn drivers(script: &std::path::Path) -> Registry {
+        let mut drivers = Registry::with_defaults();
+        drivers.insert(Arc::new(
+            ClaudeDriver::with_program(FAKE_AGENT)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        ));
+        // The same fake agent behind a driver that cannot steer, so the
+        // fallback — queue the follow-up, resume afterwards — stays covered.
+        drivers.insert(Arc::new(
+            ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
+                .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
+        ));
+        drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, script)));
+        drivers.insert(Arc::new(ResponseDriver::new(FAKE_AGENT, script)));
+        drivers
     }
 
     /// Point the agent at `script`, and start a session with `prompt`.
@@ -1064,6 +1090,7 @@ fn a_busy_sessions_queue_can_be_read_edited_reordered_and_trimmed() {
         Response::QueuedMessages {
             messages,
             can_send_now,
+            ..
         } => (messages, can_send_now),
         other => panic!("expected queued messages, got {other:?}"),
     };
@@ -2729,4 +2756,188 @@ fn the_windows_a_turn_reports_are_kept_per_account_and_pushed() {
             event: AgentEvent::PlanUsage { .. }
         }
     )));
+}
+
+/// A Codex session that is busy long enough to queue behind, with two
+/// follow-ups waiting.
+fn busy_codex_with_two_queued(fixture: &mut Fixture) -> SessionId {
+    let session = fixture.start_with(
+        "codex",
+        &[
+            r#"{"type":"thread.started","thread_id":"vendor-p"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":"[turn:{args}]"}}"#,
+            "#sleep 1500",
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+        "first",
+    );
+    for text in ["second", "third"] {
+        fixture.ask(Request::SendMessage {
+            session: session.clone(),
+            text: text.into(),
+        });
+    }
+    session
+}
+
+fn queue_of(fixture: &mut Fixture, session: &SessionId) -> (Vec<String>, bool) {
+    match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages {
+            messages, paused, ..
+        } => (messages.into_iter().map(|m| m.text).collect(), paused),
+        other => panic!("expected queued messages, got {other:?}"),
+    }
+}
+
+fn prompts(fixture: &mut Fixture, session: &SessionId) -> Vec<String> {
+    fixture
+        .transcript(session)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            TranscriptPayload::User { text } => Some(text),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Wait until the transcript holds `count` prompts.
+fn wait_for_prompts(fixture: &mut Fixture, session: &SessionId, count: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let prompts = prompts(fixture, session);
+        if prompts.len() >= count {
+            return prompts;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {prompts:?} ever reached the transcript"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn stopping_a_turn_pauses_its_queue_rather_than_throwing_it_away() {
+    // opencodex keeps what was queued across a Stop; Ginka keeps it too, but
+    // held rather than fired — the reader stopped the agent for a reason,
+    // and the next prompt starting a moment later is not what "stop" meant.
+    let mut fixture = Fixture::new();
+    let session = busy_codex_with_two_queued(&mut fixture);
+    fixture.ask(Request::CancelSession {
+        session: session.clone(),
+    });
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+    assert_eq!(
+        queue_of(&mut fixture, &session),
+        (vec!["second".to_string(), "third".to_string()], true)
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        prompts(&mut fixture, &session),
+        vec!["first"],
+        "nothing fired"
+    );
+
+    // Resuming dispatches the front of the queue into an idle session.
+    fixture.ask(Request::SetQueuePaused {
+        session: session.clone(),
+        paused: false,
+    });
+    let prompts = wait_for_prompts(&mut fixture, &session, 2);
+    assert_eq!(prompts[1], "second");
+}
+
+#[test]
+fn interrupt_and_send_stops_the_turn_and_runs_that_prompt_next() {
+    // opencodex's Steer: stop the current turn and send this one now.
+    let mut fixture = Fixture::new();
+    let session = busy_codex_with_two_queued(&mut fixture);
+    let third = match fixture.ask(Request::QueuedMessages {
+        session: session.clone(),
+    }) {
+        Response::QueuedMessages { messages, .. } => messages[1].id,
+        other => panic!("expected queued messages, got {other:?}"),
+    };
+    fixture.ask(Request::InterruptWithQueuedMessage {
+        session: session.clone(),
+        id: third,
+    });
+    let prompts = wait_for_prompts(&mut fixture, &session, 2);
+    assert_eq!(
+        prompts[..2],
+        ["first", "third"],
+        "the chosen prompt jumps the queue"
+    );
+    let (waiting, paused) = queue_of(&mut fixture, &session);
+    assert!(!paused, "an interrupt is not a stop: the queue keeps going");
+    assert!(
+        waiting == vec!["second".to_string()] || prompts.len() >= 3,
+        "the rest waits its turn: {waiting:?}"
+    );
+}
+
+#[test]
+fn a_queued_message_can_be_chosen_over_steering_and_the_queue_cleared() {
+    // Codex CLI's Tab: queue even where the transport could take it now.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+        "take your time",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    fixture.ask(Request::QueueMessage {
+        session: session.clone(),
+        text: "later".into(),
+    });
+    assert_eq!(queue_of(&mut fixture, &session).0, vec!["later"]);
+    assert_eq!(
+        prompts(&mut fixture, &session),
+        vec!["take your time"],
+        "queued, not steered into the running turn"
+    );
+    fixture.ask(Request::ClearQueue {
+        session: session.clone(),
+    });
+    assert!(queue_of(&mut fixture, &session).0.is_empty());
+    fixture.ask(Request::CancelSession { session });
+}
+
+#[test]
+fn a_queue_survives_a_daemon_restart_and_comes_back_held() {
+    let mut fixture = Fixture::new();
+    let session = busy_codex_with_two_queued(&mut fixture);
+    fixture.ask(Request::CancelSession {
+        session: session.clone(),
+    });
+    fixture.settle(&session);
+    fixture.restart();
+    assert_eq!(
+        queue_of(&mut fixture, &session),
+        (vec!["second".to_string(), "third".to_string()], true),
+        "a restart must not fire prompts nobody is watching"
+    );
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert_eq!(
+        listed
+            .iter()
+            .find(|summary| summary.id() == fixture.workspace)
+            .map(|summary| summary.queued),
+        Some(2),
+        "the sidebar can say how much is waiting"
+    );
 }

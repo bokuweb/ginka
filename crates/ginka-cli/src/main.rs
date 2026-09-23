@@ -540,6 +540,18 @@ enum SessionCommand {
     },
     /// Inject one queued follow-up into the active turn when supported.
     QueueSendNow { session: String, id: u64 },
+    /// Queue a follow-up even where the running turn could take it now.
+    QueueAdd { session: String, text: String },
+    /// Stop the running turn and send this queued follow-up next.
+    QueueInterrupt { session: String, id: u64 },
+    /// Hold the queue, or let it go with `--resume`.
+    QueuePause {
+        session: String,
+        #[arg(long)]
+        resume: bool,
+    },
+    /// Throw away every queued follow-up.
+    QueueClear { session: String },
     /// Compact an idle provider conversation's context.
     Compact { session: String },
     /// Answer a question, plan or permission request in a running turn.
@@ -1217,6 +1229,25 @@ fn request_for(command: Command) -> Result<Request> {
                 id,
             }
         }
+        Command::Session(SessionCommand::QueueAdd { session, text }) => Request::QueueMessage {
+            session: SessionId(session),
+            text,
+        },
+        Command::Session(SessionCommand::QueueInterrupt { session, id }) => {
+            Request::InterruptWithQueuedMessage {
+                session: SessionId(session),
+                id,
+            }
+        }
+        Command::Session(SessionCommand::QueuePause { session, resume }) => {
+            Request::SetQueuePaused {
+                session: SessionId(session),
+                paused: !resume,
+            }
+        }
+        Command::Session(SessionCommand::QueueClear { session }) => Request::ClearQueue {
+            session: SessionId(session),
+        },
         Command::Session(SessionCommand::Compact { session }) => Request::CompactSession {
             session: SessionId(session),
         },
@@ -1670,7 +1701,12 @@ fn print(response: Response, patch: bool) {
                 println!("{}", ginka_cli_format::transcript_line(&entry));
             }
         }
-        Response::QueuedMessages { messages, .. } => {
+        Response::QueuedMessages {
+            messages, paused, ..
+        } => {
+            if paused && !messages.is_empty() {
+                println!("{}", rust_i18n::t!("cli.queue.paused"));
+            }
             for (index, message) in messages.into_iter().enumerate() {
                 println!(
                     "{}\t{}\t{}",

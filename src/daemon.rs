@@ -882,7 +882,7 @@ impl DaemonLink {
     pub async fn queued_messages(
         &self,
         session: &SessionId,
-    ) -> (Vec<ginka_protocol::model::QueuedMessage>, bool) {
+    ) -> (Vec<ginka_protocol::model::QueuedMessage>, bool, bool) {
         match self
             .ask_result(Request::QueuedMessages {
                 session: session.clone(),
@@ -892,9 +892,45 @@ impl DaemonLink {
             Ok(Response::QueuedMessages {
                 messages,
                 can_send_now,
-            }) => (messages, can_send_now),
-            _ => (Vec::new(), false),
+                paused,
+            }) => (messages, can_send_now, paused),
+            _ => (Vec::new(), false, false),
         }
+    }
+
+    /// Queue a follow-up behind the running turn rather than steering it in.
+    pub async fn queue_message(&self, session: &SessionId, text: String) -> Result<(), String> {
+        self.git_sync(Request::QueueMessage {
+            session: session.clone(),
+            text,
+        })
+        .await
+    }
+
+    /// Stop the running turn and send this queued follow-up next.
+    pub async fn interrupt_with_queued(&self, session: &SessionId, id: u64) -> Result<(), String> {
+        self.git_sync(Request::InterruptWithQueuedMessage {
+            session: session.clone(),
+            id,
+        })
+        .await
+    }
+
+    /// Hold the queue, or let it go.
+    pub async fn set_queue_paused(&self, session: &SessionId, paused: bool) -> Result<(), String> {
+        self.git_sync(Request::SetQueuePaused {
+            session: session.clone(),
+            paused,
+        })
+        .await
+    }
+
+    /// Throw away every queued follow-up.
+    pub async fn clear_queue(&self, session: &SessionId) -> Result<(), String> {
+        self.git_sync(Request::ClearQueue {
+            session: session.clone(),
+        })
+        .await
     }
 
     /// Replace one waiting follow-up.
@@ -1068,6 +1104,40 @@ impl DaemonLink {
     /// Forget a note.
     pub async fn remove_note(&self, id: String) {
         self.ask(Request::RemoveNote { id }).await;
+    }
+
+    /// Pin or unpin a workspace; the refusal is the daemon's own words.
+    pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
+        self.ask_result(Request::PinWorkspace {
+            workspace: workspace.clone(),
+            pinned,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Archive a workspace, or bring it back.
+    pub async fn archive_workspace(
+        &self,
+        workspace: &WorkspaceId,
+        archived: bool,
+    ) -> Result<(), String> {
+        self.ask_result(Request::ArchiveWorkspace {
+            workspace: workspace.clone(),
+            archived,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Give a conversation a title; an empty one clears it back to none.
+    pub async fn rename_session(&self, session: &SessionId, title: String) -> Result<(), String> {
+        self.ask_result(Request::RenameSession {
+            session: session.clone(),
+            title,
+        })
+        .await
+        .map(|_| ())
     }
 
     async fn ask_result(&self, request: Request) -> Result<Response, String> {

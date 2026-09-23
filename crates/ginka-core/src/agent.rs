@@ -42,6 +42,8 @@ struct Shared {
     blobs: crate::blob::BlobStore,
     /// How many checkpoints a workspace keeps, from the daemon's settings.
     checkpoint_limit: u32,
+    /// Hold the machine awake while each turn's process lives.
+    keep_awake: bool,
 }
 
 impl Shared {
@@ -220,6 +222,12 @@ struct Running {
 struct PendingQueue {
     next_id: u64,
     items: VecDeque<QueuedMessage>,
+    /// Held: nothing dispatches until the reader lets it go. A stopped or
+    /// failed turn holds it, and so does a daemon restart.
+    paused: bool,
+    /// The prompt an interrupt is making room for: when the turn it stopped
+    /// has exited, this goes next and the queue keeps going.
+    interrupt_with: Option<u64>,
 }
 
 impl PendingQueue {
@@ -268,10 +276,111 @@ impl PendingQueue {
         self.items.pop_front()
     }
 
+    /// What happens to the queue when its turn stops or fails: the prompt an
+    /// interrupt made room for goes to the front and the queue keeps going;
+    /// otherwise it is held rather than thrown away. Answers whether the
+    /// front should be dispatched now.
+    fn after_stop(&mut self) -> bool {
+        match self.interrupt_with.take() {
+            Some(id) if self.move_to(id, 0).is_ok() => {
+                self.paused = false;
+                true
+            }
+            _ => {
+                if !self.items.is_empty() {
+                    self.paused = true;
+                }
+                false
+            }
+        }
+    }
+
     /// Current rows in dispatch order.
     fn items(&self) -> Vec<QueuedMessage> {
         self.items.iter().cloned().collect()
     }
+}
+
+/// Write one session's queue to the database, replacing what was there.
+///
+/// The whole queue each time: it is a handful of rows, and a rewrite cannot
+/// leave positions out of step with a move that half-happened.
+fn save_queue(conn: &Connection, session: &SessionId, queue: &PendingQueue) -> Result<()> {
+    conn.execute(
+        "DELETE FROM queued_messages WHERE session_id = ?1",
+        [&session.0],
+    )?;
+    for (position, message) in queue.items.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO queued_messages (session_id, id, position, text) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![session.0, message.id as i64, position as i64, message.text],
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO queue_state (session_id, next_id, paused) VALUES (?1, ?2, ?3)
+         ON CONFLICT(session_id) DO UPDATE SET next_id = ?2, paused = ?3",
+        rusqlite::params![session.0, queue.next_id as i64, queue.paused],
+    )?;
+    Ok(())
+}
+
+/// Every stored queue, as a daemon that has just started finds them.
+///
+/// A queue with anything in it comes back held: its turns died with the old
+/// daemon, and firing a prompt into a session nobody is watching the moment
+/// the daemon returns would be a surprise.
+fn load_queues(conn: &Connection) -> Result<HashMap<SessionId, PendingQueue>> {
+    let mut queues: HashMap<SessionId, PendingQueue> = HashMap::new();
+    let mut state = conn.prepare("SELECT session_id, next_id FROM queue_state")?;
+    for row in state.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    })? {
+        let (session, next_id) = row?;
+        queues.entry(SessionId(session)).or_default().next_id = next_id.max(0) as u64;
+    }
+    let mut items = conn.prepare(
+        "SELECT session_id, id, text FROM queued_messages ORDER BY session_id, position",
+    )?;
+    for row in items.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, String>(2)?,
+        ))
+    })? {
+        let (session, id, text) = row?;
+        let queue = queues.entry(SessionId(session)).or_default();
+        let id = id.max(0) as u64;
+        queue.next_id = queue.next_id.max(id);
+        queue.items.push_back(QueuedMessage { id, text });
+    }
+    for queue in queues.values_mut() {
+        queue.paused = !queue.items.is_empty();
+    }
+    Ok(queues)
+}
+
+/// Store a session's queue and tell every client it moved.
+fn queue_changed_in(
+    context: &Shared,
+    queued: &Mutex<HashMap<SessionId, PendingQueue>>,
+    session: &SessionId,
+) {
+    {
+        let queues = queued.lock().unwrap_or_else(|error| error.into_inner());
+        if let Some(queue) = queues.get(session) {
+            let conn = context
+                .conn
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Err(error) = save_queue(&conn, session, queue) {
+                tracing::warn!(%error, %session, "could not store the queue");
+            }
+        }
+    }
+    context.events.emit(DaemonEvent::SessionQueueChanged {
+        session: session.clone(),
+    });
 }
 
 /// Owns every running agent process.
@@ -293,16 +402,28 @@ impl Supervisor {
         checkpoint_limit: u32,
         blobs: crate::blob::BlobStore,
     ) -> Self {
+        let stored = load_queues(&conn.lock().unwrap_or_else(|error| error.into_inner()))
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "could not read the stored queues");
+                HashMap::new()
+            });
         Self {
             context: Shared {
                 conn,
                 events,
                 blobs,
                 checkpoint_limit,
+                keep_awake: false,
             },
             running: Arc::new(Mutex::new(HashMap::new())),
-            queued: Arc::new(Mutex::new(HashMap::new())),
+            queued: Arc::new(Mutex::new(stored)),
         }
+    }
+
+    /// Keep the machine awake while agents work (`DaemonSettings::keep_awake`).
+    pub fn with_keep_awake(mut self, keep_awake: bool) -> Self {
+        self.context.keep_awake = keep_awake;
+        self
     }
 
     /// Whether a process is alive for this session.
@@ -425,11 +546,131 @@ impl Supervisor {
         Ok(())
     }
 
-    /// Announce one queue mutation; the ordered rows remain daemon-owned.
+    /// Store one queue mutation and announce it; the ordered rows remain
+    /// daemon-owned.
     fn queue_changed(&self, session: &SessionId) {
-        self.context.events.emit(DaemonEvent::SessionQueueChanged {
-            session: session.clone(),
-        });
+        queue_changed_in(&self.context, &self.queued, session);
+    }
+
+    /// Whether this session's queue is held.
+    pub fn queue_paused(&self, session: &SessionId) -> bool {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .is_some_and(|queue| queue.paused)
+    }
+
+    /// How many follow-ups wait in this session's queue.
+    pub fn queued_count(&self, session: &SessionId) -> u32 {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .map(|queue| queue.items.len() as u32)
+            .unwrap_or(0)
+    }
+
+    /// Put a follow-up at the back of the queue, whatever the transport
+    /// could do with it now — the Codex CLI's Tab.
+    pub fn enqueue(&self, session: &SessionId, text: String) -> Result<QueuedMessage> {
+        anyhow::ensure!(!text.trim().is_empty(), "a queued message cannot be blank");
+        let message = self
+            .queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .entry(session.clone())
+            .or_default()
+            .push(text);
+        self.queue_changed(session);
+        Ok(message)
+    }
+
+    /// Whether a new follow-up would wait behind something: a turn running,
+    /// a held queue, or prompts already waiting.
+    pub fn would_wait(&self, session: &SessionId) -> bool {
+        self.is_running(session)
+            || self
+                .queued
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(session)
+                .is_some_and(|queue| queue.paused || !queue.items.is_empty())
+    }
+
+    /// Hold the queue or let it go. Answers whether the caller should
+    /// dispatch the front now: let go, nothing running, something waiting.
+    pub fn set_queue_paused(&self, session: &SessionId, paused: bool) -> bool {
+        let dispatch = {
+            let mut queues = self
+                .queued
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let queue = queues.entry(session.clone()).or_default();
+            queue.paused = paused;
+            !paused && !queue.items.is_empty()
+        };
+        self.queue_changed(session);
+        dispatch && !self.is_running(session)
+    }
+
+    /// Throw away every waiting follow-up.
+    pub fn clear_queue(&self, session: &SessionId) {
+        if let Some(queue) = self
+            .queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(session)
+        {
+            queue.items.clear();
+            queue.interrupt_with = None;
+            queue.paused = false;
+        }
+        self.queue_changed(session);
+    }
+
+    /// Take the front of the queue to send now, for a caller that has made
+    /// sure nothing is running.
+    pub fn take_front(&self, session: &SessionId) -> Option<QueuedMessage> {
+        let message = self
+            .queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get_mut(session)
+            .and_then(PendingQueue::pop_front);
+        if message.is_some() {
+            self.queue_changed(session);
+        }
+        message
+    }
+
+    /// Stop the running turn and send this prompt next — opencodex's Steer.
+    ///
+    /// The prompt moves to the front at once, so a reader looking at the
+    /// queue sees what is about to happen. Answers `true` when a turn was
+    /// stopped (the exit hands over), `false` when nothing was running and
+    /// the caller should send the front itself.
+    pub fn interrupt_with_queued(&self, session: &SessionId, id: u64) -> Result<bool> {
+        let running = self.is_running(session);
+        {
+            let mut queues = self
+                .queued
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let queue = queues
+                .get_mut(session)
+                .with_context(|| format!("session {session} has no queued messages"))?;
+            queue.move_to(id, 0)?;
+            queue.paused = false;
+            if running {
+                queue.interrupt_with = Some(id);
+            }
+        }
+        self.queue_changed(session);
+        if running {
+            self.stop_process(session);
+        }
+        Ok(running)
     }
 
     /// Start the first turn of a session, recording the opening prompt.
@@ -609,18 +850,23 @@ impl Supervisor {
                 None => None,
             }
         };
-        // A queued follow-up must not start after a cancel.
-        let cleared = self
+        // A queued follow-up must not start after a cancel: the queue is
+        // held, not thrown away — the reader stopped this turn, not the
+        // prompts they lined up after it.
+        let held = self
             .queued
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_mut(session)
             .is_some_and(|queue| {
+                queue.interrupt_with = None;
                 let had_messages = !queue.items.is_empty();
-                queue.items.clear();
+                if had_messages {
+                    queue.paused = true;
+                }
                 had_messages
             });
-        if cleared {
+        if held {
             self.queue_changed(session);
         }
 
@@ -629,6 +875,21 @@ impl Supervisor {
             None => self
                 .context
                 .set_state(session, SessionState::Cancelled, None),
+        }
+    }
+
+    /// Kill a running turn's process tree without touching its queue: what
+    /// an interrupt does, whose exit hands over to the prompt it chose.
+    fn stop_process(&self, session: &SessionId) {
+        let pid = {
+            let running = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            running.get(session).and_then(|entry| {
+                entry.cancelled.store(true, Ordering::SeqCst);
+                entry.pid
+            })
+        };
+        if let Some(pid) = pid {
+            stop_process_tree(pid);
         }
     }
 
@@ -680,6 +941,9 @@ impl Supervisor {
             }
         };
         let pid = Some(child.id());
+        if context.keep_awake {
+            hold_awake(child.id());
+        }
 
         // Transports that read their input as they work are given the prompt
         // that way too, and stay open for whatever is steered in after it. The
@@ -753,23 +1017,36 @@ impl Supervisor {
 
                 // A turn that ended cleanly hands over to whatever the user
                 // sent while it was working.
+                // A stopped or failed turn holds its queue — unless the stop
+                // was an interrupt, which hands over to the prompt it chose.
                 if state == SessionState::Cancelled || state == SessionState::Failed {
-                    let mut queues = queued.lock().unwrap_or_else(|e| e.into_inner());
-                    if let Some(queue) = queues.get_mut(&session)
-                        && !queue.items.is_empty()
-                    {
-                        queue.items.clear();
-                        context.events.emit(DaemonEvent::SessionQueueChanged {
-                            session: session.clone(),
-                        });
+                    let hand_over = queued
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get_mut(&session)
+                        .is_some_and(PendingQueue::after_stop);
+                    queue_changed_in(&context, &queued, &session);
+                    if !hand_over {
+                        return;
                     }
-                    return;
                 }
-                let next = queued
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .get_mut(&session)
-                    .and_then(PendingQueue::pop_front);
+                let next = {
+                    let mut queues = queued.lock().unwrap_or_else(|e| e.into_inner());
+                    match queues.get_mut(&session) {
+                        Some(queue) => {
+                            // A turn that finished before an interrupt reached
+                            // it leaves no interrupt pending: the prompt it
+                            // chose is at the front and goes next anyway.
+                            queue.interrupt_with = None;
+                            if queue.paused {
+                                None
+                            } else {
+                                queue.pop_front()
+                            }
+                        }
+                        None => None,
+                    }
+                };
                 if let Some(message) = next {
                     if context
                         .record(
@@ -787,9 +1064,7 @@ impl Supervisor {
                         );
                         return;
                     }
-                    context.events.emit(DaemonEvent::SessionQueueChanged {
-                        session: session.clone(),
-                    });
+                    queue_changed_in(&context, &queued, &session);
                     let supervisor = Supervisor {
                         context: context.clone(),
                         running,
@@ -1391,5 +1666,56 @@ mod tests {
         );
         assert_eq!(state, SessionState::Idle);
         assert_eq!(summary, None);
+    }
+}
+
+/// The command that keeps the machine awake for as long as `pid` lives.
+///
+/// `-i` holds idle sleep off and nothing more: the display may still sleep,
+/// and a closed lid still wins. `-w` ties it to the agent, so it ends by
+/// itself the moment the turn does — there is nothing to clean up.
+pub fn keep_awake_command(pid: u32) -> Option<(String, Vec<String>)> {
+    cfg!(target_os = "macos").then(|| {
+        (
+            "caffeinate".to_string(),
+            vec!["-i".to_string(), "-w".to_string(), pid.to_string()],
+        )
+    })
+}
+
+/// Start `caffeinate` beside a turn's process, best-effort: a machine that
+/// sleeps is an inconvenience, not a reason to fail the turn.
+fn hold_awake(pid: u32) {
+    if let Some((program, args)) = keep_awake_command(pid) {
+        match std::process::Command::new(program)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            // Reaped on its own thread when the agent exits and it follows.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(error) => tracing::debug!(%error, "could not keep the machine awake"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod keep_awake_tests {
+    use super::*;
+
+    #[test]
+    fn keeping_awake_is_tied_to_the_agent_and_only_on_macos() {
+        let command = keep_awake_command(4242);
+        assert_eq!(command.is_some(), cfg!(target_os = "macos"));
+        if let Some((program, args)) = command {
+            assert_eq!(program, "caffeinate");
+            assert_eq!(args, vec!["-i", "-w", "4242"]);
+        }
     }
 }

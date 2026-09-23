@@ -955,6 +955,9 @@ pub struct WorkspaceSummary {
     /// Whether zvec-grep's index directory exists in this worktree.
     #[serde(default)]
     pub indexed: bool,
+    /// How many follow-ups wait in the latest session's queue.
+    #[serde(default)]
+    pub queued: u32,
 }
 
 impl WorkspaceSummary {
@@ -1059,6 +1062,7 @@ mod tests {
             session: None,
             last_commit_at: None,
             indexed: false,
+            queued: 0,
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
@@ -1072,6 +1076,7 @@ mod tests {
             session: None,
             last_commit_at: None,
             indexed: false,
+            queued: 0,
         })
         .unwrap();
         let mut object = json.as_object().unwrap().clone();

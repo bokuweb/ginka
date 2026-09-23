@@ -161,6 +161,14 @@ pub struct SurfacePanel {
 }
 
 /// Emitted when the panel wants the shell to do something only it can.
+/// What a commit is followed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitThen {
+    Nothing,
+    Push,
+    PullRequest,
+}
+
 pub enum SurfaceEvent {
     /// The visible right-panel surface changed and should be remembered.
     SurfaceShown(Option<Surface>),
@@ -168,7 +176,13 @@ pub enum SurfaceEvent {
     ///
     /// `only_staged` when the reader has staged something: having said which
     /// files belong in the commit, they do not expect the rest to come along.
-    Commit { message: String, only_staged: bool },
+    Commit {
+        message: String,
+        only_staged: bool,
+        /// What happens once the commit is in: nothing, a push, or a push
+        /// and a pull request — MonoCode's commit menu.
+        then: CommitThen,
+    },
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
     GenerateCommitMessage { only_staged: bool },
@@ -897,6 +911,13 @@ impl SurfacePanel {
             .and_then(|changes| changes.files.first())
             .map(|file| file.path.clone());
         self.commit_view = Some((commit, changes));
+        cx.notify();
+    }
+
+    /// The commit a pull request was waiting on did not happen; the button
+    /// stops saying it is opening one. The commit's own refusal says why.
+    pub fn abandon_pull_request(&mut self, cx: &mut Context<Self>) {
+        self.opening_pull_request = false;
         cx.notify();
     }
 
@@ -1770,8 +1791,42 @@ impl SurfacePanel {
                                     .text_color(tokens.colors().bg_window)
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().accent))
-                                    .on_click(cx.listener(|this, _, _, cx| this.commit(cx)))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit(CommitThen::Nothing, cx)
+                                    }))
                                     .child(rust_i18n::t!("surface.git.commit").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id("commit-push")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(tokens.radius.row))
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_secondary)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.commit(CommitThen::Push, cx)
+                                    }))
+                                    .child(rust_i18n::t!("surface.git.commit_push").to_string()),
+                            )
+                            .child(
+                                div()
+                                    .id("commit-pr")
+                                    .px_2p5()
+                                    .py_1()
+                                    .rounded(px(tokens.radius.row))
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_secondary)
+                                    .cursor_pointer()
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.opening_pull_request = true;
+                                        this.pull_request = None;
+                                        this.commit(CommitThen::PullRequest, cx)
+                                    }))
+                                    .child(rust_i18n::t!("surface.git.commit_pr").to_string()),
                             )
                             .child(
                                 div()
@@ -1850,7 +1905,7 @@ impl SurfacePanel {
     }
 
     /// Hand the message to the shell, which is the one holding the daemon.
-    fn commit(&mut self, cx: &mut Context<Self>) {
+    fn commit(&mut self, then: CommitThen, cx: &mut Context<Self>) {
         let Some(state) = self.message.as_ref() else {
             return;
         };
@@ -1867,6 +1922,7 @@ impl SurfacePanel {
         cx.emit(SurfaceEvent::Commit {
             message,
             only_staged: self.only_staged(),
+            then,
         });
     }
 

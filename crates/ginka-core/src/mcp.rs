@@ -216,6 +216,36 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_queue_add",
+            description: "Queue a follow-up behind the running turn instead of steering it in. With nothing running or waiting it is sent at once.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}, "text": {"type": "string"}},
+                "required": ["session", "text"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_interrupt",
+            description: "Stop the running turn and send this queued follow-up next; the rest of the queue keeps its order.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "id": {"type": "integer", "minimum": 1}
+                },
+                "required": ["session", "id"],
+            }),
+        },
+        Tool {
+            name: "ginka_queue_pause",
+            description: "Hold a session's queue (paused: true) or let it go (paused: false), which sends the first prompt if nothing is running.",
+            schema: json!({
+                "type": "object",
+                "properties": {"session": {"type": "string"}, "paused": {"type": "boolean"}},
+                "required": ["session", "paused"],
+            }),
+        },
+        Tool {
             name: "ginka_queue_send_now",
             description: "Inject one queued follow-up into the active turn when the transport supports live input. A refusal leaves it queued.",
             schema: json!({
@@ -637,6 +667,18 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
         "ginka_queue_send_now" => Request::SendQueuedMessageNow {
             session: SessionId(text("session")?),
             id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_queue_add" => Request::QueueMessage {
+            session: SessionId(text("session")?),
+            text: text("text")?,
+        },
+        "ginka_queue_interrupt" => Request::InterruptWithQueuedMessage {
+            session: SessionId(text("session")?),
+            id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_queue_pause" => Request::SetQueuePaused {
+            session: SessionId(text("session")?),
+            paused: flag("paused"),
         },
         "ginka_session_compact" => Request::CompactSession {
             session: SessionId(text("session")?),

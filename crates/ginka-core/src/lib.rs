@@ -40,5 +40,6 @@ pub mod skills;
 pub mod terminal;
 pub mod tools;
 pub mod usage;
+pub mod worktree_include;
 
 pub use paths::Paths;
