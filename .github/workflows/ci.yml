@@ -33,3 +33,6 @@ jobs:
       # promote warnings in third-party crates and fail on their schedule.
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Package and install the Linux archive
+        if: runner.os == 'Linux'
+        run: sh scripts/test-package-linux

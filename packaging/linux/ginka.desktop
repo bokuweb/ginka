@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Ginka
+Comment=Run coding agents in worktrees of their own
+Exec=@BIN@/ginka-app
+Terminal=false
+Categories=Development;
+StartupWMClass=ginka

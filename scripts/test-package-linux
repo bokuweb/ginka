@@ -1,0 +1,39 @@
+#!/bin/sh
+# Pack stand-in binaries, unpack the archive, install it into a scratch
+# prefix, check what landed, and uninstall. Runs anywhere with a POSIX shell.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+mkdir -p "$work/built"
+for binary in ginka ginka-cli ginka-daemon; do
+    printf '#!/bin/sh\necho %s\n' "$binary" >"$work/built/$binary"
+done
+
+archive=$("$root/scripts/package-linux" --bin-dir "$work/built" --out-dir "$work/out" --version 9.9.9)
+case "$archive" in
+*/ginka-9.9.9-linux-*.tar.gz) ;;
+*) echo "unexpected archive name: $archive" >&2; exit 1 ;;
+esac
+
+mkdir "$work/unpacked"
+tar -C "$work/unpacked" -xzf "$archive"
+unpacked=$(find "$work/unpacked" -mindepth 1 -maxdepth 1 -type d)
+
+PREFIX="$work/prefix" "$unpacked/install.sh" >/dev/null
+fail() { echo "FAIL: $1" >&2; exit 1; }
+[ "$("$work/prefix/bin/ginka")" = "ginka-cli" ] || fail "ginka is the command line"
+[ "$("$work/prefix/bin/ginka-app")" = "ginka" ] || fail "ginka-app is the window"
+[ -x "$work/prefix/bin/ginka-daemon" ] || fail "the daemon sits beside them"
+grep -q "Exec=$work/prefix/bin/ginka-app" "$work/prefix/share/applications/ginka.desktop" \
+    || fail "the desktop entry starts the installed window"
+
+# Installing again over itself is fine.
+PREFIX="$work/prefix" "$unpacked/install.sh" >/dev/null
+
+PREFIX="$work/prefix" "$unpacked/install.sh" uninstall >/dev/null
+[ ! -e "$work/prefix/bin/ginka" ] || fail "uninstall removes the binaries"
+[ ! -e "$work/prefix/share/applications/ginka.desktop" ] || fail "and the desktop entry"
+echo "ok"

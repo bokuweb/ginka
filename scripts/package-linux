@@ -1,0 +1,45 @@
+#!/bin/sh
+# Build the Linux archive: ginka-<version>-linux-<arch>.tar.gz, holding the
+# three binaries, a desktop entry and install.sh (RELEASING.md step 5).
+#
+#   scripts/package-linux                 # cargo build --release, then pack
+#   scripts/package-linux --bin-dir DIR   # pack binaries built elsewhere
+#
+# The CLI is built as `ginka-cli` and shipped as `ginka`; the window, built as
+# `ginka`, ships as `ginka-app` (the decision log, 2026-09-01).
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+bin_dir=""
+out_dir="$root/target/package"
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
+arch=$(uname -m)
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --bin-dir) bin_dir="$2"; shift 2 ;;
+    --out-dir) out_dir="$2"; shift 2 ;;
+    --version) version="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+if [ -z "$bin_dir" ]; then
+    (cd "$root" && cargo build --release -p ginka -p ginka-cli -p ginka-daemon)
+    bin_dir="$root/target/release"
+fi
+
+name="ginka-$version-linux-$arch"
+stage="$out_dir/$name"
+rm -rf "$stage"
+mkdir -p "$stage/bin" "$stage/share/applications"
+cp "$bin_dir/ginka-cli" "$stage/bin/ginka"
+cp "$bin_dir/ginka" "$stage/bin/ginka-app"
+cp "$bin_dir/ginka-daemon" "$stage/bin/ginka-daemon"
+chmod 0755 "$stage/bin/"*
+cp "$root/packaging/linux/ginka.desktop" "$stage/share/applications/"
+cp "$root/packaging/linux/install.sh" "$stage/install.sh"
+chmod 0755 "$stage/install.sh"
+
+tar -C "$out_dir" -czf "$out_dir/$name.tar.gz" "$name"
+echo "$out_dir/$name.tar.gz"
