@@ -77,6 +77,7 @@ What is *not* there yet: dockable/persisted centre and right surfaces (M4), a vi
 ```bash
 cargo run                                   # the desktop app
 cargo run --features github                 # …with the GitHub client as its Inbox
+scripts/cargo-local-e1 run --features github  # …against ../e1, leaving Cargo.lock as committed
 cargo test --workspace                      # run this rather than `-p`: the CLI's
                                             # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings
