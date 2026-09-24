@@ -7572,6 +7572,9 @@ impl Shell {
             .map(|agent| {
                 let id = agent.id.clone();
                 Button::new(SharedString::from(format!("review-{turn}-{id}")))
+                    // The toolkit draws a button's hover itself; a second
+                    // one trips its debug assertion.
+                    .ghost()
                     .disabled(fork_busy)
                     .px(px(7.))
                     .py(px(2.))
@@ -7580,7 +7583,6 @@ impl Shell {
                     .text_color(tokens.colors().text_secondary)
                     .when(!fork_busy, |this| {
                         this.cursor_pointer()
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.fork_from_as(seq, id.clone(), true, cx)
                             }))
@@ -7598,6 +7600,9 @@ impl Shell {
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+                // The toolkit draws a button's hover itself; a second
+                // one trips its debug assertion.
+                .ghost()
                 .disabled(fork_busy)
                 .px(px(7.))
                 .py(px(2.))
@@ -7605,11 +7610,9 @@ impl Shell {
                 .text_xs()
                 .text_color(tokens.colors().text_primary)
                 .when(!fork_busy, |this| {
-                    this.cursor_pointer()
-                        .hover(|this| this.bg(tokens.colors().row_hover()))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
-                        )
+                    this.cursor_pointer().on_click(
+                        cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
+                    )
                 })
                 .child(agent.display_name.clone())
                 .into_any_element()
@@ -7713,6 +7716,9 @@ impl Shell {
                     .items_center()
                     .child(
                         Button::new(SharedString::from(format!("fork-menu-{turn}")))
+                            // The toolkit draws a button's hover itself; a second
+                            // one trips its debug assertion.
+                            .ghost()
                             .disabled(fork_busy)
                             .px(px(7.))
                             .py(px(2.))
@@ -7725,7 +7731,6 @@ impl Shell {
                             })
                             .when(!fork_busy, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
                                     .tooltip(rust_i18n::t!("transcript.fork.hint").to_string())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.rewinding = None;
@@ -11067,13 +11072,15 @@ impl Shell {
                     .items_center()
                     .children(indexed.map(|ready| {
                         Button::new("workspace-index")
+                            // The toolkit draws a button's hover itself; a second
+                            // one trips its debug assertion.
+                            .ghost()
                             .disabled(self.index_starting)
                             .h(px(22.))
                             .px(px(6.))
                             .rounded(px(tokens.radius.row))
                             .text_size(px(11.))
                             .text_color(index_colour)
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
                             .tooltip(self.index_error.clone().map_or_else(
                                 || {
                                     if ready {
