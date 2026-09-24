@@ -173,6 +173,17 @@ pub enum CommitThen {
 pub enum SurfaceEvent {
     /// The visible right-panel surface changed and should be remembered.
     SurfaceShown(Option<Surface>),
+    /// A page loaded in a workspace's browser: keep it in its history.
+    BrowserVisited {
+        workspace: WorkspaceId,
+        url: String,
+        title: Option<String>,
+    },
+    /// A workspace's address bar changed: find pages to offer.
+    BrowserTyped {
+        workspace: WorkspaceId,
+        query: String,
+    },
     /// Commit the workspace's work with this message.
     ///
     /// `only_staged` when the reader has staged something: having said which
@@ -1007,6 +1018,19 @@ impl SurfacePanel {
                                 this.browser_capture = Some(capture.clone());
                                 cx.notify();
                             }
+                            crate::browser::BrowserEvent::Visited { url, title } => {
+                                cx.emit(SurfaceEvent::BrowserVisited {
+                                    workspace: expected.clone(),
+                                    url: url.clone(),
+                                    title: title.clone(),
+                                });
+                            }
+                            crate::browser::BrowserEvent::Typed(query) => {
+                                cx.emit(SurfaceEvent::BrowserTyped {
+                                    workspace: expected.clone(),
+                                    query: query.clone(),
+                                });
+                            }
                         }
                     })
                     .detach();
@@ -1025,6 +1049,21 @@ impl SurfacePanel {
         self.browser_workspace = Some(workspace);
         self.browser_capture = None;
         cx.notify();
+    }
+
+    /// Offer these pages under a workspace's address bar.
+    pub fn set_browser_suggestions(
+        &mut self,
+        workspace: &WorkspaceId,
+        pages: Vec<ginka_protocol::model::VisitedPage>,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(Ok(browser)) = self.browser_tabs.get(workspace) {
+            browser.update(cx, |browser, cx| browser.set_suggestions(pages, cx));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (workspace, pages, cx);
     }
 
     /// Which surface is showing, so the shell knows what to keep fetching.

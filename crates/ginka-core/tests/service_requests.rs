@@ -1915,3 +1915,39 @@ fn ginkas_own_skills_are_installed_where_the_agents_read_them() {
         other => panic!("expected results, got {other:?}"),
     }
 }
+
+#[test]
+fn the_address_bar_completes_from_the_workspaces_own_history() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = WorkspaceId(format!("{}/main", project.0));
+    for url in [
+        "http://localhost:3000/dashboard",
+        "http://localhost:3000/dashboard",
+        "https://user:pw@example.com/login?token=secret",
+    ] {
+        fixture.ask(Request::RecordBrowserVisit {
+            workspace: workspace.clone(),
+            url: url.into(),
+            title: Some("Page".into()),
+        });
+    }
+    let pages = match fixture.ask(Request::BrowserSuggestions {
+        workspace: workspace.clone(),
+        query: "".into(),
+        limit: None,
+    }) {
+        Response::BrowserSuggestions { pages } => pages,
+        other => panic!("expected pages, got {other:?}"),
+    };
+    let urls: Vec<&str> = pages.iter().map(|page| page.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "http://localhost:3000/dashboard",
+            "https://example.com/login"
+        ],
+        "most visited first, and nothing secret kept"
+    );
+    assert_eq!(pages[0].visits, 2);
+}

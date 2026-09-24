@@ -1048,6 +1048,44 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::RecordBrowserVisit {
+                workspace,
+                url,
+                title,
+            } => {
+                crate::browser_history::record(
+                    &self.conn(),
+                    &workspace,
+                    &url,
+                    title.as_deref(),
+                    now(),
+                )
+                .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::BrowserSuggestions {
+                workspace,
+                query,
+                limit,
+            } => {
+                let pages = crate::browser_history::suggestions(
+                    &self.conn(),
+                    &workspace,
+                    &query,
+                    now(),
+                    limit.unwrap_or(8).min(50) as usize,
+                )
+                .map_err(failed)?
+                .into_iter()
+                .map(|visited| ginka_protocol::model::VisitedPage {
+                    url: visited.url,
+                    title: visited.title,
+                    visits: visited.visits,
+                    last_visited_at: visited.last_visited_at,
+                })
+                .collect();
+                Ok(Response::BrowserSuggestions { pages })
+            }
             Request::InstallBundledSkills { force } => {
                 let home = self
                     .home()

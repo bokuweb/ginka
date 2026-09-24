@@ -1311,6 +1311,44 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Keep a page the browser loaded in a workspace's history.
+    pub async fn record_browser_visit(
+        &self,
+        workspace: &WorkspaceId,
+        url: String,
+        title: Option<String>,
+    ) {
+        self.ask(Request::RecordBrowserVisit {
+            workspace: workspace.clone(),
+            url,
+            title,
+        })
+        .await;
+    }
+
+    /// Pages from a workspace's history for what is typed in its address
+    /// bar; none for an empty field.
+    pub async fn browser_suggestions(
+        &self,
+        workspace: &WorkspaceId,
+        query: String,
+    ) -> Vec<ginka_protocol::model::VisitedPage> {
+        if query.trim().is_empty() {
+            return Vec::new();
+        }
+        match self
+            .ask(Request::BrowserSuggestions {
+                workspace: workspace.clone(),
+                query,
+                limit: Some(6),
+            })
+            .await
+        {
+            Some(Response::BrowserSuggestions { pages }) => pages,
+            _ => Vec::new(),
+        }
+    }
+
     pub async fn rename_session(&self, session: &SessionId, title: String) -> Result<(), String> {
         self.ask_result(Request::RenameSession {
             session: session.clone(),

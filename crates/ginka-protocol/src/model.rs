@@ -1155,6 +1155,17 @@ impl QuickCommandKind {
     }
 }
 
+/// A page from a workspace's browser history.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisitedPage {
+    pub url: String,
+    pub title: Option<String>,
+    pub visits: u32,
+    /// Unix seconds.
+    pub last_visited_at: i64,
+}
+
 /// One of Ginka's own skills, installed into one place.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
