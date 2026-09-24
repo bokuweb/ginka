@@ -1760,3 +1760,48 @@ fn a_locked_worktree_is_named_as_locked_and_removed_only_when_forced() {
         "force goes through the lock"
     );
 }
+
+#[test]
+fn a_settings_file_edited_by_hand_is_read_again_without_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::with_root(home.path().join("state"));
+    paths.ensure().unwrap();
+    let mut service = Service::new(
+        paths.clone(),
+        db::open_in_memory().unwrap(),
+        Arc::new(Recorder::default()),
+    );
+    service
+        .handle(Request::AddAccount {
+            id: ginka_protocol::AccountId("codex-work".into()),
+            provider: ginka_protocol::ProviderKind::Codex,
+            label: "Work".into(),
+        })
+        .unwrap();
+    // Nothing has changed since the service wrote the file itself.
+    assert!(!service.reload_settings_if_changed());
+
+    // The reader edits the file in their editor.
+    let file = paths.daemon_settings();
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    settings["accounts"]["codex-work"]["label"] = "Day job".into();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&file, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+    assert!(service.reload_settings_if_changed());
+    let accounts = match service.handle(Request::Accounts).unwrap() {
+        Response::Accounts { accounts } => accounts,
+        other => panic!("expected accounts, got {other:?}"),
+    };
+    let work = accounts
+        .iter()
+        .find(|account| account.id.0 == "codex-work")
+        .unwrap();
+    assert_eq!(work.label, "Day job");
+    assert!(!service.reload_settings_if_changed(), "read once");
+
+    // A file that no longer parses is not taken: the running settings stay.
+    std::fs::write(&file, "{ not json").unwrap();
+    assert!(!service.reload_settings_if_changed());
+}
