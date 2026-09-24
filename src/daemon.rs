@@ -898,6 +898,30 @@ impl DaemonLink {
         }
     }
 
+    /// Ask one prompt in a worktree per attempt; answers with the sessions
+    /// that started and a line for each that did not.
+    pub async fn fan_out(
+        &self,
+        project: ProjectName,
+        branch_prefix: String,
+        prompt: String,
+        attempts: Vec<ginka_protocol::rpc::Attempt>,
+    ) -> Result<(Vec<Session>, Vec<String>), String> {
+        match self
+            .ask_result(Request::FanOut {
+                project,
+                branch_prefix,
+                base: None,
+                prompt,
+                attempts,
+            })
+            .await?
+        {
+            Response::FannedOut { started, failed } => Ok((started, failed)),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// A project's saved commands and the global ones.
     pub async fn quick_commands(
         &self,

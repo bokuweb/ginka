@@ -1238,3 +1238,45 @@ settings.quick.add:
 terminal.quick:
   en: Quick commands
   ja: クイックコマンド
+transcript.second_opinion:
+  en: "Second opinion: %{agent}"
+  ja: "セカンドオピニオン: %{agent}"
+transcript.second_opinion.prompt:
+  en: "Give a second opinion on the work above. Review what was asked, what was done and the changes in this worktree: what is wrong, risky or missing, and what you would do differently. Do not change any files."
+  ja: "ここまでの作業についてセカンドオピニオンをください。依頼内容・実施内容・このワークツリーの変更を確認し、誤り・リスク・不足と、自分ならどうするかを挙げてください。ファイルは変更しないでください。"
+composer.fan_out:
+  en: "Try several ways"
+  ja: "複数の方法で試す"
+composer.fan_out.title:
+  en: "Ask the prompt in a worktree per attempt"
+  ja: "試行ごとのワークツリーでプロンプトを実行"
+composer.fan_out.start:
+  en: "Try %{count} ways"
+  ja: "%{count} 通り試す"
+composer.fan_out.needs_prompt:
+  en: "Write the prompt first."
+  ja: "先にプロンプトを入力してください。"
+compare.chip:
+  en: "Compare %{count}"
+  ja: "%{count} 件を比較"
+compare.title:
+  en: "%{count} attempts"
+  ja: "%{count} 件の試行"
+compare.close:
+  en: "Close"
+  ja: "閉じる"
+compare.open:
+  en: "Open"
+  ja: "開く"
+compare.keep:
+  en: "Keep"
+  ja: "採用"
+compare.keep.confirm:
+  en: "Archive the others?"
+  ja: "他をアーカイブ?"
+compare.idle:
+  en: "Idle"
+  ja: "待機中"
+compare.no_answer:
+  en: "No answer yet."
+  ja: "まだ回答がありません。"

@@ -279,6 +279,35 @@ const TERMINAL_COLUMNS: u16 = 100;
 const NEARLY_THE_FOOT: f32 = 24.;
 
 /// The turn-level handoff choice currently expanded in the transcript.
+/// The composer's fan-out panel: how many attempts each agent gets.
+struct FanOutPanel {
+    /// Driver id, display name, attempts.
+    counts: Vec<(String, String, usize)>,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// The attempts of one fan-out, side by side (`docs/ui.md` §3.3).
+struct Compare {
+    entries: Vec<CompareEntry>,
+    /// The attempt whose *Keep* was pressed once and waits for the second
+    /// press, which archives the others.
+    keeping: Option<ginka_protocol::WorkspaceId>,
+}
+
+/// One attempt in the comparison.
+#[derive(Clone)]
+struct CompareEntry {
+    workspace: ginka_protocol::WorkspaceId,
+    title: SharedString,
+    agent: ginka_ui::workspace::Agent,
+    state: ginka_ui::workspace::AgentState,
+    added: u32,
+    removed: u32,
+    /// The attempt's last answer, once read.
+    answer: Option<String>,
+}
+
 struct ForkMenu {
     turn: u32,
     seq: u64,
@@ -570,6 +599,10 @@ pub struct Shell {
     rewinding: Option<u32>,
     /// A turn whose conversation can be continued by another agent.
     forking: Option<ForkMenu>,
+    /// The fan-out panel above the composer, while it is open.
+    fan_out: Option<FanOutPanel>,
+    /// The fan-out comparison in the centre column, while it is open.
+    comparing: Option<Compare>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
     /// Present while the reader is finding text in the active terminal.
@@ -1287,6 +1320,8 @@ impl Shell {
             checkpoints: Vec::new(),
             rewinding: None,
             forking: None,
+            fan_out: None,
+            comparing: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
@@ -5481,6 +5516,16 @@ impl Shell {
             cx,
         );
         let has_tabs = !self.tabs.is_empty();
+        let attempts = self.session.as_ref().map_or(0, |row| {
+            ginka_ui::fan_out::siblings(self.sidebar.read(cx).rows(), row).len()
+        });
+        let compare_chip = (attempts > 0).then(|| {
+            Button::new("open-compare")
+                .ghost()
+                .compact()
+                .label(rust_i18n::t!("compare.chip", count = attempts).to_string())
+                .on_click(cx.listener(|this, _, _, cx| this.open_compare(cx)))
+        });
         let tab_strip = has_tabs.then(|| self.tab_strip(cx));
 
         let strip = h_flex()
@@ -5522,6 +5567,7 @@ impl Shell {
                 h_flex()
                     .gap_1()
                     .items_center()
+                    .children(compare_chip)
                     .child(new_chat)
                     .child(dock_toggle)
                     .child(right_toggle),
@@ -6418,6 +6464,506 @@ impl Shell {
 
     /// Copy the conversation through `after` onto another agent and show it.
     fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
+        self.fork_from_as(after, agent, false, cx);
+    }
+
+    /// Whether a fan-out can start from here: a project to cut worktrees in,
+    /// and no conversation already under way in this tab.
+    fn can_fan_out(&self) -> bool {
+        self.target_project.is_some()
+            && self
+                .session
+                .as_ref()
+                .is_none_or(|row| row.session.is_none())
+    }
+
+    fn toggle_fan_out(&mut self, cx: &mut Context<Self>) {
+        self.fan_out = match self.fan_out.take() {
+            Some(_) => None,
+            None => Some(FanOutPanel {
+                // Every agent that can run, once each, is the ordinary race.
+                counts: self
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.is_ready())
+                    .map(|agent| (agent.id.clone(), agent.display_name.clone(), 1))
+                    .collect(),
+                busy: false,
+                error: None,
+            }),
+        };
+        cx.notify();
+    }
+
+    /// The fan-out panel: an agent a row, how many attempts each, and the way
+    /// to start them with what is in the composer.
+    fn fan_out_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panel = self.fan_out.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let total: usize = panel
+            .counts
+            .iter()
+            .map(|(_, _, count)| count)
+            .sum::<usize>()
+            .min(ginka_ui::fan_out::MAX_ATTEMPTS);
+        let busy = panel.busy;
+        let rows: Vec<AnyElement> = panel
+            .counts
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, count))| {
+                let count = *count;
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        ginka_ui::workspace::Agent::from_id(id)
+                            .glyph()
+                            .size_3p5()
+                            .text_color(tokens.colors().accent),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .child(name.clone()),
+                    )
+                    .child(
+                        Button::new(("fan-less", index))
+                            .ghost()
+                            .compact()
+                            .disabled(count == 0)
+                            .child(Icon::new(IconName::Minus).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(panel) = this.fan_out.as_mut() {
+                                    panel.counts[index].2 = panel.counts[index].2.saturating_sub(1);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(count.to_string()),
+                    )
+                    .child(
+                        Button::new(("fan-more", index))
+                            .ghost()
+                            .compact()
+                            .disabled(total >= ginka_ui::fan_out::MAX_ATTEMPTS)
+                            .child(Icon::new(IconName::Plus).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(panel) = this.fan_out.as_mut() {
+                                    panel.counts[index].2 += 1;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.fan_out.title").to_string()),
+                )
+                .children(rows)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .children(panel.error.clone().map(|error| {
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child(error)
+                        }))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("fan-out-start")
+                                .compact()
+                                .disabled(busy || total == 0)
+                                .label(
+                                    rust_i18n::t!("composer.fan_out.start", count = total)
+                                        .to_string(),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start_fan_out(window, cx)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Ask what is in the composer in a worktree per attempt, and open each
+    /// attempt as a tab.
+    fn start_fan_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = self.composer.read(cx).value().trim().to_string();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let Some(panel) = self.fan_out.as_mut() else {
+            return;
+        };
+        if prompt.is_empty() {
+            panel.error = Some(rust_i18n::t!("composer.fan_out.needs_prompt").to_string());
+            cx.notify();
+            return;
+        }
+        let attempts = ginka_ui::fan_out::attempts(
+            &panel
+                .counts
+                .iter()
+                .map(|(id, _, count)| (id.clone(), *count))
+                .collect::<Vec<_>>(),
+        );
+        panel.busy = true;
+        panel.error = None;
+        // Unique per fan-out: a second race on the same question must not
+        // collide with the branches of the first.
+        let prefix = format!(
+            "{}-{}",
+            ginka_ui::fan_out::branch_prefix(&prompt),
+            crate::daemon::now() % 100_000
+        );
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.fan_out(project, prefix, prompt, attempts).await },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok((started, failed)) => {
+                        this.fan_out = None;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        for session in &started {
+                            this.tabs
+                                .open(ginka_ui::tabs::Tab::Workspace(session.workspace.clone()));
+                        }
+                        this.persist_tabs();
+                        if let Some(first) = started.first() {
+                            let workspace = first.workspace.clone();
+                            this.sidebar
+                                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+                        }
+                        if !failed.is_empty() {
+                            tracing::warn!(?failed, "some fan-out attempts did not start");
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(panel) = this.fan_out.as_mut() {
+                            panel.busy = false;
+                            panel.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open the comparison of the fan-out the conversation on screen belongs
+    /// to, and read each attempt's diff and last answer.
+    fn open_compare(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.session.clone() else {
+            return;
+        };
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let siblings: Vec<SessionRow> = ginka_ui::fan_out::siblings(&rows, &row)
+            .into_iter()
+            .cloned()
+            .collect();
+        if siblings.is_empty() {
+            return;
+        }
+        self.comparing = Some(Compare {
+            entries: siblings
+                .iter()
+                .map(|row| CompareEntry {
+                    workspace: row.workspace.clone(),
+                    title: SharedString::from(row.branch.to_string()),
+                    agent: row.agent,
+                    state: row.state,
+                    added: 0,
+                    removed: 0,
+                    answer: None,
+                })
+                .collect(),
+            keeping: None,
+        });
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            for row in siblings {
+                let reading = link.clone();
+                let asked = row.clone();
+                let (totals, answer) = cx
+                    .background_spawn(async move {
+                        let totals = reading
+                            .changes(&asked.workspace, ginka_protocol::ChangeSource::Uncommitted)
+                            .await
+                            .map(|changes| changes.totals())
+                            .unwrap_or((0, 0));
+                        let answer = match &asked.session {
+                            Some(session) => {
+                                let mut transcript = Transcript::new();
+                                transcript.extend(&reading.transcript(session, 0).await);
+                                transcript
+                                    .blocks()
+                                    .iter()
+                                    .rev()
+                                    .find_map(|block| match block {
+                                        TranscriptBlock::Assistant { text } => Some(text.clone()),
+                                        _ => None,
+                                    })
+                            }
+                            None => None,
+                        };
+                        (totals, answer)
+                    })
+                    .await;
+                let updated = this.update(cx, |this, cx| {
+                    if let Some(compare) = this.comparing.as_mut()
+                        && let Some(entry) = compare
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.workspace == row.workspace)
+                    {
+                        entry.added = totals.0;
+                        entry.removed = totals.1;
+                        entry.answer = Some(answer.unwrap_or_default());
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Keep one attempt: archive the others — Orca's "keep the winner" —
+    /// after a second press, and go to it.
+    fn keep_attempt(&mut self, workspace: ginka_protocol::WorkspaceId, cx: &mut Context<Self>) {
+        let Some(compare) = self.comparing.as_mut() else {
+            return;
+        };
+        if compare.keeping.as_ref() != Some(&workspace) {
+            compare.keeping = Some(workspace);
+            cx.notify();
+            return;
+        }
+        let others: Vec<_> = compare
+            .entries
+            .iter()
+            .map(|entry| entry.workspace.clone())
+            .filter(|other| other != &workspace)
+            .collect();
+        self.comparing = None;
+        self.tabs.retain_workspaces(|open| !others.contains(open));
+        self.persist_tabs();
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+        let link = self.link.clone();
+        self.after_row_change(
+            async move {
+                for other in others {
+                    link.archive_workspace(&other, true).await?;
+                }
+                Ok(())
+            },
+            cx,
+        );
+    }
+
+    /// The comparison: an attempt a column — agent, branch, state, diff size
+    /// and last answer — with *Open* and *Keep*.
+    fn compare_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let compare = self.comparing.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let keeping = compare.keeping.clone();
+        let count = compare.entries.len();
+        let columns: Vec<AnyElement> = compare
+            .entries
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let open = entry.workspace.clone();
+                let keep = entry.workspace.clone();
+                let armed = keeping.as_ref() == Some(&entry.workspace);
+                let state = entry
+                    .state
+                    .label()
+                    .map(|label| label.to_string())
+                    .unwrap_or_else(|| rust_i18n::t!("compare.idle").to_string());
+                v_flex()
+                    .id(("compare", index))
+                    .flex_1()
+                    .min_w(px(220.))
+                    .h_full()
+                    .p_3()
+                    .gap_2()
+                    .rounded(px(tokens.radius.panel))
+                    .bg(tokens.colors().bg_surface)
+                    .border_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .overflow_y_scroll()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                entry
+                                    .agent
+                                    .glyph()
+                                    .size_4()
+                                    .text_color(tokens.colors().accent),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_primary)
+                                    .truncate()
+                                    .child(entry.title.clone()),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(tokens.colors().text_muted).child(state))
+                            .child(
+                                div()
+                                    .text_color(tokens.colors().status_done)
+                                    .child(format!("+{}", entry.added)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(tokens.colors().status_error)
+                                    .child(format!("-{}", entry.removed)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(("compare-open", index))
+                                    .ghost()
+                                    .compact()
+                                    .label(rust_i18n::t!("compare.open").to_string())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.comparing = None;
+                                        this.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.select_workspace(&open, cx)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("compare-keep", index))
+                                    .compact()
+                                    .label(if armed {
+                                        rust_i18n::t!("compare.keep.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("compare.keep").to_string()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.keep_attempt(keep.clone(), cx)
+                                    })),
+                            ),
+                    )
+                    .child(match entry.answer {
+                        None => div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.reading").to_string())
+                            .into_any_element(),
+                        Some(answer) if answer.is_empty() => div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("compare.no_answer").to_string())
+                            .into_any_element(),
+                        Some(answer) => div()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(
+                                TextView::markdown(("compare-answer", index), answer)
+                                    .selectable(true),
+                            )
+                            .into_any_element(),
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .size_full()
+                .p_4()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tokens.colors().text_primary)
+                                .child(rust_i18n::t!("compare.title", count = count).to_string()),
+                        )
+                        .child(
+                            Button::new("compare-close")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("compare.close").to_string())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.comparing = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .id("compare-columns")
+                        .flex_1()
+                        .min_h_0()
+                        .gap_3()
+                        .overflow_x_scroll()
+                        .children(columns),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Fork here onto another agent; `review` hands the fork a request for
+    /// a second opinion on the work so far instead of leaving it to carry on.
+    fn fork_from_as(&mut self, after: u64, agent: String, review: bool, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
             return;
         };
@@ -6434,10 +6980,15 @@ impl Shell {
         let link = self.link.clone();
         cx.spawn(async move |this, cx| {
             let requesting = link.clone();
+            let prompt = rust_i18n::t!("transcript.second_opinion.prompt").to_string();
             let result = cx
-                .background_spawn(
-                    async move { requesting.fork_session(&session, after, agent).await },
-                )
+                .background_spawn(async move {
+                    let fork = requesting.fork_session(&session, after, agent).await?;
+                    if review {
+                        requesting.send_message(&fork.id, prompt).await;
+                    }
+                    Ok::<_, String>(fork)
+                })
                 .await;
             match result {
                 Err(error) => {
@@ -6512,6 +7063,36 @@ impl Shell {
             .filter(|menu| menu.turn == turn && menu.seq == seq)
             .map(|menu| (true, menu.busy, menu.error.clone()))
             .unwrap_or((false, false, None));
+        // MonoCode's second opinion: the same fork, handed a request to review
+        // the work rather than to carry it on.
+        let review_buttons: Vec<AnyElement> = targets
+            .iter()
+            .map(|agent| {
+                let id = agent.id.clone();
+                Button::new(SharedString::from(format!("review-{turn}-{id}")))
+                    .disabled(fork_busy)
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .when(!fork_busy, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.fork_from_as(seq, id.clone(), true, cx)
+                            }))
+                    })
+                    .child(
+                        rust_i18n::t!(
+                            "transcript.second_opinion",
+                            agent = agent.display_name.clone()
+                        )
+                        .to_string(),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
@@ -6669,6 +7250,7 @@ impl Shell {
                             }),
                     )
                     .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
+                    .children(fork_open.then(|| h_flex().gap_1().children(review_buttons)))
                     .children(fork_error.map(|error| {
                         div()
                             .text_xs()
@@ -7177,6 +7759,7 @@ impl Shell {
         let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
         let queue_panel = self.queue_panel(cx);
+        let fan_out_panel = self.fan_out_panel(cx);
         let prompt_editing = self.editing_prompt.map(|_| {
             h_flex()
                 .w_full()
@@ -7288,6 +7871,7 @@ impl Shell {
             .pb_3()
             .gap_2()
             .children(picker)
+            .children(fan_out_panel)
             .children(queue_panel)
             .child(
                 v_flex()
@@ -7362,6 +7946,26 @@ impl Shell {
                                         this.choose_attachments(window, cx)
                                     })),
                             )
+                            .when(self.can_fan_out(), |this| {
+                                this.child(
+                                    Button::new("fan-out")
+                                        .ghost()
+                                        .compact()
+                                        .tooltip(rust_i18n::t!("composer.fan_out").to_string())
+                                        .child(
+                                            Icon::new(IconName::LayoutDashboard)
+                                                .size_4()
+                                                .text_color(if self.fan_out.is_some() {
+                                                    tokens.colors().accent
+                                                } else {
+                                                    tokens.colors().text_muted
+                                                }),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.toggle_fan_out(cx)),
+                                        ),
+                                )
+                            })
                             .child(div().flex_1())
                             .children(model_chip)
                             .children(effort_chip)
@@ -10575,13 +11179,14 @@ impl Shell {
                     }
                 })
                 .child(
-                    resizable_panel().child(
-                        v_flex()
+                    resizable_panel().child(match self.compare_view(cx) {
+                        Some(compare) => compare,
+                        None => v_flex()
                             .size_full()
                             .child(self.transcript(selected_text, cx))
                             .child(self.composer(cx))
                             .into_any_element(),
-                    ),
+                    }),
                 )
                 .when(dock_open, |this| {
                     this.child(

@@ -16,6 +16,7 @@ pub mod branches;
 pub mod browser;
 pub mod composer;
 pub mod editor;
+pub mod fan_out;
 pub mod file_search;
 pub mod file_tree;
 pub mod graph;
