@@ -279,6 +279,9 @@ impl Fixture {
         ));
         drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, script)));
         drivers.insert(Arc::new(ResponseDriver::new(FAKE_AGENT, script)));
+        drivers.insert(Arc::new(
+            ginka_core::driver::acp::AcpDriver::gemini().with_program(FAKE_AGENT),
+        ));
         drivers
     }
 
@@ -2643,7 +2646,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
             .map(|account| account.id.0.clone())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert_eq!(
+        ids(&accounts_of(&mut fixture)),
+        vec!["claude", "codex", "gemini", "opencode"]
+    );
 
     fixture.ask(Request::AddAccount {
         id: ginka_protocol::AccountId("codex-work".into()),
@@ -2651,7 +2657,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         label: "Work".into(),
     });
     let accounts = accounts_of(&mut fixture);
-    assert_eq!(ids(&accounts), vec!["claude", "codex", "codex-work"]);
+    assert_eq!(
+        ids(&accounts),
+        vec!["claude", "codex", "codex-work", "gemini", "opencode"]
+    );
     let work = &accounts[2];
     assert_eq!(work.label, "Work");
     assert!(!work.is_default);
@@ -2694,7 +2703,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         id: ginka_protocol::AccountId("codex-work".into()),
         delete_home: false,
     });
-    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert_eq!(
+        ids(&accounts_of(&mut fixture)),
+        vec!["claude", "codex", "gemini", "opencode"]
+    );
     assert!(
         accounts_of(&mut fixture)
             .iter()
@@ -2940,4 +2952,137 @@ fn a_queue_survives_a_daemon_restart_and_comes_back_held() {
         Some(2),
         "the sidebar can say how much is waiting"
     );
+}
+
+#[test]
+fn an_edited_prompt_runs_the_conversation_again_on_a_fresh_thread() {
+    // MonoCode's edit-and-resend: the reader changes what they asked, and the
+    // conversation goes on from there — not from the answer being replaced.
+    let mut fixture = Fixture::new();
+    let script = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[turn:{args}]"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&script, "first");
+    fixture.settle(&session);
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "second".into(),
+    });
+    // The second turn's end, not just its prompt: a turn that has not begun
+    // yet looks settled, and an edit is refused while one is running.
+    fixture.wait_for(&session, |turns| turns.len() >= 2);
+    fixture.settle(&session);
+
+    let second = match fixture.ask(Request::SessionTranscript {
+        session: session.clone(),
+        after: None,
+        limit: None,
+    }) {
+        Response::Transcript { entries } => entries
+            .into_iter()
+            .find(|entry| {
+                matches!(&entry.payload, TranscriptPayload::User { text } if text == "second")
+            })
+            .expect("the second prompt is recorded")
+            .seq,
+        other => panic!("expected a transcript, got {other:?}"),
+    };
+    let edited = match fixture.ask(Request::EditPrompt {
+        session: session.clone(),
+        seq: second,
+        text: "second, edited".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_ne!(edited.id, session, "the original conversation is kept");
+    assert_eq!(
+        edited.vendor_session_id, None,
+        "not the thread with the old answer in it"
+    );
+
+    let prompts = wait_for_prompts(&mut fixture, &edited.id, 2);
+    assert_eq!(prompts[..2], ["first", "second, edited"]);
+    fixture.settle(&edited.id);
+    assert!(
+        !spoken(&fixture.transcript(&edited.id)).contains("resume vendor-1"),
+        "the edited turn must not resume the replaced thread"
+    );
+    assert_eq!(
+        self::prompts(&mut fixture, &session),
+        vec!["first", "second"],
+        "the original is untouched"
+    );
+
+    // A prompt that is not one is refused.
+    assert!(
+        fixture
+            .service
+            .handle(Request::EditPrompt {
+                session: session.clone(),
+                seq: second + 1,
+                text: "no".into(),
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn an_acp_agent_is_prompted_once_it_has_opened_a_session_and_reloaded_after() {
+    // ACP is a conversation: the prompt can only follow `session/new`'s
+    // answer, which is what the driver's outbox is for.
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with("gemini", "", "hello");
+    let transcript = fixture.wait_for_said(&session, "[acp:acp-1:hello]");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    assert!(
+        transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptPayload::Agent {
+                event: AgentEvent::TurnEnd { turn: 1 }
+            }
+        )),
+        "{transcript:?}"
+    );
+    assert_eq!(
+        fixture.stored(&session).vendor_session_id.as_deref(),
+        Some("acp-1")
+    );
+
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "again".into(),
+    });
+    let transcript = fixture.wait_for_said(&session, "[acp:acp-1:again]");
+    assert!(
+        !spoken(&transcript).contains("[replayed]"),
+        "a reloaded conversation is not recorded twice"
+    );
+}
+
+#[test]
+fn an_acp_permission_request_waits_for_the_reader_and_carries_the_choice_back() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with("gemini", "", "needs permission");
+    fixture.wait_for_state(&session, SessionState::AwaitingInput);
+    let asked = fixture
+        .transcript(&session)
+        .into_iter()
+        .find_map(|entry| match entry {
+            TranscriptPayload::Agent {
+                event: AgentEvent::AskUser { id, options, .. },
+            } => Some((id, options)),
+            _ => None,
+        })
+        .expect("the question is recorded");
+    assert_eq!(asked.1, vec!["Allow", "Reject"]);
+    fixture.ask(Request::RespondToAgent {
+        session: session.clone(),
+        request_id: asked.0,
+        response: "Allow".into(),
+    });
+    fixture.wait_for_said(&session, "[permission:yes]");
 }

@@ -460,3 +460,15 @@ fn a_commit_is_named_as_a_change_source_and_a_note_as_a_request() {
         json!({"method": "create_pull_request", "workspace": "comet/harbor", "draft": false})
     );
 }
+
+#[test]
+fn an_edited_prompt_names_its_session_position_and_text() {
+    assert_eq!(
+        wire(&Request::EditPrompt {
+            session: SessionId("s-1".into()),
+            seq: 4,
+            text: "again".into(),
+        }),
+        json!({"method": "edit_prompt", "session": "s-1", "seq": 4, "text": "again"})
+    );
+}

@@ -260,6 +260,9 @@ enum Command {
     /// Markdown notes, kept by the daemon.
     #[command(subcommand)]
     Notes(NotesCommand),
+    /// Saved shell commands and prompts, run in a workspace.
+    #[command(subcommand)]
+    Quick(QuickCommand),
     /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
     ///
     /// Spawned by the agent, not by the user: the state stays in the daemon
@@ -432,6 +435,30 @@ enum SlackCommand {
 }
 
 #[derive(Subcommand)]
+enum QuickCommand {
+    /// List a project's quick commands and the global ones.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Save a shell command (`--shell`) or a prompt (`--prompt`).
+    Add {
+        name: String,
+        #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
+        shell: Option<String>,
+        #[arg(long)]
+        prompt: Option<String>,
+        /// The project it belongs to; every project when omitted.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Forget a quick command.
+    Remove { id: String },
+    /// Run a shell quick command in a new terminal in the workspace.
+    Run { workspace: String, id: String },
+}
+
+#[derive(Subcommand)]
 enum NotesCommand {
     /// List notes, most recently touched first.
     List {
@@ -540,6 +567,13 @@ enum SessionCommand {
     },
     /// Inject one queued follow-up into the active turn when supported.
     QueueSendNow { session: String, id: u64 },
+    /// Edit a sent prompt, by the position `session log` shows it at, and
+    /// run the conversation again from it in a new session.
+    Edit {
+        session: String,
+        seq: u64,
+        text: String,
+    },
     /// Queue a follow-up even where the running turn could take it now.
     QueueAdd { session: String, text: String },
     /// Stop the running turn and send this queued follow-up next.
@@ -1168,6 +1202,35 @@ fn request_for(command: Command) -> Result<Request> {
             body: body_or_stdin(body)?,
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
+        Command::Quick(QuickCommand::List { project }) => Request::ListQuickCommands {
+            project: project.map(ProjectName),
+        },
+        Command::Quick(QuickCommand::Add {
+            name,
+            shell,
+            prompt,
+            project,
+        }) => {
+            let (kind, body) = match (shell, prompt) {
+                (Some(shell), _) => (ginka_protocol::model::QuickCommandKind::Shell, shell),
+                (None, Some(prompt)) => (ginka_protocol::model::QuickCommandKind::Prompt, prompt),
+                (None, None) => unreachable!("clap requires one of --shell and --prompt"),
+            };
+            Request::SaveQuickCommand {
+                id: None,
+                project: project.map(ProjectName),
+                name,
+                kind,
+                body,
+            }
+        }
+        Command::Quick(QuickCommand::Remove { id }) => Request::RemoveQuickCommand { id },
+        Command::Quick(QuickCommand::Run { workspace, id }) => Request::RunQuickCommand {
+            workspace: WorkspaceId(workspace),
+            id,
+            rows: 24,
+            cols: 100,
+        },
         Command::History { workspace, limit } => Request::WorkspaceHistory {
             workspace: WorkspaceId(workspace),
             limit: Some(limit),
@@ -1229,6 +1292,11 @@ fn request_for(command: Command) -> Result<Request> {
                 id,
             }
         }
+        Command::Session(SessionCommand::Edit { session, seq, text }) => Request::EditPrompt {
+            session: SessionId(session),
+            seq,
+            text,
+        },
         Command::Session(SessionCommand::QueueAdd { session, text }) => Request::QueueMessage {
             session: SessionId(session),
             text,
@@ -1531,6 +1599,22 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::Note { note } => println!("{}", note.id),
+        Response::QuickCommands { commands } => {
+            for command in commands {
+                println!(
+                    "{}  {:<6} {:<12} {:<20} {}",
+                    command.id,
+                    command.kind.as_str(),
+                    command
+                        .project
+                        .map(|project| project.0)
+                        .unwrap_or_else(|| "*".into()),
+                    command.name,
+                    command.body.replace(['\r', '\n'], " ")
+                );
+            }
+        }
+        Response::QuickCommand { command } => println!("{}", command.id),
         Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
         Response::PlanUsage { snapshot } => match snapshot {
             Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),

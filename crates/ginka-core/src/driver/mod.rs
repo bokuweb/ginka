@@ -11,6 +11,7 @@
 //! what makes vendor formats testable against recorded fixtures instead of
 //! against a live CLI (`docs/roadmap.md` §7 R6).
 
+pub mod acp;
 pub mod activity;
 pub mod claude;
 pub mod codex;
@@ -237,6 +238,13 @@ pub struct ParseState {
     /// lines — a tool result has to find the call it belongs to — so the state
     /// travels with the session rather than with the driver, which is shared.
     pub stream: claude::ClaudeStream,
+    /// Lines the driver wants written to the agent's input, drained by the
+    /// supervisor after every line it parses. How a transport that is a
+    /// conversation — ACP answers `session/new` before it can be prompted —
+    /// replies without the parser doing any I/O.
+    pub outbox: Vec<String>,
+    /// The ACP driver's half of the exchange.
+    pub acp: acp::AcpState,
 }
 
 impl ParseState {
@@ -301,6 +309,21 @@ pub trait AgentDriver: Send + Sync + 'static {
 
     /// The command that starts a fresh session.
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec;
+
+    /// What to write to the agent's input as soon as it starts, with
+    /// whatever the driver needs to carry through the turn put in `state`.
+    ///
+    /// Empty for transports that take the whole turn on the command line. A
+    /// driver that returns lines here is started with its input open, and
+    /// the turn's end closes it.
+    fn begin(
+        &self,
+        _spec: &SessionSpec,
+        _vendor_session_id: Option<&str>,
+        _state: &mut ParseState,
+    ) -> Vec<String> {
+        Vec::new()
+    }
 
     /// The command that continues the vendor session `vendor_session_id`.
     ///
@@ -445,16 +468,37 @@ impl Registry {
         }
         registry.insert(Arc::new(driver));
 
+        // Every agent reached over ACP, in the same shape.
+        for base in [acp::AcpDriver::gemini(), acp::AcpDriver::opencode()] {
+            let configured = settings.agents.get(base.id());
+            let mut driver = match configured.and_then(|agent| agent.program.clone()) {
+                Some(program) => base.with_program(program),
+                None => base,
+            };
+            for (key, value) in configured.iter().flat_map(|agent| agent.env.iter()) {
+                driver = driver.with_env(key, value);
+            }
+            registry.insert(Arc::new(driver));
+        }
+
         registry
     }
 
     /// Add a driver, replacing any with the same id.
     ///
     /// Replacing rather than appending is what lets a test point the `claude`
-    /// id at a fake agent binary without the real one shadowing it.
+    /// id at a fake agent binary without the real one shadowing it. A
+    /// replacement keeps its predecessor's place, so the offering order does
+    /// not depend on which drivers were overridden.
     pub fn insert(&mut self, driver: Arc<dyn AgentDriver>) {
-        self.drivers.retain(|existing| existing.id() != driver.id());
-        self.drivers.push(driver);
+        match self
+            .drivers
+            .iter_mut()
+            .find(|existing| existing.id() == driver.id())
+        {
+            Some(existing) => *existing = driver,
+            None => self.drivers.push(driver),
+        }
     }
 
     /// The driver with this id.
@@ -498,6 +542,7 @@ mod tests {
         let before = registry.ids().len();
         registry.insert(Arc::new(claude::ClaudeDriver::with_program("/bin/echo")));
         assert_eq!(registry.ids().len(), before);
+        assert_eq!(registry.ids().first(), Some(&"claude"), "in its own place");
         assert_eq!(
             registry.get("claude").unwrap().probe_command().program,
             "/bin/echo"
@@ -554,7 +599,10 @@ mod tests {
             crate::settings::AgentSettings::default(),
         );
         let registry = Registry::from_settings(&settings);
-        assert_eq!(registry.ids(), vec!["claude", "codex"]);
+        assert_eq!(
+            registry.ids(),
+            vec!["claude", "codex", "gemini", "opencode"]
+        );
     }
 
     #[test]

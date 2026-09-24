@@ -16,8 +16,9 @@ use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
 use anyhow::Result;
-use ginka_protocol::event::DaemonEvent;
+use ginka_protocol::event::{AgentEvent, DaemonEvent};
 use ginka_protocol::ids::slugify;
+use ginka_protocol::model::TranscriptPayload;
 use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
@@ -304,7 +305,6 @@ impl Service {
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
-                self.set_up(&project.path, &path);
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
@@ -320,6 +320,7 @@ impl Service {
                             path.display()
                         ))
                     })?;
+                self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
                 Ok(Response::Workspace {
                     workspace: self.summarize(worktree),
                 })
@@ -610,7 +611,8 @@ impl Service {
                 agent,
                 model,
                 account,
-            } => self.fork_session(&session, after, agent.as_deref(), model, account),
+            } => self.fork_session(&session, after, agent.as_deref(), model, account, false),
+            Request::EditPrompt { session, seq, text } => self.edit_prompt(&session, seq, text),
             Request::SearchSessions {
                 workspace,
                 query,
@@ -766,6 +768,64 @@ impl Service {
                 )
                 .map_err(failed)?,
             }),
+            Request::ListQuickCommands { project } => Ok(Response::QuickCommands {
+                commands: crate::quick_commands::list(&self.conn(), project.as_ref())
+                    .map_err(failed)?,
+            }),
+            Request::SaveQuickCommand {
+                id,
+                project,
+                name,
+                kind,
+                body,
+            } => Ok(Response::QuickCommand {
+                command: crate::quick_commands::save(
+                    &self.conn(),
+                    id.as_deref(),
+                    project.as_ref(),
+                    &name,
+                    kind,
+                    &body,
+                )
+                .map_err(failed)?,
+            }),
+            Request::RemoveQuickCommand { id } => {
+                crate::quick_commands::remove(&self.conn(), &id).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RunQuickCommand {
+                workspace,
+                id,
+                rows,
+                cols,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let command = crate::quick_commands::get(&self.conn(), &id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no quick command with id {id}")))?;
+                if command.kind != ginka_protocol::model::QuickCommandKind::Shell {
+                    return Err(RpcError::failed(
+                        "a prompt is sent to the conversation, not run in a terminal",
+                    ));
+                }
+                let terminal = self
+                    .terminals
+                    .open_command(
+                        &workspace,
+                        &worktree.path,
+                        crate::terminal::TerminalCommand {
+                            program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                            args: crate::quick_commands::shell_args(&command.body),
+                            env: Vec::new(),
+                            title: command.name.clone(),
+                            on_exit: None,
+                        },
+                        rows,
+                        cols,
+                    )
+                    .map_err(failed)?;
+                Ok(Response::Terminal { terminal })
+            }
             Request::RemoveNote { id } => {
                 crate::notes::remove(&self.conn(), &id).map_err(failed)?;
                 Ok(Response::Ack)
@@ -1518,6 +1578,7 @@ impl Service {
         agent: Option<&str>,
         model: Option<String>,
         account: Option<ginka_protocol::AccountId>,
+        fresh_thread: bool,
     ) -> Result<Response, RpcError> {
         let original = self.session(id)?;
         let driver = self.driver(agent.unwrap_or(&original.agent))?;
@@ -1533,7 +1594,9 @@ impl Service {
                 crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
             }
         };
-        let moved = !same_agent || account != original.account;
+        // A fresh thread is a move in all but name: the vendor's thread holds
+        // what is being replaced, so the digest stands in for it.
+        let moved = !same_agent || account != original.account || fresh_thread;
         let keeps_model_options = same_agent
             && model
                 .as_ref()
@@ -1566,12 +1629,15 @@ impl Service {
             // A fork has not run anything yet.
             state: SessionState::Idle,
             title: Some(match (&original.title, moved) {
+                // An edited prompt is the same conversation taken another way.
+                (Some(title), _) if fresh_thread => title.clone(),
+                (None, _) if fresh_thread => "edited".to_string(),
                 (Some(title), false) => format!("{title} (fork)"),
                 (Some(title), true) => format!("{title} ({} fork)", driver.id()),
                 (None, false) => "fork".to_string(),
                 (None, true) => format!("{} fork", driver.id()),
             }),
-            summary: moved.then(|| format!("moved from {}", original.agent)),
+            summary: (moved && !fresh_thread).then(|| format!("moved from {}", original.agent)),
             // Inherited only where continuing it would continue the same
             // conversation; elsewhere the digest stands in for it.
             vendor_session_id: (!moved)
@@ -1599,6 +1665,66 @@ impl Service {
         self.events.emit(DaemonEvent::SessionStarted {
             session: Box::new(fork.clone()),
         });
+        Ok(Response::Session { session: fork })
+    }
+
+    /// Edit a sent prompt and run the conversation again from it.
+    fn edit_prompt(
+        &mut self,
+        id: &SessionId,
+        seq: u64,
+        text: String,
+    ) -> Result<Response, RpcError> {
+        if text.trim().is_empty() {
+            return Err(RpcError::failed("an edited prompt cannot be blank"));
+        }
+        let original = self.session(id)?;
+        if self.sessions.is_running(id) {
+            return Err(RpcError::failed(
+                "the session is still working; stop it before editing a prompt",
+            ));
+        }
+        let entries = session::transcript(&self.conn(), id, None, None).map_err(failed)?;
+        let Some(prompt) = entries.iter().find(|entry| entry.seq == seq) else {
+            return Err(RpcError::not_found(format!("no transcript entry {seq}")));
+        };
+        if !matches!(prompt.payload, TranscriptPayload::User { .. }) {
+            return Err(RpcError::failed(format!("entry {seq} is not a prompt")));
+        }
+        // The turns finished before this prompt: the checkpoint at the end of
+        // the last of them (or turn 0, taken before the first) is the state
+        // the prompt was sent into.
+        let finished = entries
+            .iter()
+            .filter(|entry| entry.seq < seq)
+            .filter(|entry| {
+                matches!(
+                    entry.payload,
+                    TranscriptPayload::Agent {
+                        event: AgentEvent::TurnEnd { .. }
+                    }
+                )
+            })
+            .count() as u32;
+        let before = checkpoint::list(&self.conn(), &original.workspace)
+            .map_err(failed)?
+            .into_iter()
+            .filter(|checkpoint| &checkpoint.session == id && checkpoint.turn == finished)
+            // The one the turn took, not a later "before restoring" snapshot.
+            .min_by_key(|checkpoint| checkpoint.created_at);
+        if let Some(checkpoint) = before {
+            self.restore(&checkpoint.id)?;
+        }
+        let fork =
+            match self.fork_session(id, Some(seq.saturating_sub(1)), None, None, None, true)? {
+                Response::Session { session } => session,
+                other => {
+                    return Err(RpcError::failed(format!(
+                        "unexpected fork answer: {other:?}"
+                    )));
+                }
+            };
+        self.send_message(&fork.id, text)?;
         Ok(Response::Session { session: fork })
     }
 
@@ -2047,7 +2173,12 @@ impl Service {
     /// rather than returned: the worktree exists by now, and removing it
     /// because an install failed would throw away the branch the user asked
     /// for.
-    fn set_up(&self, project: &std::path::Path, worktree: &std::path::Path) {
+    fn set_up(
+        &self,
+        project: &std::path::Path,
+        worktree: &std::path::Path,
+        workspace: &WorkspaceId,
+    ) {
         let setup = match crate::setup::read(project) {
             Ok(setup) => setup,
             Err(error) => {
@@ -2058,15 +2189,34 @@ impl Service {
         if setup.copy.is_empty() && setup.commands.is_empty() {
             return;
         }
-        let report = crate::setup::run(project, worktree, &setup);
+        // The files first, before anything can start in the worktree.
+        let copying = crate::setup::Setup {
+            copy: setup.copy.clone(),
+            commands: Vec::new(),
+        };
+        let report = crate::setup::run(project, worktree, &copying);
         for problem in &report.problems {
             tracing::warn!(problem, worktree = %worktree.display(), "setting up the worktree");
         }
-        tracing::info!(
-            copied = report.copied.len(),
-            ran = report.ran.len(),
-            "ran the project's setup"
-        );
+        // The commands in a terminal of the workspace's own, as Orca runs
+        // its setup script: an install is minutes, and the reader should see
+        // it happen rather than wait on a request that says nothing.
+        if !setup.commands.is_empty() {
+            let command = crate::terminal::TerminalCommand {
+                program: "sh".to_string(),
+                args: crate::setup::terminal_args(&setup.commands),
+                env: Vec::new(),
+                title: "setup".to_string(),
+                on_exit: None,
+            };
+            if let Err(error) = self
+                .terminals
+                .open_command(workspace, worktree, command, 24, 100)
+            {
+                tracing::warn!(%error, "could not start the project's setup");
+            }
+        }
+        tracing::info!(copied = report.copied.len(), "set up the worktree");
     }
 }
 

@@ -39,8 +39,8 @@ gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d
 
 # The GitHub client, mounted as the Inbox (`docs/ui.md` §3.5). A git
 # dependency pinned by rev rather than a submodule: the rev lands in
-# `Cargo.lock` and Cargo resolves e1's graph into ours. `.cargo/config.toml`
-# may patch these to `../e1` for local work.
+# `Cargo.lock` and Cargo resolves e1's graph into ours. For local work against
+# `../e1`, use `scripts/cargo-local-e1`, which does not rewrite the lock.
 e1-github = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
 e1-ui = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
 e1-views = { git = "https://github.com/bokuweb/e1", rev = "076295e" }

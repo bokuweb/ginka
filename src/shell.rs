@@ -63,7 +63,11 @@ actions!(
         CopyTerminalOutput,
         NavigateBack,
         NavigateForward,
-        OpenSettings
+        OpenSettings,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab
     ]
 );
 
@@ -106,6 +110,16 @@ enum Picker {
     Mention,
     /// Which command the `/` being typed means.
     Command,
+}
+
+/// The settings page's form for a new quick command.
+struct QuickForm {
+    name: Entity<InputState>,
+    body: Entity<InputState>,
+    kind: ginka_protocol::model::QuickCommandKind,
+    /// For the project on screen rather than for every project.
+    project_only: bool,
+    error: Option<String>,
 }
 
 const CONTEXT: &str = "Shell";
@@ -164,6 +178,22 @@ pub fn init(cx: &mut App) {
             CopyTerminalOutput,
             Some("Terminal"),
         ),
+        // MonoCode's tab chords. `⇧⌘[`/`⇧⌘]` are the terminal's own tabs
+        // while a terminal has focus: its context is the deeper one.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-t", NewTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-]", NextTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-[", PreviousTab, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-t", NewTab, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -249,6 +279,35 @@ const TERMINAL_COLUMNS: u16 = 100;
 const NEARLY_THE_FOOT: f32 = 24.;
 
 /// The turn-level handoff choice currently expanded in the transcript.
+/// The composer's fan-out panel: how many attempts each agent gets.
+struct FanOutPanel {
+    /// Driver id, display name, attempts.
+    counts: Vec<(String, String, usize)>,
+    busy: bool,
+    error: Option<String>,
+}
+
+/// The attempts of one fan-out, side by side (`docs/ui.md` §3.3).
+struct Compare {
+    entries: Vec<CompareEntry>,
+    /// The attempt whose *Keep* was pressed once and waits for the second
+    /// press, which archives the others.
+    keeping: Option<ginka_protocol::WorkspaceId>,
+}
+
+/// One attempt in the comparison.
+#[derive(Clone)]
+struct CompareEntry {
+    workspace: ginka_protocol::WorkspaceId,
+    title: SharedString,
+    agent: ginka_ui::workspace::Agent,
+    state: ginka_ui::workspace::AgentState,
+    added: u32,
+    removed: u32,
+    /// The attempt's last answer, once read.
+    answer: Option<String>,
+}
+
 struct ForkMenu {
     turn: u32,
     seq: u64,
@@ -490,6 +549,9 @@ pub struct Shell {
     queue_next: bool,
     /// Stable id of the queued prompt currently being edited in the composer.
     editing_queued_message: Option<u64>,
+    /// The sent prompt being edited, by transcript position: Enter runs the
+    /// conversation again from it (`EditPrompt`).
+    editing_prompt: Option<u64>,
     /// The ordinary draft displaced while a queued prompt is edited.
     queue_edit_draft: Option<String>,
     /// Why the most recent queue mutation was refused.
@@ -537,6 +599,10 @@ pub struct Shell {
     rewinding: Option<u32>,
     /// A turn whose conversation can be continued by another agent.
     forking: Option<ForkMenu>,
+    /// The fan-out panel above the composer, while it is open.
+    fan_out: Option<FanOutPanel>,
+    /// The fan-out comparison in the centre column, while it is open.
+    comparing: Option<Compare>,
     /// Where keystrokes go when the terminal has the keyboard.
     terminal_focus: FocusHandle,
     /// Present while the reader is finding text in the active terminal.
@@ -582,6 +648,15 @@ pub struct Shell {
     index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
+    /// The conversations open across the top of the centre column.
+    tabs: ginka_ui::tabs::Tabs,
+    /// Saved commands and prompts for the project on screen (Orca's Quick
+    /// Commands), read from the daemon on the refresh tick.
+    quick_commands: Vec<ginka_protocol::model::QuickCommand>,
+    /// Whether the terminal dock's quick-command menu is open.
+    quick_menu_open: bool,
+    /// The settings page's new-quick-command form.
+    quick_form: QuickForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -625,6 +700,25 @@ impl Shell {
             window.refresh();
         });
         let notes = cx.new(|cx| crate::notes::NotesView::new(link.clone(), window, cx));
+        let quick_form = QuickForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.quick.name").to_string())
+            }),
+            body: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.quick.body").to_string())
+            }),
+            kind: ginka_protocol::model::QuickCommandKind::Shell,
+            project_only: true,
+            error: None,
+        };
+        let restored_tabs = ginka_ui::tabs::Tabs::restore(
+            settings
+                .open_tabs
+                .iter()
+                .map(|id| ginka_protocol::WorkspaceId(id.clone())),
+        );
 
         // The centre column shows whichever row the sidebar has selected; until
         // selection is wired up that is simply the first.
@@ -793,6 +887,9 @@ impl Shell {
                         if let Some(workspace) =
                             this.session.as_ref().map(|row| row.workspace.clone())
                         {
+                            this.tabs
+                                .open(ginka_ui::tabs::Tab::Workspace(workspace.clone()));
+                            this.persist_tabs();
                             this.navigation
                                 .visit(NavigationTarget::Workspace(workspace));
                         }
@@ -1200,6 +1297,7 @@ impl Shell {
             session_states: std::collections::HashMap::new(),
             queue_next: false,
             editing_queued_message: None,
+            editing_prompt: None,
             queue_edit_draft: None,
             queue_error: None,
             attachments: Vec::new(),
@@ -1222,6 +1320,8 @@ impl Shell {
             checkpoints: Vec::new(),
             rewinding: None,
             forking: None,
+            fan_out: None,
+            comparing: None,
             transcript_scroll: ScrollHandle::new(),
             transcript_follows: true,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
@@ -1242,6 +1342,10 @@ impl Shell {
             sidebar,
             surfaces,
             notes,
+            tabs: restored_tabs,
+            quick_commands: Vec::new(),
+            quick_menu_open: false,
+            quick_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -1689,6 +1793,7 @@ impl Shell {
     ) {
         self.navigation
             .visit(NavigationTarget::Home(project.clone()));
+        self.tabs.open(ginka_ui::tabs::Tab::New);
         self.remember_workspace_view(cx);
         self.save_settings();
         self.sidebar
@@ -1756,6 +1861,9 @@ impl Shell {
         self.target_project = Some(ProjectName(row.origin.to_string()));
         self.navigation
             .visit(NavigationTarget::Workspace(row.workspace.clone()));
+        // A new chat's tab becomes its conversation in place.
+        self.tabs.promote_new(row.workspace.clone());
+        self.persist_tabs();
         self.session = Some(row);
         if changed_workspace {
             let workspace = self
@@ -1770,6 +1878,331 @@ impl Shell {
             self.save_settings();
         }
         cx.notify();
+    }
+
+    /// Read the saved commands for the project on screen.
+    fn refresh_quick_commands(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        cx.spawn(async move |this, cx| {
+            let commands = cx
+                .background_spawn(async move { link.quick_commands(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.quick_commands != commands {
+                    this.quick_commands = commands;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Run a saved command: a shell one in a new terminal in the dock, a
+    /// prompt sent to the conversation on screen.
+    fn run_quick(
+        &mut self,
+        command: ginka_protocol::model::QuickCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_menu_open = false;
+        match command.kind {
+            ginka_protocol::model::QuickCommandKind::Prompt => {
+                self.composer
+                    .update(cx, |state, cx| state.set_value(command.body, window, cx));
+                self.submit(window, cx);
+            }
+            ginka_protocol::model::QuickCommandKind::Shell => {
+                let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+                    return;
+                };
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                let (rows, cols) = self.dock_size();
+                let link = self.link.clone();
+                let title = command.name.clone();
+                cx.spawn(async move |this, cx| {
+                    let opened = cx
+                        .background_spawn(async move {
+                            link.run_quick_command(&workspace, command.id, rows, cols)
+                                .await
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        match opened {
+                            Ok(terminal) => {
+                                this.terminals.open(terminal, title, rows, cols);
+                                this.resize_terminal(cx);
+                                this.persist();
+                                this.adopt_terminals(cx);
+                            }
+                            Err(error) => tracing::warn!(%error, "a quick command did not run"),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    /// The dock's quick-command menu: the project's shell commands, each a
+    /// button that runs it in a new terminal.
+    fn quick_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.quick_menu_open {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let commands: Vec<_> = self
+            .quick_commands
+            .iter()
+            .filter(|command| command.kind == ginka_protocol::model::QuickCommandKind::Shell)
+            .cloned()
+            .collect();
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .flex_wrap()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .children(commands.into_iter().map(|command| {
+                    let label = command.name.clone();
+                    let tooltip = command.body.clone();
+                    Button::new(SharedString::from(format!("quick-run-{}", command.id)))
+                        .ghost()
+                        .compact()
+                        .tooltip(tooltip)
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_quick(command.clone(), window, cx)
+                        }))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Save the settings page's new quick command.
+    fn save_quick_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.quick_form.name.read(cx).value().to_string();
+        let body = self.quick_form.body.read(cx).value().to_string();
+        let kind = self.quick_form.kind;
+        let project = self
+            .quick_form
+            .project_only
+            .then(|| self.target_project.clone())
+            .flatten();
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move {
+                    link.save_quick_command(project, name, kind, body).await
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(()) => {
+                        this.quick_form.error = None;
+                        this.quick_form
+                            .name
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.quick_form
+                            .body
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                    }
+                    Err(error) => this.quick_form.error = Some(error),
+                }
+                this.refresh_quick_commands(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Write the open tabs back to `app.json`.
+    fn persist_tabs(&mut self) {
+        self.settings.open_tabs = self
+            .tabs
+            .workspaces()
+            .into_iter()
+            .map(|workspace| workspace.0)
+            .collect();
+        self.save_settings();
+    }
+
+    /// Show whatever a tab holds: its conversation, or a new chat.
+    fn show_tab(
+        &mut self,
+        tab: Option<ginka_ui::tabs::Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match tab {
+            // The sidebar decides what "selected" means and announces it; the
+            // announcement is what swaps the conversation in.
+            Some(ginka_ui::tabs::Tab::Workspace(workspace)) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx)),
+            Some(ginka_ui::tabs::Tab::New) | None => {
+                let project = self.target_project.clone();
+                self.start_new_chat(project, window, cx);
+            }
+        }
+        self.persist_tabs();
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_active = self.tabs.active_index() == Some(index);
+        self.tabs.close(index);
+        if closing_active {
+            let next = self.tabs.active().cloned();
+            self.show_tab(next, window, cx);
+        } else {
+            self.persist_tabs();
+            cx.notify();
+        }
+    }
+
+    fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self.target_project.clone();
+        self.start_new_chat(project, window, cx);
+    }
+
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.active_index() {
+            self.close_tab(index, window, cx);
+        }
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tabs.cycle(true).cloned();
+        if tab.is_some() {
+            self.show_tab(tab, window, cx);
+        }
+    }
+
+    fn on_previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tabs.cycle(false).cloned();
+        if tab.is_some() {
+            self.show_tab(tab, window, cx);
+        }
+    }
+
+    /// The tab strip: MonoCode's tabs of open conversations, each with its
+    /// agent's mark (in the working colour while it works) and a close.
+    fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let active = self.tabs.active_index();
+        let tabs: Vec<AnyElement> = self
+            .tabs
+            .tabs()
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let on = active == Some(index);
+                let row = match tab {
+                    ginka_ui::tabs::Tab::Workspace(workspace) => {
+                        rows.iter().find(|row| &row.workspace == workspace)
+                    }
+                    ginka_ui::tabs::Tab::New => None,
+                };
+                let title: SharedString = match (tab, row) {
+                    (ginka_ui::tabs::Tab::New, _) => rust_i18n::t!("tabs.new").to_string().into(),
+                    (_, Some(row)) => row.title.clone(),
+                    (ginka_ui::tabs::Tab::Workspace(workspace), None) => workspace
+                        .0
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                        .into(),
+                };
+                let working =
+                    row.is_some_and(|row| row.state == ginka_ui::workspace::AgentState::Working);
+                let glyph = match row {
+                    Some(row) => row.agent.glyph(),
+                    None => Icon::new(IconName::Plus),
+                };
+                h_flex()
+                    .id(("centre-tab", index))
+                    .h(px(28.))
+                    .min_w(px(90.))
+                    .max_w(px(240.))
+                    .pl_2p5()
+                    .pr_1()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .cursor_pointer()
+                    .when(on, |this| {
+                        this.bg(tokens.colors().bg_surface)
+                            .border_1()
+                            .border_color(tokens.colors().border_subtle)
+                    })
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(tab) = this.tabs.select_number(index + 1).cloned() {
+                            this.show_tab(Some(tab), window, cx);
+                        }
+                    }))
+                    .child(glyph.size_3p5().text_color(if working {
+                        tokens.colors().status_working
+                    } else if on {
+                        tokens.colors().text_secondary
+                    } else {
+                        tokens.colors().text_muted
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(if on {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_secondary
+                            })
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id(("close-tab", index))
+                            .p_0p5()
+                            .rounded(px(tokens.radius.control()))
+                            .hover(|this| this.bg(tokens.colors().bg_raised))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(index, window, cx);
+                            }))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        h_flex()
+            .id("centre-tabs")
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .items_center()
+            .overflow_x_scroll()
+            .children(tabs)
+            .into_any_element()
     }
 
     /// The project the next prompt would run in, as the window says it.
@@ -2441,6 +2874,32 @@ impl Shell {
     }
 
     /// Actions shared by the readable messages in a transcript.
+    /// *Edit* on a sent prompt, where running it again is possible: the
+    /// conversation is not working, and the block maps to a stored prompt.
+    fn edit_prompt_button(
+        &self,
+        index: usize,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.is_working() || self.session.as_ref()?.session.is_none() {
+            return None;
+        }
+        let seq = self.transcript.seq_for_block(index)?;
+        let text = text.to_string();
+        Some(
+            Button::new(SharedString::from(format!("edit-prompt-{index}")))
+                .ghost()
+                .compact()
+                .tooltip(rust_i18n::t!("transcript.edit.tooltip").to_string())
+                .child(rust_i18n::t!("transcript.edit").to_string())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.edit_prompt(seq, text.clone(), window, cx)
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn message_actions(
         &self,
         index: usize,
@@ -3316,6 +3775,73 @@ impl Shell {
         cx.notify();
     }
 
+    /// Put a sent prompt in the composer to edit and run again.
+    fn edit_prompt(&mut self, seq: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_prompt.is_none() && self.editing_queued_message.is_none() {
+            self.queue_edit_draft = Some(self.composer.read(cx).value().to_string());
+        }
+        self.editing_queued_message = None;
+        self.editing_prompt = Some(seq);
+        self.composer
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leave prompt editing and restore the draft it displaced.
+    fn cancel_prompt_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.editing_prompt = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        cx.notify();
+    }
+
+    /// Run the conversation again from an edited prompt, and follow the new
+    /// session it answers with.
+    fn resend_edited(
+        &mut self,
+        session: SessionId,
+        seq: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing_prompt = None;
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.submitted = true;
+        self.transcript_follows = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let edited = cx
+                .background_spawn(async move { link.edit_prompt(&session, seq, text).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match edited {
+                    Ok(session) => {
+                        if let Some(row) = this.session.as_mut() {
+                            row.session = Some(session.id.clone());
+                        }
+                        this.transcript = Transcript::new();
+                        this.transcript_of = Some(session.id);
+                        this.transcript_search = None;
+                        this.session_state = Some(session.state);
+                    }
+                    Err(error) => {
+                        this.submitted = false;
+                        this.queue_error = Some(error);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Leave queue editing and restore the draft it displaced.
     fn cancel_queued_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.queue_edit_draft.take().unwrap_or_default();
@@ -3463,6 +3989,14 @@ impl Shell {
             && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
         {
             self.save_queued_edit(session, id, draft, window, cx);
+            return;
+        }
+        if let Some(seq) = self.editing_prompt
+            && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
+        {
+            if !draft.is_empty() {
+                self.resend_edited(session, seq, draft, window, cx);
+            }
             return;
         }
         if self.session_state == Some(SessionState::AwaitingInput)
@@ -3877,6 +4411,7 @@ impl Shell {
                 }))
             }))
             .into_any_element();
+        let quick_section = self.quick_settings(cx);
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -3985,9 +4520,198 @@ impl Shell {
                                     .text_color(tokens.colors().text_secondary)
                                     .child(env!("CARGO_PKG_VERSION"))
                                     .into_any_element(),
-                            )),
+                            ))
+                            .child(quick_section),
                     ),
             )
+    }
+
+    /// The settings page's quick commands: the project's and the global ones,
+    /// each removable, and a form for a new one (`docs/ui.md` §3.7).
+    fn quick_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let shell = self.quick_form.kind == ginka_protocol::model::QuickCommandKind::Shell;
+        let project_only = self.quick_form.project_only;
+        let project = self.target_project.clone();
+        let chip = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py_0p5()
+                .rounded(px(7.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        let rows: Vec<AnyElement> = self
+            .quick_commands
+            .iter()
+            .map(|command| {
+                let id = command.id.clone();
+                h_flex()
+                    .w_full()
+                    .py_1p5()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(60.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(command.kind.as_str()),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(command.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family(cx.theme_mono_font())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(command.body.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(
+                                command
+                                    .project
+                                    .as_ref()
+                                    .map(|project| project.0.clone())
+                                    .unwrap_or_else(|| {
+                                        rust_i18n::t!("settings.quick.everywhere").to_string()
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("quick-remove-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("notes.remove").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let link = this.link.clone();
+                                let id = id.clone();
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_spawn(async move {
+                                        link.remove_quick_command(id).await
+                                    })
+                                    .await;
+                                    this.update(cx, |this, cx| this.refresh_quick_commands(cx))
+                                        .ok();
+                                })
+                                .detach();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .pt_5()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.quick").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.quick.note").to_string()),
+            )
+            .children(rows)
+            .child(
+                h_flex()
+                    .w_full()
+                    .pt_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        chip(
+                            "quick-kind-shell",
+                            rust_i18n::t!("settings.quick.shell").to_string(),
+                            shell,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.kind = ginka_protocol::model::QuickCommandKind::Shell;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        chip(
+                            "quick-kind-prompt",
+                            rust_i18n::t!("settings.quick.prompt").to_string(),
+                            !shell,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.kind = ginka_protocol::model::QuickCommandKind::Prompt;
+                            cx.notify();
+                        })),
+                    )
+                    .child(div().w(px(12.)))
+                    .children(project.map(|project| {
+                        chip("quick-scope-project", project.0, project_only).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.quick_form.project_only = true;
+                                cx.notify();
+                            },
+                        ))
+                    }))
+                    .child(
+                        chip(
+                            "quick-scope-global",
+                            rust_i18n::t!("settings.quick.everywhere").to_string(),
+                            !project_only || self.target_project.is_none(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.project_only = false;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(160.)).child(Input::new(&self.quick_form.name)))
+                    .child(div().flex_1().child(Input::new(&self.quick_form.body)))
+                    .child(
+                        Button::new("quick-save")
+                            .compact()
+                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_quick_form(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.quick_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
     }
 
     /// The Inbox: the GitHub client when it is built in, and how to build it
@@ -4462,6 +5186,10 @@ impl Shell {
             can_go_back,
             can_go_forward,
         );
+        entries.extend(ginka_ui::palette::quick_command_entries(
+            &self.quick_commands,
+            self.session.is_some(),
+        ));
         let active = self.terminals.active();
         entries.extend(ginka_ui::palette::terminal_entries(
             ginka_ui::palette::TerminalActions {
@@ -4533,6 +5261,7 @@ impl Shell {
                 self.surfaces
                     .update(cx, |surfaces, cx| surfaces.show(surface, cx));
             }
+            Command::RunQuick(command) => self.run_quick(command, window, cx),
             Command::NewTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -4786,20 +5515,35 @@ impl Shell {
             IconName::PanelRightOpen,
             cx,
         );
+        let has_tabs = !self.tabs.is_empty();
+        let attempts = self.session.as_ref().map_or(0, |row| {
+            ginka_ui::fan_out::siblings(self.sidebar.read(cx).rows(), row).len()
+        });
+        let compare_chip = (attempts > 0).then(|| {
+            Button::new("open-compare")
+                .ghost()
+                .compact()
+                .label(rust_i18n::t!("compare.chip", count = attempts).to_string())
+                .on_click(cx.listener(|this, _, _, cx| this.open_compare(cx)))
+        });
+        let tab_strip = has_tabs.then(|| self.tab_strip(cx));
 
-        let strip =
-            h_flex()
-                .id("column-header")
-                .flex_shrink_0()
-                .w_full()
-                .h(HEADER_HEIGHT)
-                .pr_3()
-                .gap_2()
-                .items_center()
-                .when(leading, |this| this.pl(TRAFFIC_LIGHT_INSET))
-                .when(!leading, |this| this.pl_4())
-                .children(sidebar_toggle)
-                .child(
+        let strip = h_flex()
+            .id("column-header")
+            .flex_shrink_0()
+            .w_full()
+            .h(HEADER_HEIGHT)
+            .pr_3()
+            .gap_2()
+            .items_center()
+            .when(leading, |this| this.pl(TRAFFIC_LIGHT_INSET))
+            .when(!leading, |this| this.pl_4())
+            .children(sidebar_toggle)
+            .when(has_tabs, |this| {
+                this.child(tab_strip.unwrap_or_else(|| div().into_any_element()))
+            })
+            .when(!has_tabs, |this| {
+                this.child(
                     h_flex()
                         .flex_1()
                         .gap_2()
@@ -4818,14 +5562,16 @@ impl Shell {
                             div().text_xs().text_color(muted).truncate().child(origin)
                         })),
                 )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .child(new_chat)
-                        .child(dock_toggle)
-                        .child(right_toggle),
-                );
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .children(compare_chip)
+                    .child(new_chat)
+                    .child(dock_toggle)
+                    .child(right_toggle),
+            );
 
         self.draggable(strip, cx)
     }
@@ -5553,6 +6299,7 @@ impl Shell {
                             .child(text.clone()),
                     )
                     .child(self.message_actions(index, "user", text, cx))
+                    .children(self.edit_prompt_button(index, text, cx))
                     .into_any_element()
             }
             TranscriptBlock::Assistant { text } => {
@@ -5717,6 +6464,506 @@ impl Shell {
 
     /// Copy the conversation through `after` onto another agent and show it.
     fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
+        self.fork_from_as(after, agent, false, cx);
+    }
+
+    /// Whether a fan-out can start from here: a project to cut worktrees in,
+    /// and no conversation already under way in this tab.
+    fn can_fan_out(&self) -> bool {
+        self.target_project.is_some()
+            && self
+                .session
+                .as_ref()
+                .is_none_or(|row| row.session.is_none())
+    }
+
+    fn toggle_fan_out(&mut self, cx: &mut Context<Self>) {
+        self.fan_out = match self.fan_out.take() {
+            Some(_) => None,
+            None => Some(FanOutPanel {
+                // Every agent that can run, once each, is the ordinary race.
+                counts: self
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.is_ready())
+                    .map(|agent| (agent.id.clone(), agent.display_name.clone(), 1))
+                    .collect(),
+                busy: false,
+                error: None,
+            }),
+        };
+        cx.notify();
+    }
+
+    /// The fan-out panel: an agent a row, how many attempts each, and the way
+    /// to start them with what is in the composer.
+    fn fan_out_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let panel = self.fan_out.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let total: usize = panel
+            .counts
+            .iter()
+            .map(|(_, _, count)| count)
+            .sum::<usize>()
+            .min(ginka_ui::fan_out::MAX_ATTEMPTS);
+        let busy = panel.busy;
+        let rows: Vec<AnyElement> = panel
+            .counts
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, count))| {
+                let count = *count;
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        ginka_ui::workspace::Agent::from_id(id)
+                            .glyph()
+                            .size_3p5()
+                            .text_color(tokens.colors().accent),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .child(name.clone()),
+                    )
+                    .child(
+                        Button::new(("fan-less", index))
+                            .ghost()
+                            .compact()
+                            .disabled(count == 0)
+                            .child(Icon::new(IconName::Minus).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(panel) = this.fan_out.as_mut() {
+                                    panel.counts[index].2 = panel.counts[index].2.saturating_sub(1);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .w(px(18.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(count.to_string()),
+                    )
+                    .child(
+                        Button::new(("fan-more", index))
+                            .ghost()
+                            .compact()
+                            .disabled(total >= ginka_ui::fan_out::MAX_ATTEMPTS)
+                            .child(Icon::new(IconName::Plus).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(panel) = this.fan_out.as_mut() {
+                                    panel.counts[index].2 += 1;
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_1()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.fan_out.title").to_string()),
+                )
+                .children(rows)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .children(panel.error.clone().map(|error| {
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(tokens.colors().status_error)
+                                .child(error)
+                        }))
+                        .child(div().flex_1())
+                        .child(
+                            Button::new("fan-out-start")
+                                .compact()
+                                .disabled(busy || total == 0)
+                                .label(
+                                    rust_i18n::t!("composer.fan_out.start", count = total)
+                                        .to_string(),
+                                )
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.start_fan_out(window, cx)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Ask what is in the composer in a worktree per attempt, and open each
+    /// attempt as a tab.
+    fn start_fan_out(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let prompt = self.composer.read(cx).value().trim().to_string();
+        let Some(project) = self.target_project.clone() else {
+            return;
+        };
+        let Some(panel) = self.fan_out.as_mut() else {
+            return;
+        };
+        if prompt.is_empty() {
+            panel.error = Some(rust_i18n::t!("composer.fan_out.needs_prompt").to_string());
+            cx.notify();
+            return;
+        }
+        let attempts = ginka_ui::fan_out::attempts(
+            &panel
+                .counts
+                .iter()
+                .map(|(id, _, count)| (id.clone(), *count))
+                .collect::<Vec<_>>(),
+        );
+        panel.busy = true;
+        panel.error = None;
+        // Unique per fan-out: a second race on the same question must not
+        // collide with the branches of the first.
+        let prefix = format!(
+            "{}-{}",
+            ginka_ui::fan_out::branch_prefix(&prompt),
+            crate::daemon::now() % 100_000
+        );
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(
+                    async move { link.fan_out(project, prefix, prompt, attempts).await },
+                )
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok((started, failed)) => {
+                        this.fan_out = None;
+                        this.composer
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        for session in &started {
+                            this.tabs
+                                .open(ginka_ui::tabs::Tab::Workspace(session.workspace.clone()));
+                        }
+                        this.persist_tabs();
+                        if let Some(first) = started.first() {
+                            let workspace = first.workspace.clone();
+                            this.sidebar
+                                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+                        }
+                        if !failed.is_empty() {
+                            tracing::warn!(?failed, "some fan-out attempts did not start");
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(panel) = this.fan_out.as_mut() {
+                            panel.busy = false;
+                            panel.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open the comparison of the fan-out the conversation on screen belongs
+    /// to, and read each attempt's diff and last answer.
+    fn open_compare(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.session.clone() else {
+            return;
+        };
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let siblings: Vec<SessionRow> = ginka_ui::fan_out::siblings(&rows, &row)
+            .into_iter()
+            .cloned()
+            .collect();
+        if siblings.is_empty() {
+            return;
+        }
+        self.comparing = Some(Compare {
+            entries: siblings
+                .iter()
+                .map(|row| CompareEntry {
+                    workspace: row.workspace.clone(),
+                    title: SharedString::from(row.branch.to_string()),
+                    agent: row.agent,
+                    state: row.state,
+                    added: 0,
+                    removed: 0,
+                    answer: None,
+                })
+                .collect(),
+            keeping: None,
+        });
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            for row in siblings {
+                let reading = link.clone();
+                let asked = row.clone();
+                let (totals, answer) = cx
+                    .background_spawn(async move {
+                        let totals = reading
+                            .changes(&asked.workspace, ginka_protocol::ChangeSource::Uncommitted)
+                            .await
+                            .map(|changes| changes.totals())
+                            .unwrap_or((0, 0));
+                        let answer = match &asked.session {
+                            Some(session) => {
+                                let mut transcript = Transcript::new();
+                                transcript.extend(&reading.transcript(session, 0).await);
+                                transcript
+                                    .blocks()
+                                    .iter()
+                                    .rev()
+                                    .find_map(|block| match block {
+                                        TranscriptBlock::Assistant { text } => Some(text.clone()),
+                                        _ => None,
+                                    })
+                            }
+                            None => None,
+                        };
+                        (totals, answer)
+                    })
+                    .await;
+                let updated = this.update(cx, |this, cx| {
+                    if let Some(compare) = this.comparing.as_mut()
+                        && let Some(entry) = compare
+                            .entries
+                            .iter_mut()
+                            .find(|entry| entry.workspace == row.workspace)
+                    {
+                        entry.added = totals.0;
+                        entry.removed = totals.1;
+                        entry.answer = Some(answer.unwrap_or_default());
+                        cx.notify();
+                    }
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Keep one attempt: archive the others — Orca's "keep the winner" —
+    /// after a second press, and go to it.
+    fn keep_attempt(&mut self, workspace: ginka_protocol::WorkspaceId, cx: &mut Context<Self>) {
+        let Some(compare) = self.comparing.as_mut() else {
+            return;
+        };
+        if compare.keeping.as_ref() != Some(&workspace) {
+            compare.keeping = Some(workspace);
+            cx.notify();
+            return;
+        }
+        let others: Vec<_> = compare
+            .entries
+            .iter()
+            .map(|entry| entry.workspace.clone())
+            .filter(|other| other != &workspace)
+            .collect();
+        self.comparing = None;
+        self.tabs.retain_workspaces(|open| !others.contains(open));
+        self.persist_tabs();
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+        let link = self.link.clone();
+        self.after_row_change(
+            async move {
+                for other in others {
+                    link.archive_workspace(&other, true).await?;
+                }
+                Ok(())
+            },
+            cx,
+        );
+    }
+
+    /// The comparison: an attempt a column — agent, branch, state, diff size
+    /// and last answer — with *Open* and *Keep*.
+    fn compare_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let compare = self.comparing.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let keeping = compare.keeping.clone();
+        let count = compare.entries.len();
+        let columns: Vec<AnyElement> = compare
+            .entries
+            .clone()
+            .into_iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let open = entry.workspace.clone();
+                let keep = entry.workspace.clone();
+                let armed = keeping.as_ref() == Some(&entry.workspace);
+                let state = entry
+                    .state
+                    .label()
+                    .map(|label| label.to_string())
+                    .unwrap_or_else(|| rust_i18n::t!("compare.idle").to_string());
+                v_flex()
+                    .id(("compare", index))
+                    .flex_1()
+                    .min_w(px(220.))
+                    .h_full()
+                    .p_3()
+                    .gap_2()
+                    .rounded(px(tokens.radius.panel))
+                    .bg(tokens.colors().bg_surface)
+                    .border_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .overflow_y_scroll()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                entry
+                                    .agent
+                                    .glyph()
+                                    .size_4()
+                                    .text_color(tokens.colors().accent),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_primary)
+                                    .truncate()
+                                    .child(entry.title.clone()),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .text_xs()
+                            .child(div().text_color(tokens.colors().text_muted).child(state))
+                            .child(
+                                div()
+                                    .text_color(tokens.colors().status_done)
+                                    .child(format!("+{}", entry.added)),
+                            )
+                            .child(
+                                div()
+                                    .text_color(tokens.colors().status_error)
+                                    .child(format!("-{}", entry.removed)),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new(("compare-open", index))
+                                    .ghost()
+                                    .compact()
+                                    .label(rust_i18n::t!("compare.open").to_string())
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.comparing = None;
+                                        this.sidebar.update(cx, |sidebar, cx| {
+                                            sidebar.select_workspace(&open, cx)
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new(("compare-keep", index))
+                                    .compact()
+                                    .label(if armed {
+                                        rust_i18n::t!("compare.keep.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("compare.keep").to_string()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.keep_attempt(keep.clone(), cx)
+                                    })),
+                            ),
+                    )
+                    .child(match entry.answer {
+                        None => div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.reading").to_string())
+                            .into_any_element(),
+                        Some(answer) if answer.is_empty() => div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("compare.no_answer").to_string())
+                            .into_any_element(),
+                        Some(answer) => div()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(
+                                TextView::markdown(("compare-answer", index), answer)
+                                    .selectable(true),
+                            )
+                            .into_any_element(),
+                    })
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            v_flex()
+                .size_full()
+                .p_4()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_sm()
+                                .text_color(tokens.colors().text_primary)
+                                .child(rust_i18n::t!("compare.title", count = count).to_string()),
+                        )
+                        .child(
+                            Button::new("compare-close")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("compare.close").to_string())
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.comparing = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .id("compare-columns")
+                        .flex_1()
+                        .min_h_0()
+                        .gap_3()
+                        .overflow_x_scroll()
+                        .children(columns),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Fork here onto another agent; `review` hands the fork a request for
+    /// a second opinion on the work so far instead of leaving it to carry on.
+    fn fork_from_as(&mut self, after: u64, agent: String, review: bool, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
             return;
         };
@@ -5733,10 +6980,15 @@ impl Shell {
         let link = self.link.clone();
         cx.spawn(async move |this, cx| {
             let requesting = link.clone();
+            let prompt = rust_i18n::t!("transcript.second_opinion.prompt").to_string();
             let result = cx
-                .background_spawn(
-                    async move { requesting.fork_session(&session, after, agent).await },
-                )
+                .background_spawn(async move {
+                    let fork = requesting.fork_session(&session, after, agent).await?;
+                    if review {
+                        requesting.send_message(&fork.id, prompt).await;
+                    }
+                    Ok::<_, String>(fork)
+                })
                 .await;
             match result {
                 Err(error) => {
@@ -5811,6 +7063,36 @@ impl Shell {
             .filter(|menu| menu.turn == turn && menu.seq == seq)
             .map(|menu| (true, menu.busy, menu.error.clone()))
             .unwrap_or((false, false, None));
+        // MonoCode's second opinion: the same fork, handed a request to review
+        // the work rather than to carry it on.
+        let review_buttons: Vec<AnyElement> = targets
+            .iter()
+            .map(|agent| {
+                let id = agent.id.clone();
+                Button::new(SharedString::from(format!("review-{turn}-{id}")))
+                    .disabled(fork_busy)
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .when(!fork_busy, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.fork_from_as(seq, id.clone(), true, cx)
+                            }))
+                    })
+                    .child(
+                        rust_i18n::t!(
+                            "transcript.second_opinion",
+                            agent = agent.display_name.clone()
+                        )
+                        .to_string(),
+                    )
+                    .into_any_element()
+            })
+            .collect();
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
@@ -5968,6 +7250,7 @@ impl Shell {
                             }),
                     )
                     .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
+                    .children(fork_open.then(|| h_flex().gap_1().children(review_buttons)))
                     .children(fork_error.map(|error| {
                         div()
                             .text_xs()
@@ -6476,6 +7759,30 @@ impl Shell {
         let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
         let queue_panel = self.queue_panel(cx);
+        let fan_out_panel = self.fan_out_panel(cx);
+        let prompt_editing = self.editing_prompt.map(|_| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.prompt.editing").to_string()),
+                )
+                .child(
+                    Button::new("cancel-prompt-edit")
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("composer.queue.cancel").to_string())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_prompt_edit(window, cx)),
+                        ),
+                )
+                .into_any_element()
+        });
         let queue_editing = self.editing_queued_message.map(|_| {
             h_flex()
                 .w_full()
@@ -6564,6 +7871,7 @@ impl Shell {
             .pb_3()
             .gap_2()
             .children(picker)
+            .children(fan_out_panel)
             .children(queue_panel)
             .child(
                 v_flex()
@@ -6610,6 +7918,7 @@ impl Shell {
                                     .to_string(),
                             )
                     }))
+                    .children(prompt_editing)
                     .children(queue_editing)
                     .child(Textarea::new(&self.composer))
                     .child(
@@ -6637,6 +7946,26 @@ impl Shell {
                                         this.choose_attachments(window, cx)
                                     })),
                             )
+                            .when(self.can_fan_out(), |this| {
+                                this.child(
+                                    Button::new("fan-out")
+                                        .ghost()
+                                        .compact()
+                                        .tooltip(rust_i18n::t!("composer.fan_out").to_string())
+                                        .child(
+                                            Icon::new(IconName::LayoutDashboard)
+                                                .size_4()
+                                                .text_color(if self.fan_out.is_some() {
+                                                    tokens.colors().accent
+                                                } else {
+                                                    tokens.colors().text_muted
+                                                }),
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| this.toggle_fan_out(cx)),
+                                        ),
+                                )
+                            })
                             .child(div().flex_1())
                             .children(model_chip)
                             .children(effort_chip)
@@ -9432,6 +10761,29 @@ impl Shell {
                                 },
                             )),
                     )
+                    .children(
+                        (self.session.is_some()
+                            && self.quick_commands.iter().any(|command| {
+                                command.kind == ginka_protocol::model::QuickCommandKind::Shell
+                            }))
+                        .then(|| {
+                            let label = rust_i18n::t!("terminal.quick").to_string();
+                            Button::new("quick-commands")
+                                .ghost()
+                                .compact()
+                                .tooltip(label.clone())
+                                .accessibility_label(label)
+                                .child(
+                                    Icon::new(IconName::Play)
+                                        .size_3()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.quick_menu_open = !this.quick_menu_open;
+                                    cx.notify();
+                                }))
+                        }),
+                    )
                     .children(self.session.is_some().then(|| {
                         let label = rust_i18n::t!("terminal.open").to_string();
                         Button::new("new-terminal")
@@ -9527,6 +10879,7 @@ impl Shell {
                             )
                     })),
             )
+            .children(self.quick_menu(cx))
             .children(self.terminal_search_bar(cx))
             .child(self.terminal_panes(cx))
     }
@@ -9826,13 +11179,14 @@ impl Shell {
                     }
                 })
                 .child(
-                    resizable_panel().child(
-                        v_flex()
+                    resizable_panel().child(match self.compare_view(cx) {
+                        Some(compare) => compare,
+                        None => v_flex()
                             .size_full()
                             .child(self.transcript(selected_text, cx))
                             .child(self.composer(cx))
                             .into_any_element(),
-                    ),
+                    }),
                 )
                 .when(dock_open, |this| {
                     this.child(
@@ -10040,6 +11394,8 @@ async fn pull_rows(
         }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        // The saved commands follow the project on screen, on the same tick.
+        this.refresh_quick_commands(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
             Some(row) => {
                 this.target_project = Some(ProjectName(row.origin.to_string()));
@@ -10194,6 +11550,10 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_previous_tab))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.

@@ -14,6 +14,9 @@ fn main() {
     if std::env::args().any(|argument| argument == "--lsp") {
         return language_server();
     }
+    if std::env::args().any(|argument| argument == "--experimental-acp" || argument == "acp") {
+        return acp_agent();
+    }
     // Two ways to script this, because two suites do. A script file exercises
     // the daemon's supervisor with directives it can pause and block on; the
     // flags exercise the driver's own reading of a stream. Neither knows about
@@ -22,6 +25,76 @@ fn main() {
         return scripted();
     }
     flags();
+}
+
+/// Minimal ACP agent: one session, reloadable, that echoes the prompt back.
+/// A prompt that mentions "permission" asks for one first and says which
+/// option came back.
+fn acp_agent() {
+    use serde_json::{Value, json};
+    let mut output = std::io::stdout().lock();
+    let mut send = |message: Value| {
+        writeln!(output, "{message}").ok();
+        output.flush().ok();
+    };
+    let chunk = |session: &str, text: &str| {
+        json!({"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": session,
+            "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}}}})
+    };
+    let mut lines = std::io::stdin().lock().lines();
+    let mut pending_prompt: Option<(Value, String, String)> = None;
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let id = message["id"].clone();
+        match message["method"].as_str() {
+            Some("initialize") => send(json!({"jsonrpc": "2.0", "id": id, "result": {
+                "protocolVersion": 1, "agentCapabilities": {"loadSession": true}}})),
+            Some("session/new") => {
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {"sessionId": "acp-1"}}))
+            }
+            Some("session/load") => {
+                let session = message["params"]["sessionId"].as_str().unwrap_or_default();
+                send(chunk(session, "[replayed]"));
+                send(json!({"jsonrpc": "2.0", "id": id, "result": null}));
+            }
+            Some("session/prompt") => {
+                let session = message["params"]["sessionId"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                let text = message["params"]["prompt"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                if text.contains("permission") {
+                    send(
+                        json!({"jsonrpc": "2.0", "id": "ask-1", "method": "session/request_permission",
+                        "params": {"sessionId": session, "toolCall": {"toolCallId": "c1", "title": "Touch a file"},
+                        "options": [{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+                                    {"optionId": "no", "name": "Reject", "kind": "reject_once"}]}}),
+                    );
+                    pending_prompt = Some((id, session, text));
+                    continue;
+                }
+                send(chunk(&session, &format!("[acp:{session}:{text}]")));
+                send(json!({"jsonrpc": "2.0", "id": id, "result": {"stopReason": "end_turn"}}));
+            }
+            None => {
+                if let Some((prompt, session, _)) = pending_prompt.take() {
+                    let chose = message["result"]["outcome"]["optionId"]
+                        .as_str()
+                        .unwrap_or("cancelled");
+                    send(chunk(&session, &format!("[permission:{chose}]")));
+                    send(
+                        json!({"jsonrpc": "2.0", "id": prompt, "result": {"stopReason": "end_turn"}}),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Minimal LSP peer for exercising framing and document synchronization.

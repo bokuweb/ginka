@@ -772,7 +772,14 @@ impl Supervisor {
         let compact = driver
             .compaction(&spec, vendor_session_id)
             .context("the provider does not support manual context compaction")?;
-        self.run_process(session, driver, spec, compact.command, compact.input);
+        self.run_process(
+            session,
+            driver,
+            spec,
+            compact.command,
+            compact.input,
+            ParseState::default(),
+        );
         Ok(())
     }
 
@@ -905,7 +912,9 @@ impl Supervisor {
             Some(vendor) => driver.resume_command(&spec, vendor),
             None => driver.start_command(&spec),
         };
-        self.run_process(session, driver, spec, command, Vec::new());
+        let mut parse = ParseState::default();
+        let opening = driver.begin(&spec, vendor_session_id.as_deref(), &mut parse);
+        self.run_process(session, driver, spec, command, opening, parse);
     }
 
     /// Spawn one ordinary or provider-control turn and the task that pumps it.
@@ -916,6 +925,7 @@ impl Supervisor {
         spec: SessionSpec,
         command: CommandSpec,
         initial_input: Vec<String>,
+        parse: ParseState,
     ) {
         let context = self.context.clone();
         let running = self.running.clone();
@@ -1007,6 +1017,7 @@ impl Supervisor {
                         cancelled: &cancelled,
                         steer: &steer,
                         requests: &requests,
+                        parse,
                     },
                 )
                 .await;
@@ -1134,6 +1145,8 @@ struct Turn<'a> {
     steer: &'a Mutex<Option<async_channel::Sender<String>>>,
     /// Interaction ids this turn is blocked on.
     requests: &'a Mutex<HashSet<String>>,
+    /// The reader's state as [`AgentDriver::begin`] left it.
+    parse: ParseState,
 }
 
 async fn pump(
@@ -1153,6 +1166,7 @@ async fn pump(
         cancelled,
         steer,
         requests,
+        parse,
     } = turn;
     context.set_state(session, SessionState::Running, None);
     if let Err(error) = context.record(
@@ -1173,7 +1187,7 @@ async fn pump(
     let stderr = child.stderr.take();
     let mut parse = ParseState {
         turn: turns_so_far,
-        ..ParseState::default()
+        ..parse
     };
     // Captured before the agent runs, so a file the user edited in the terminal
     // between turns counts as part of what the agent was handed rather than as
@@ -1199,6 +1213,9 @@ async fn pump(
                 match &event {
                     AgentEvent::SessionResult { state, summary } => {
                         reported = Some((*state, summary.clone()));
+                        // Nothing follows a result: close the agent's input
+                        // so a transport that waits on it can exit.
+                        steer.lock().unwrap_or_else(|e| e.into_inner()).take();
                     }
                     AgentEvent::TextDelta { text } if !text.trim().is_empty() => {
                         last_text.push_str(text);
@@ -1247,6 +1264,15 @@ async fn pump(
                 }
                 if let Err(error) = context.record(session, TranscriptPayload::Agent { event }) {
                     tracing::error!(%error, "could not record an agent event");
+                }
+            }
+            // What the driver has to say back, before the next line is read.
+            if !parse.outbox.is_empty() {
+                let sender = steer.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                for reply in parse.outbox.drain(..) {
+                    if let Some(sender) = &sender {
+                        let _ = sender.try_send(reply);
+                    }
                 }
             }
             if let Some(vendor) = parse.vendor_session_id.as_deref() {

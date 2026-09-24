@@ -216,6 +216,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_session_edit",
+            description: "Edit a sent prompt (by transcript seq) and run the conversation again from it in a new session; the worktree goes back to the checkpoint before that prompt and the original conversation is kept.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "seq": {"type": "integer", "minimum": 1},
+                    "text": {"type": "string"}
+                },
+                "required": ["session", "seq", "text"],
+            }),
+        },
+        Tool {
             name: "ginka_queue_add",
             description: "Queue a follow-up behind the running turn instead of steering it in. With nothing running or waiting it is sent at once.",
             schema: json!({
@@ -328,6 +341,23 @@ pub fn tools() -> Vec<Tool> {
                     "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
                 },
                 "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_quick_commands",
+            description: "The reader's saved shell commands and prompts: a project's own and the global ones.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}},
+            }),
+        },
+        Tool {
+            name: "ginka_quick_run",
+            description: "Run a saved shell command in a new terminal in a workspace; answers with the terminal id.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace, "id": {"type": "string"}},
+                "required": ["workspace", "id"],
             }),
         },
         Tool {
@@ -668,6 +698,11 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             session: SessionId(text("session")?),
             id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
         },
+        "ginka_session_edit" => Request::EditPrompt {
+            session: SessionId(text("session")?),
+            seq: number("seq").ok_or_else(|| anyhow!("{tool} needs a `seq`"))?,
+            text: text("text")?,
+        },
         "ginka_queue_add" => Request::QueueMessage {
             session: SessionId(text("session")?),
             text: text("text")?,
@@ -715,6 +750,19 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 None if flag("unstaged") => ginka_protocol::model::ChangeSource::Unstaged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_quick_commands" => Request::ListQuickCommands {
+            project: maybe("project").map(ProjectName),
+        },
+        "ginka_quick_run" => Request::RunQuickCommand {
+            workspace: WorkspaceId(text("workspace")?),
+            // A string id; a number is read as one, which is what an agent
+            // that copied it from a listing may hand back.
+            id: maybe("id")
+                .or_else(|| number("id").map(|id| id.to_string()))
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            rows: 24,
+            cols: 100,
         },
         "ginka_notes" => Request::ListNotes {
             project: maybe("project").map(ProjectName),
@@ -880,6 +928,7 @@ mod tests {
                 "session": "s-1",
                 "request_id": "ask-1",
                 "id": 7,
+                "seq": 3,
                 "index": 0,
                 "response": "yes",
                 "agent": "claude",

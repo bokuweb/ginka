@@ -662,7 +662,17 @@ mod tests {
             .iter()
             .map(|account| account.id.0.as_str())
             .collect();
-        assert_eq!(ids, vec!["claude", "claude-work", "codex", "codex-work"]);
+        assert_eq!(
+            ids,
+            vec![
+                "claude",
+                "claude-work",
+                "codex",
+                "codex-work",
+                "gemini",
+                "opencode"
+            ]
+        );
 
         let default = &accounts[0];
         assert!(default.is_default);

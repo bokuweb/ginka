@@ -898,6 +898,108 @@ impl DaemonLink {
         }
     }
 
+    /// Ask one prompt in a worktree per attempt; answers with the sessions
+    /// that started and a line for each that did not.
+    pub async fn fan_out(
+        &self,
+        project: ProjectName,
+        branch_prefix: String,
+        prompt: String,
+        attempts: Vec<ginka_protocol::rpc::Attempt>,
+    ) -> Result<(Vec<Session>, Vec<String>), String> {
+        match self
+            .ask_result(Request::FanOut {
+                project,
+                branch_prefix,
+                base: None,
+                prompt,
+                attempts,
+            })
+            .await?
+        {
+            Response::FannedOut { started, failed } => Ok((started, failed)),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
+    /// A project's saved commands and the global ones.
+    pub async fn quick_commands(
+        &self,
+        project: Option<ProjectName>,
+    ) -> Vec<ginka_protocol::model::QuickCommand> {
+        match self.ask(Request::ListQuickCommands { project }).await {
+            Some(Response::QuickCommands { commands }) => commands,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Save a quick command; the refusal is the daemon's own words.
+    pub async fn save_quick_command(
+        &self,
+        project: Option<ProjectName>,
+        name: String,
+        kind: ginka_protocol::model::QuickCommandKind,
+        body: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SaveQuickCommand {
+            id: None,
+            project,
+            name,
+            kind,
+            body,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a quick command.
+    pub async fn remove_quick_command(&self, id: String) {
+        self.ask(Request::RemoveQuickCommand { id }).await;
+    }
+
+    /// Run a shell quick command in a new terminal in the workspace.
+    pub async fn run_quick_command(
+        &self,
+        workspace: &WorkspaceId,
+        id: String,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId, String> {
+        match self
+            .ask_result(Request::RunQuickCommand {
+                workspace: workspace.clone(),
+                id,
+                rows,
+                cols,
+            })
+            .await?
+        {
+            Response::Terminal { terminal } => Ok(terminal),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
+    /// Run the conversation again from an edited prompt; answers with the
+    /// session it now continues in.
+    pub async fn edit_prompt(
+        &self,
+        session: &SessionId,
+        seq: u64,
+        text: String,
+    ) -> Result<ginka_protocol::model::Session, String> {
+        match self
+            .ask_result(Request::EditPrompt {
+                session: session.clone(),
+                seq,
+                text,
+            })
+            .await?
+        {
+            Response::Session { session } => Ok(session),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// Queue a follow-up behind the running turn rather than steering it in.
     pub async fn queue_message(&self, session: &SessionId, text: String) -> Result<(), String> {
         self.git_sync(Request::QueueMessage {

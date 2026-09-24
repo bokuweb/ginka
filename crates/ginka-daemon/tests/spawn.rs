@@ -114,6 +114,41 @@ fn a_stale_handshake_is_replaced_rather_than_trusted() {
 }
 
 #[test]
+fn a_daemon_from_an_older_build_is_replaced_rather_than_waited_for() {
+    // The lock keeps a second daemon out, so an upgrade has to retire the
+    // old one or no client of the new build could ever connect.
+    let home = Home::new();
+    let discovery = home.discovery();
+    smol::block_on(async {
+        discovery
+            .connect(None)
+            .await
+            .expect("the first daemon starts");
+    });
+    let mut old = discovery.published().expect("it published itself");
+    // As a daemon from an older build looks to this client: an older
+    // protocol in its file, and a refusal when it is spoken to.
+    old.protocol_version -= 1;
+    old.token = "refused".into();
+    ginka_daemon::handshake::write(&home.paths.daemon_handshake(), &old).unwrap();
+
+    smol::block_on(async {
+        let client = discovery
+            .connect(None)
+            .await
+            .expect("an older daemon must not strand a newer client");
+        assert_eq!(client.request(Request::Ping).await.unwrap(), Response::Ack);
+    });
+    let now = discovery.published().unwrap();
+    assert_ne!(now.pid, old.pid, "the old daemon was replaced");
+    assert_eq!(
+        now.protocol_version,
+        ginka_protocol::envelope::PROTOCOL_VERSION
+    );
+    stop(&discovery);
+}
+
+#[test]
 fn a_spawned_daemon_keeps_the_state_it_was_given() {
     // The daemon inherits `GINKA_HOME`, so what a client writes through it
     // lands in the directory the client meant, not in the user's real one.
@@ -193,4 +228,61 @@ fn a_daemon_asked_to_stop_by_signal_leaves_nothing_behind() {
     // Leave nothing running for the next test either.
     stop(&discovery);
     panic!("the daemon ignored the signal, or left its handshake behind");
+}
+
+#[test]
+fn a_second_daemon_on_the_same_state_leaves_the_first_alone() {
+    let home = Home::new();
+    let discovery = home.discovery();
+    smol::block_on(async {
+        discovery
+            .connect(None)
+            .await
+            .expect("the first daemon starts");
+    });
+    let first = discovery.published().expect("it published itself").pid;
+
+    let status = std::process::Command::new(DAEMON)
+        .env("GINKA_HOME", home.paths.root())
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "the second one leaves quietly");
+    assert_eq!(
+        discovery.published().map(|handshake| handshake.pid),
+        Some(first),
+        "and does not publish over the first"
+    );
+    stop(&discovery);
+}
+
+#[test]
+fn clients_arriving_together_share_one_daemon() {
+    let home = Home::new();
+    let discovery = home.discovery();
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let discovery = discovery.clone();
+            std::thread::spawn(move || {
+                smol::block_on(async {
+                    let client = discovery.connect(None).await.expect("connects");
+                    client.request(Request::Ping).await.unwrap();
+                })
+            })
+        })
+        .collect();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    // However many clients raced to start one, only one daemon got past the
+    // lock to serve, and its log says so once.
+    let ready = std::fs::read_dir(home.paths.logs())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("daemon"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+        .map(|text| text.matches("daemon ready").count())
+        .sum::<usize>();
+    assert_eq!(ready, 1, "one daemon served every client");
+    stop(&discovery);
 }

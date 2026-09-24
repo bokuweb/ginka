@@ -108,6 +108,15 @@ pub fn run(project: &Path, worktree: &Path, setup: &Setup) -> Report {
     report
 }
 
+/// The shell arguments a terminal runs a project's setup commands with: each
+/// in order, stopping at the first that fails, then a line with the exit
+/// status and a shell in its place, so the output stays readable and the tab
+/// is somewhere to carry on.
+pub fn terminal_args(commands: &[String]) -> Vec<String> {
+    let script = format!("set -e\n{}\n", commands.join("\n"));
+    crate::quick_commands::shell_args(&format!("( {script})"))
+}
+
 /// Copy a file, or a directory and everything under it.
 fn copy(from: &Path, to: &Path) -> Result<()> {
     if let Some(parent) = to.parent() {

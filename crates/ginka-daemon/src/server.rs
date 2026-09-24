@@ -57,6 +57,39 @@ pub struct Daemon {
     status_every: std::time::Duration,
 }
 
+/// Stop a daemon from an older build that is still serving this state
+/// directory, and say whether it has gone.
+///
+/// Only an older one: this daemon holds the lock by now, so the other is
+/// from a build before it, and no client of this build can talk to it. One
+/// with the same protocol or a newer one is left alone.
+fn retire_older(existing: &Handshake) -> bool {
+    if existing.protocol_version >= ginka_protocol::envelope::PROTOCOL_VERSION {
+        return false;
+    }
+    tracing::info!(
+        pid = existing.pid,
+        protocol = existing.protocol_version,
+        "stopping a daemon from an older build"
+    );
+    for signal in ["TERM", "KILL"] {
+        let _ = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(existing.pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            if !is_listening(existing.port) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    !is_listening(existing.port)
+}
+
 impl Daemon {
     /// Bind a loopback port, open the database and publish the handshake file.
     ///
@@ -68,6 +101,7 @@ impl Daemon {
         let handshake_path = paths.daemon_handshake();
         if let Some(existing) = handshake::read(&handshake_path)
             && is_listening(existing.port)
+            && !retire_older(&existing)
         {
             anyhow::bail!(
                 "a daemon is already running (pid {}) on port {}",
