@@ -279,6 +279,9 @@ impl Fixture {
         ));
         drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, script)));
         drivers.insert(Arc::new(ResponseDriver::new(FAKE_AGENT, script)));
+        drivers.insert(Arc::new(
+            ginka_core::driver::acp::AcpDriver::gemini().with_program(FAKE_AGENT),
+        ));
         drivers
     }
 
@@ -3016,4 +3019,61 @@ fn an_edited_prompt_runs_the_conversation_again_on_a_fresh_thread() {
             })
             .is_err()
     );
+}
+
+#[test]
+fn an_acp_agent_is_prompted_once_it_has_opened_a_session_and_reloaded_after() {
+    // ACP is a conversation: the prompt can only follow `session/new`'s
+    // answer, which is what the driver's outbox is for.
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with("gemini", "", "hello");
+    let transcript = fixture.wait_for_said(&session, "[acp:acp-1:hello]");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    assert!(
+        transcript.iter().any(|entry| matches!(
+            entry,
+            TranscriptPayload::Agent {
+                event: AgentEvent::TurnEnd { turn: 1 }
+            }
+        )),
+        "{transcript:?}"
+    );
+    assert_eq!(
+        fixture.stored(&session).vendor_session_id.as_deref(),
+        Some("acp-1")
+    );
+
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "again".into(),
+    });
+    let transcript = fixture.wait_for_said(&session, "[acp:acp-1:again]");
+    assert!(
+        !spoken(&transcript).contains("[replayed]"),
+        "a reloaded conversation is not recorded twice"
+    );
+}
+
+#[test]
+fn an_acp_permission_request_waits_for_the_reader_and_carries_the_choice_back() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start_with("gemini", "", "needs permission");
+    fixture.wait_for_state(&session, SessionState::AwaitingInput);
+    let asked = fixture
+        .transcript(&session)
+        .into_iter()
+        .find_map(|entry| match entry {
+            TranscriptPayload::Agent {
+                event: AgentEvent::AskUser { id, options, .. },
+            } => Some((id, options)),
+            _ => None,
+        })
+        .expect("the question is recorded");
+    assert_eq!(asked.1, vec!["Allow", "Reject"]);
+    fixture.ask(Request::RespondToAgent {
+        session: session.clone(),
+        request_id: asked.0,
+        response: "Allow".into(),
+    });
+    fixture.wait_for_said(&session, "[permission:yes]");
 }

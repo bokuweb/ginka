@@ -228,6 +228,7 @@ pub enum Agent {
     Claude,
     Codex,
     Gemini,
+    OpenCode,
 }
 
 impl Agent {
@@ -240,6 +241,7 @@ impl Agent {
         match id {
             "codex" => Self::Codex,
             "gemini" => Self::Gemini,
+            "opencode" => Self::OpenCode,
             _ => Self::Claude,
         }
     }
@@ -253,6 +255,7 @@ impl Agent {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Gemini => "gemini",
+            Self::OpenCode => "opencode",
         }
     }
 
@@ -261,6 +264,7 @@ impl Agent {
             Self::Claude => icon::AGENT_SPARK,
             Self::Codex => icon::AGENT_ORBIT,
             Self::Gemini => icon::AGENT_CUBE,
+            Self::OpenCode => icon::AGENT_PROMPT,
         })
     }
 
@@ -269,6 +273,7 @@ impl Agent {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
             Self::Gemini => "Gemini",
+            Self::OpenCode => "OpenCode",
         }
     }
 }
@@ -1226,7 +1231,7 @@ mod tests {
     fn a_glyph_names_the_driver_it_came_from() {
         // The row is what the user starts an agent from, so the mapping has to
         // survive the round trip.
-        for agent in [Agent::Claude, Agent::Codex, Agent::Gemini] {
+        for agent in [Agent::Claude, Agent::Codex, Agent::Gemini, Agent::OpenCode] {
             assert_eq!(Agent::from_id(agent.driver_id()), agent);
         }
     }

@@ -38,6 +38,10 @@ const ICONS: &[(&str, &str)] = &[
         include_str!("../../../assets/icons/agent-spark.svg"),
     ),
     (
+        "icons/agent-prompt.svg",
+        include_str!("../../../assets/icons/agent-prompt.svg"),
+    ),
+    (
         "icons/compass.svg",
         include_str!("../../../assets/icons/compass.svg"),
     ),
@@ -77,6 +81,7 @@ pub mod icon {
     pub const AGENT_CUBE: &str = "icons/agent-cube.svg";
     pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
     pub const AGENT_SPARK: &str = "icons/agent-spark.svg";
+    pub const AGENT_PROMPT: &str = "icons/agent-prompt.svg";
     /// The four marks on the home screen's starters, one per kind of first
     /// question: explore, build, review, fix.
     pub const COMPASS: &str = "icons/compass.svg";
@@ -137,6 +142,7 @@ mod tests {
             icon::AGENT_CUBE,
             icon::AGENT_ORBIT,
             icon::AGENT_SPARK,
+            icon::AGENT_PROMPT,
             icon::COMPASS,
             icon::HAMMER,
             icon::LIST_CHECK,
