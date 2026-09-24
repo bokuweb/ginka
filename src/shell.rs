@@ -283,10 +283,9 @@ const TERMINAL_CELL_WIDTH: f32 = 7.5;
 /// re-wrapping instead of working. Eighty is what everything assumes anyway.
 const TERMINAL_COLUMNS: u16 = 100;
 
-/// How far from the foot still counts as being at it. About a line of text:
-/// enough that an answer growing between one frame and the next does not read
-/// as the reader scrolling away.
-const NEARLY_THE_FOOT: f32 = 24.;
+/// How far past the screen the transcript list lays blocks out, so a short
+/// scroll does not show a block being measured.
+const TRANSCRIPT_OVERDRAW: f32 = 1200.;
 
 /// The turn-level handoff choice currently expanded in the transcript.
 /// The composer's fan-out panel: how many attempts each agent gets.
@@ -637,8 +636,10 @@ pub struct Shell {
     /// which is why a window that closes and reopens finds the build still
     /// running and picks the tab back up.
     terminals: ginka_ui::terminal::TerminalTabs,
-    /// The transcript's scroll position, so the answer can be followed.
-    transcript_scroll: ScrollHandle,
+    /// The transcript, as a virtualized list (`AGENTS.md` rule 5): only the
+    /// blocks near the screen are laid out, however long the conversation.
+    /// One item per block, and the activity line as the last.
+    transcript_list: ListState,
     /// Whether the transcript is still following the answer. Dropped by the
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
@@ -963,7 +964,7 @@ impl Shell {
                         this.transcript_search = None;
                         this.session_state = None;
                         this.submitted = false;
-                        this.transcript_follows = true;
+                        this.follow_transcript();
                         this.picker = None;
                         this.attachments.clear();
                         this.image_markup = None;
@@ -1373,7 +1374,11 @@ impl Shell {
             forking: None,
             fan_out: None,
             comparing: None,
-            transcript_scroll: ScrollHandle::new(),
+            transcript_list: {
+                let list = ListState::new(0, ListAlignment::Top, px(TRANSCRIPT_OVERDRAW));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
             transcript_follows: true,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
             composer,
@@ -1860,7 +1865,7 @@ impl Shell {
         self.transcript_search = None;
         self.session_state = None;
         self.submitted = false;
-        self.transcript_follows = true;
+        self.follow_transcript();
         // The next prompt opens a session rather than continuing whichever one
         // the workspace it lands in happens to hold: that is what "new" said.
         self.start_fresh = true;
@@ -2485,6 +2490,7 @@ impl Shell {
     /// keeps it going; with nothing left to write nothing is asked for, and
     /// the window goes back to sleep.
     fn write_a_little_more(&mut self, window: &mut Window) {
+        self.sync_transcript_list();
         self.follow_the_answer();
 
         let arrived = self
@@ -2498,33 +2504,48 @@ impl Shell {
     }
 
     /// Keep the foot of the conversation in view while it is being written.
-    fn follow_the_answer(&mut self) {
-        let (pull, follows) = ginka_ui::transcript::following(
-            self.is_working(),
-            self.transcript_follows,
-            self.transcript_at_foot(),
-        );
-        self.transcript_follows = follows;
-        if pull {
-            self.transcript_scroll.scroll_to_bottom();
-        }
-    }
-
-    /// Whether the transcript is scrolled to its foot, near enough.
     ///
-    /// Near enough because the foot moves as the answer grows: by the time a
-    /// frame is drawn the text is a line longer than when the offset was set.
-    fn transcript_at_foot(&self) -> bool {
-        let offset = f32::from(self.transcript_scroll.offset().y);
-        let furthest = f32::from(self.transcript_scroll.max_offset().y);
-        // Scrolling down counts down from zero, so the foot is the most
-        // negative the offset gets.
-        furthest + offset <= NEARLY_THE_FOOT
+    /// The list follows its tail itself: it stops when the reader scrolls
+    /// up, and picks the tail up again when they come back to the foot.
+    /// What is left here is to tell the rest of the window which it is doing.
+    fn follow_the_answer(&mut self) {
+        self.transcript_follows = self.transcript_list.is_following_tail();
     }
 
-    /// The reader has taken the transcript somewhere themselves.
-    fn transcript_scrolled(&mut self) {
+    /// Follow the answer again from its foot, as sending a prompt does.
+    fn follow_transcript(&mut self) {
+        self.transcript_follows = true;
+        self.transcript_list.set_follow_mode(FollowMode::Tail);
+    }
+
+    /// Bring block `index` to the top of the transcript, which stops
+    /// following the answer.
+    fn show_transcript_block(&mut self, index: usize) {
         self.transcript_follows = false;
+        self.transcript_list.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.),
+        });
+    }
+
+    /// Tell the list what changed in the transcript since the last frame:
+    /// the blocks from the first one touched are measured again, and none
+    /// before it.
+    fn sync_transcript_list(&mut self) {
+        let count = self.transcript.blocks().len() + 1;
+        let old = self.transcript_list.item_count();
+        let changed = self.transcript.take_changed();
+        if old == 0 || old > count {
+            // Another conversation, or this one read again from the start.
+            self.transcript_list.reset(count);
+            if self.transcript_follows {
+                self.transcript_list.set_follow_mode(FollowMode::Tail);
+            }
+            return;
+        }
+        // The activity line, last, changes with every state the agent is in.
+        let from = changed.unwrap_or(old - 1).min(old - 1);
+        self.transcript_list.splice(from..old, count - from);
     }
 
     /// Put the workspace back to a checkpoint, and read the transcript again.
@@ -3977,7 +3998,7 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value(draft, window, cx));
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
         let link = self.link.clone();
         cx.spawn(async move |this, cx| {
@@ -4228,7 +4249,7 @@ impl Shell {
         // because making a worktree is a round trip and a window that says
         // nothing for one reads as a window that dropped the prompt.
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
         let link = self.link.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -4281,7 +4302,7 @@ impl Shell {
         // window saying nothing for a round trip reads as a window that
         // dropped it.
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
 
         let link = self.link.clone();
@@ -5529,8 +5550,7 @@ impl Shell {
             return;
         };
         if let Some(index) = self.transcript.block_index_for_seq(seq) {
-            self.transcript_follows = false;
-            self.transcript_scroll.scroll_to_top_of_item(index);
+            self.show_transcript_block(index);
         }
     }
 
@@ -5993,63 +6013,12 @@ impl Shell {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
-        let hit = self.transcript_search.as_ref().and_then(|search| {
-            search
-                .chosen
-                .and_then(|chosen| search.matches.get(chosen))
-                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
-        });
-        let scroller = v_flex()
-            .id("transcript-scroll")
-            .flex_1()
-            .px_8()
-            .py_6()
-            .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll)
-            // The gesture, not the resulting offset: an answer that grows
-            // moves the foot away from the reader too.
-            .on_scroll_wheel(cx.listener(|this, _, _, _| this.transcript_scrolled()))
-            .children({
-                let last = self.transcript.blocks().len().saturating_sub(1);
-                self.transcript
-                    .blocks()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, block)| {
-                        let block = match block {
-                            // Only the tail is still being written; every
-                            // block before it is finished text.
-                            TranscriptBlock::Assistant { text } if index == last => self.block(
-                                index,
-                                &TranscriptBlock::Assistant {
-                                    text: self.reveal.shown(text).to_string(),
-                                },
-                                cx,
-                            ),
-                            block => self.block(index, block, cx),
-                        };
-                        // Each block is a direct child of the scroller so its
-                        // persisted sequence can be brought into view by ⌘F.
-                        div()
-                            .w_full()
-                            .max_w(px(TRANSCRIPT_MEASURE))
-                            .mx_auto()
-                            .mb_5()
-                            .when(hit == Some(index), |this| {
-                                this.rounded(px(Tokens::global(cx).radius.card))
-                                    .bg(Tokens::global(cx).colors().row_active())
-                            })
-                            .child(block)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(TRANSCRIPT_MEASURE))
-                    .mx_auto()
-                    .children(self.activity_line(cx)),
-            );
+        let scroller = list(
+            self.transcript_list.clone(),
+            cx.processor(|this, index: usize, _window, cx| this.transcript_item(index, cx)),
+        )
+        .flex_1()
+        .size_full();
         v_flex()
             .id("transcript")
             .relative()
@@ -6059,6 +6028,65 @@ impl Shell {
             .children(self.transcript_search_bar(cx))
             .child(scroller)
             .children(self.transcript_selection_action(selected_text, cx))
+            .into_any_element()
+    }
+
+    /// One item of the transcript list: a block, or — last — the activity
+    /// line. Padded here rather than on the list, so the list's own scroll
+    /// area is the whole column.
+    fn transcript_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let blocks = self.transcript.blocks().len();
+        let tokens = Tokens::global(cx).clone();
+        let frame = div()
+            .w_full()
+            .px_8()
+            .pt(if index == 0 { px(24.) } else { px(0.) });
+        if index >= blocks {
+            return frame
+                .pb_6()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(TRANSCRIPT_MEASURE))
+                        .mx_auto()
+                        .children(self.activity_line(cx)),
+                )
+                .into_any_element();
+        }
+        let hit = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
+        });
+        let block = match &self.transcript.blocks()[index] {
+            // Only the tail is still being written; every block before it is
+            // finished text.
+            TranscriptBlock::Assistant { text } if index + 1 == blocks => self.block(
+                index,
+                &TranscriptBlock::Assistant {
+                    text: self.reveal.shown(text).to_string(),
+                },
+                cx,
+            ),
+            block => {
+                let block = block.clone();
+                self.block(index, &block, cx)
+            }
+        };
+        frame
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_MEASURE))
+                    .mx_auto()
+                    .mb_5()
+                    .when(hit == Some(index), |this| {
+                        this.rounded(px(tokens.radius.card))
+                            .bg(tokens.colors().row_active())
+                    })
+                    .child(block),
+            )
             .into_any_element()
     }
 
@@ -6165,8 +6193,7 @@ impl Shell {
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.transcript_follows = false;
-                            this.transcript_scroll.scroll_to_top_of_item(block);
+                            this.show_transcript_block(block);
                             cx.notify();
                         }))
                 }))
