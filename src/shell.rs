@@ -5130,13 +5130,21 @@ impl Shell {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .child(div().w(px(140.)).child(Input::new(&self.cron_form.name)))
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .child(ginka_ui::field::input(&self.cron_form.name)),
+                    )
                     .child(
                         div()
                             .w(px(130.))
-                            .child(Input::new(&self.cron_form.schedule)),
+                            .child(ginka_ui::field::input(&self.cron_form.schedule)),
                     )
-                    .child(div().flex_1().child(Input::new(&self.cron_form.body)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.cron_form.body)),
+                    )
                     .child(
                         Button::new("cron-save")
                             .compact()

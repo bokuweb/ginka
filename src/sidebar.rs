@@ -568,7 +568,7 @@ impl SessionSidebar {
                 .w_full()
                 .px_1()
                 .py_0p5()
-                .child(Input::new(field))
+                .child(ginka_ui::field::input(field))
                 .into_any_element();
         }
         let menu_open = self.project_menu_for.as_ref() == Some(&project);
