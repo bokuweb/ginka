@@ -1193,3 +1193,6 @@ surface.git.commit_push:
 surface.git.commit_pr:
   en: Commit & Create PR
   ja: コミットして PR を作成
+tabs.new:
+  en: New chat
+  ja: 新しいチャット

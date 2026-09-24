@@ -63,7 +63,11 @@ actions!(
         CopyTerminalOutput,
         NavigateBack,
         NavigateForward,
-        OpenSettings
+        OpenSettings,
+        NewTab,
+        CloseTab,
+        NextTab,
+        PreviousTab
     ]
 );
 
@@ -164,6 +168,22 @@ pub fn init(cx: &mut App) {
             CopyTerminalOutput,
             Some("Terminal"),
         ),
+        // MonoCode's tab chords. `⇧⌘[`/`⇧⌘]` are the terminal's own tabs
+        // while a terminal has focus: its context is the deeper one.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-t", NewTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-w", CloseTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-]", NextTab, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-[", PreviousTab, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-t", NewTab, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
+        KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -582,6 +602,8 @@ pub struct Shell {
     index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
+    /// The conversations open across the top of the centre column.
+    tabs: ginka_ui::tabs::Tabs,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -625,6 +647,12 @@ impl Shell {
             window.refresh();
         });
         let notes = cx.new(|cx| crate::notes::NotesView::new(link.clone(), window, cx));
+        let restored_tabs = ginka_ui::tabs::Tabs::restore(
+            settings
+                .open_tabs
+                .iter()
+                .map(|id| ginka_protocol::WorkspaceId(id.clone())),
+        );
 
         // The centre column shows whichever row the sidebar has selected; until
         // selection is wired up that is simply the first.
@@ -793,6 +821,9 @@ impl Shell {
                         if let Some(workspace) =
                             this.session.as_ref().map(|row| row.workspace.clone())
                         {
+                            this.tabs
+                                .open(ginka_ui::tabs::Tab::Workspace(workspace.clone()));
+                            this.persist_tabs();
                             this.navigation
                                 .visit(NavigationTarget::Workspace(workspace));
                         }
@@ -1242,6 +1273,7 @@ impl Shell {
             sidebar,
             surfaces,
             notes,
+            tabs: restored_tabs,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -1689,6 +1721,7 @@ impl Shell {
     ) {
         self.navigation
             .visit(NavigationTarget::Home(project.clone()));
+        self.tabs.open(ginka_ui::tabs::Tab::New);
         self.remember_workspace_view(cx);
         self.save_settings();
         self.sidebar
@@ -1756,6 +1789,9 @@ impl Shell {
         self.target_project = Some(ProjectName(row.origin.to_string()));
         self.navigation
             .visit(NavigationTarget::Workspace(row.workspace.clone()));
+        // A new chat's tab becomes its conversation in place.
+        self.tabs.promote_new(row.workspace.clone());
+        self.persist_tabs();
         self.session = Some(row);
         if changed_workspace {
             let workspace = self
@@ -1770,6 +1806,184 @@ impl Shell {
             self.save_settings();
         }
         cx.notify();
+    }
+
+    /// Write the open tabs back to `app.json`.
+    fn persist_tabs(&mut self) {
+        self.settings.open_tabs = self
+            .tabs
+            .workspaces()
+            .into_iter()
+            .map(|workspace| workspace.0)
+            .collect();
+        self.save_settings();
+    }
+
+    /// Show whatever a tab holds: its conversation, or a new chat.
+    fn show_tab(
+        &mut self,
+        tab: Option<ginka_ui::tabs::Tab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match tab {
+            // The sidebar decides what "selected" means and announces it; the
+            // announcement is what swaps the conversation in.
+            Some(ginka_ui::tabs::Tab::Workspace(workspace)) => self
+                .sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx)),
+            Some(ginka_ui::tabs::Tab::New) | None => {
+                let project = self.target_project.clone();
+                self.start_new_chat(project, window, cx);
+            }
+        }
+        self.persist_tabs();
+        cx.notify();
+    }
+
+    fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let closing_active = self.tabs.active_index() == Some(index);
+        self.tabs.close(index);
+        if closing_active {
+            let next = self.tabs.active().cloned();
+            self.show_tab(next, window, cx);
+        } else {
+            self.persist_tabs();
+            cx.notify();
+        }
+    }
+
+    fn on_new_tab(&mut self, _: &NewTab, window: &mut Window, cx: &mut Context<Self>) {
+        let project = self.target_project.clone();
+        self.start_new_chat(project, window, cx);
+    }
+
+    fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(index) = self.tabs.active_index() {
+            self.close_tab(index, window, cx);
+        }
+    }
+
+    fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tabs.cycle(true).cloned();
+        if tab.is_some() {
+            self.show_tab(tab, window, cx);
+        }
+    }
+
+    fn on_previous_tab(&mut self, _: &PreviousTab, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.tabs.cycle(false).cloned();
+        if tab.is_some() {
+            self.show_tab(tab, window, cx);
+        }
+    }
+
+    /// The tab strip: MonoCode's tabs of open conversations, each with its
+    /// agent's mark (in the working colour while it works) and a close.
+    fn tab_strip(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let active = self.tabs.active_index();
+        let tabs: Vec<AnyElement> = self
+            .tabs
+            .tabs()
+            .iter()
+            .enumerate()
+            .map(|(index, tab)| {
+                let on = active == Some(index);
+                let row = match tab {
+                    ginka_ui::tabs::Tab::Workspace(workspace) => {
+                        rows.iter().find(|row| &row.workspace == workspace)
+                    }
+                    ginka_ui::tabs::Tab::New => None,
+                };
+                let title: SharedString = match (tab, row) {
+                    (ginka_ui::tabs::Tab::New, _) => rust_i18n::t!("tabs.new").to_string().into(),
+                    (_, Some(row)) => row.title.clone(),
+                    (ginka_ui::tabs::Tab::Workspace(workspace), None) => workspace
+                        .0
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or_default()
+                        .to_string()
+                        .into(),
+                };
+                let working =
+                    row.is_some_and(|row| row.state == ginka_ui::workspace::AgentState::Working);
+                let glyph = match row {
+                    Some(row) => row.agent.glyph(),
+                    None => Icon::new(IconName::Plus),
+                };
+                h_flex()
+                    .id(("centre-tab", index))
+                    .h(px(28.))
+                    .min_w(px(90.))
+                    .max_w(px(240.))
+                    .pl_2p5()
+                    .pr_1()
+                    .gap_1p5()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .cursor_pointer()
+                    .when(on, |this| {
+                        this.bg(tokens.colors().bg_surface)
+                            .border_1()
+                            .border_color(tokens.colors().border_subtle)
+                    })
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        if let Some(tab) = this.tabs.select_number(index + 1).cloned() {
+                            this.show_tab(Some(tab), window, cx);
+                        }
+                    }))
+                    .child(glyph.size_3p5().text_color(if working {
+                        tokens.colors().status_working
+                    } else if on {
+                        tokens.colors().text_secondary
+                    } else {
+                        tokens.colors().text_muted
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(if on {
+                                tokens.colors().text_primary
+                            } else {
+                                tokens.colors().text_secondary
+                            })
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .id(("close-tab", index))
+                            .p_0p5()
+                            .rounded(px(tokens.radius.control()))
+                            .hover(|this| this.bg(tokens.colors().bg_raised))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(index, window, cx);
+                            }))
+                            .child(
+                                Icon::new(IconName::Close)
+                                    .size_3()
+                                    .text_color(tokens.colors().text_muted),
+                            ),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        h_flex()
+            .id("centre-tabs")
+            .flex_1()
+            .min_w_0()
+            .gap_1()
+            .items_center()
+            .overflow_x_scroll()
+            .children(tabs)
+            .into_any_element()
     }
 
     /// The project the next prompt would run in, as the window says it.
@@ -4786,20 +5000,25 @@ impl Shell {
             IconName::PanelRightOpen,
             cx,
         );
+        let has_tabs = !self.tabs.is_empty();
+        let tab_strip = has_tabs.then(|| self.tab_strip(cx));
 
-        let strip =
-            h_flex()
-                .id("column-header")
-                .flex_shrink_0()
-                .w_full()
-                .h(HEADER_HEIGHT)
-                .pr_3()
-                .gap_2()
-                .items_center()
-                .when(leading, |this| this.pl(TRAFFIC_LIGHT_INSET))
-                .when(!leading, |this| this.pl_4())
-                .children(sidebar_toggle)
-                .child(
+        let strip = h_flex()
+            .id("column-header")
+            .flex_shrink_0()
+            .w_full()
+            .h(HEADER_HEIGHT)
+            .pr_3()
+            .gap_2()
+            .items_center()
+            .when(leading, |this| this.pl(TRAFFIC_LIGHT_INSET))
+            .when(!leading, |this| this.pl_4())
+            .children(sidebar_toggle)
+            .when(has_tabs, |this| {
+                this.child(tab_strip.unwrap_or_else(|| div().into_any_element()))
+            })
+            .when(!has_tabs, |this| {
+                this.child(
                     h_flex()
                         .flex_1()
                         .gap_2()
@@ -4818,14 +5037,15 @@ impl Shell {
                             div().text_xs().text_color(muted).truncate().child(origin)
                         })),
                 )
-                .child(
-                    h_flex()
-                        .gap_1()
-                        .items_center()
-                        .child(new_chat)
-                        .child(dock_toggle)
-                        .child(right_toggle),
-                );
+            })
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(new_chat)
+                    .child(dock_toggle)
+                    .child(right_toggle),
+            );
 
         self.draggable(strip, cx)
     }
@@ -10194,6 +10414,10 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_navigate_forward))
             .on_action(cx.listener(Self::on_switch_session))
             .on_action(cx.listener(Self::on_open_settings))
+            .on_action(cx.listener(Self::on_new_tab))
+            .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_next_tab))
+            .on_action(cx.listener(Self::on_previous_tab))
             .size_full()
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.

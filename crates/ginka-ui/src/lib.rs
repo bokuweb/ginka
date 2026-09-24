@@ -31,6 +31,7 @@ pub mod reports;
 pub mod search;
 pub mod skills;
 pub mod surface;
+pub mod tabs;
 pub mod terminal;
 pub mod theme;
 pub mod transcript;

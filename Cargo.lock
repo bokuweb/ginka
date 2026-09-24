@@ -1872,6 +1872,7 @@ checksum = "d0881ea181b1df73ff77ffaaf9c7544ecc11e82fba9b5f27b262a3c73a332555"
 [[package]]
 name = "e1-github"
 version = "0.0.0"
+source = "git+https://github.com/bokuweb/e1?rev=076295e#076295e5fa2baf9d8918463eec1293153ee42be0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -1886,6 +1887,7 @@ dependencies = [
 [[package]]
 name = "e1-ui"
 version = "0.0.0"
+source = "git+https://github.com/bokuweb/e1?rev=076295e#076295e5fa2baf9d8918463eec1293153ee42be0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1906,6 +1908,7 @@ dependencies = [
 [[package]]
 name = "e1-views"
 version = "0.0.0"
+source = "git+https://github.com/bokuweb/e1?rev=076295e#076295e5fa2baf9d8918463eec1293153ee42be0"
 dependencies = [
  "anyhow",
  "chrono",
