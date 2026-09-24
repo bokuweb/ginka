@@ -1824,7 +1824,13 @@ fn print(response: Response, patch: bool) {
             by_account,
             plans,
             rates_fetched_at: _,
-        } => print_usage(&by_day, &by_agent, &by_account, &plans),
+            by_model,
+            by_project,
+        } => {
+            print_usage(&by_day, &by_agent, &by_account, &plans);
+            print_usage_rows(&by_project);
+            print_usage_rows(&by_model);
+        }
         Response::ReviewComments { comments } => {
             if comments.is_empty() {
                 println!("{}", rust_i18n::t!("cli.review.empty"));
@@ -2141,6 +2147,28 @@ fn print_usage(
     if !plans.is_empty() {
         println!();
         print_plans(plans);
+    }
+}
+
+/// A further section of `ginka usage`: a blank line, then a row per label.
+fn print_usage_rows(rows: &[UsageRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!();
+    for row in rows {
+        println!(
+            "{:<24} {:>10} in {:>8} out {:>8} cached  {}",
+            row.label,
+            row.totals.input_tokens,
+            row.totals.output_tokens,
+            row.totals.cache_read_tokens,
+            match (row.totals.cost_usd, row.totals.estimated) {
+                (Some(cost), true) => format!("≈${cost:.2}"),
+                (Some(cost), false) => format!("${cost:.2}"),
+                (None, _) => String::new(),
+            }
+        );
     }
 }
 

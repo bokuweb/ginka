@@ -68,6 +68,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0015_cron_jobs",
         include_str!("../../../db/migrations/0015_cron_jobs.sql"),
     ),
+    (
+        "0016_outside_usage",
+        include_str!("../../../db/migrations/0016_outside_usage.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

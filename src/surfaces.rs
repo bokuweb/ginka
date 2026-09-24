@@ -2664,6 +2664,14 @@ impl SurfacePanel {
                 rust_i18n::t!("surface.reports.by_agent").to_string(),
             ))
             .children(usage_rows(&usage.by_agent))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_project").to_string(),
+            ))
+            .children(usage_rows(&usage.by_project))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_model").to_string(),
+            ))
+            .children(usage_rows(&usage.by_model))
             .child(heading(rust_i18n::t!("surface.reports.by_day").to_string()))
             .children(usage_rows(&usage.by_day))
             // Where the estimates came from, so a `≈` is never unexplained.

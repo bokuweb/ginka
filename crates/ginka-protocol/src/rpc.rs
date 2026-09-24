@@ -810,6 +810,13 @@ pub enum Response {
         /// when there is none, and nothing was estimated.
         #[serde(default)]
         rates_fetched_at: Option<i64>,
+        /// What each model cost, including agents run outside Ginka.
+        #[serde(default)]
+        by_model: Vec<UsageRow>,
+        /// What each project cost, including agents run in its folders
+        /// outside Ginka.
+        #[serde(default)]
+        by_project: Vec<UsageRow>,
         /// The latest reading per account, for those that have one.
         plans: Vec<PlanSnapshot>,
     },

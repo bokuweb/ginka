@@ -120,6 +120,28 @@ async fn refresh_rates(service: &Arc<Mutex<Service>>) {
     .await;
 }
 
+/// Read what agents run outside Ginka spent from their vendors' logs, holding
+/// the service only to plan and to keep what was read — never while files are
+/// read, which on a first scan is every session on the machine.
+async fn scan_vendor_logs(service: &Arc<Mutex<Service>>) {
+    let service = service.clone();
+    smol::unblock(move || {
+        let (roots, marks) = service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .outside_scan_plan();
+        let (records, moved) = ginka_core::usage::scan::collect(&roots, &marks);
+        let added = service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .record_outside(&records, &moved);
+        if added > 0 {
+            tracing::debug!(added, "read usage from vendor logs");
+        }
+    })
+    .await;
+}
+
 /// Unix seconds now.
 fn chrono_now() -> i64 {
     std::time::SystemTime::now()
@@ -262,9 +284,17 @@ impl Daemon {
                 // test, a version swap — has no use for prices.
                 let rates_every = std::time::Duration::from_secs(3_600);
                 let mut next_rates = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                // The vendors' logs grow as their agents work; every few
+                // minutes is soon enough for a report.
+                let scan_every = std::time::Duration::from_secs(300);
+                let mut next_scan = std::time::Instant::now() + std::time::Duration::from_secs(90);
                 loop {
                     let now = std::time::Instant::now();
-                    let wake = next_sync.min(next_status).min(next_cron).min(next_rates);
+                    let wake = next_sync
+                        .min(next_status)
+                        .min(next_cron)
+                        .min(next_rates)
+                        .min(next_scan);
                     if wake > now {
                         smol::Timer::at(wake).await;
                     }
@@ -274,6 +304,10 @@ impl Daemon {
                     if now >= next_rates {
                         next_rates = now + rates_every;
                         refresh_rates(&service).await;
+                    }
+                    if now >= next_scan {
+                        next_scan = now + scan_every;
+                        scan_vendor_logs(&service).await;
                     }
                     if cron {
                         next_cron = now + cron_every;

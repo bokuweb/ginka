@@ -1805,3 +1805,64 @@ fn a_settings_file_edited_by_hand_is_read_again_without_a_restart() {
     std::fs::write(&file, "{ not json").unwrap();
     assert!(!service.reload_settings_if_changed());
 }
+
+#[test]
+fn reports_count_what_agents_spent_outside_ginka_by_model_and_by_project() {
+    let logs = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    // An agent's working directory as it reports it: the real path, as the
+    // project is registered by.
+    let folder = fixture.repo().canonicalize().unwrap();
+    let claude = logs.path().join("projects/-work");
+    std::fs::create_dir_all(&claude).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let turn = |id: &str| {
+        format!(
+            r#"{{"type":"assistant","sessionId":"terminal-1","cwd":"{}","timestamp":"{now}","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":1000,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#,
+            folder.display()
+        )
+    };
+    std::fs::write(claude.join("s.jsonl"), format!("{}\n", turn("m1"))).unwrap();
+    fixture.service = std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(logs.path().join("unused")),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )
+    .with_vendor_logs(vec![(
+        logs.path().join("projects"),
+        ginka_core::usage::scan::Format::Claude,
+    )]);
+
+    assert_eq!(fixture.service.scan_outside_now(), 1);
+    // Scanning again reads only what was appended.
+    assert_eq!(fixture.service.scan_outside_now(), 0);
+    std::fs::write(
+        claude.join("s.jsonl"),
+        format!("{}\n{}\n", turn("m1"), turn("m2")),
+    )
+    .unwrap();
+    assert_eq!(fixture.service.scan_outside_now(), 1);
+
+    let (by_model, by_project) = match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage {
+            by_model,
+            by_project,
+            ..
+        } => (by_model, by_project),
+        other => panic!("expected usage, got {other:?}"),
+    };
+    let model = by_model
+        .iter()
+        .find(|row| row.label == "claude-opus-5-5")
+        .expect("the model is listed");
+    assert_eq!(model.totals.input_tokens, 2_000);
+    let comet = by_project
+        .iter()
+        .find(|row| row.label == project.0)
+        .expect("the run in the project's folder is the project's");
+    assert_eq!(comet.totals.input_tokens, 2_000);
+}
