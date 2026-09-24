@@ -965,6 +965,21 @@ surface.reports.rates:
 surface.reports.no_rates:
   en: "Costs are only what vendors report; the public rate table has not been fetched yet."
   ja: "コストはベンダーが報告した分だけです。公開レート表はまだ取得していません。"
+home.setup.title:
+  en: Before the first prompt
+  ja: 最初のプロンプトの前に
+home.setup.install:
+  en: "Install a coding agent — none of %{agents} is on this machine's PATH. Ginka starts whichever one is there."
+  ja: "コーディングエージェントをインストールしてください。%{agents} のどれも PATH にありません。入っているものを Ginka が起動します。"
+home.setup.sign_in:
+  en: "Sign in to %{agent}: run `ginka account login %{id}` in a terminal."
+  ja: "%{agent} にサインインしてください: ターミナルで `ginka account login %{id}` を実行します。"
+home.setup.project:
+  en: Add a project — a repository or a folder — for agents to work in.
+  ja: エージェントが作業するプロジェクト（リポジトリかフォルダ）を追加してください。
+home.setup.project.add:
+  en: Add project…
+  ja: プロジェクトを追加…
 cli.merged:
   en: "merged into %{into} as %{commit}"
   ja: "%{into} にマージしました (%{commit})"

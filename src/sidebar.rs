@@ -225,6 +225,11 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// How many projects are registered.
+    pub fn project_count(&self) -> usize {
+        self.projects.len()
+    }
+
     pub fn selected_row(&self) -> Option<&SessionRow> {
         let selected = self.selected.as_ref()?;
         self.rows.iter().find(|row| &row.workspace == selected)

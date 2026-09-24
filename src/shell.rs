@@ -6347,6 +6347,97 @@ impl Shell {
     /// One question, naming the project the answer would run in, over four
     /// starters. Choosing one fills the composer rather than sending it: the
     /// starter is the first half of a sentence the reader finishes.
+    /// What still stands between this machine and a first prompt
+    /// (`ginka_ui::home::setup_steps`): an agent that can run, and a project
+    /// to run it in. Nothing once both are there.
+    fn setup_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let steps = home::setup_steps(&self.agents, self.sidebar.read(cx).project_count());
+        if steps.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let rows: Vec<AnyElement> = steps
+            .into_iter()
+            .enumerate()
+            .map(|(number, step)| {
+                let (text, action) = match step {
+                    home::SetupStep::InstallAgent { agents } => (
+                        rust_i18n::t!("home.setup.install", agents = agents.join(", ")).to_string(),
+                        None,
+                    ),
+                    home::SetupStep::SignIn { agents } => (
+                        agents
+                            .into_iter()
+                            .map(|(id, name)| {
+                                rust_i18n::t!("home.setup.sign_in", agent = name, id = id)
+                                    .to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None,
+                    ),
+                    home::SetupStep::AddProject => (
+                        rust_i18n::t!("home.setup.project").to_string(),
+                        Some(
+                            Button::new("setup-add-project")
+                                .compact()
+                                .label(rust_i18n::t!("home.setup.project.add").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_add_project(window, cx)
+                                })),
+                        ),
+                    ),
+                };
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{}.", number + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(text),
+                    )
+                    .children(action)
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            // Inset like the starters under it, so the two line up with the
+            // composer rather than sitting a hair wider.
+            div()
+                .w_full()
+                .max_w(px(TRANSCRIPT_MEASURE))
+                .px_4()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .p_4()
+                        .gap_2()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_surface)
+                        .border_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("home.setup.title").to_string()),
+                        )
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn home(&self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let project = self.project_label();
@@ -6367,6 +6458,7 @@ impl Shell {
                     .text_color(tokens.colors().text_primary)
                     .child(home::greeting(project.as_deref())),
             )
+            .children(self.setup_card(cx))
             .child(
                 h_flex()
                     .w_full()
