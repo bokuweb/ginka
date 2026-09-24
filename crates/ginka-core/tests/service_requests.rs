@@ -1447,3 +1447,167 @@ fn the_winning_attempt_is_merged_into_the_branch_the_project_is_on() {
             .is_err()
     );
 }
+
+/// Save a scheduled job and take it back.
+fn save_cron(fixture: &mut Fixture, request: Request) -> ginka_protocol::model::CronJob {
+    match fixture.ask(request) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    }
+}
+
+fn cron_runs(fixture: &mut Fixture, id: i64) -> Vec<ginka_protocol::model::CronRun> {
+    match fixture.ask(Request::CronRuns { id, limit: None }) {
+        Response::CronRuns { runs } => runs,
+        other => panic!("expected runs, got {other:?}"),
+    }
+}
+
+fn terminal_job(project: &ProjectName, schedule: &str, body: &str) -> Request {
+    Request::SaveCronJob {
+        id: None,
+        project: project.clone(),
+        workspace: None,
+        name: "nightly".into(),
+        schedule: schedule.into(),
+        via: ginka_protocol::model::CronVia::Terminal,
+        agent: None,
+        body: body.into(),
+        enabled: true,
+    }
+}
+
+#[test]
+fn a_scheduled_job_is_checked_when_it_is_written() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+
+    for bad in [
+        terminal_job(&project, "61 * * * *", "true"),
+        terminal_job(&project, "0 0 31 2 *", "true"),
+        terminal_job(&ProjectName("nowhere".into()), "@daily", "true"),
+        terminal_job(&project, "@daily", "  "),
+        Request::SaveCronJob {
+            id: None,
+            project: project.clone(),
+            workspace: None,
+            name: "review".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Chat,
+            agent: None,
+            body: "review the diff".into(),
+            enabled: true,
+        },
+    ] {
+        assert!(fixture.service.handle(bad.clone()).is_err(), "{bad:?}");
+    }
+
+    let job = save_cron(&mut fixture, terminal_job(&project, "@daily", "true"));
+    let now = chrono::Utc::now().timestamp();
+    let next = job.next_run_at.expect("an enabled job says when it fires");
+    assert!(next > now && next <= now + 86_400, "{next} vs {now}");
+
+    let disabled = save_cron(
+        &mut fixture,
+        Request::SaveCronJob {
+            id: Some(job.id),
+            project: project.clone(),
+            workspace: None,
+            name: "nightly".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "true".into(),
+            enabled: false,
+        },
+    );
+    assert_eq!(disabled.id, job.id, "saved in place");
+    assert_eq!(disabled.next_run_at, None);
+
+    match fixture.ask(Request::ListCronJobs {
+        project: Some(project),
+    }) {
+        Response::CronJobs { jobs } => assert_eq!(jobs.len(), 1),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+    fixture.ask(Request::RemoveCronJob { id: job.id });
+    match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => assert!(jobs.is_empty()),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_due_terminal_job_runs_once_and_is_skipped_while_it_is_still_running() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let marker = fixture.repo().join(".cron-ran");
+    let job = save_cron(
+        &mut fixture,
+        terminal_job(&project, "* * * * *", "echo ran >> .cron-ran; sleep 30"),
+    );
+
+    // Nothing is owed before the schedule's next minute.
+    assert_eq!(fixture.service.run_due_cron(chrono::Local::now()), 0);
+
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !marker.is_file() {
+        assert!(std::time::Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Missed minutes are not replayed: the tick that fired moved it on.
+    assert_eq!(fixture.service.run_due_cron(later), 0);
+
+    // Its command is still sleeping, so the next firing is skipped.
+    let even_later = later + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(even_later), 1);
+    let runs = cron_runs(&mut fixture, job.id);
+    let outcomes: Vec<_> = runs.iter().map(|run| run.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            ginka_protocol::model::CronOutcome::Skipped,
+            ginka_protocol::model::CronOutcome::Started,
+        ],
+        "most recent first"
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran\n");
+
+    match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => assert_eq!(
+            jobs[0].last_run.as_ref().map(|run| run.outcome),
+            Some(ginka_protocol::model::CronOutcome::Skipped)
+        ),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_terminal_job_is_finished_when_its_terminal_closes_and_can_be_run_by_hand() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let job = save_cron(&mut fixture, terminal_job(&project, "@yearly", "true"));
+
+    fixture.ask(Request::RunCronJob { id: job.id });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let runs = cron_runs(&mut fixture, job.id);
+        if runs[0].outcome == ginka_protocol::model::CronOutcome::Finished {
+            assert!(runs[0].finished_at.is_some());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never finished: {runs:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        fixture
+            .service
+            .handle(Request::RunCronJob { id: 999 })
+            .is_err()
+    );
+}

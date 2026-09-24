@@ -859,6 +859,67 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::ListCronJobs { project } => Ok(Response::CronJobs {
+                jobs: crate::cron::list(&self.conn(), project.as_ref()).map_err(failed)?,
+            }),
+            Request::SaveCronJob {
+                id,
+                project,
+                workspace,
+                name,
+                schedule,
+                via,
+                agent,
+                body,
+                enabled,
+            } => {
+                self.project(&project)?;
+                if let Some(workspace) = &workspace
+                    && self.worktree(workspace)?.project != project
+                {
+                    return Err(RpcError::failed(format!(
+                        "{workspace} is not a workspace of {project}"
+                    )));
+                }
+                if let Some(agent) = &agent
+                    && via == ginka_protocol::model::CronVia::Chat
+                    && self.drivers.get(agent).is_none()
+                {
+                    return Err(RpcError::failed(format!("no agent named {agent}")));
+                }
+                let draft = crate::cron::Draft {
+                    project,
+                    workspace,
+                    name,
+                    schedule,
+                    via,
+                    agent,
+                    body,
+                    enabled,
+                };
+                let job =
+                    crate::cron::save(&self.conn(), id, &draft, chrono::Utc::now().timestamp())
+                        .map_err(failed)?;
+                Ok(Response::CronJob { job })
+            }
+            Request::RemoveCronJob { id } => {
+                crate::cron::remove(&self.conn(), id).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RunCronJob { id } => {
+                let job = crate::cron::get(&self.conn(), id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no scheduled job with id {id}")))?;
+                self.fire_cron(&job);
+                let job = crate::cron::get(&self.conn(), id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no scheduled job with id {id}")))?;
+                Ok(Response::CronJob { job })
+            }
+            Request::CronRuns { id, limit } => Ok(Response::CronRuns {
+                runs: crate::cron::runs(&self.conn(), id, limit.unwrap_or(50).min(500))
+                    .map_err(failed)?,
+            }),
             Request::RemoveNote { id } => {
                 crate::notes::remove(&self.conn(), &id).map_err(failed)?;
                 Ok(Response::Ack)
@@ -2012,6 +2073,178 @@ impl Service {
                 known.join(", ")
             ))
         }
+    }
+
+    /// Fire every scheduled job a tick at `now` owes, and say how many were
+    /// due — skipped ones included. The daemon calls this on its own clock.
+    pub fn run_due_cron(&mut self, now: chrono::DateTime<chrono::Local>) -> usize {
+        let due = match crate::cron::take_due(&self.conn(), &now) {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::error!(%error, "could not read the scheduled jobs");
+                return 0;
+            }
+        };
+        for job in &due {
+            self.fire_cron(job);
+        }
+        due.len()
+    }
+
+    /// [`Service::run_due_cron`] on the daemon host's clock.
+    pub fn run_due_cron_now(&mut self) -> usize {
+        self.run_due_cron(chrono::Local::now())
+    }
+
+    /// Fire one job: skip it while what it last started is still running,
+    /// otherwise start its conversation or its terminal, and record the run.
+    fn fire_cron(&mut self, job: &ginka_protocol::model::CronJob) {
+        use ginka_protocol::model::{CronOutcome, CronVia};
+        let now = chrono::Utc::now().timestamp();
+        let record = |service: &Self, outcome: CronOutcome, detail: Option<&str>| {
+            crate::cron::record_run(&service.conn(), job.id, now, outcome, detail)
+        };
+        let workspace = match &job.workspace {
+            Some(workspace) => Some(workspace.clone()),
+            None => self.project_checkout(&job.project),
+        };
+        let Some(workspace) = workspace else {
+            let _ = record(
+                self,
+                CronOutcome::Failed,
+                Some(&format!("{} has no checkout to run in", job.project)),
+            );
+            return;
+        };
+        let last = crate::cron::last_started(&self.conn(), job.id).unwrap_or_default();
+        let still_running = match job.via {
+            CronVia::Chat => last
+                .session
+                .as_ref()
+                .is_some_and(|session| self.sessions.is_running(&SessionId(session.clone()))),
+            CronVia::Terminal => last.terminal.as_ref().is_some_and(|terminal| {
+                self.terminals
+                    .list(&workspace)
+                    .iter()
+                    .any(|open| &open.id.0 == terminal)
+            }),
+        };
+        if still_running {
+            let _ = record(
+                self,
+                CronOutcome::Skipped,
+                Some("the previous run is still going"),
+            );
+            return;
+        }
+
+        match job.via {
+            CronVia::Chat => {
+                let started = self.handle(Request::StartSession {
+                    workspace,
+                    agent: job.agent.clone().unwrap_or_default(),
+                    prompt: job.body.clone(),
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    account: None,
+                    access_mode: None,
+                    origin: None,
+                });
+                match started {
+                    Ok(Response::Session { session }) => {
+                        let _ = record(self, CronOutcome::Started, Some(&session.id.0));
+                        let _ = crate::cron::set_last_started(
+                            &self.conn(),
+                            job.id,
+                            &crate::cron::LastStarted {
+                                session: Some(session.id.0),
+                                terminal: None,
+                            },
+                        );
+                    }
+                    Ok(other) => {
+                        let _ = record(self, CronOutcome::Failed, Some(&format!("{other:?}")));
+                    }
+                    Err(error) => {
+                        let _ = record(self, CronOutcome::Failed, Some(&error.message));
+                    }
+                }
+            }
+            CronVia::Terminal => {
+                let Ok(run) = record(self, CronOutcome::Started, None) else {
+                    return;
+                };
+                let path = match self.worktree(&workspace) {
+                    Ok(worktree) => worktree.path,
+                    Err(error) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Failed,
+                            Some(&error.message),
+                        );
+                        return;
+                    }
+                };
+                let conn = self.conn.clone();
+                let opened = self.terminals.open_command(
+                    &workspace,
+                    &path,
+                    crate::terminal::TerminalCommand {
+                        program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                        args: vec!["-lc".into(), job.body.clone()],
+                        env: Vec::new(),
+                        title: job.name.clone(),
+                        on_exit: Some(Box::new(move || {
+                            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ =
+                                crate::cron::finish_run(&conn, run, chrono::Utc::now().timestamp());
+                        })),
+                    },
+                    24,
+                    100,
+                );
+                match opened {
+                    Ok(terminal) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Started,
+                            Some(&terminal.0),
+                        );
+                        let _ = crate::cron::set_last_started(
+                            &self.conn(),
+                            job.id,
+                            &crate::cron::LastStarted {
+                                session: None,
+                                terminal: Some(terminal.0),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Failed,
+                            Some(&format!("{error:#}")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The workspace that is the project's own checkout — where a job with no
+    /// workspace runs.
+    fn project_checkout(&self, name: &ProjectName) -> Option<WorkspaceId> {
+        let project = self.project(name).ok()?;
+        let worktrees = project::list_worktrees(&self.conn(), name).ok()?;
+        worktrees
+            .iter()
+            .find(|worktree| worktree.path == project.path)
+            .or(worktrees.first())
+            .map(|worktree| worktree.workspace_id())
     }
 
     /// Resolve a workspace id to the worktree it names.

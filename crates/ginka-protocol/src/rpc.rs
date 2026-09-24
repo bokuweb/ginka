@@ -607,6 +607,30 @@ pub enum Request {
     /// Close a terminal and stop its shell.
     CloseTerminal { terminal: TerminalId },
 
+    /// Scheduled jobs: a project's, or every project's.
+    ListCronJobs { project: Option<ProjectName> },
+    /// Save a scheduled job: new without an `id`, a replacement with one.
+    /// The schedule is checked here, so a job that can never fire is refused
+    /// when it is written rather than found silent later.
+    SaveCronJob {
+        id: Option<i64>,
+        project: ProjectName,
+        workspace: Option<WorkspaceId>,
+        name: String,
+        schedule: String,
+        via: crate::model::CronVia,
+        agent: Option<String>,
+        body: String,
+        enabled: bool,
+    },
+    /// Forget a scheduled job and its history.
+    RemoveCronJob { id: i64 },
+    /// Fire a job now, as its schedule would — including skipping it while
+    /// its previous run is still going.
+    RunCronJob { id: i64 },
+    /// A job's firings, most recent first.
+    CronRuns { id: i64, limit: Option<u32> },
+
     /// Every chat connector this daemon hosts, and whether each is connected
     /// (`docs/connectors.md` §3.3).
     ListConnectors,
@@ -799,6 +823,15 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    CronJobs {
+        jobs: Vec<crate::model::CronJob>,
+    },
+    CronJob {
+        job: crate::model::CronJob,
+    },
+    CronRuns {
+        runs: Vec<crate::model::CronRun>,
     },
     QuickCommands {
         commands: Vec<crate::model::QuickCommand>,

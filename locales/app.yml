@@ -917,6 +917,42 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.cron.off:
+  en: "off"
+  ja: "停止中"
+settings.cron:
+  en: Scheduled
+  ja: スケジュール
+settings.cron.note:
+  en: "Prompts and commands run on a cron schedule in this project's checkout, on this machine's clock. A run is skipped while the last one is still going."
+  ja: "cron のスケジュールで、このプロジェクトのチェックアウトでプロンプトやコマンドを実行します（このマシンの時刻）。前回の実行が続いている間はスキップします。"
+settings.cron.name:
+  en: "Name"
+  ja: "名前"
+settings.cron.schedule:
+  en: "0 9 * * 1-5"
+  ja: "0 9 * * 1-5"
+settings.cron.body:
+  en: "Command or prompt"
+  ja: "コマンドまたはプロンプト"
+settings.cron.next:
+  en: "in %{when}"
+  ja: "%{when}後"
+settings.cron.off:
+  en: "paused"
+  ja: "停止中"
+settings.cron.pause:
+  en: "Pause"
+  ja: "停止"
+settings.cron.resume:
+  en: "Resume"
+  ja: "再開"
+settings.cron.run:
+  en: "Run now"
+  ja: "今すぐ実行"
+settings.cron.needs_project:
+  en: "Choose a project first."
+  ja: "先にプロジェクトを選んでください。"
 cli.merged:
   en: "merged into %{into} as %{commit}"
   ja: "%{into} にマージしました (%{commit})"

@@ -217,14 +217,21 @@ impl Daemon {
             async move {
                 let mut next_sync = std::time::Instant::now() + sync_every;
                 let mut next_status = std::time::Instant::now();
+                // Often enough that a job due on the minute fires within it.
+                let cron_every = std::time::Duration::from_secs(20);
+                let mut next_cron = std::time::Instant::now() + cron_every;
                 loop {
                     let now = std::time::Instant::now();
-                    let wake = next_sync.min(next_status);
+                    let wake = next_sync.min(next_status).min(next_cron);
                     if wake > now {
                         smol::Timer::at(wake).await;
                     }
                     let now = std::time::Instant::now();
                     let (sync, status) = (now >= next_sync, now >= next_status);
+                    let cron = now >= next_cron;
+                    if cron {
+                        next_cron = now + cron_every;
+                    }
                     if sync {
                         next_sync = now + sync_every;
                     }
@@ -241,6 +248,9 @@ impl Daemon {
                         }
                         if status {
                             service.poll_statuses();
+                        }
+                        if cron {
+                            service.run_due_cron_now();
                         }
                     })
                     .await;

@@ -484,3 +484,25 @@ fn a_merge_names_the_workspace_and_optionally_its_target_and_message() {
         json!({"method": "merge_workspace", "workspace": "comet/try-1", "into": null, "message": "Keep try-1"})
     );
 }
+
+#[test]
+fn a_scheduled_job_says_how_it_runs_in_words() {
+    assert_eq!(
+        wire(&Request::SaveCronJob {
+            id: None,
+            project: ginka_protocol::ProjectName("comet".into()),
+            workspace: None,
+            name: "nightly".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "cargo test".into(),
+            enabled: true,
+        }),
+        json!({
+            "method": "save_cron_job", "id": null, "project": "comet", "workspace": null,
+            "name": "nightly", "schedule": "@daily", "via": "terminal", "agent": null,
+            "body": "cargo test", "enabled": true
+        })
+    );
+}

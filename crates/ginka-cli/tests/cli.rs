@@ -668,3 +668,58 @@ fn a_workspace_is_merged_into_the_branch_the_project_is_on() {
     assert!(merged.contains("main"), "{merged}");
     assert!(repository.join("answer.txt").exists());
 }
+
+#[test]
+fn a_scheduled_job_is_added_listed_run_and_removed() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let refused = home.run(&[
+        "cron",
+        "add",
+        "comet",
+        "nightly",
+        "--schedule",
+        "61 * * * *",
+        "--shell",
+        "true",
+    ]);
+    assert!(!refused.status.success());
+
+    let added = home.ok(&[
+        "cron",
+        "add",
+        "comet",
+        "nightly",
+        "--schedule",
+        "@daily",
+        "--shell",
+        "touch .cron-ran",
+    ]);
+    let id = added
+        .split_whitespace()
+        .next()
+        .expect("the id comes first")
+        .to_string();
+    let listed = home.ok(&["cron", "list"]);
+    assert!(
+        listed.contains("nightly") && listed.contains("@daily"),
+        "{listed}"
+    );
+
+    home.ok(&["cron", "run", &id]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !repository.join(".cron-ran").exists() {
+        assert!(std::time::Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let runs = home.ok(&["cron", "runs", &id]);
+    assert!(
+        runs.contains("started") || runs.contains("finished"),
+        "{runs}"
+    );
+
+    home.ok(&["cron", "remove", &id]);
+    assert!(!home.ok(&["cron", "list"]).contains("nightly"));
+}

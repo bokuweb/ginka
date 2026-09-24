@@ -972,6 +972,34 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Scheduled jobs for a project, or every one.
+    pub async fn cron_jobs(
+        &self,
+        project: Option<ProjectName>,
+    ) -> Vec<ginka_protocol::model::CronJob> {
+        match self.ask(Request::ListCronJobs { project }).await {
+            Some(Response::CronJobs { jobs }) => jobs,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Save a scheduled job; the refusal is the daemon's own words.
+    pub async fn save_cron_job(&self, request: Request) -> Result<(), String> {
+        self.ask_result(request).await.map(|_| ())
+    }
+
+    /// Forget a scheduled job.
+    pub async fn remove_cron_job(&self, id: i64) {
+        self.ask(Request::RemoveCronJob { id }).await;
+    }
+
+    /// Fire a scheduled job now.
+    pub async fn run_cron_job(&self, id: i64) -> Result<(), String> {
+        self.ask_result(Request::RunCronJob { id })
+            .await
+            .map(|_| ())
+    }
+
     /// Forget a quick command.
     pub async fn remove_quick_command(&self, id: String) {
         self.ask(Request::RemoveQuickCommand { id }).await;

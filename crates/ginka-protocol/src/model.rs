@@ -1147,6 +1147,113 @@ impl QuickCommandKind {
     }
 }
 
+/// How a scheduled job runs.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CronVia {
+    /// The body is a prompt, started as a new conversation with an agent.
+    Chat,
+    /// The body is a shell command, run in a terminal that closes with it.
+    Terminal,
+}
+
+impl CronVia {
+    /// The value stored in SQLite and printed by the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chat => "chat",
+            Self::Terminal => "terminal",
+        }
+    }
+
+    /// Read a stored or typed value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "chat" => Some(Self::Chat),
+            "terminal" => Some(Self::Terminal),
+            _ => None,
+        }
+    }
+}
+
+/// What one firing of a scheduled job came to.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CronOutcome {
+    /// It is running.
+    Started,
+    /// Its terminal closed.
+    Finished,
+    /// The previous run was still going, so this one did not start.
+    Skipped,
+    /// It could not be started; `detail` says why.
+    Failed,
+}
+
+impl CronOutcome {
+    /// The value stored in SQLite and printed by the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::Finished => "finished",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Read a stored value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "started" => Some(Self::Started),
+            "finished" => Some(Self::Finished),
+            "skipped" => Some(Self::Skipped),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// A prompt or command run on a cron schedule, in one workspace — or in the
+/// project's own checkout when `workspace` is absent.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CronJob {
+    pub id: i64,
+    pub project: ProjectName,
+    pub workspace: Option<WorkspaceId>,
+    pub name: String,
+    /// A five-field cron expression or `@daily` and the like, read on the
+    /// daemon host's clock.
+    pub schedule: String,
+    pub via: CronVia,
+    /// The driver a chat job starts. Absent for a terminal job.
+    pub agent: Option<String>,
+    /// The prompt, or the command line.
+    pub body: String,
+    pub enabled: bool,
+    /// Unix seconds of the next firing; absent while disabled.
+    pub next_run_at: Option<i64>,
+    /// The most recent firing, if it has fired.
+    pub last_run: Option<CronRun>,
+}
+
+/// One firing of a scheduled job.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CronRun {
+    pub id: i64,
+    pub job: i64,
+    /// Unix seconds.
+    pub started_at: i64,
+    /// Unix seconds; set when a terminal job's terminal closed.
+    pub finished_at: Option<i64>,
+    pub outcome: CronOutcome,
+    /// Why it failed, or the conversation or terminal it started.
+    pub detail: Option<String>,
+}
+
 /// A saved command or prompt — Orca's Quick Commands — for one project, or
 /// for every project when `project` is absent.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]

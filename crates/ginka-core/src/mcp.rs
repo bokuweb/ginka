@@ -448,6 +448,51 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_cron_jobs",
+            description: "List the prompts and commands scheduled with cron, with when each fires next.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}},
+            }),
+        },
+        Tool {
+            name: "ginka_cron_save",
+            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal) on a cron expression — five fields or @daily and the like, on the daemon host's clock. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "project": {"type": "string"},
+                    "workspace": workspace,
+                    "name": {"type": "string"},
+                    "schedule": {"type": "string"},
+                    "via": {"type": "string", "enum": ["chat", "terminal"]},
+                    "agent": {"type": "string"},
+                    "body": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["project", "name", "schedule", "via", "body"],
+            }),
+        },
+        Tool {
+            name: "ginka_cron_remove",
+            description: "Forget a scheduled job and its history.",
+            schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+            }),
+        },
+        Tool {
+            name: "ginka_cron_run",
+            description: "Fire a scheduled job now, skipping it if its previous run is still going.",
+            schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+            }),
+        },
+        Tool {
             name: "ginka_push",
             description: "Push a workspace branch, setting its upstream on the first push.",
             schema: json!({
@@ -809,6 +854,36 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             message: text("message")?,
             all: !flag("staged_only"),
         },
+        "ginka_cron_jobs" => Request::ListCronJobs {
+            project: text("project").ok().map(ProjectName),
+        },
+        "ginka_cron_save" => Request::SaveCronJob {
+            id: arguments.get("id").and_then(Value::as_i64),
+            project: ProjectName(text("project")?),
+            workspace: text("workspace").ok().map(WorkspaceId),
+            name: text("name")?,
+            schedule: text("schedule")?,
+            via: ginka_protocol::model::CronVia::parse(&text("via")?)
+                .ok_or_else(|| anyhow!("{tool}: `via` is chat or terminal"))?,
+            agent: text("agent").ok(),
+            body: text("body")?,
+            enabled: arguments
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        },
+        "ginka_cron_remove" => Request::RemoveCronJob {
+            id: arguments
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_cron_run" => Request::RunCronJob {
+            id: arguments
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
         "ginka_workspace_merge" => Request::MergeWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             into: text("into").ok(),
@@ -965,6 +1040,8 @@ mod tests {
                 "agents": ["claude", "codex:gpt-5"],
                 "name": "release-notes",
                 "enabled": false,
+                "schedule": "@daily",
+                "via": "terminal",
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));

@@ -263,6 +263,9 @@ enum Command {
     /// Saved shell commands and prompts, run in a workspace.
     #[command(subcommand)]
     Quick(QuickCommand),
+    /// Prompts and commands run on a cron schedule, on this machine's clock.
+    #[command(subcommand)]
+    Cron(CronCommand),
     /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
     ///
     /// Spawned by the agent, not by the user: the state stays in the daemon
@@ -468,6 +471,46 @@ enum QuickCommand {
     Remove { id: String },
     /// Run a shell quick command in a new terminal in the workspace.
     Run { workspace: String, id: String },
+}
+
+#[derive(Subcommand)]
+enum CronCommand {
+    /// List scheduled jobs, with when each fires next and how it last went.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Schedule a shell command (`--shell`) or a prompt for an agent
+    /// (`--prompt` with `--agent`).
+    Add {
+        project: String,
+        name: String,
+        /// Five cron fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`.
+        #[arg(long)]
+        schedule: String,
+        #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
+        shell: Option<String>,
+        #[arg(long, requires = "agent")]
+        prompt: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        /// A workspace id; the project's own checkout when omitted.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Save it switched off.
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Forget a scheduled job and its history.
+    Remove { id: i64 },
+    /// Fire a job now, as its schedule would.
+    Run { id: i64 },
+    /// A job's firings, most recent first.
+    Runs {
+        id: i64,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1223,6 +1266,39 @@ fn request_for(command: Command) -> Result<Request> {
             body: body_or_stdin(body)?,
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
+        Command::Cron(CronCommand::List { project }) => Request::ListCronJobs {
+            project: project.map(ProjectName),
+        },
+        Command::Cron(CronCommand::Add {
+            project,
+            name,
+            schedule,
+            shell,
+            prompt,
+            agent,
+            workspace,
+            disabled,
+        }) => {
+            let (via, body) = match (shell, prompt) {
+                (Some(shell), _) => (ginka_protocol::model::CronVia::Terminal, shell),
+                (None, Some(prompt)) => (ginka_protocol::model::CronVia::Chat, prompt),
+                (None, None) => unreachable!("clap requires one of --shell and --prompt"),
+            };
+            Request::SaveCronJob {
+                id: None,
+                project: ProjectName(project),
+                workspace: workspace.map(WorkspaceId),
+                name,
+                schedule,
+                via,
+                agent,
+                body,
+                enabled: !disabled,
+            }
+        }
+        Command::Cron(CronCommand::Remove { id }) => Request::RemoveCronJob { id },
+        Command::Cron(CronCommand::Run { id }) => Request::RunCronJob { id },
+        Command::Cron(CronCommand::Runs { id, limit }) => Request::CronRuns { id, limit },
         Command::Quick(QuickCommand::List { project }) => Request::ListQuickCommands {
             project: project.map(ProjectName),
         },
@@ -1636,6 +1712,22 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::CronJobs { jobs } => {
+            for job in &jobs {
+                print_cron_job(job);
+            }
+        }
+        Response::CronJob { job } => print_cron_job(&job),
+        Response::CronRuns { runs } => {
+            for run in runs {
+                println!(
+                    "{}  {:<8} {}",
+                    format_time(run.started_at),
+                    run.outcome.as_str(),
+                    run.detail.unwrap_or_default()
+                );
+            }
+        }
         Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
         Response::PlanUsage { snapshot } => match snapshot {
             Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),
@@ -2407,4 +2499,38 @@ mod ginka_cli_format {
             assert!(!line.contains("more"), "only the first line: {line}");
         }
     }
+}
+
+/// One scheduled job on a line: id first, so a script can take it.
+fn print_cron_job(job: &ginka_protocol::model::CronJob) {
+    let next = match job.next_run_at {
+        Some(at) => format_time(at),
+        None => rust_i18n::t!("cli.cron.off").to_string(),
+    };
+    let last = job
+        .last_run
+        .as_ref()
+        .map(|run| run.outcome.as_str())
+        .unwrap_or("-");
+    println!(
+        "{}  {:<16} {:<8} {:<12} {:<20} next {}  last {}  {}",
+        job.id,
+        job.schedule,
+        job.via.as_str(),
+        job.project.0,
+        job.name,
+        next,
+        last,
+        job.body.replace(['\r', '\n'], " ")
+    );
+}
+
+/// A Unix time as local wall-clock time.
+fn format_time(at: i64) -> String {
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_opt(at, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| at.to_string())
 }

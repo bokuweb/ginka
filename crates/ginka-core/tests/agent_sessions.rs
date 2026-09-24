@@ -3086,3 +3086,55 @@ fn an_acp_permission_request_waits_for_the_reader_and_carries_the_choice_back() 
     });
     fixture.wait_for_said(&session, "[permission:yes]");
 }
+
+#[test]
+fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-cron"}"#,
+            "#sleep 1500",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[cron:{prompt}]"}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-cron"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let job = match fixture.ask(Request::SaveCronJob {
+        id: None,
+        project: ginka_protocol::ProjectName("comet".into()),
+        workspace: Some(fixture.workspace.clone()),
+        name: "morning review".into(),
+        schedule: "0 9 * * 1-5".into(),
+        via: ginka_protocol::model::CronVia::Chat,
+        agent: Some("claude".into()),
+        body: "review yesterday's changes".into(),
+        enabled: true,
+    }) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    };
+
+    let started = match fixture.ask(Request::RunCronJob { id: job.id }) {
+        Response::CronJob { job } => job.last_run.expect("it ran"),
+        other => panic!("expected a job, got {other:?}"),
+    };
+    assert_eq!(started.outcome, ginka_protocol::model::CronOutcome::Started);
+    let session = SessionId(started.detail.expect("the conversation it started"));
+
+    // Still working: the next firing does not start a second one.
+    match fixture.ask(Request::RunCronJob { id: job.id }) {
+        Response::CronJob { job } => assert_eq!(
+            job.last_run.map(|run| run.outcome),
+            Some(ginka_protocol::model::CronOutcome::Skipped)
+        ),
+        other => panic!("expected a job, got {other:?}"),
+    }
+
+    let transcript = fixture.wait_for_said(&session, "[cron:review yesterday's changes]");
+    assert!(transcript.iter().any(|entry| matches!(
+        entry,
+        TranscriptPayload::User { text } if text == "review yesterday's changes"
+    )));
+}

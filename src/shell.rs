@@ -122,6 +122,16 @@ struct QuickForm {
     error: Option<String>,
 }
 
+/// The settings page's form for a new scheduled job.
+struct CronForm {
+    name: Entity<InputState>,
+    schedule: Entity<InputState>,
+    body: Entity<InputState>,
+    /// A prompt for an agent rather than a shell command.
+    chat: bool,
+    error: Option<String>,
+}
+
 const CONTEXT: &str = "Shell";
 
 /// Bind the panel toggles.
@@ -664,6 +674,9 @@ pub struct Shell {
     quick_menu_open: bool,
     /// The settings page's new-quick-command form.
     quick_form: QuickForm,
+    /// The scheduled jobs of the project on screen.
+    cron_jobs: Vec<ginka_protocol::model::CronJob>,
+    cron_form: CronForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -718,6 +731,22 @@ impl Shell {
             }),
             kind: ginka_protocol::model::QuickCommandKind::Shell,
             project_only: true,
+            error: None,
+        };
+        let cron_form = CronForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.name").to_string())
+            }),
+            schedule: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.schedule").to_string())
+            }),
+            body: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.body").to_string())
+            }),
+            chat: false,
             error: None,
         };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
@@ -1353,6 +1382,8 @@ impl Shell {
             quick_commands: Vec::new(),
             quick_menu_open: false,
             quick_form,
+            cron_jobs: Vec::new(),
+            cron_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -1994,6 +2025,118 @@ impl Shell {
                 }))
                 .into_any_element(),
         )
+    }
+
+    /// Read the scheduled jobs for the project on screen.
+    fn refresh_cron_jobs(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        cx.spawn(async move |this, cx| {
+            let jobs = cx
+                .background_spawn(async move { link.cron_jobs(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.cron_jobs != jobs {
+                    this.cron_jobs = jobs;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Send one change to the scheduled jobs, then read them again.
+    fn cron_request(
+        &mut self,
+        work: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+        clear_form: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let done = cx.background_spawn(work).await;
+            this.update_in(cx, |this, window, cx| {
+                match done {
+                    Ok(()) => {
+                        this.cron_form.error = None;
+                        if clear_form {
+                            for input in [
+                                this.cron_form.name.clone(),
+                                this.cron_form.schedule.clone(),
+                                this.cron_form.body.clone(),
+                            ] {
+                                input.update(cx, |state, cx| state.set_value("", window, cx));
+                            }
+                        }
+                    }
+                    Err(error) => this.cron_form.error = Some(error),
+                }
+                this.refresh_cron_jobs(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Save the settings page's new scheduled job, in the project on screen.
+    fn save_cron_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.target_project.clone() else {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.needs_project").to_string());
+            cx.notify();
+            return;
+        };
+        let chat = self.cron_form.chat;
+        let request = ginka_protocol::rpc::Request::SaveCronJob {
+            id: None,
+            project,
+            workspace: None,
+            name: self.cron_form.name.read(cx).value().to_string(),
+            schedule: self.cron_form.schedule.read(cx).value().to_string(),
+            via: if chat {
+                ginka_protocol::model::CronVia::Chat
+            } else {
+                ginka_protocol::model::CronVia::Terminal
+            },
+            agent: if chat { self.agent_to_start() } else { None },
+            body: self.cron_form.body.read(cx).value().to_string(),
+            enabled: true,
+        };
+        let link = self.link.clone();
+        self.cron_request(
+            async move { link.save_cron_job(request).await },
+            true,
+            window,
+            cx,
+        );
+    }
+
+    /// Switch a job on or off, keeping everything else about it.
+    fn toggle_cron_job(
+        &mut self,
+        job: ginka_protocol::model::CronJob,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = ginka_protocol::rpc::Request::SaveCronJob {
+            id: Some(job.id),
+            project: job.project,
+            workspace: job.workspace,
+            name: job.name,
+            schedule: job.schedule,
+            via: job.via,
+            agent: job.agent,
+            body: job.body,
+            enabled: !job.enabled,
+        };
+        let link = self.link.clone();
+        self.cron_request(
+            async move { link.save_cron_job(request).await },
+            false,
+            window,
+            cx,
+        );
     }
 
     /// Save the settings page's new quick command.
@@ -4419,6 +4562,7 @@ impl Shell {
             }))
             .into_any_element();
         let quick_section = self.quick_settings(cx);
+        let cron_section = self.cron_settings(cx);
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -4528,7 +4672,8 @@ impl Shell {
                                     .child(env!("CARGO_PKG_VERSION"))
                                     .into_any_element(),
                             ))
-                            .child(quick_section),
+                            .child(quick_section)
+                            .child(cron_section),
                     ),
             )
     }
@@ -4713,6 +4858,213 @@ impl Shell {
                     ),
             )
             .children(self.quick_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
+    }
+
+    /// Scheduled prompts and commands for the project on screen: what each
+    /// runs, when it next fires, how it last went, and the way to switch it
+    /// off, run it now or forget it.
+    fn cron_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let now = chrono::Utc::now().timestamp();
+        let chat = self.cron_form.chat;
+        let chip = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py_0p5()
+                .rounded(px(7.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        let rows: Vec<AnyElement> = self
+            .cron_jobs
+            .iter()
+            .map(|job| {
+                let id = job.id;
+                let toggled = job.clone();
+                let when = match job.next_run_at {
+                    Some(at) => rust_i18n::t!(
+                        "settings.cron.next",
+                        when = ginka_ui::workspace::relative_age(at, now)
+                    )
+                    .to_string(),
+                    None => rust_i18n::t!("settings.cron.off").to_string(),
+                };
+                let last = job
+                    .last_run
+                    .as_ref()
+                    .map(|run| run.outcome.as_str().to_string())
+                    .unwrap_or_default();
+                h_flex()
+                    .w_full()
+                    .py_1p5()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(110.))
+                            .font_family(cx.theme_mono_font())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(job.schedule.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(job.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(format!("{} · {}", job.via.as_str(), job.body)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{when}  {last}")),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-toggle-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(if job.enabled {
+                                rust_i18n::t!("settings.cron.pause").to_string()
+                            } else {
+                                rust_i18n::t!("settings.cron.resume").to_string()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_cron_job(toggled.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-run-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("settings.cron.run").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let link = this.link.clone();
+                                this.cron_request(
+                                    async move { link.run_cron_job(id).await },
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-remove-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("notes.remove").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let link = this.link.clone();
+                                this.cron_request(
+                                    async move {
+                                        link.remove_cron_job(id).await;
+                                        Ok(())
+                                    },
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .pt_5()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.cron").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.cron.note").to_string()),
+            )
+            .children(rows)
+            .child(
+                h_flex()
+                    .w_full()
+                    .pt_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        chip(
+                            "cron-via-terminal",
+                            rust_i18n::t!("settings.quick.shell").to_string(),
+                            !chat,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cron_form.chat = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        chip(
+                            "cron-via-chat",
+                            rust_i18n::t!("settings.quick.prompt").to_string(),
+                            chat,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cron_form.chat = true;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(140.)).child(Input::new(&self.cron_form.name)))
+                    .child(
+                        div()
+                            .w(px(130.))
+                            .child(Input::new(&self.cron_form.schedule)),
+                    )
+                    .child(div().flex_1().child(Input::new(&self.cron_form.body)))
+                    .child(
+                        Button::new("cron-save")
+                            .compact()
+                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_cron_form(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.cron_form.error.clone().map(|error| {
                 div()
                     .text_xs()
                     .text_color(tokens.colors().status_error)
@@ -11499,6 +11851,7 @@ async fn pull_rows(
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         // The saved commands follow the project on screen, on the same tick.
         this.refresh_quick_commands(cx);
+        this.refresh_cron_jobs(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
             Some(row) => {
                 this.target_project = Some(ProjectName(row.origin.to_string()));
