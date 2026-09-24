@@ -349,7 +349,8 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
 - [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: project rail, session rows, status pills, archived section, attention sort, fuzzy metadata search and user footer — fed by real projects and worktrees, with a first-run line that names the command to fix it
-- [ ] Virtualize the session list; animate the reorder on the 260 ms curve
+- [x] Virtualize the session list (`ginka_ui::session_list`, a GPUI `list`)
+- [ ] Animate the session list's reorder on the 260 ms curve
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin|archive`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
 - [x] Command palette + global keymap infrastructure
 - [x] Workspace picker / quick switcher (in the palette)
@@ -524,8 +525,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Nightly channel from `main`
 - [ ] Linux: `.tar.gz` + install script (`~/.local`), Wayland + X11 verified
 - [ ] Windows: installer + portable zip (best-effort at v1)
-- [ ] `CONTRIBUTING.md`, `RELEASING.md`, `SECURITY.md`, a maintained `CHANGELOG.md` — the release process has to be written down before the first release, not after it
-- [ ] Onboarding: prerequisite checks (agent CLIs installed and authenticated), first-project flow
+- [x] `CONTRIBUTING.md`, `RELEASING.md`, `SECURITY.md`, a maintained `CHANGELOG.md` — the release process has to be written down before the first release, not after it
+- [x] Onboarding: prerequisite checks (agent CLIs installed and authenticated), first-project flow — a card on the home screen while a step is left (`ginka_ui::home::setup_steps`)
 - [ ] Docs site + user documentation
 - [ ] Performance pass against the budgets in §6.2
 

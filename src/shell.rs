@@ -643,6 +643,9 @@ pub struct Shell {
     /// Whether the transcript is still following the answer. Dropped by the
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
+    /// Set once the window has gone back to the workspace it was left on,
+    /// so a later refresh does not take the reader there again.
+    selection_restored: bool,
     /// Project/session visits addressed by the title-bar arrows.
     navigation: NavigationHistory<NavigationTarget>,
     composer: Entity<TextareaState>,
@@ -1380,6 +1383,7 @@ impl Shell {
                 list
             },
             transcript_follows: true,
+            selection_restored: false,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
             composer,
             model_query,
@@ -2199,6 +2203,8 @@ impl Shell {
 
     /// Write the open tabs back to `app.json`.
     fn persist_tabs(&mut self) {
+        // The workspace on screen is where the next launch opens.
+        self.settings.last_workspace = self.session.as_ref().map(|row| row.workspace.0.clone());
         self.settings.open_tabs = self
             .tabs
             .workspaces()
@@ -6341,6 +6347,97 @@ impl Shell {
     /// One question, naming the project the answer would run in, over four
     /// starters. Choosing one fills the composer rather than sending it: the
     /// starter is the first half of a sentence the reader finishes.
+    /// What still stands between this machine and a first prompt
+    /// (`ginka_ui::home::setup_steps`): an agent that can run, and a project
+    /// to run it in. Nothing once both are there.
+    fn setup_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let steps = home::setup_steps(&self.agents, self.sidebar.read(cx).project_count());
+        if steps.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let rows: Vec<AnyElement> = steps
+            .into_iter()
+            .enumerate()
+            .map(|(number, step)| {
+                let (text, action) = match step {
+                    home::SetupStep::InstallAgent { agents } => (
+                        rust_i18n::t!("home.setup.install", agents = agents.join(", ")).to_string(),
+                        None,
+                    ),
+                    home::SetupStep::SignIn { agents } => (
+                        agents
+                            .into_iter()
+                            .map(|(id, name)| {
+                                rust_i18n::t!("home.setup.sign_in", agent = name, id = id)
+                                    .to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None,
+                    ),
+                    home::SetupStep::AddProject => (
+                        rust_i18n::t!("home.setup.project").to_string(),
+                        Some(
+                            Button::new("setup-add-project")
+                                .compact()
+                                .label(rust_i18n::t!("home.setup.project.add").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_add_project(window, cx)
+                                })),
+                        ),
+                    ),
+                };
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{}.", number + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(text),
+                    )
+                    .children(action)
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            // Inset like the starters under it, so the two line up with the
+            // composer rather than sitting a hair wider.
+            div()
+                .w_full()
+                .max_w(px(TRANSCRIPT_MEASURE))
+                .px_4()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .p_4()
+                        .gap_2()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_surface)
+                        .border_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("home.setup.title").to_string()),
+                        )
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn home(&self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let project = self.project_label();
@@ -6361,6 +6458,7 @@ impl Shell {
                     .text_color(tokens.colors().text_primary)
                     .child(home::greeting(project.as_deref())),
             )
+            .children(self.setup_card(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -11931,8 +12029,31 @@ async fn pull_rows(
         crate::dock::set_badge(ginka_ui::notify::badge(
             rows.iter().filter(|row| !row.archived).map(|row| row.state),
         ));
+        // The first time there are rows to choose from, open where the
+        // window was left (`ginka_ui::tabs::restore_selection`).
+        let restore = (!this.selection_restored && !rows.is_empty())
+            .then(|| {
+                this.selection_restored = true;
+                let live: Vec<_> = rows
+                    .iter()
+                    .filter(|row| !row.archived)
+                    .map(|row| row.workspace.clone())
+                    .collect();
+                ginka_ui::tabs::restore_selection(
+                    this.settings.last_workspace.as_deref(),
+                    &this.tabs.workspaces(),
+                    &live,
+                )
+            })
+            .flatten();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        if let Some(workspace) = restore
+            && this.sidebar.read(cx).selected_row().is_none()
+        {
+            this.sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+        }
         // The saved commands follow the project on screen, on the same tick.
         this.refresh_quick_commands(cx);
         this.refresh_cron_jobs(cx);

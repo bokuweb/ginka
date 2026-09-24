@@ -112,6 +112,11 @@ pub struct SessionSidebar {
     /// See [`SessionSidebar::set_rows`].
     unlisted: u8,
     archived_open: bool,
+    /// The session list, virtualized (`AGENTS.md` rule 5): only the rows
+    /// near the screen are laid out, however many sessions there are.
+    session_list: ListState,
+    /// What the list shows, one entry per item, as of the last frame.
+    entries: Vec<ginka_ui::session_list::Entry>,
     /// The login the next prompt runs on, and its headroom, for the footer
     /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
     /// them.
@@ -149,6 +154,8 @@ impl SessionSidebar {
             selected_project: None,
             unlisted: 0,
             archived_open: true,
+            session_list: ListState::new(0, ListAlignment::Top, px(600.)),
+            entries: Vec::new(),
             account: None,
             search,
             search_query: String::new(),
@@ -195,6 +202,9 @@ impl SessionSidebar {
     /// whatever row is now first — that would be a conversation nobody asked
     /// for.
     pub fn set_rows(&mut self, rows: Vec<SessionRow>, cx: &mut Context<Self>) {
+        // A row's title or state can change its height where the list is not
+        // looking; the rows on screen are laid out again anyway.
+        self.session_list.remeasure();
         self.rows = rows;
         match &self.selected {
             Some(selected) if !self.rows.iter().any(|row| &row.workspace == selected) => {
@@ -213,6 +223,11 @@ impl SessionSidebar {
     pub fn set_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut Context<Self>) {
         self.projects = projects;
         cx.notify();
+    }
+
+    /// How many projects are registered.
+    pub fn project_count(&self) -> usize {
+        self.projects.len()
     }
 
     pub fn selected_row(&self) -> Option<&SessionRow> {
@@ -1066,6 +1081,60 @@ impl SessionSidebar {
             )
     }
 
+    /// One item of the session list (`ginka_ui::session_list::Entry`).
+    fn session_entry(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        use ginka_ui::session_list::Entry;
+        let Some(entry) = self.entries.get(index).cloned() else {
+            return div().into_any_element();
+        };
+        let item = div().w_full().pb_0p5();
+        match entry {
+            Entry::Project(name) => {
+                let position = self
+                    .projects
+                    .iter()
+                    .position(|project| project.name == name)
+                    .unwrap_or_default();
+                let label = self
+                    .projects
+                    .get(position)
+                    .map(|project| project.label.clone())
+                    .unwrap_or_else(|| name.0.clone().into());
+                let count = self.projects.len();
+                item.child(self.project_header(name, label, position, count, cx))
+                    .into_any_element()
+            }
+            Entry::Row(row) => match self.rows.get(row).cloned() {
+                Some(session) => item
+                    .child(self.session_row(row, &session, cx))
+                    .into_any_element(),
+                None => item.into_any_element(),
+            },
+            Entry::ArchivedHeading => item
+                .pt_2()
+                .child(self.archived_header(cx))
+                .into_any_element(),
+            Entry::Archived(row) => match self.rows.get(row).cloned() {
+                Some(session) => item
+                    .child(self.archived_row(row, &session, cx))
+                    .into_any_element(),
+                None => item.into_any_element(),
+            },
+            Entry::ArchivedFoot => {
+                let tokens = Tokens::global(cx);
+                item.child(
+                    div()
+                        .px_2p5()
+                        .py_1p5()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("sidebar.show_more", count = 25).to_string()),
+                )
+                .into_any_element()
+            }
+        }
+    }
+
     fn archived_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let tokens = Tokens::global(cx);
         h_flex()
@@ -1283,6 +1352,19 @@ impl Render for SessionSidebar {
         let archived_count = archived.len();
         let no_matching_sessions =
             groups.iter().all(|group| group.rows.is_empty()) && archived_count == 0;
+        let headings = !(selected_project_name.is_some() && self.place == Place::Workspace);
+        let archived_indices: Vec<usize> = archived.iter().map(|(index, _)| *index).collect();
+        let entries = ginka_ui::session_list::entries(
+            &groups,
+            headings,
+            &archived_indices,
+            self.archived_open,
+        );
+        if let Some(from) = ginka_ui::session_list::first_difference(&self.entries, &entries) {
+            let old = self.entries.len();
+            self.session_list.splice(from..old, entries.len() - from);
+        }
+        self.entries = entries;
 
         let project_rows = self.projects.clone();
         let selected_project = selected_project_name.is_some() && self.place == Place::Workspace;
@@ -1430,8 +1512,6 @@ impl Render for SessionSidebar {
                                 .flex_1()
                                 .min_h_0()
                                 .px_1p5()
-                                .gap_0p5()
-                                .overflow_y_scroll()
                                 .when(no_matching_sessions, |this| {
                                     this.child(
                                         div()
@@ -1447,56 +1527,16 @@ impl Render for SessionSidebar {
                                             }),
                                     )
                                 })
-                                .children(groups.into_iter().flat_map(|group| {
-                                    let mut elements = Vec::new();
-                                    if !selected_project {
-                                        elements.push(
-                                            {
-                                                let index = self
-                                                    .projects
-                                                    .iter()
-                                                    .position(|project| project.name == group.name)
-                                                    .unwrap_or_default();
-                                                self.project_header(
-                                                    group.name,
-                                                    group.project,
-                                                    index,
-                                                    self.projects.len(),
-                                                    cx,
-                                                )
-                                            }
-                                            .into_any_element(),
-                                        );
-                                    }
-                                    elements.extend(group.rows.iter().map(|(index, row)| {
-                                        self.session_row(*index, row, cx).into_any_element()
-                                    }));
-                                    elements
-                                }))
-                                .when(archived_count > 0, |this| {
-                                    this.child(div().h_2())
-                                        .child(self.archived_header(cx))
-                                        .when(self.archived_open, |this| {
-                                            this.children(archived.iter().map(|(index, row)| {
-                                                self.archived_row(*index, row, cx)
-                                                    .into_any_element()
-                                            }))
-                                            .child(
-                                                div()
-                                                    .px_2p5()
-                                                    .py_1p5()
-                                                    .text_xs()
-                                                    .text_color(tokens.colors().text_muted)
-                                                    .child(
-                                                        rust_i18n::t!(
-                                                            "sidebar.show_more",
-                                                            count = 25
-                                                        )
-                                                        .to_string(),
-                                                    ),
-                                            )
-                                        })
-                                }),
+                                .child(
+                                    list(
+                                        self.session_list.clone(),
+                                        cx.processor(|this, index: usize, _window, cx| {
+                                            this.session_entry(index, cx)
+                                        }),
+                                    )
+                                    .flex_1()
+                                    .size_full(),
+                                ),
                         )
                         .child(self.footer(cx)),
                 )

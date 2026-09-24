@@ -30,6 +30,7 @@ pub mod notify;
 pub mod palette;
 pub mod reports;
 pub mod search;
+pub mod session_list;
 pub mod skills;
 pub mod split_diff;
 pub mod surface;

@@ -168,8 +168,43 @@ impl Tabs {
     }
 }
 
+/// Which workspace to show when the window opens: the one on screen when
+/// it closed, if it is still there, else the first open tab that is.
+/// `None` leaves the home screen up.
+pub fn restore_selection(
+    last: Option<&str>,
+    open_tabs: &[WorkspaceId],
+    live: &[WorkspaceId],
+) -> Option<WorkspaceId> {
+    last.map(|last| WorkspaceId(last.to_string()))
+        .into_iter()
+        .chain(open_tabs.iter().cloned())
+        .find(|candidate| live.contains(candidate))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_window_opens_where_it_was_left_or_on_the_first_tab_still_there() {
+        let id = |text: &str| WorkspaceId(text.into());
+        let live = [id("comet/main"), id("comet/try-1")];
+        assert_eq!(
+            restore_selection(Some("comet/try-1"), &[id("comet/main")], &live),
+            Some(id("comet/try-1"))
+        );
+        assert_eq!(
+            restore_selection(
+                Some("comet/gone"),
+                &[id("comet/gone"), id("comet/main")],
+                &live
+            ),
+            Some(id("comet/main")),
+            "a workspace that is gone is skipped"
+        );
+        assert_eq!(restore_selection(None, &[], &live), None, "the home screen");
+        assert_eq!(restore_selection(Some("comet/gone"), &[], &live), None);
+    }
+
     use super::*;
 
     fn ws(name: &str) -> WorkspaceId {
