@@ -39,6 +39,37 @@ pub fn insert_project(conn: &Connection, project: &Project) -> Result<()> {
     Ok(())
 }
 
+/// Set or clear a project's label. `false` when there is no such project.
+pub fn set_label(conn: &Connection, project: &ProjectName, label: Option<&str>) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE projects SET label = ?1 WHERE name = ?2",
+        rusqlite::params![label, project.0],
+    )? > 0)
+}
+
+/// Put a project at `index` in the sidebar order, renumbering every project
+/// so the order is dense. `false` when there is no such project.
+pub fn move_to(conn: &Connection, project: &ProjectName, index: usize) -> Result<bool> {
+    let mut names: Vec<ProjectName> = list_projects(conn)?
+        .into_iter()
+        .map(|project| project.name)
+        .collect();
+    let Some(from) = names.iter().position(|name| name == project) else {
+        return Ok(false);
+    };
+    let moved = names.remove(from);
+    names.insert(index.min(names.len()), moved);
+    let transaction = conn.unchecked_transaction()?;
+    for (order, name) in names.iter().enumerate() {
+        transaction.execute(
+            "UPDATE projects SET sort_order = ?1 WHERE name = ?2",
+            rusqlite::params![order as i64, name.0],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(true)
+}
+
 /// Every project, in sidebar order.
 pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
     let mut statement = conn.prepare(

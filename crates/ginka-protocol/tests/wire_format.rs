@@ -506,3 +506,14 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
         })
     );
 }
+
+#[test]
+fn a_project_is_moved_by_name_to_an_index() {
+    assert_eq!(
+        wire(&Request::MoveProject {
+            project: ginka_protocol::ProjectName("comet".into()),
+            index: 2,
+        }),
+        json!({"method": "move_project", "project": "comet", "index": 2})
+    );
+}

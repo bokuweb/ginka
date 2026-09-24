@@ -890,6 +890,21 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::LabelProject { project, label } => {
+                        let (link, project, label) =
+                            (this.link.clone(), project.clone(), label.clone());
+                        this.after_row_change(
+                            async move { link.set_project_label(&project, label).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::MoveProject { project, index } => {
+                        let (link, project, index) = (this.link.clone(), project.clone(), *index);
+                        this.after_row_change(
+                            async move { link.move_project(&project, index).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::Rename { session, title } => {
                         let (link, session, title) =
                             (this.link.clone(), session.clone(), title.clone());

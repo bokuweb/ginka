@@ -1205,6 +1205,12 @@ composer.queue.clear:
 sidebar.queued:
   en: "%{count} queued"
   ja: "%{count} 件待ち"
+sidebar.action.move_up:
+  en: Move up
+  ja: 上へ
+sidebar.action.move_down:
+  en: Move down
+  ja: 下へ
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更

@@ -493,6 +493,24 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_project_label",
+            description: "Label a project the way the reader groups it; an empty label clears it.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}, "label": {"type": "string"}},
+                "required": ["project", "label"],
+            }),
+        },
+        Tool {
+            name: "ginka_project_move",
+            description: "Put a project at a position in the sidebar order, 0 first.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}, "index": {"type": "integer", "minimum": 0}},
+                "required": ["project", "index"],
+            }),
+        },
+        Tool {
             name: "ginka_push",
             description: "Push a workspace branch, setting its upstream on the first push.",
             schema: json!({
@@ -884,6 +902,14 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
         },
+        "ginka_project_label" => Request::SetProjectLabel {
+            project: ProjectName(text("project")?),
+            label: text("label")?,
+        },
+        "ginka_project_move" => Request::MoveProject {
+            project: ProjectName(text("project")?),
+            index: number("index").ok_or_else(|| anyhow!("{tool} needs an `index`"))? as u32,
+        },
         "ginka_workspace_merge" => Request::MergeWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             into: text("into").ok(),
@@ -1040,6 +1066,7 @@ mod tests {
                 "agents": ["claude", "codex:gpt-5"],
                 "name": "release-notes",
                 "enabled": false,
+                "label": "Work",
                 "schedule": "@daily",
                 "via": "terminal",
             });

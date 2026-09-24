@@ -1611,3 +1611,74 @@ fn a_terminal_job_is_finished_when_its_terminal_closes_and_can_be_run_by_hand() 
             .is_err()
     );
 }
+
+fn project_names(fixture: &mut Fixture) -> Vec<(String, Option<String>)> {
+    match fixture.ask(Request::ListProjects) {
+        Response::Projects { projects } => projects
+            .into_iter()
+            .map(|project| (project.name.0, project.label))
+            .collect(),
+        other => panic!("expected projects, got {other:?}"),
+    }
+}
+
+#[test]
+fn projects_keep_the_order_and_labels_the_reader_gives_them() {
+    let mut fixture = Fixture::new();
+    for name in ["comet", "aurora", "nebula"] {
+        let root = fixture.work.path().join(name);
+        support::repository(&root);
+        fixture.ask(Request::AddProject {
+            path: root,
+            label: None,
+        });
+    }
+    // A new project goes to the end rather than into the alphabet.
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["comet", "aurora", "nebula"]);
+
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("nebula".into()),
+        index: 0,
+    });
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("comet".into()),
+        index: 99,
+    });
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        ["nebula", "aurora", "comet"],
+        "a far index is the end"
+    );
+
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "Work".into(),
+    });
+    assert_eq!(
+        project_names(&mut fixture)[1],
+        ("aurora".to_string(), Some("Work".to_string()))
+    );
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "  ".into(),
+    });
+    assert_eq!(project_names(&mut fixture)[1].1, None, "blank clears it");
+
+    assert!(
+        fixture
+            .service
+            .handle(Request::MoveProject {
+                project: ProjectName("nowhere".into()),
+                index: 0,
+            })
+            .is_err()
+    );
+}

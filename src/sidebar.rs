@@ -62,6 +62,16 @@ pub enum SidebarEvent {
         session: SessionId,
         title: String,
     },
+    /// Show a project under another name; blank goes back to its own.
+    LabelProject {
+        project: ProjectName,
+        label: String,
+    },
+    /// Put a project at another place in the rail.
+    MoveProject {
+        project: ProjectName,
+        index: u32,
+    },
 }
 
 /// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
@@ -122,6 +132,10 @@ pub struct SessionSidebar {
     /// The row whose actions are open: MonoCode's session menu, drawn under
     /// the row rather than floating, so the list stays one column.
     menu_for: Option<WorkspaceId>,
+    /// The project whose menu is open in the rail.
+    project_menu_for: Option<ProjectName>,
+    /// The project being renamed, and the field its name is typed in.
+    labelling: Option<(ProjectName, Entity<InputState>)>,
     /// The conversation being renamed, and the field its title is typed in.
     renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
 }
@@ -143,6 +157,8 @@ impl SessionSidebar {
             inbox_unread: false,
             status: ginka_ui::workspace::StatusFilter::All,
             menu_for: None,
+            project_menu_for: None,
+            labelling: None,
             renaming: None,
         }
     }
@@ -519,13 +535,106 @@ impl SessionSidebar {
         &self,
         project: ProjectName,
         label: SharedString,
+        index: usize,
+        count: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let tokens = Tokens::global(cx);
+        let tokens = Tokens::global(cx).clone();
         // The project rail and the session list are separate navigation
         // levels, so both stay selected while a conversation is open.
         let selected =
             self.place == Place::Workspace && self.selected_project.as_ref() == Some(&project);
+        if let Some((_, field)) = self
+            .labelling
+            .as_ref()
+            .filter(|(labelling, _)| labelling == &project)
+        {
+            return div()
+                .w_full()
+                .px_1()
+                .py_0p5()
+                .child(Input::new(field))
+                .into_any_element();
+        }
+        let menu_open = self.project_menu_for.as_ref() == Some(&project);
+        let menu = menu_open.then(|| {
+            let action = |id: String, label: String| {
+                div()
+                    .id(SharedString::from(id))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(tokens.radius.control()))
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .child(label)
+            };
+            let (rename, up, down) = (project.clone(), project.clone(), project.clone());
+            let current = label.clone();
+            h_flex()
+                .ml_5()
+                .pb_1()
+                .gap_1()
+                .child(
+                    action(
+                        format!("project-rename:{}", project.0),
+                        rust_i18n::t!("sidebar.action.rename").to_string(),
+                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_labelling(rename.clone(), current.clone(), window, cx)
+                    })),
+                )
+                .when(index > 0, |this| {
+                    this.child(
+                        action(
+                            format!("project-up:{}", project.0),
+                            rust_i18n::t!("sidebar.action.move_up").to_string(),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.project_menu_for = None;
+                            cx.emit(SidebarEvent::MoveProject {
+                                project: up.clone(),
+                                index: index as u32 - 1,
+                            });
+                        })),
+                    )
+                })
+                .when(index + 1 < count, |this| {
+                    this.child(
+                        action(
+                            format!("project-down:{}", project.0),
+                            rust_i18n::t!("sidebar.action.move_down").to_string(),
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.project_menu_for = None;
+                            cx.emit(SidebarEvent::MoveProject {
+                                project: down.clone(),
+                                index: index as u32 + 1,
+                            });
+                        })),
+                    )
+                })
+        });
+        let toggle = project.clone();
+        v_flex()
+            .w_full()
+            .child(self.project_row(project, label, selected, menu_open, toggle, cx))
+            .children(menu)
+            .into_any_element()
+    }
+
+    /// The rail's row for one project, with the ⋯ that opens its menu.
+    fn project_row(
+        &self,
+        project: ProjectName,
+        label: SharedString,
+        selected: bool,
+        menu_open: bool,
+        toggle: ProjectName,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
         h_flex()
             .id(SharedString::from(format!("project:{}", project.0)))
             .w_full()
@@ -555,6 +664,61 @@ impl SessionSidebar {
                     .truncate()
                     .child(label),
             )
+            .child(
+                div()
+                    .id(SharedString::from(format!("project-menu:{}", toggle.0)))
+                    .px_1()
+                    .rounded(px(tokens.radius.control()))
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .cursor_pointer()
+                    .when(menu_open, |this| this.bg(tokens.colors().row_active()))
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.project_menu_for = if this.project_menu_for.as_ref() == Some(&toggle) {
+                            None
+                        } else {
+                            Some(toggle.clone())
+                        };
+                        cx.notify();
+                    }))
+                    .child("⋯"),
+            )
+    }
+
+    /// Start renaming a project in the rail, with its name in a focused field.
+    fn start_labelling(
+        &mut self,
+        project: ProjectName,
+        current: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(current.to_string(), window, cx);
+            state
+        });
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let label = field.read(cx).value().trim().to_string();
+                if let Some((project, _)) = this.labelling.take() {
+                    cx.emit(SidebarEvent::LabelProject { project, label });
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.labelling = None;
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.project_menu_for = None;
+        self.labelling = Some((project, field));
+        cx.notify();
     }
 
     /// Header for the session list beside the project rail.
@@ -1174,9 +1338,23 @@ impl Render for SessionSidebar {
                             .when(project_rows.is_empty(), |this| {
                                 this.child(self.no_projects(cx))
                             })
-                            .children(project_rows.into_iter().map(|project| {
-                                self.project_header(project.name, project.label, cx)
-                            })),
+                            .children({
+                                let count = project_rows.len();
+                                project_rows
+                                    .into_iter()
+                                    .enumerate()
+                                    .map(|(index, project)| {
+                                        self.project_header(
+                                            project.name,
+                                            project.label,
+                                            index,
+                                            count,
+                                            cx,
+                                        )
+                                        .into_any_element()
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
                     )
                     .child(div().px_1p5().py_1p5().child(settings)),
             )
@@ -1273,8 +1451,21 @@ impl Render for SessionSidebar {
                                     let mut elements = Vec::new();
                                     if !selected_project {
                                         elements.push(
-                                            self.project_header(group.name, group.project, cx)
-                                                .into_any_element(),
+                                            {
+                                                let index = self
+                                                    .projects
+                                                    .iter()
+                                                    .position(|project| project.name == group.name)
+                                                    .unwrap_or_default();
+                                                self.project_header(
+                                                    group.name,
+                                                    group.project,
+                                                    index,
+                                                    self.projects.len(),
+                                                    cx,
+                                                )
+                                            }
+                                            .into_any_element(),
                                         );
                                     }
                                     elements.extend(group.rows.iter().map(|(index, row)| {

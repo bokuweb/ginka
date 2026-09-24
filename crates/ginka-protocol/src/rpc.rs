@@ -37,6 +37,12 @@ pub enum Request {
     /// Forget a project. The worktrees on disk are left alone: the daemon
     /// registered them, it did not create the user's code.
     RemoveProject { project: ProjectName },
+    /// Name a project the way the reader groups it; blank clears it. The
+    /// project's `name` — its identity — does not change.
+    SetProjectLabel { project: ProjectName, label: String },
+    /// Put a project at `index` in the rail's order; an index past the end
+    /// is the end.
+    MoveProject { project: ProjectName, index: u32 },
 
     /// Every workspace, reconciled against git first. `project` limits it.
     ListWorkspaces { project: Option<ProjectName> },

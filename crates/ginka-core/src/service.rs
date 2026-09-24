@@ -237,6 +237,22 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
+            Request::SetProjectLabel { project, label } => {
+                let label = label.trim();
+                let label = (!label.is_empty()).then_some(label);
+                if !project::set_label(&self.conn(), &project, label).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
+            Request::MoveProject { project, index } => {
+                if !project::move_to(&self.conn(), &project, index as usize).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
             Request::AddProject { path, label } => {
                 let project = registry::register_project_as(&self.conn(), &path, label.as_deref())
                     .map_err(failed)?;

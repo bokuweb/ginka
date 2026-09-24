@@ -723,3 +723,25 @@ fn a_scheduled_job_is_added_listed_run_and_removed() {
     home.ok(&["cron", "remove", &id]);
     assert!(!home.ok(&["cron", "list"]).contains("nightly"));
 }
+
+#[test]
+fn a_project_can_be_labelled_and_moved() {
+    let home = Home::new();
+    for name in ["comet", "aurora"] {
+        let repository = home.repository(name);
+        home.ok(&["project", "add", repository.to_str().unwrap()]);
+    }
+    home.ok(&["project", "move", "aurora", "0"]);
+    home.ok(&["project", "label", "comet", "Side projects"]);
+    let listed = home.ok(&["project", "list"]);
+    let aurora = listed.find("aurora").expect("listed");
+    let comet = listed.find("comet").expect("listed");
+    assert!(aurora < comet, "moved first: {listed}");
+    assert!(listed.contains("Side projects"), "{listed}");
+    assert!(
+        !home
+            .run(&["project", "move", "nowhere", "0"])
+            .status
+            .success()
+    );
+}
