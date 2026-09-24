@@ -19,7 +19,7 @@ use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{
     Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
@@ -850,7 +850,7 @@ impl SessionSidebar {
                                 Some(field) => div()
                                     .flex_1()
                                     .min_w_0()
-                                    .child(Input::new(&field))
+                                    .child(ginka_ui::field::input(&field))
                                     .into_any_element(),
                                 None => div()
                                     .flex_1()
@@ -1463,7 +1463,12 @@ impl Render for SessionSidebar {
                                         .size_3p5()
                                         .text_color(tokens.colors().text_muted),
                                 )
-                                .child(div().flex_1().min_w_0().child(Input::new(&self.search)))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(ginka_ui::field::input(&self.search)),
+                                )
                                 .child(
                                     div()
                                         .id("session-status-filter")
