@@ -329,11 +329,23 @@ Dragging across the terminal grid selects exact character cells in either direct
   its own worktree and opens each as a tab. A conversation that belongs to a
   fan-out shows *Compare N* in the header, which replaces the column with the
   attempts side by side — agent and branch, state, `+/−` lines, the last
-  answer as Markdown — each with *Open* and a two-step *Keep* that archives
-  the others.
+  answer as Markdown — each with *Open*, a two-step *Keep* that archives
+  the others, and a two-step *Merge* that first merges the attempt into the
+  branch the project is on. A refused merge — a conflict, or uncommitted work
+  in the project's checkout — is said above the columns and nothing is
+  archived.
 - **Second opinion** — each completed turn's footer offers every other ready
   agent as *Second opinion: <agent>*, which forks the conversation there with
   a request to review the work and change nothing.
+- **Scheduled jobs** — Settings lists the project's cron jobs: schedule,
+  name, what runs, when it next fires and how it last went, with *Pause*,
+  *Run now* and *Remove*, and a form for a new one (command or prompt).
+- **Reports** — a cost priced from the public rate table rather than by the
+  vendor reads `≈$1.25`; sessions nothing could price are counted as
+  `N unpriced` and left out of the total; a footnote says when the table
+  was fetched.
+- **Notifications** — each kind of news has its own sound (Settings turns
+  them off), and the Dock badge counts the sessions waiting on the reader.
 - **Quick commands** — the terminal dock's ▶ lists saved commands for the
   project and globally; a shell command opens a terminal named after it, a
   prompt command is sent as if typed. They are managed in Settings.
