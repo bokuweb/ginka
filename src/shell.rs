@@ -4694,8 +4694,16 @@ impl Shell {
                     .w_full()
                     .gap_2()
                     .items_center()
-                    .child(div().w(px(160.)).child(Input::new(&self.quick_form.name)))
-                    .child(div().flex_1().child(Input::new(&self.quick_form.body)))
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .child(ginka_ui::field::input(&self.quick_form.name)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.quick_form.body)),
+                    )
                     .child(
                         Button::new("quick-save")
                             .compact()
@@ -5841,7 +5849,7 @@ impl Shell {
                         .w_full()
                         .gap_1()
                         .items_center()
-                        .child(div().flex_1().child(Input::new(&search.query)))
+                        .child(div().flex_1().child(ginka_ui::field::input(&search.query)))
                         .child(
                             div()
                                 .min_w(px(58.))
@@ -7920,7 +7928,7 @@ impl Shell {
                     }))
                     .children(prompt_editing)
                     .children(queue_editing)
-                    .child(Textarea::new(&self.composer))
+                    .child(Textarea::new(&self.composer).appearance(false))
                     .child(
                         h_flex()
                             .w_full()
@@ -8457,7 +8465,7 @@ impl Shell {
                                 .p_2()
                                 .border_b_1()
                                 .border_color(tokens.colors().border_subtle)
-                                .child(Input::new(&self.model_query)),
+                                .child(ginka_ui::field::input(&self.model_query)),
                         )
                         .child(
                             v_flex()
@@ -8691,7 +8699,7 @@ impl Shell {
                         .p_2()
                         .border_b_1()
                         .border_color(tokens.colors().border_subtle)
-                        .child(Input::new(&self.branch_query)),
+                        .child(ginka_ui::field::input(&self.branch_query)),
                 )
                 .children(self.branch_error.clone().map(|error| {
                     div()
@@ -9753,7 +9761,7 @@ impl Shell {
                         .p_4()
                         .gap_3()
                         .rounded(px(tokens.radius.card))
-                        .bg(tokens.colors().bg_raised)
+                        .bg(tokens.colors().popover())
                         .border_1()
                         .border_color(tokens.colors().border_strong)
                         .shadow_lg()
@@ -9788,7 +9796,12 @@ impl Shell {
                                 .gap_1()
                                 .children(tool_buttons)
                                 .when(selected_tool == ginka_ui::markup::MarkupTool::Text, |row| {
-                                    row.child(div().ml_2().flex_1().child(Input::new(&text_input)))
+                                    row.child(
+                                        div()
+                                            .ml_2()
+                                            .flex_1()
+                                            .child(ginka_ui::field::input(&text_input)),
+                                    )
                                 })
                                 .child(div().flex_1())
                                 .child(
@@ -9935,7 +9948,7 @@ impl Shell {
                         .p_5()
                         .gap_4()
                         .rounded(px(tokens.radius.card))
-                        .bg(tokens.colors().bg_raised)
+                        .bg(tokens.colors().popover())
                         .border_1()
                         .border_color(tokens.colors().border_strong)
                         .shadow_lg()
@@ -9987,7 +10000,12 @@ impl Shell {
                                         .size_4()
                                         .text_color(tokens.colors().text_secondary),
                                 )
-                                .child(div().flex_1().min_w_0().child(Input::new(&dialog.name))),
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .child(Input::new(&dialog.name).appearance(false)),
+                                ),
                         )
                         .child(
                             div()
@@ -10116,7 +10134,7 @@ impl Shell {
                         .p_4()
                         .gap_3()
                         .rounded(px(tokens.radius.card))
-                        .bg(tokens.colors().bg_raised)
+                        .bg(tokens.colors().popover())
                         .border_1()
                         .border_color(tokens.colors().border_strong)
                         .shadow_lg()
@@ -10133,8 +10151,8 @@ impl Shell {
                                         .to_string(),
                                 ),
                         )
-                        .child(Input::new(&dialog.id))
-                        .child(Input::new(&dialog.label))
+                        .child(ginka_ui::field::input(&dialog.id))
+                        .child(ginka_ui::field::input(&dialog.label))
                         .child(
                             div()
                                 .text_xs()
@@ -10945,7 +10963,7 @@ impl Shell {
                         this.close_terminal_search(window, cx);
                     }
                 }))
-                .child(div().flex_1().child(Input::new(&search.query)))
+                .child(div().flex_1().child(ginka_ui::field::input(&search.query)))
                 .child(
                     div()
                         .min_w(px(58.))
@@ -11634,7 +11652,7 @@ impl Shell {
                         .w(px(560.))
                         .max_h(px(420.))
                         .rounded(px(tokens.radius.card))
-                        .bg(tokens.colors().bg_raised)
+                        .bg(tokens.colors().popover())
                         .border_1()
                         .border_color(tokens.colors().border_strong)
                         .shadow_lg()
@@ -11648,7 +11666,7 @@ impl Shell {
                                 .py_2()
                                 .border_b_1()
                                 .border_color(tokens.colors().border_subtle)
-                                .child(Input::new(&palette.query)),
+                                .child(ginka_ui::field::input(&palette.query)),
                         )
                         .child(
                             v_flex()
