@@ -216,6 +216,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_session_edit",
+            description: "Edit a sent prompt (by transcript seq) and run the conversation again from it in a new session; the worktree goes back to the checkpoint before that prompt and the original conversation is kept.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "session": {"type": "string"},
+                    "seq": {"type": "integer", "minimum": 1},
+                    "text": {"type": "string"}
+                },
+                "required": ["session", "seq", "text"],
+            }),
+        },
+        Tool {
             name: "ginka_queue_add",
             description: "Queue a follow-up behind the running turn instead of steering it in. With nothing running or waiting it is sent at once.",
             schema: json!({
@@ -668,6 +681,11 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             session: SessionId(text("session")?),
             id: number("id").ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
         },
+        "ginka_session_edit" => Request::EditPrompt {
+            session: SessionId(text("session")?),
+            seq: number("seq").ok_or_else(|| anyhow!("{tool} needs a `seq`"))?,
+            text: text("text")?,
+        },
         "ginka_queue_add" => Request::QueueMessage {
             session: SessionId(text("session")?),
             text: text("text")?,
@@ -880,6 +898,7 @@ mod tests {
                 "session": "s-1",
                 "request_id": "ask-1",
                 "id": 7,
+                "seq": 3,
                 "index": 0,
                 "response": "yes",
                 "agent": "claude",

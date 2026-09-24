@@ -16,8 +16,9 @@ use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
 use anyhow::Result;
-use ginka_protocol::event::DaemonEvent;
+use ginka_protocol::event::{AgentEvent, DaemonEvent};
 use ginka_protocol::ids::slugify;
+use ginka_protocol::model::TranscriptPayload;
 use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
@@ -610,7 +611,8 @@ impl Service {
                 agent,
                 model,
                 account,
-            } => self.fork_session(&session, after, agent.as_deref(), model, account),
+            } => self.fork_session(&session, after, agent.as_deref(), model, account, false),
+            Request::EditPrompt { session, seq, text } => self.edit_prompt(&session, seq, text),
             Request::SearchSessions {
                 workspace,
                 query,
@@ -1518,6 +1520,7 @@ impl Service {
         agent: Option<&str>,
         model: Option<String>,
         account: Option<ginka_protocol::AccountId>,
+        fresh_thread: bool,
     ) -> Result<Response, RpcError> {
         let original = self.session(id)?;
         let driver = self.driver(agent.unwrap_or(&original.agent))?;
@@ -1533,7 +1536,9 @@ impl Service {
                 crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
             }
         };
-        let moved = !same_agent || account != original.account;
+        // A fresh thread is a move in all but name: the vendor's thread holds
+        // what is being replaced, so the digest stands in for it.
+        let moved = !same_agent || account != original.account || fresh_thread;
         let keeps_model_options = same_agent
             && model
                 .as_ref()
@@ -1566,12 +1571,15 @@ impl Service {
             // A fork has not run anything yet.
             state: SessionState::Idle,
             title: Some(match (&original.title, moved) {
+                // An edited prompt is the same conversation taken another way.
+                (Some(title), _) if fresh_thread => title.clone(),
+                (None, _) if fresh_thread => "edited".to_string(),
                 (Some(title), false) => format!("{title} (fork)"),
                 (Some(title), true) => format!("{title} ({} fork)", driver.id()),
                 (None, false) => "fork".to_string(),
                 (None, true) => format!("{} fork", driver.id()),
             }),
-            summary: moved.then(|| format!("moved from {}", original.agent)),
+            summary: (moved && !fresh_thread).then(|| format!("moved from {}", original.agent)),
             // Inherited only where continuing it would continue the same
             // conversation; elsewhere the digest stands in for it.
             vendor_session_id: (!moved)
@@ -1599,6 +1607,66 @@ impl Service {
         self.events.emit(DaemonEvent::SessionStarted {
             session: Box::new(fork.clone()),
         });
+        Ok(Response::Session { session: fork })
+    }
+
+    /// Edit a sent prompt and run the conversation again from it.
+    fn edit_prompt(
+        &mut self,
+        id: &SessionId,
+        seq: u64,
+        text: String,
+    ) -> Result<Response, RpcError> {
+        if text.trim().is_empty() {
+            return Err(RpcError::failed("an edited prompt cannot be blank"));
+        }
+        let original = self.session(id)?;
+        if self.sessions.is_running(id) {
+            return Err(RpcError::failed(
+                "the session is still working; stop it before editing a prompt",
+            ));
+        }
+        let entries = session::transcript(&self.conn(), id, None, None).map_err(failed)?;
+        let Some(prompt) = entries.iter().find(|entry| entry.seq == seq) else {
+            return Err(RpcError::not_found(format!("no transcript entry {seq}")));
+        };
+        if !matches!(prompt.payload, TranscriptPayload::User { .. }) {
+            return Err(RpcError::failed(format!("entry {seq} is not a prompt")));
+        }
+        // The turns finished before this prompt: the checkpoint at the end of
+        // the last of them (or turn 0, taken before the first) is the state
+        // the prompt was sent into.
+        let finished = entries
+            .iter()
+            .filter(|entry| entry.seq < seq)
+            .filter(|entry| {
+                matches!(
+                    entry.payload,
+                    TranscriptPayload::Agent {
+                        event: AgentEvent::TurnEnd { .. }
+                    }
+                )
+            })
+            .count() as u32;
+        let before = checkpoint::list(&self.conn(), &original.workspace)
+            .map_err(failed)?
+            .into_iter()
+            .filter(|checkpoint| &checkpoint.session == id && checkpoint.turn == finished)
+            // The one the turn took, not a later "before restoring" snapshot.
+            .min_by_key(|checkpoint| checkpoint.created_at);
+        if let Some(checkpoint) = before {
+            self.restore(&checkpoint.id)?;
+        }
+        let fork =
+            match self.fork_session(id, Some(seq.saturating_sub(1)), None, None, None, true)? {
+                Response::Session { session } => session,
+                other => {
+                    return Err(RpcError::failed(format!(
+                        "unexpected fork answer: {other:?}"
+                    )));
+                }
+            };
+        self.send_message(&fork.id, text)?;
         Ok(Response::Session { session: fork })
     }
 

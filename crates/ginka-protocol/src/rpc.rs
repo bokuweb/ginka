@@ -258,6 +258,21 @@ pub enum Request {
         #[serde(default)]
         account: Option<AccountId>,
     },
+    /// Edit a prompt already sent and run the conversation again from it —
+    /// MonoCode's edit-and-resend.
+    ///
+    /// `seq` names the prompt's transcript entry. The worktree goes back to
+    /// the checkpoint taken before that prompt's turn (snapshotting what is
+    /// there first, so the rewind itself can be undone), and a new session
+    /// takes the conversation up to just before it — on a fresh vendor
+    /// thread, handed a digest, because the old thread has the answers being
+    /// replaced in it. `text` is then sent there. The original conversation
+    /// is left as it was. Answers with the new session.
+    EditPrompt {
+        session: SessionId,
+        seq: u64,
+        text: String,
+    },
     /// Find transcript entries containing `query`.
     SearchSessions {
         workspace: Option<WorkspaceId>,

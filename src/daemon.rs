@@ -898,6 +898,27 @@ impl DaemonLink {
         }
     }
 
+    /// Run the conversation again from an edited prompt; answers with the
+    /// session it now continues in.
+    pub async fn edit_prompt(
+        &self,
+        session: &SessionId,
+        seq: u64,
+        text: String,
+    ) -> Result<ginka_protocol::model::Session, String> {
+        match self
+            .ask_result(Request::EditPrompt {
+                session: session.clone(),
+                seq,
+                text,
+            })
+            .await?
+        {
+            Response::Session { session } => Ok(session),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// Queue a follow-up behind the running turn rather than steering it in.
     pub async fn queue_message(&self, session: &SessionId, text: String) -> Result<(), String> {
         self.git_sync(Request::QueueMessage {

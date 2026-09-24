@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// The contract version this build speaks. A mismatch fails the handshake
 /// loudly: a client and daemon that disagree about the wire will otherwise
 /// half-work, which is far harder to diagnose than a refusal.
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// Largest message either side will accept. Attachments travel over this
 /// socket, so the cap has to clear the largest upload the daemon takes — and

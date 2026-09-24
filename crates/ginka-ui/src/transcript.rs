@@ -320,6 +320,16 @@ impl Transcript {
             .flatten()
     }
 
+    /// The persisted position a drawable block was folded from — the first,
+    /// where several entries folded into one. What an edit of a prompt names
+    /// the prompt by.
+    pub fn seq_for_block(&self, index: usize) -> Option<u64> {
+        self.positions
+            .iter()
+            .position(|block| *block == Some(index))
+            .map(|position| position as u64 + 1)
+    }
+
     /// Top-level prompts in reading order, paired with their drawable block.
     ///
     /// Answers to an agent question or plan card are deliberately absent: the
@@ -1071,6 +1081,15 @@ pub fn head_of(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_names_the_position_it_was_folded_from() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[user(1, "one"), user(2, "two")]);
+        assert_eq!(transcript.seq_for_block(0), Some(1));
+        assert_eq!(transcript.seq_for_block(1), Some(2));
+        assert_eq!(transcript.seq_for_block(9), None);
+    }
     use ginka_protocol::event::ActivityItem;
     use ginka_protocol::{SubagentStep, SubagentStepKind, SubagentStepStatus};
     use serde_json::json;

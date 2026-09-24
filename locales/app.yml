@@ -1196,3 +1196,12 @@ surface.git.commit_pr:
 tabs.new:
   en: New chat
   ja: 新しいチャット
+transcript.edit:
+  en: Edit
+  ja: 編集
+transcript.edit.tooltip:
+  en: Edit this prompt and run the conversation again from it
+  ja: このプロンプトを編集して、ここから会話をやり直します
+composer.prompt.editing:
+  en: Editing a sent prompt — ↩ runs the conversation again from here; the original is kept
+  ja: 送信済みプロンプトを編集中 — ↩ でここから会話をやり直します（元の会話は残ります）

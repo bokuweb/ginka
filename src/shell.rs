@@ -510,6 +510,9 @@ pub struct Shell {
     queue_next: bool,
     /// Stable id of the queued prompt currently being edited in the composer.
     editing_queued_message: Option<u64>,
+    /// The sent prompt being edited, by transcript position: Enter runs the
+    /// conversation again from it (`EditPrompt`).
+    editing_prompt: Option<u64>,
     /// The ordinary draft displaced while a queued prompt is edited.
     queue_edit_draft: Option<String>,
     /// Why the most recent queue mutation was refused.
@@ -1231,6 +1234,7 @@ impl Shell {
             session_states: std::collections::HashMap::new(),
             queue_next: false,
             editing_queued_message: None,
+            editing_prompt: None,
             queue_edit_draft: None,
             queue_error: None,
             attachments: Vec::new(),
@@ -2655,6 +2659,32 @@ impl Shell {
     }
 
     /// Actions shared by the readable messages in a transcript.
+    /// *Edit* on a sent prompt, where running it again is possible: the
+    /// conversation is not working, and the block maps to a stored prompt.
+    fn edit_prompt_button(
+        &self,
+        index: usize,
+        text: &str,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.is_working() || self.session.as_ref()?.session.is_none() {
+            return None;
+        }
+        let seq = self.transcript.seq_for_block(index)?;
+        let text = text.to_string();
+        Some(
+            Button::new(SharedString::from(format!("edit-prompt-{index}")))
+                .ghost()
+                .compact()
+                .tooltip(rust_i18n::t!("transcript.edit.tooltip").to_string())
+                .child(rust_i18n::t!("transcript.edit").to_string())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.edit_prompt(seq, text.clone(), window, cx)
+                }))
+                .into_any_element(),
+        )
+    }
+
     fn message_actions(
         &self,
         index: usize,
@@ -3530,6 +3560,73 @@ impl Shell {
         cx.notify();
     }
 
+    /// Put a sent prompt in the composer to edit and run again.
+    fn edit_prompt(&mut self, seq: u64, text: String, window: &mut Window, cx: &mut Context<Self>) {
+        if self.editing_prompt.is_none() && self.editing_queued_message.is_none() {
+            self.queue_edit_draft = Some(self.composer.read(cx).value().to_string());
+        }
+        self.editing_queued_message = None;
+        self.editing_prompt = Some(seq);
+        self.composer
+            .update(cx, |state, cx| state.set_value(text, window, cx));
+        self.composer.focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
+    /// Leave prompt editing and restore the draft it displaced.
+    fn cancel_prompt_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.editing_prompt = None;
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        cx.notify();
+    }
+
+    /// Run the conversation again from an edited prompt, and follow the new
+    /// session it answers with.
+    fn resend_edited(
+        &mut self,
+        session: SessionId,
+        seq: u64,
+        text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editing_prompt = None;
+        let draft = self.queue_edit_draft.take().unwrap_or_default();
+        self.composer
+            .update(cx, |state, cx| state.set_value(draft, window, cx));
+        self.submitted = true;
+        self.transcript_follows = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let edited = cx
+                .background_spawn(async move { link.edit_prompt(&session, seq, text).await })
+                .await;
+            this.update(cx, |this, cx| {
+                match edited {
+                    Ok(session) => {
+                        if let Some(row) = this.session.as_mut() {
+                            row.session = Some(session.id.clone());
+                        }
+                        this.transcript = Transcript::new();
+                        this.transcript_of = Some(session.id);
+                        this.transcript_search = None;
+                        this.session_state = Some(session.state);
+                    }
+                    Err(error) => {
+                        this.submitted = false;
+                        this.queue_error = Some(error);
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Leave queue editing and restore the draft it displaced.
     fn cancel_queued_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let draft = self.queue_edit_draft.take().unwrap_or_default();
@@ -3677,6 +3774,14 @@ impl Shell {
             && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
         {
             self.save_queued_edit(session, id, draft, window, cx);
+            return;
+        }
+        if let Some(seq) = self.editing_prompt
+            && let Some(session) = self.session.as_ref().and_then(|row| row.session.clone())
+        {
+            if !draft.is_empty() {
+                self.resend_edited(session, seq, draft, window, cx);
+            }
             return;
         }
         if self.session_state == Some(SessionState::AwaitingInput)
@@ -5773,6 +5878,7 @@ impl Shell {
                             .child(text.clone()),
                     )
                     .child(self.message_actions(index, "user", text, cx))
+                    .children(self.edit_prompt_button(index, text, cx))
                     .into_any_element()
             }
             TranscriptBlock::Assistant { text } => {
@@ -6696,6 +6802,29 @@ impl Shell {
         let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
         let queue_panel = self.queue_panel(cx);
+        let prompt_editing = self.editing_prompt.map(|_| {
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(rust_i18n::t!("composer.prompt.editing").to_string()),
+                )
+                .child(
+                    Button::new("cancel-prompt-edit")
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("composer.queue.cancel").to_string())
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.cancel_prompt_edit(window, cx)),
+                        ),
+                )
+                .into_any_element()
+        });
         let queue_editing = self.editing_queued_message.map(|_| {
             h_flex()
                 .w_full()
@@ -6830,6 +6959,7 @@ impl Shell {
                                     .to_string(),
                             )
                     }))
+                    .children(prompt_editing)
                     .children(queue_editing)
                     .child(Textarea::new(&self.composer))
                     .child(

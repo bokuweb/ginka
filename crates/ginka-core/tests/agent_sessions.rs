@@ -2941,3 +2941,77 @@ fn a_queue_survives_a_daemon_restart_and_comes_back_held() {
         "the sidebar can say how much is waiting"
     );
 }
+
+#[test]
+fn an_edited_prompt_runs_the_conversation_again_on_a_fresh_thread() {
+    // MonoCode's edit-and-resend: the reader changes what they asked, and the
+    // conversation goes on from there — not from the answer being replaced.
+    let mut fixture = Fixture::new();
+    let script = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[turn:{args}]"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&script, "first");
+    fixture.settle(&session);
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "second".into(),
+    });
+    wait_for_prompts(&mut fixture, &session, 2);
+    fixture.settle(&session);
+
+    let second = match fixture.ask(Request::SessionTranscript {
+        session: session.clone(),
+        after: None,
+        limit: None,
+    }) {
+        Response::Transcript { entries } => entries
+            .into_iter()
+            .find(|entry| {
+                matches!(&entry.payload, TranscriptPayload::User { text } if text == "second")
+            })
+            .expect("the second prompt is recorded")
+            .seq,
+        other => panic!("expected a transcript, got {other:?}"),
+    };
+    let edited = match fixture.ask(Request::EditPrompt {
+        session: session.clone(),
+        seq: second,
+        text: "second, edited".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_ne!(edited.id, session, "the original conversation is kept");
+    assert_eq!(
+        edited.vendor_session_id, None,
+        "not the thread with the old answer in it"
+    );
+
+    let prompts = wait_for_prompts(&mut fixture, &edited.id, 2);
+    assert_eq!(prompts[..2], ["first", "second, edited"]);
+    fixture.settle(&edited.id);
+    assert!(
+        !spoken(&fixture.transcript(&edited.id)).contains("resume vendor-1"),
+        "the edited turn must not resume the replaced thread"
+    );
+    assert_eq!(
+        self::prompts(&mut fixture, &session),
+        vec!["first", "second"],
+        "the original is untouched"
+    );
+
+    // A prompt that is not one is refused.
+    assert!(
+        fixture
+            .service
+            .handle(Request::EditPrompt {
+                session: session.clone(),
+                seq: second + 1,
+                text: "no".into(),
+            })
+            .is_err()
+    );
+}

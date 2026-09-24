@@ -540,6 +540,13 @@ enum SessionCommand {
     },
     /// Inject one queued follow-up into the active turn when supported.
     QueueSendNow { session: String, id: u64 },
+    /// Edit a sent prompt, by the position `session log` shows it at, and
+    /// run the conversation again from it in a new session.
+    Edit {
+        session: String,
+        seq: u64,
+        text: String,
+    },
     /// Queue a follow-up even where the running turn could take it now.
     QueueAdd { session: String, text: String },
     /// Stop the running turn and send this queued follow-up next.
@@ -1229,6 +1236,11 @@ fn request_for(command: Command) -> Result<Request> {
                 id,
             }
         }
+        Command::Session(SessionCommand::Edit { session, seq, text }) => Request::EditPrompt {
+            session: SessionId(session),
+            seq,
+            text,
+        },
         Command::Session(SessionCommand::QueueAdd { session, text }) => Request::QueueMessage {
             session: SessionId(session),
             text,
