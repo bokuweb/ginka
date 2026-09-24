@@ -85,6 +85,9 @@ pub struct Service {
     /// Where vendor session logs are read from, when a test says; otherwise
     /// the vendors' own directories (`usage::scan`).
     vendor_logs: Option<Vec<(std::path::PathBuf, crate::usage::scan::Format)>>,
+    /// The home whose skills directories are read and written, when a test
+    /// says; otherwise the daemon user's.
+    skills_home: Option<std::path::PathBuf>,
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
@@ -146,6 +149,7 @@ impl Service {
             rates,
             drivers_follow_settings: false,
             vendor_logs: None,
+            skills_home: None,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
         }
@@ -189,6 +193,16 @@ impl Service {
     ) -> Self {
         self.vendor_logs = Some(roots);
         self
+    }
+
+    /// Read and write skills under this home instead of the daemon user's.
+    pub fn with_skills_home(mut self, home: impl Into<std::path::PathBuf>) -> Self {
+        self.skills_home = Some(home.into());
+        self
+    }
+
+    fn home(&self) -> Option<std::path::PathBuf> {
+        self.skills_home.clone().or_else(dirs::home_dir)
     }
 
     /// Where the vendors keep their session logs: Claude Code under its
@@ -1033,6 +1047,36 @@ impl Service {
                     )
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
+            }
+            Request::InstallBundledSkills { force } => {
+                let home = self
+                    .home()
+                    .ok_or_else(|| RpcError::failed("the daemon has no home directory"))?;
+                let mut results = Vec::new();
+                // The two whose agents Ginka runs, and whose skills directory
+                // each of them reads.
+                for relative in [".claude/skills", ".codex/skills"] {
+                    let root = home.join(relative);
+                    for (name, outcome) in
+                        crate::skills::install_bundled(&root, force).map_err(failed)?
+                    {
+                        results.push(ginka_protocol::model::BundledSkillInstall {
+                            name: name.to_string(),
+                            path: root
+                                .join(name)
+                                .join(crate::skills::SKILL_FILE)
+                                .display()
+                                .to_string(),
+                            outcome: match outcome {
+                                crate::skills::Installed::Written => "written",
+                                crate::skills::Installed::Unchanged => "unchanged",
+                                crate::skills::Installed::Kept => "kept",
+                            }
+                            .to_string(),
+                        });
+                    }
+                }
+                Ok(Response::BundledSkillsInstalled { results })
             }
             Request::ListCronJobs { project } => Ok(Response::CronJobs {
                 jobs: crate::cron::list(&self.conn(), project.as_ref()).map_err(failed)?,
@@ -2206,7 +2250,7 @@ impl Service {
         };
         // The user's skills live in their home, which is theirs rather than
         // Ginka's `GINKA_HOME`.
-        let roots = crate::skills::default_roots(dirs::home_dir().as_deref(), &projects);
+        let roots = crate::skills::default_roots(self.home().as_deref(), &projects);
         crate::skills::discover(&roots).map_err(failed)
     }
 

@@ -517,3 +517,11 @@ fn a_project_is_moved_by_name_to_an_index() {
         json!({"method": "move_project", "project": "comet", "index": 2})
     );
 }
+
+#[test]
+fn installing_ginkas_skills_says_whether_to_replace_an_edit() {
+    assert_eq!(
+        wire(&Request::InstallBundledSkills { force: false }),
+        json!({"method": "install_bundled_skills", "force": false})
+    );
+}

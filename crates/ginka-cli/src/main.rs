@@ -595,6 +595,13 @@ enum SkillsCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Install the skills that teach an agent to drive Ginka into Claude
+    /// Code's and Codex's skills directories.
+    Install {
+        /// Replace a different file of the same name.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1079,6 +1086,9 @@ fn request_for(command: Command) -> Result<Request> {
             into,
             message,
         },
+        Command::Skills(SkillsCommand::Install { force }) => {
+            Request::InstallBundledSkills { force }
+        }
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
             project: project.map(ProjectName),
         },
@@ -1769,6 +1779,11 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::BundledSkillsInstalled { results } => {
+            for result in results {
+                println!("{:<10} {}", result.outcome, result.path);
+            }
+        }
         Response::CronJobs { jobs } => {
             for job in &jobs {
                 print_cron_job(job);

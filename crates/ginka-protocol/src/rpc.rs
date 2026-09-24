@@ -637,6 +637,12 @@ pub enum Request {
     /// A job's firings, most recent first.
     CronRuns { id: i64, limit: Option<u32> },
 
+    /// Put the skills that teach an agent to drive Ginka — `ginka-start`,
+    /// `ginka-chat`, `ginka-terminal`, `ginka-loop` — into Claude Code's and
+    /// Codex's skills directories on the daemon's host. A different file
+    /// already there is left alone unless `force`.
+    InstallBundledSkills { force: bool },
+
     /// Every chat connector this daemon hosts, and whether each is connected
     /// (`docs/connectors.md` §3.3).
     ListConnectors,
@@ -840,6 +846,10 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    /// What installing Ginka's own skills did, a row per skill and place.
+    BundledSkillsInstalled {
+        results: Vec<crate::model::BundledSkillInstall>,
     },
     CronJobs {
         jobs: Vec<crate::model::CronJob>,

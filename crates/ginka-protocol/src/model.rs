@@ -1155,6 +1155,18 @@ impl QuickCommandKind {
     }
 }
 
+/// One of Ginka's own skills, installed into one place.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BundledSkillInstall {
+    pub name: String,
+    /// The `SKILL.md` it concerns, on the daemon's host.
+    pub path: String,
+    /// `written`, `unchanged`, or `kept` — a different file, or one the
+    /// reader turned off, left alone.
+    pub outcome: String,
+}
+
 /// How a scheduled job runs.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

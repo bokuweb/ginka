@@ -1866,3 +1866,52 @@ fn reports_count_what_agents_spent_outside_ginka_by_model_and_by_project() {
         .expect("the run in the project's folder is the project's");
     assert_eq!(comet.totals.input_tokens, 2_000);
 }
+
+#[test]
+fn ginkas_own_skills_are_installed_where_the_agents_read_them() {
+    let home = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new();
+    fixture.service = std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(home.path().join("unused")),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )
+    .with_skills_home(home.path());
+
+    let installed = match fixture.ask(Request::InstallBundledSkills { force: false }) {
+        Response::BundledSkillsInstalled { results } => results,
+        other => panic!("expected results, got {other:?}"),
+    };
+    // Four skills into Claude Code's directory and Codex's.
+    assert_eq!(installed.len(), 8, "{installed:?}");
+    assert!(installed.iter().all(|result| result.outcome == "written"));
+    assert!(
+        home.path()
+            .join(".claude/skills/ginka-loop/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        home.path()
+            .join(".codex/skills/ginka-start/SKILL.md")
+            .is_file()
+    );
+
+    let listed = match fixture.ask(Request::ListSkills { project: None }) {
+        Response::Skills { skills, .. } => skills,
+        other => panic!("expected skills, got {other:?}"),
+    };
+    assert!(
+        listed.iter().any(|skill| skill.name == "ginka-chat"),
+        "and listed"
+    );
+
+    match fixture.ask(Request::InstallBundledSkills { force: false }) {
+        Response::BundledSkillsInstalled { results } => {
+            assert!(results.iter().all(|result| result.outcome == "unchanged"))
+        }
+        other => panic!("expected results, got {other:?}"),
+    }
+}
