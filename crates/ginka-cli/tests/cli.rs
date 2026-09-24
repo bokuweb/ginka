@@ -745,3 +745,33 @@ fn a_project_can_be_labelled_and_moved() {
             .success()
     );
 }
+
+#[test]
+fn a_terminal_is_opened_written_to_read_and_closed_from_the_cli() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    let id = home
+        .ok(&["terminal", "open", "comet/main"])
+        .trim()
+        .to_string();
+    assert!(!id.is_empty());
+    assert!(home.ok(&["terminal", "list", "comet/main"]).contains(&id));
+
+    home.ok(&["terminal", "send", &id, "echo hi-from-$((40+2))"]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let read = home.ok(&["terminal", "read", &id]);
+        if read.contains("hi-from-42") {
+            assert!(
+                !read.contains('\u{1b}'),
+                "escape sequences are stripped: {read:?}"
+            );
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "never ran: {read}");
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    home.ok(&["terminal", "close", &id]);
+    assert!(!home.ok(&["terminal", "list", "comet/main"]).contains(&id));
+}

@@ -370,6 +370,64 @@ fn shell() -> String {
         .unwrap_or_else(|| "/bin/sh".to_string())
 }
 
+/// A terminal's output as plain text: escape sequences (colours, cursor
+/// moves, titles) taken out, carriage returns before a newline dropped. What
+/// `ginka terminal read` prints, for a reader — or an agent — that wants the
+/// words and not the screen.
+pub fn plain_text(output: &str) -> String {
+    let mut text = String::with_capacity(output.len());
+    let mut chars = output.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => match chars.next() {
+                // CSI: parameters and intermediates, then one final byte.
+                Some('[') => {
+                    for c in chars.by_ref() {
+                        if ('@'..='~').contains(&c) {
+                            break;
+                        }
+                    }
+                }
+                // OSC: up to BEL or ESC \.
+                Some(']') => {
+                    while let Some(c) = chars.next() {
+                        if c == '\u{7}' {
+                            break;
+                        }
+                        if c == '\u{1b}' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                // A charset designation takes one more character.
+                Some('(' | ')' | '*' | '+') => {
+                    chars.next();
+                }
+                _ => {}
+            },
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\u{7}' => {}
+            c => text.push(c),
+        }
+    }
+    text
+}
+
+#[cfg(test)]
+mod plain_text_tests {
+    use super::plain_text;
+
+    #[test]
+    fn colours_moves_and_titles_come_out_and_the_words_stay() {
+        assert_eq!(plain_text("\u{1b}[1;32mok\u{1b}[0m done\r\n"), "ok done\n");
+        assert_eq!(plain_text("\u{1b}]0;title\u{7}prompt$ "), "prompt$ ");
+        assert_eq!(plain_text("a\u{1b}[2Kb\u{1b}[?2004hc"), "abc");
+        assert_eq!(plain_text("x\u{1b}(By"), "xy", "a charset switch");
+        assert_eq!(plain_text("plain"), "plain");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
