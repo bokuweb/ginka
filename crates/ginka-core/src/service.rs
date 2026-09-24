@@ -82,6 +82,12 @@ pub struct Service {
     /// built again when the settings file changes. Not for a service given
     /// its drivers, which is how a test puts a scripted agent in.
     drivers_follow_settings: bool,
+    /// Where vendor session logs are read from, when a test says; otherwise
+    /// the vendors' own directories (`usage::scan`).
+    vendor_logs: Option<Vec<(std::path::PathBuf, crate::usage::scan::Format)>>,
+    /// The home whose skills directories are read and written, when a test
+    /// says; otherwise the daemon user's.
+    skills_home: Option<std::path::PathBuf>,
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
@@ -142,6 +148,8 @@ impl Service {
             accounts: None,
             rates,
             drivers_follow_settings: false,
+            vendor_logs: None,
+            skills_home: None,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
         }
@@ -175,6 +183,121 @@ impl Service {
         self.drivers = Arc::new(Registry::from_settings(&self.settings));
         self.drivers_follow_settings = true;
         self
+    }
+
+    /// Read vendor session logs from these places instead of the vendors'
+    /// own directories. How a test keeps the scanner out of the real home.
+    pub fn with_vendor_logs(
+        mut self,
+        roots: Vec<(std::path::PathBuf, crate::usage::scan::Format)>,
+    ) -> Self {
+        self.vendor_logs = Some(roots);
+        self
+    }
+
+    /// Read and write skills under this home instead of the daemon user's.
+    pub fn with_skills_home(mut self, home: impl Into<std::path::PathBuf>) -> Self {
+        self.skills_home = Some(home.into());
+        self
+    }
+
+    fn home(&self) -> Option<std::path::PathBuf> {
+        self.skills_home.clone().or_else(dirs::home_dir)
+    }
+
+    /// Where the vendors keep their session logs: Claude Code under its
+    /// config directory's `projects`, Codex under its home's `sessions` — the
+    /// default login's and each added login's.
+    fn vendor_log_roots(&self) -> Vec<(std::path::PathBuf, crate::usage::scan::Format)> {
+        use crate::usage::scan::Format;
+        if let Some(roots) = &self.vendor_logs {
+            return roots.clone();
+        }
+        if !self.settings.scan_vendor_logs {
+            return Vec::new();
+        }
+        let mut roots = Vec::new();
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            roots.push((home.join(".claude/projects"), Format::Claude));
+            let codex = std::env::var_os("CODEX_HOME")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| home.join(".codex"));
+            roots.push((codex.join("sessions"), Format::Codex));
+        }
+        for (id, account) in &self.settings.accounts {
+            let home =
+                crate::account::home_dir(&self.paths, &ginka_protocol::AccountId(id.clone()));
+            match account.provider {
+                ginka_protocol::ProviderKind::Claude => {
+                    roots.push((home.join("projects"), Format::Claude))
+                }
+                ginka_protocol::ProviderKind::Codex => {
+                    roots.push((home.join("sessions"), Format::Codex))
+                }
+                _ => {}
+            }
+        }
+        roots
+    }
+
+    /// What a scan of the vendor logs needs: where they are and where each
+    /// was read to. Taken under the service's lock; the reading is not.
+    pub fn outside_scan_plan(
+        &self,
+    ) -> (
+        Vec<(std::path::PathBuf, crate::usage::scan::Format)>,
+        std::collections::HashMap<String, crate::usage::scan::Watermark>,
+    ) {
+        let marks = crate::usage::watermarks(&self.conn()).unwrap_or_default();
+        (self.vendor_log_roots(), marks)
+    }
+
+    /// Keep what a scan read, and where it got to. Returns how many requests
+    /// were new.
+    pub fn record_outside(
+        &mut self,
+        records: &[crate::usage::scan::Record],
+        moved: &[(String, crate::usage::scan::Watermark)],
+    ) -> usize {
+        let conn = self.conn();
+        let added = match crate::usage::store_outside(&conn, records) {
+            Ok(added) => added,
+            Err(error) => {
+                tracing::error!(%error, "could not keep usage read from vendor logs");
+                return 0;
+            }
+        };
+        for (file, mark) in moved {
+            if let Err(error) = crate::usage::save_watermark(&conn, file, mark) {
+                tracing::warn!(%error, file, "could not remember where a vendor log was read to");
+            }
+        }
+        added
+    }
+
+    /// Plan, read and keep a scan in one go — for tests, and for anything
+    /// that does not mind holding the service while files are read.
+    pub fn scan_outside_now(&mut self) -> usize {
+        let (roots, marks) = self.outside_scan_plan();
+        let (records, moved) = crate::usage::scan::collect(&roots, &marks);
+        self.record_outside(&records, &moved)
+    }
+
+    /// Each project's name and its folders — its checkout and its
+    /// worktrees — for placing usage by where it ran.
+    fn project_folders(&self) -> Vec<(String, std::path::PathBuf)> {
+        let Ok(projects) = self.projects() else {
+            return Vec::new();
+        };
+        let mut folders = Vec::new();
+        for project in projects {
+            folders.push((project.name.0.clone(), project.path.clone()));
+            for worktree in project::list_worktrees(&self.conn(), &project.name).unwrap_or_default()
+            {
+                folders.push((project.name.0.clone(), worktree.path));
+            }
+        }
+        folders
     }
 
     /// Read the settings file again if it says something other than what the
@@ -925,6 +1048,74 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::RecordBrowserVisit {
+                workspace,
+                url,
+                title,
+            } => {
+                crate::browser_history::record(
+                    &self.conn(),
+                    &workspace,
+                    &url,
+                    title.as_deref(),
+                    now(),
+                )
+                .map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::BrowserSuggestions {
+                workspace,
+                query,
+                limit,
+            } => {
+                let pages = crate::browser_history::suggestions(
+                    &self.conn(),
+                    &workspace,
+                    &query,
+                    now(),
+                    limit.unwrap_or(8).min(50) as usize,
+                )
+                .map_err(failed)?
+                .into_iter()
+                .map(|visited| ginka_protocol::model::VisitedPage {
+                    url: visited.url,
+                    title: visited.title,
+                    visits: visited.visits,
+                    last_visited_at: visited.last_visited_at,
+                })
+                .collect();
+                Ok(Response::BrowserSuggestions { pages })
+            }
+            Request::InstallBundledSkills { force } => {
+                let home = self
+                    .home()
+                    .ok_or_else(|| RpcError::failed("the daemon has no home directory"))?;
+                let mut results = Vec::new();
+                // The two whose agents Ginka runs, and whose skills directory
+                // each of them reads.
+                for relative in [".claude/skills", ".codex/skills"] {
+                    let root = home.join(relative);
+                    for (name, outcome) in
+                        crate::skills::install_bundled(&root, force).map_err(failed)?
+                    {
+                        results.push(ginka_protocol::model::BundledSkillInstall {
+                            name: name.to_string(),
+                            path: root
+                                .join(name)
+                                .join(crate::skills::SKILL_FILE)
+                                .display()
+                                .to_string(),
+                            outcome: match outcome {
+                                crate::skills::Installed::Written => "written",
+                                crate::skills::Installed::Unchanged => "unchanged",
+                                crate::skills::Installed::Kept => "kept",
+                            }
+                            .to_string(),
+                        });
+                    }
+                }
+                Ok(Response::BundledSkillsInstalled { results })
+            }
             Request::ListCronJobs { project } => Ok(Response::CronJobs {
                 jobs: crate::cron::list(&self.conn(), project.as_ref()).map_err(failed)?,
             }),
@@ -1108,16 +1299,19 @@ impl Service {
             }
             Request::Usage { days } => {
                 let days = days.unwrap_or(30);
+                // Read before the connection is held: it asks the database too.
+                let folders = self.project_folders();
                 let conn = self.conn();
+                let report = crate::usage::report(&conn, days, self.rates.as_ref(), &folders)
+                    .map_err(failed)?;
                 Ok(Response::Usage {
-                    by_day: crate::usage::by_day(&conn, days, self.rates.as_ref())
-                        .map_err(failed)?,
-                    by_agent: crate::usage::by_agent(&conn, days, self.rates.as_ref())
-                        .map_err(failed)?,
-                    by_account: crate::usage::by_account(&conn, days, self.rates.as_ref())
-                        .map_err(failed)?,
-                    rates_fetched_at: self.rates.as_ref().map(|rates| rates.fetched_at),
+                    by_day: report.by_day,
+                    by_agent: report.by_agent,
+                    by_account: report.by_account,
                     plans: crate::usage::plans(&conn).map_err(failed)?,
+                    rates_fetched_at: self.rates.as_ref().map(|rates| rates.fetched_at),
+                    by_model: report.by_model,
+                    by_project: report.by_project,
                 })
             }
             Request::AddReviewComment {
@@ -2094,7 +2288,7 @@ impl Service {
         };
         // The user's skills live in their home, which is theirs rather than
         // Ginka's `GINKA_HOME`.
-        let roots = crate::skills::default_roots(dirs::home_dir().as_deref(), &projects);
+        let roots = crate::skills::default_roots(self.home().as_deref(), &projects);
         crate::skills::discover(&roots).map_err(failed)
     }
 

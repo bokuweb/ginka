@@ -50,6 +50,10 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Transcript and review.** The transcript is a virtualized GPUI `list` that follows its tail; diffs can be read unified or side by side (`ginka_ui::split_diff`).
 - **Projects.** `ginka project label|move` and the rail's ⋯ menu rename and reorder projects; reconciling prunes worktrees deleted by hand, and a forced removal goes through a lock.
 - **Robustness.** A panic writes `crash-<process>-<unix>.log` into the logs directory; the daemon reads `settings.json` again when it is edited by hand.
+- **Usage outside Ginka.** The daemon reads Claude Code's and Codex's own session logs from a watermark per file (`usage::scan`) and Reports adds by-model and by-project rows; `scan_vendor_logs: false` turns it off.
+- **Skills and terminals from the CLI.** `ginka skills install` puts `ginka-start`, `ginka-chat`, `ginka-terminal` and `ginka-loop` (`skills/`) where Claude Code and Codex read skills; `ginka terminal list|open|send|read|close` drives the daemon's terminals.
+- **Browser history.** The address bar completes from the workspace's history by frecency (`browser_history`).
+- **Linux archive.** `scripts/package-linux` and its `install.sh`; `scripts/test-package-linux` in CI.
 - **ACP agents.** Gemini CLI and OpenCode are driven over the Agent Client Protocol by one driver (`driver::acp`); a driver writes back to its agent through `ParseState::outbox` and opens a turn with `AgentDriver::begin`.
 - **One daemon per state directory.** `daemon.lock` is held for the daemon's life; a second daemon exits on it and a client that finds it held waits rather than starting another.
 - **Branches.** `ginka workspace branches|checkout [--create]` and the same over MCP; the context-bar branch picker uses those requests to search, switch or create. A checkout changes the branch column and nothing else (rule 4).

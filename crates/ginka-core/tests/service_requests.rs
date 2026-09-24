@@ -1805,3 +1805,149 @@ fn a_settings_file_edited_by_hand_is_read_again_without_a_restart() {
     std::fs::write(&file, "{ not json").unwrap();
     assert!(!service.reload_settings_if_changed());
 }
+
+#[test]
+fn reports_count_what_agents_spent_outside_ginka_by_model_and_by_project() {
+    let logs = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    // An agent's working directory as it reports it: the real path, as the
+    // project is registered by.
+    let folder = fixture.repo().canonicalize().unwrap();
+    let claude = logs.path().join("projects/-work");
+    std::fs::create_dir_all(&claude).unwrap();
+    let now = chrono::Utc::now().to_rfc3339();
+    let turn = |id: &str| {
+        format!(
+            r#"{{"type":"assistant","sessionId":"terminal-1","cwd":"{}","timestamp":"{now}","message":{{"id":"{id}","model":"claude-opus-5-5","usage":{{"input_tokens":1000,"output_tokens":10,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#,
+            folder.display()
+        )
+    };
+    std::fs::write(claude.join("s.jsonl"), format!("{}\n", turn("m1"))).unwrap();
+    fixture.service = std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(logs.path().join("unused")),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )
+    .with_vendor_logs(vec![(
+        logs.path().join("projects"),
+        ginka_core::usage::scan::Format::Claude,
+    )]);
+
+    assert_eq!(fixture.service.scan_outside_now(), 1);
+    // Scanning again reads only what was appended.
+    assert_eq!(fixture.service.scan_outside_now(), 0);
+    std::fs::write(
+        claude.join("s.jsonl"),
+        format!("{}\n{}\n", turn("m1"), turn("m2")),
+    )
+    .unwrap();
+    assert_eq!(fixture.service.scan_outside_now(), 1);
+
+    let (by_model, by_project) = match fixture.ask(Request::Usage { days: Some(30) }) {
+        Response::Usage {
+            by_model,
+            by_project,
+            ..
+        } => (by_model, by_project),
+        other => panic!("expected usage, got {other:?}"),
+    };
+    let model = by_model
+        .iter()
+        .find(|row| row.label == "claude-opus-5-5")
+        .expect("the model is listed");
+    assert_eq!(model.totals.input_tokens, 2_000);
+    let comet = by_project
+        .iter()
+        .find(|row| row.label == project.0)
+        .expect("the run in the project's folder is the project's");
+    assert_eq!(comet.totals.input_tokens, 2_000);
+}
+
+#[test]
+fn ginkas_own_skills_are_installed_where_the_agents_read_them() {
+    let home = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::new();
+    fixture.service = std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(home.path().join("unused")),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )
+    .with_skills_home(home.path());
+
+    let installed = match fixture.ask(Request::InstallBundledSkills { force: false }) {
+        Response::BundledSkillsInstalled { results } => results,
+        other => panic!("expected results, got {other:?}"),
+    };
+    // Four skills into Claude Code's directory and Codex's.
+    assert_eq!(installed.len(), 8, "{installed:?}");
+    assert!(installed.iter().all(|result| result.outcome == "written"));
+    assert!(
+        home.path()
+            .join(".claude/skills/ginka-loop/SKILL.md")
+            .is_file()
+    );
+    assert!(
+        home.path()
+            .join(".codex/skills/ginka-start/SKILL.md")
+            .is_file()
+    );
+
+    let listed = match fixture.ask(Request::ListSkills { project: None }) {
+        Response::Skills { skills, .. } => skills,
+        other => panic!("expected skills, got {other:?}"),
+    };
+    assert!(
+        listed.iter().any(|skill| skill.name == "ginka-chat"),
+        "and listed"
+    );
+
+    match fixture.ask(Request::InstallBundledSkills { force: false }) {
+        Response::BundledSkillsInstalled { results } => {
+            assert!(results.iter().all(|result| result.outcome == "unchanged"))
+        }
+        other => panic!("expected results, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_address_bar_completes_from_the_workspaces_own_history() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = WorkspaceId(format!("{}/main", project.0));
+    for url in [
+        "http://localhost:3000/dashboard",
+        "http://localhost:3000/dashboard",
+        "https://user:pw@example.com/login?token=secret",
+    ] {
+        fixture.ask(Request::RecordBrowserVisit {
+            workspace: workspace.clone(),
+            url: url.into(),
+            title: Some("Page".into()),
+        });
+    }
+    let pages = match fixture.ask(Request::BrowserSuggestions {
+        workspace: workspace.clone(),
+        query: "".into(),
+        limit: None,
+    }) {
+        Response::BrowserSuggestions { pages } => pages,
+        other => panic!("expected pages, got {other:?}"),
+    };
+    let urls: Vec<&str> = pages.iter().map(|page| page.url.as_str()).collect();
+    assert_eq!(
+        urls,
+        [
+            "http://localhost:3000/dashboard",
+            "https://example.com/login"
+        ],
+        "most visited first, and nothing secret kept"
+    );
+    assert_eq!(pages[0].visits, 2);
+}

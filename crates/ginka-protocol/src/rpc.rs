@@ -637,6 +637,27 @@ pub enum Request {
     /// A job's firings, most recent first.
     CronRuns { id: i64, limit: Option<u32> },
 
+    /// A page the browser surface finished loading in a workspace, for the
+    /// address bar to complete from. Credentials, fragments and
+    /// secret-looking query parameters are dropped before it is kept.
+    RecordBrowserVisit {
+        workspace: WorkspaceId,
+        url: String,
+        title: Option<String>,
+    },
+    /// The pages to offer for what is typed in a workspace's address bar,
+    /// most frecent first.
+    BrowserSuggestions {
+        workspace: WorkspaceId,
+        query: String,
+        limit: Option<u32>,
+    },
+    /// Put the skills that teach an agent to drive Ginka — `ginka-start`,
+    /// `ginka-chat`, `ginka-terminal`, `ginka-loop` — into Claude Code's and
+    /// Codex's skills directories on the daemon's host. A different file
+    /// already there is left alone unless `force`.
+    InstallBundledSkills { force: bool },
+
     /// Every chat connector this daemon hosts, and whether each is connected
     /// (`docs/connectors.md` §3.3).
     ListConnectors,
@@ -810,6 +831,13 @@ pub enum Response {
         /// when there is none, and nothing was estimated.
         #[serde(default)]
         rates_fetched_at: Option<i64>,
+        /// What each model cost, including agents run outside Ginka.
+        #[serde(default)]
+        by_model: Vec<UsageRow>,
+        /// What each project cost, including agents run in its folders
+        /// outside Ginka.
+        #[serde(default)]
+        by_project: Vec<UsageRow>,
         /// The latest reading per account, for those that have one.
         plans: Vec<PlanSnapshot>,
     },
@@ -833,6 +861,14 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    /// Pages the address bar can offer.
+    BrowserSuggestions {
+        pages: Vec<crate::model::VisitedPage>,
+    },
+    /// What installing Ginka's own skills did, a row per skill and place.
+    BundledSkillsInstalled {
+        results: Vec<crate::model::BundledSkillInstall>,
     },
     CronJobs {
         jobs: Vec<crate::model::CronJob>,

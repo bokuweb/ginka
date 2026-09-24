@@ -19,6 +19,9 @@ pub struct UsageReport {
     pub plans: Vec<PlanSnapshot>,
     /// When the rate table behind any estimate was fetched.
     pub rates_fetched_at: Option<i64>,
+    /// By model and by project, including agents run outside Ginka.
+    pub by_model: Vec<UsageRow>,
+    pub by_project: Vec<UsageRow>,
 }
 
 impl UsageReport {

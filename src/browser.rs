@@ -15,13 +15,24 @@ use serde::Deserialize;
 /// A browser selection ready to be reviewed or sent to the active agent.
 pub enum BrowserEvent {
     /// The page's untrusted payload after Rust-side validation and bounds.
-    Inspected(BrowserCapture),
+    Inspected(Box<BrowserCapture>),
+    /// A page finished loading: history for the address bar.
+    Visited { url: String, title: Option<String> },
+    /// The address bar's text changed: time to offer pages from history.
+    Typed(String),
 }
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
 
 enum BrowserSignal {
     Inspect(String),
+}
+
+#[derive(Deserialize)]
+struct VisitEnvelope {
+    kind: String,
+    url: String,
+    title: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -37,6 +48,8 @@ pub struct BrowserPane {
     inspecting: bool,
     visible: bool,
     complaint: Option<SharedString>,
+    /// Pages from this workspace's history that match what is typed.
+    suggestions: Vec<ginka_protocol::model::VisitedPage>,
 }
 
 impl BrowserPane {
@@ -47,6 +60,7 @@ impl BrowserPane {
         let builder = wry::WebViewBuilder::new()
             .with_url("about:blank")
             .with_initialization_script(INSPECT_SCRIPT)
+            .with_initialization_script(VISIT_SCRIPT)
             .with_ipc_handler(move |request| {
                 let _ = ipc_sender.try_send(BrowserSignal::Inspect(request.body().clone()));
             });
@@ -66,11 +80,20 @@ impl BrowserPane {
         let pane = cx.new(|cx| {
             cx.subscribe(
                 &address,
-                |this: &mut Self, input, event: &InputEvent, cx| {
-                    if matches!(event, InputEvent::PressEnter { .. }) {
+                |this: &mut Self, input, event: &InputEvent, cx| match event {
+                    InputEvent::PressEnter { .. } => {
                         let value = input.read(cx).value().to_string();
                         this.navigate(&value, cx);
                     }
+                    InputEvent::Change => {
+                        let value = input.read(cx).value().to_string();
+                        cx.emit(BrowserEvent::Typed(value));
+                    }
+                    InputEvent::Blur => {
+                        this.suggestions.clear();
+                        cx.notify();
+                    }
+                    _ => {}
                 },
             )
             .detach();
@@ -91,6 +114,7 @@ impl BrowserPane {
                 inspecting: false,
                 visible: true,
                 complaint: None,
+                suggestions: Vec::new(),
             }
         });
         Ok(pane)
@@ -99,12 +123,25 @@ impl BrowserPane {
     fn receive(&mut self, signal: BrowserSignal, cx: &mut Context<Self>) {
         match signal {
             BrowserSignal::Inspect(body) => {
+                // A page load reports itself for history; anything else on
+                // this channel is an inspection.
+                if let Ok(visit) = serde_json::from_str::<VisitEnvelope>(&body)
+                    && visit.kind == "ginka-visit"
+                {
+                    cx.emit(BrowserEvent::Visited {
+                        url: visit.url.chars().take(4096).collect(),
+                        title: visit.title.map(|title| title.chars().take(512).collect()),
+                    });
+                    return;
+                }
                 let parsed = serde_json::from_str::<InspectEnvelope>(&body);
                 match parsed {
                     Ok(envelope) if envelope.kind == "ginka-inspect" => {
                         self.inspecting = false;
                         self.complaint = None;
-                        cx.emit(BrowserEvent::Inspected(sanitize_capture(envelope.capture)));
+                        cx.emit(BrowserEvent::Inspected(Box::new(sanitize_capture(
+                            envelope.capture,
+                        ))));
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -131,11 +168,22 @@ impl BrowserPane {
         cx.notify();
     }
 
+    /// Offer these pages under the address bar.
+    pub fn set_suggestions(
+        &mut self,
+        pages: Vec<ginka_protocol::model::VisitedPage>,
+        cx: &mut Context<Self>,
+    ) {
+        self.suggestions = pages;
+        cx.notify();
+    }
+
     fn navigate(&mut self, address: &str, cx: &mut Context<Self>) {
         let Some(url) = ginka_ui::browser::resolve_address(address) else {
             return;
         };
         self.complaint = None;
+        self.suggestions.clear();
         self.webview.update(cx, |view, _| view.load_url(&url));
         cx.notify();
     }
@@ -217,6 +265,51 @@ impl Render for BrowserPane {
                             .on_click(cx.listener(Self::toggle_inspect)),
                     ),
             )
+            // Between the toolbar and the page rather than over it: the page
+            // is a native view drawn above everything GPUI paints.
+            .when(!self.suggestions.is_empty(), |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .flex_shrink_0()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .children(self.suggestions.iter().enumerate().map(|(index, page)| {
+                            let url = page.url.clone();
+                            h_flex()
+                                .id(("browser-suggestion", index))
+                                .w_full()
+                                .px_3()
+                                .py_1()
+                                .gap_2()
+                                .cursor_pointer()
+                                .hover(|this| this.bg(tokens.colors().row_hover()))
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.navigate(&url, cx)),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(
+                                            page.title.clone().unwrap_or_else(|| page.url.clone()),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .max_w(px(260.))
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(page.url.clone()),
+                                )
+                        })),
+                )
+            })
             .children(self.complaint.clone().map(|complaint| {
                 div()
                     .px_3()
@@ -228,6 +321,23 @@ impl Render for BrowserPane {
             .child(div().flex_1().min_h_0().child(self.webview.clone()))
     }
 }
+
+/// Installed in every page: says what loaded, for the address bar's history.
+const VISIT_SCRIPT: &str = r#"
+(() => {
+  if (window.__ginkaVisitInstalled) return;
+  window.__ginkaVisitInstalled = true;
+  window.addEventListener('load', () => {
+    try {
+      window.ipc.postMessage(JSON.stringify({
+        kind: 'ginka-visit',
+        url: String(location.href).slice(0, 4096),
+        title: String(document.title || '').slice(0, 512),
+      }));
+    } catch (_) {}
+  });
+})();
+"#;
 
 /// Installed in every page. It is inert until the native toolbar enables it.
 /// The page is untrusted, so the Rust boundary still validates every field.

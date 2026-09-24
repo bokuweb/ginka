@@ -23,7 +23,12 @@ exist yet are marked as such.
 5. Build the artifacts *(not automated yet)*:
    - macOS: a universal build, the daemon bundled and signed with the app
      (N16), notarized, as a `.dmg` and a Homebrew cask;
-   - Linux: `.tar.gz` with an install script into `~/.local`;
+   - Linux: `scripts/package-linux` builds `ginka-<version>-linux-<arch>.tar.gz`
+     — `ginka`, `ginka-app`, `ginka-daemon`, a desktop entry and
+     `install.sh`, which installs into `~/.local` (or `$PREFIX`) and
+     uninstalls; CI checks the archive with stand-in binaries
+     (`scripts/test-package-linux`). Wayland and X11 still need a person
+     to look;
    - Windows (best effort): an installer and a portable zip.
 6. Publish the signed appcast that every platform's updater reads (N15)
    *(not built yet)*.

@@ -22,7 +22,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::provider::ProviderKind;
 use ginka_protocol::rpc::{Attempt, Request, Response};
-use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, WorkspaceId};
+use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -263,6 +263,10 @@ enum Command {
     /// Saved shell commands and prompts, run in a workspace.
     #[command(subcommand)]
     Quick(QuickCommand),
+    /// The daemon's terminals in a workspace: open one, type into it, read
+    /// what it printed, close it.
+    #[command(subcommand)]
+    Terminal(TerminalCommand),
     /// Prompts and commands run on a cron schedule, on this machine's clock.
     #[command(subcommand)]
     Cron(CronCommand),
@@ -478,6 +482,25 @@ enum QuickCommand {
 }
 
 #[derive(Subcommand)]
+enum TerminalCommand {
+    /// The terminals running in a workspace.
+    List { workspace: String },
+    /// Open a shell in a workspace, and print its id.
+    Open { workspace: String },
+    /// Type a line into a terminal, and press Enter unless told not to.
+    Send {
+        terminal: String,
+        text: String,
+        #[arg(long)]
+        no_enter: bool,
+    },
+    /// Print what a terminal has shown lately, as plain text.
+    Read { terminal: String },
+    /// Close a terminal and stop its shell.
+    Close { terminal: String },
+}
+
+#[derive(Subcommand)]
 enum CronCommand {
     /// List scheduled jobs, with when each fires next and how it last went.
     List {
@@ -571,6 +594,13 @@ enum SkillsCommand {
         name: String,
         #[arg(long)]
         project: Option<String>,
+    },
+    /// Install the skills that teach an agent to drive Ginka into Claude
+    /// Code's and Codex's skills directories.
+    Install {
+        /// Replace a different file of the same name.
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1056,6 +1086,9 @@ fn request_for(command: Command) -> Result<Request> {
             into,
             message,
         },
+        Command::Skills(SkillsCommand::Install { force }) => {
+            Request::InstallBundledSkills { force }
+        }
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
             project: project.map(ProjectName),
         },
@@ -1278,6 +1311,28 @@ fn request_for(command: Command) -> Result<Request> {
             body: body_or_stdin(body)?,
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
+        Command::Terminal(TerminalCommand::List { workspace }) => Request::WorkspaceTerminals {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Terminal(TerminalCommand::Open { workspace }) => Request::OpenTerminal {
+            workspace: WorkspaceId(workspace),
+            rows: 24,
+            cols: 100,
+        },
+        Command::Terminal(TerminalCommand::Send {
+            terminal,
+            text,
+            no_enter,
+        }) => Request::WriteTerminal {
+            terminal: TerminalId(terminal),
+            data: if no_enter { text } else { format!("{text}\r") },
+        },
+        Command::Terminal(TerminalCommand::Read { terminal }) => Request::TerminalHistory {
+            terminal: TerminalId(terminal),
+        },
+        Command::Terminal(TerminalCommand::Close { terminal }) => Request::CloseTerminal {
+            terminal: TerminalId(terminal),
+        },
         Command::Cron(CronCommand::List { project }) => Request::ListCronJobs {
             project: project.map(ProjectName),
         },
@@ -1724,6 +1779,21 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::BrowserSuggestions { pages } => {
+            for page in pages {
+                println!(
+                    "{:>4}  {}  {}",
+                    page.visits,
+                    page.url,
+                    page.title.unwrap_or_default()
+                );
+            }
+        }
+        Response::BundledSkillsInstalled { results } => {
+            for result in results {
+                println!("{:<10} {}", result.outcome, result.path);
+            }
+        }
         Response::CronJobs { jobs } => {
             for job in &jobs {
                 print_cron_job(job);
@@ -1817,14 +1887,22 @@ fn print(response: Response, patch: bool) {
         // Escapes and all: what a terminal printed is only meaningful to
         // something that renders a terminal, and rewriting it here would be
         // guessing at a screen this end does not have.
-        Response::TerminalHistory { data } => print!("{data}"),
+        Response::TerminalHistory { data } => {
+            print!("{}", ginka_core::terminal::plain_text(&data))
+        }
         Response::Usage {
             by_day,
             by_agent,
             by_account,
             plans,
             rates_fetched_at: _,
-        } => print_usage(&by_day, &by_agent, &by_account, &plans),
+            by_model,
+            by_project,
+        } => {
+            print_usage(&by_day, &by_agent, &by_account, &plans);
+            print_usage_rows(&by_project);
+            print_usage_rows(&by_model);
+        }
         Response::ReviewComments { comments } => {
             if comments.is_empty() {
                 println!("{}", rust_i18n::t!("cli.review.empty"));
@@ -2144,6 +2222,28 @@ fn print_usage(
     }
 }
 
+/// A further section of `ginka usage`: a blank line, then a row per label.
+fn print_usage_rows(rows: &[UsageRow]) {
+    if rows.is_empty() {
+        return;
+    }
+    println!();
+    for row in rows {
+        println!(
+            "{:<24} {:>10} in {:>8} out {:>8} cached  {}",
+            row.label,
+            row.totals.input_tokens,
+            row.totals.output_tokens,
+            row.totals.cache_read_tokens,
+            match (row.totals.cost_usd, row.totals.estimated) {
+                (Some(cost), true) => format!("≈${cost:.2}"),
+                (Some(cost), false) => format!("${cost:.2}"),
+                (None, _) => String::new(),
+            }
+        );
+    }
+}
+
 /// One line per login: id, provider, label, signed in, and either the
 /// tightest of its windows or where it lives.
 fn print_accounts(accounts: &[Account], plans: &[PlanSnapshot]) {
@@ -2409,8 +2509,19 @@ mod ginka_cli_format {
                     summary.as_deref().unwrap_or_default()
                 )
             }
-            AgentEvent::AskUser { question, .. } => format!("? {question}"),
-            AgentEvent::PlanProposal { plan, .. } => format!("plan: {plan}"),
+            // The id in brackets is what `session respond` answers.
+            AgentEvent::AskUser {
+                id,
+                question,
+                options,
+            } => {
+                if options.is_empty() {
+                    format!("? {question} [{id}]")
+                } else {
+                    format!("? {question} [{id}] {}", options.join(" / "))
+                }
+            }
+            AgentEvent::PlanProposal { id, plan } => format!("plan [{id}]: {plan}"),
             AgentEvent::Usage { usage } => format!(
                 "usage: {} in, {} out",
                 usage.input_tokens, usage.output_tokens
@@ -2436,7 +2547,7 @@ mod ginka_cli_format {
                 None => "-- connected --".to_string(),
             },
             AgentEvent::AgentTitle { title } => format!("-- titled: {title} --"),
-            AgentEvent::Permission { request, .. } => format!("? permission: {request}"),
+            AgentEvent::Permission { id, request } => format!("? permission [{id}]: {request}"),
             AgentEvent::SteerRejected { reason } => format!(
                 "-- steer refused{} --",
                 reason
@@ -2487,6 +2598,33 @@ mod ginka_cli_format {
                 ..BranchStatus::default()
             };
             assert_eq!(status_label(&status), "dirty +2 -1");
+        }
+
+        #[test]
+        fn a_question_names_the_request_id_an_answer_is_sent_to() {
+            let entry = |event| TranscriptEntry {
+                seq: 9,
+                at: 0,
+                payload: TranscriptPayload::Agent { event },
+            };
+            let asked = transcript_line(&entry(AgentEvent::AskUser {
+                id: "q-7".into(),
+                question: "Which parser?".into(),
+                options: vec!["serde".into(), "hand-written".into()],
+            }));
+            assert!(asked.contains("Which parser?"), "{asked}");
+            assert!(asked.contains("[q-7]"), "{asked}");
+            assert!(asked.contains("serde / hand-written"), "{asked}");
+            let permission = transcript_line(&entry(AgentEvent::Permission {
+                id: "p-1".into(),
+                request: "run cargo test".into(),
+            }));
+            assert!(permission.contains("[p-1]"), "{permission}");
+            let plan = transcript_line(&entry(AgentEvent::PlanProposal {
+                id: "plan-2".into(),
+                plan: "do it".into(),
+            }));
+            assert!(plan.contains("[plan-2]"), "{plan}");
         }
 
         #[test]

@@ -517,3 +517,23 @@ fn a_project_is_moved_by_name_to_an_index() {
         json!({"method": "move_project", "project": "comet", "index": 2})
     );
 }
+
+#[test]
+fn installing_ginkas_skills_says_whether_to_replace_an_edit() {
+    assert_eq!(
+        wire(&Request::InstallBundledSkills { force: false }),
+        json!({"method": "install_bundled_skills", "force": false})
+    );
+}
+
+#[test]
+fn a_browser_visit_names_its_workspace_url_and_title() {
+    assert_eq!(
+        wire(&Request::RecordBrowserVisit {
+            workspace: WorkspaceId("comet/main".into()),
+            url: "http://localhost:3000/".into(),
+            title: None,
+        }),
+        json!({"method": "record_browser_visit", "workspace": "comet/main", "url": "http://localhost:3000/", "title": null})
+    );
+}

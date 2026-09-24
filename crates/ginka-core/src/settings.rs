@@ -225,6 +225,9 @@ pub struct DaemonSettings {
     /// Fetch the public rate table, at most daily, to price the turns a
     /// vendor does not (§3.3 N13). Off, costs are only what vendors report.
     pub fetch_rates: bool,
+    /// Read Claude Code's and Codex's own session logs for what agents run
+    /// outside Ginka spent, so Reports covers the whole plan. Read only.
+    pub scan_vendor_logs: bool,
     /// Providers the user has switched off. Absent means enabled, so the file
     /// stays empty until someone actually turns something off.
     pub disabled_providers: Vec<ProviderKind>,
@@ -332,6 +335,7 @@ impl Default for DaemonSettings {
             checkpoint_limit: 200,
             keep_awake: true,
             fetch_rates: true,
+            scan_vendor_logs: true,
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),

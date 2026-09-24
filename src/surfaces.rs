@@ -173,6 +173,20 @@ pub enum CommitThen {
 pub enum SurfaceEvent {
     /// The visible right-panel surface changed and should be remembered.
     SurfaceShown(Option<Surface>),
+    /// A page loaded in a workspace's browser: keep it in its history.
+    /// Only a platform with the browser surface sends this or the next.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    BrowserVisited {
+        workspace: WorkspaceId,
+        url: String,
+        title: Option<String>,
+    },
+    /// A workspace's address bar changed: find pages to offer.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    BrowserTyped {
+        workspace: WorkspaceId,
+        query: String,
+    },
     /// Commit the workspace's work with this message.
     ///
     /// `only_staged` when the reader has staged something: having said which
@@ -1004,8 +1018,21 @@ impl SurfacePanel {
                         }
                         match event {
                             crate::browser::BrowserEvent::Inspected(capture) => {
-                                this.browser_capture = Some(capture.clone());
+                                this.browser_capture = Some((**capture).clone());
                                 cx.notify();
+                            }
+                            crate::browser::BrowserEvent::Visited { url, title } => {
+                                cx.emit(SurfaceEvent::BrowserVisited {
+                                    workspace: expected.clone(),
+                                    url: url.clone(),
+                                    title: title.clone(),
+                                });
+                            }
+                            crate::browser::BrowserEvent::Typed(query) => {
+                                cx.emit(SurfaceEvent::BrowserTyped {
+                                    workspace: expected.clone(),
+                                    query: query.clone(),
+                                });
                             }
                         }
                     })
@@ -1025,6 +1052,21 @@ impl SurfacePanel {
         self.browser_workspace = Some(workspace);
         self.browser_capture = None;
         cx.notify();
+    }
+
+    /// Offer these pages under a workspace's address bar.
+    pub fn set_browser_suggestions(
+        &mut self,
+        workspace: &WorkspaceId,
+        pages: Vec<ginka_protocol::model::VisitedPage>,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        if let Some(Ok(browser)) = self.browser_tabs.get(workspace) {
+            browser.update(cx, |browser, cx| browser.set_suggestions(pages, cx));
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let _ = (workspace, pages, cx);
     }
 
     /// Which surface is showing, so the shell knows what to keep fetching.
@@ -2664,6 +2706,14 @@ impl SurfacePanel {
                 rust_i18n::t!("surface.reports.by_agent").to_string(),
             ))
             .children(usage_rows(&usage.by_agent))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_project").to_string(),
+            ))
+            .children(usage_rows(&usage.by_project))
+            .child(heading(
+                rust_i18n::t!("surface.reports.by_model").to_string(),
+            ))
+            .children(usage_rows(&usage.by_model))
             .child(heading(rust_i18n::t!("surface.reports.by_day").to_string()))
             .children(usage_rows(&usage.by_day))
             // Where the estimates came from, so a `≈` is never unexplained.

@@ -33,6 +33,14 @@ far is unreleased.
   commands, and settings; English and Japanese.
 - Desktop notifications with sounds, and a Dock badge.
 
+### Reach
+- Reports count agents run outside Ginka, from Claude Code's and Codex's own
+  logs, by model and by project.
+- Skills that teach an agent to drive Ginka (`ginka skills install`), and
+  `ginka terminal` for the daemon's terminals.
+- The browser's address bar completes from history.
+- A Linux archive with an install script.
+
 ### Robustness
 - Crash reports written to the logs directory, and the daemon's settings
   read again when edited by hand.

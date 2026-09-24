@@ -786,6 +786,41 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::SurfaceShown(surface) => {
                     this.persist_surface(*surface)
                 }
+                crate::surfaces::SurfaceEvent::BrowserVisited {
+                    workspace,
+                    url,
+                    title,
+                } => {
+                    let (link, workspace, url, title) = (
+                        this.link.clone(),
+                        workspace.clone(),
+                        url.clone(),
+                        title.clone(),
+                    );
+                    cx.background_spawn(async move {
+                        link.record_browser_visit(&workspace, url, title).await
+                    })
+                    .detach();
+                }
+                crate::surfaces::SurfaceEvent::BrowserTyped { workspace, query } => {
+                    let (link, workspace, query) =
+                        (this.link.clone(), workspace.clone(), query.clone());
+                    cx.spawn(async move |this, cx| {
+                        let asked = workspace.clone();
+                        let pages = cx
+                            .background_spawn(async move {
+                                link.browser_suggestions(&asked, query).await
+                            })
+                            .await;
+                        this.update(cx, |this, cx| {
+                            this.surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_browser_suggestions(&workspace, pages, cx)
+                            })
+                        })
+                        .ok();
+                    })
+                    .detach();
+                }
                 crate::surfaces::SurfaceEvent::Commit {
                     message,
                     only_staged,

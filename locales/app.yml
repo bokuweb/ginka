@@ -959,6 +959,12 @@ settings.cron.run:
 settings.cron.needs_project:
   en: "Choose a project first."
   ja: "先にプロジェクトを選んでください。"
+surface.reports.by_project:
+  en: By project, including agents run outside Ginka
+  ja: プロジェクト別（Ginka の外で動かしたエージェントも含む）
+surface.reports.by_model:
+  en: By model
+  ja: モデル別
 surface.reports.rates:
   en: "≈ is priced from the public rate table, fetched %{age} ago; the vendor's own figure has no mark. Unpriced sessions are left out of the total."
   ja: "≈ は公開レート表（%{age}前に取得）からの見積もりです。印のないものはベンダー自身の金額です。価格不明のセッションは合計に含めていません。"

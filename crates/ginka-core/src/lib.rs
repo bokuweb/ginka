@@ -9,6 +9,7 @@ pub mod agent;
 pub mod attachment;
 pub mod blob;
 pub mod browser;
+pub mod browser_history;
 pub mod checkpoint;
 pub mod commands;
 pub mod comments;
