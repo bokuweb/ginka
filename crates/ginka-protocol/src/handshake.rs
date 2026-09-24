@@ -14,6 +14,12 @@ pub const DAEMON_ADDRESS_ENV: &str = "GINKA_DAEMON_ADDRESS";
 /// Overrides the token that would have come from the handshake file.
 pub const DAEMON_TOKEN_ENV: &str = "GINKA_DAEMON_TOKEN";
 
+/// The file a running daemon holds an exclusive lock on, beside its
+/// handshake. One daemon per state directory: a second one that cannot take
+/// the lock exits, and a client that finds it held waits instead of starting
+/// another.
+pub const DAEMON_LOCK_FILE: &str = "daemon.lock";
+
 /// The contents of `~/.ginka/daemon.json`.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

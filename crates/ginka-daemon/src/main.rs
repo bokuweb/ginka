@@ -13,6 +13,23 @@ fn main() -> Result<()> {
     paths.ensure()?;
     let _log_guard = logging::init(&paths, "daemon")?;
 
+    // One daemon per state directory. Taken before anything else — before
+    // the migrations, which are what makes a first start slow — so a second
+    // one started in that window finds it held and leaves quietly.
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(paths.daemon_lock())?;
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => {
+            tracing::info!("another daemon holds this state directory; leaving it to that one");
+            return Ok(());
+        }
+        Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+    }
+
     let config: settings::DaemonSettings = settings::load(&paths.daemon_settings());
     let daemon = Daemon::bind(paths, config)?;
     let handshake = daemon.handshake();
@@ -21,5 +38,9 @@ fn main() -> Result<()> {
     // without polling the handshake file.
     println!("listening on 127.0.0.1:{}", handshake.port);
 
-    smol::block_on(daemon.serve())
+    let served = smol::block_on(daemon.serve());
+    // Held for the daemon's whole life; the OS releases it if the process
+    // dies, which is what makes a crashed daemon replaceable.
+    drop(lock);
+    served
 }

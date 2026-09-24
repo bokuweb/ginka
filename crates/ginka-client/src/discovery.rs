@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 
 /// How long to wait for a spawned daemon to publish its handshake.
 ///
-/// Generous because the first start also runs the database migrations; a
-/// client that gives up early would spawn a second daemon on top of the first.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Generous because the first start also runs the database migrations, and a
+/// slow or external disk can take several seconds over them. A client that
+/// gives up early reports a failure for a daemon that was about to answer.
+const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often to look for the handshake while waiting.
 const STARTUP_POLL: Duration = Duration::from_millis(25);
@@ -120,8 +121,45 @@ impl Discovery {
         {
             return Ok(client);
         }
-        self.spawn()?;
+        // A daemon that holds the lock is starting or running: wait for it
+        // rather than starting another. Two callers in one window used to
+        // both find no daemon and both start one.
+        if !self.daemon_holds_lock() {
+            self.spawn()?;
+        }
         self.wait_for_daemon(resume_from).await
+    }
+
+    /// Whether a daemon holds this state directory's lock right now.
+    ///
+    /// Probed by trying to take it and letting it go at once: a lock that
+    /// can be taken has no daemon behind it. A file that cannot even be
+    /// opened says nothing, and reads as "not held" so a daemon is started
+    /// and reports the real problem itself.
+    pub fn daemon_holds_lock(&self) -> bool {
+        let Some(path) = self
+            .handshake_path
+            .parent()
+            .map(|dir| dir.join(ginka_protocol::handshake::DAEMON_LOCK_FILE))
+        else {
+            return false;
+        };
+        let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+        else {
+            return false;
+        };
+        match file.try_lock() {
+            Ok(()) => {
+                let _ = file.unlock();
+                false
+            }
+            Err(std::fs::TryLockError::WouldBlock) => true,
+            Err(std::fs::TryLockError::Error(_)) => false,
+        }
     }
 
     /// Connect only if a daemon is already running.
@@ -256,6 +294,28 @@ fn sibling_daemon() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_held_lock_means_a_daemon_is_there_to_wait_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let discovery = Discovery::new(dir.path().join("daemon.json"));
+        assert!(!discovery.daemon_holds_lock(), "nothing holds it yet");
+        assert!(!discovery.daemon_holds_lock(), "probing does not keep it");
+
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.path().join(ginka_protocol::handshake::DAEMON_LOCK_FILE))
+            .unwrap();
+        held.lock().unwrap();
+        assert!(discovery.daemon_holds_lock());
+        drop(held);
+        assert!(
+            !discovery.daemon_holds_lock(),
+            "released when its holder goes"
+        );
+    }
 
     #[test]
     fn a_complete_override_is_an_external_daemon_target() {

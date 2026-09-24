@@ -50,6 +50,11 @@ impl Paths {
         self.root.join("daemon.json")
     }
 
+    /// The lock only one daemon at a time can hold for this state directory.
+    pub fn daemon_lock(&self) -> PathBuf {
+        self.root.join(ginka_protocol::handshake::DAEMON_LOCK_FILE)
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
