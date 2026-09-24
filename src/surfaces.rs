@@ -24,8 +24,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{
-    Editor, EditorState, Input, InputEvent, InputState, Replace, Search, TabSize, Textarea,
-    TextareaState,
+    Editor, EditorState, InputEvent, InputState, Replace, Search, TabSize, Textarea, TextareaState,
 };
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
@@ -2813,7 +2812,7 @@ impl SurfacePanel {
                     .gap_2()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(Input::new(&self.skill_finder))
+                    .child(ginka_ui::field::input(&self.skill_finder))
                     .child(
                         h_flex()
                             .w_full()
@@ -2959,7 +2958,7 @@ impl SurfacePanel {
                     .gap_1()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
-                    .child(Input::new(&self.finder))
+                    .child(ginka_ui::field::input(&self.finder))
                     .child(
                         h_flex()
                             .gap_1()
