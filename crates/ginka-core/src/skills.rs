@@ -251,3 +251,143 @@ fn parse_front_matter(text: &str) -> BTreeMap<String, String> {
     }
     values
 }
+
+// ---------------------------------------------------------------------------
+// The skills Ginka ships: how an agent drives Ginka's own CLI (roadmap M4).
+
+/// One skill that ships in the binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Bundled {
+    pub name: &'static str,
+    /// The whole `SKILL.md`.
+    pub text: &'static str,
+}
+
+/// The skills that teach an agent to drive `ginka`: start another agent,
+/// follow a session, use a workspace terminal, and run a review loop.
+pub fn bundled() -> [Bundled; 4] {
+    [
+        Bundled {
+            name: "ginka-start",
+            text: include_str!("../../../skills/ginka-start/SKILL.md"),
+        },
+        Bundled {
+            name: "ginka-chat",
+            text: include_str!("../../../skills/ginka-chat/SKILL.md"),
+        },
+        Bundled {
+            name: "ginka-terminal",
+            text: include_str!("../../../skills/ginka-terminal/SKILL.md"),
+        },
+        Bundled {
+            name: "ginka-loop",
+            text: include_str!("../../../skills/ginka-loop/SKILL.md"),
+        },
+    ]
+}
+
+/// What installing one skill did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Installed {
+    /// It was not there, or was replaced.
+    Written,
+    /// It was there already, word for word.
+    Unchanged,
+    /// A different `SKILL.md` was there — the reader's edit, or another
+    /// skill of that name — or the reader turned it off; it was left alone.
+    Kept,
+}
+
+/// Install the bundled skills into one skills directory (`~/.claude/skills`
+/// and the like): `<root>/<name>/SKILL.md`. A different file already there is
+/// kept unless `force`, and a skill the reader disabled stays disabled.
+pub fn install_bundled(root: &Path, force: bool) -> Result<Vec<(&'static str, Installed)>> {
+    let mut outcomes = Vec::new();
+    for skill in bundled() {
+        let directory = root.join(skill.name);
+        let path = directory.join(SKILL_FILE);
+        let outcome = if directory.join(DISABLED_SKILL_FILE).exists() {
+            Installed::Kept
+        } else {
+            match std::fs::read_to_string(&path) {
+                Ok(text) if text == skill.text => Installed::Unchanged,
+                Ok(_) if !force => Installed::Kept,
+                _ => {
+                    std::fs::create_dir_all(&directory)
+                        .with_context(|| format!("creating {}", directory.display()))?;
+                    std::fs::write(&path, skill.text)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    Installed::Written
+                }
+            }
+        };
+        outcomes.push((skill.name, outcome));
+    }
+    Ok(outcomes)
+}
+
+#[cfg(test)]
+mod bundled_tests {
+    use super::*;
+
+    #[test]
+    fn every_bundled_skill_names_itself_and_says_when_to_use_it() {
+        for skill in bundled() {
+            assert!(
+                skill
+                    .text
+                    .starts_with(&format!("---\nname: {}\n", skill.name)),
+                "{}",
+                skill.name
+            );
+            assert!(skill.text.contains("\ndescription: "), "{}", skill.name);
+            assert!(
+                skill.text.contains("ginka "),
+                "{} names the CLI",
+                skill.name
+            );
+        }
+    }
+
+    #[test]
+    fn installing_writes_once_keeps_an_edit_and_forces_only_when_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".claude/skills");
+        let first = install_bundled(&root, false).unwrap();
+        assert!(
+            first
+                .iter()
+                .all(|(_, outcome)| *outcome == Installed::Written)
+        );
+        let start = root.join("ginka-start/SKILL.md");
+        assert_eq!(std::fs::read_to_string(&start).unwrap(), bundled()[0].text);
+
+        let again = install_bundled(&root, false).unwrap();
+        assert!(
+            again
+                .iter()
+                .all(|(_, outcome)| *outcome == Installed::Unchanged)
+        );
+
+        std::fs::write(&start, "my own version").unwrap();
+        let kept = install_bundled(&root, false).unwrap();
+        assert_eq!(kept[0], ("ginka-start", Installed::Kept));
+        assert_eq!(std::fs::read_to_string(&start).unwrap(), "my own version");
+
+        let forced = install_bundled(&root, true).unwrap();
+        assert_eq!(forced[0], ("ginka-start", Installed::Written));
+        assert_eq!(std::fs::read_to_string(&start).unwrap(), bundled()[0].text);
+    }
+
+    #[test]
+    fn a_disabled_bundled_skill_is_not_turned_back_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("skills");
+        install_bundled(&root, false).unwrap();
+        let skill = root.join("ginka-chat");
+        std::fs::rename(skill.join(SKILL_FILE), skill.join(DISABLED_SKILL_FILE)).unwrap();
+        let outcomes = install_bundled(&root, true).unwrap();
+        assert_eq!(outcomes[1], ("ginka-chat", Installed::Kept));
+        assert!(!skill.join(SKILL_FILE).exists(), "still off");
+    }
+}
