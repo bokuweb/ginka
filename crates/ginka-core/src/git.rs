@@ -15,6 +15,7 @@ use std::io::Write as _;
 /// Re-exported so callers can read a status without naming the protocol crate;
 /// it is a wire type because the daemon pushes it to every client.
 pub use ginka_protocol::model::BranchStatus;
+pub use ginka_protocol::model::MergeOutcome;
 use ginka_protocol::model::{ChangeSource, FileChange, GitCommit};
 
 use std::path::{Path, PathBuf};
@@ -385,10 +386,21 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
 }
 
 /// Remove a worktree. `force` is required for one that is dirty or locked.
+///
+/// git asks for `--force` twice to remove a locked worktree — once for the
+/// changes, once for the lock — so a forced removal of a locked one says it
+/// twice. Unforced, git's refusal already names the lock and its reason.
 pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> Result<()> {
+    let locked = force
+        && list_worktrees(repo)?
+            .iter()
+            .any(|worktree| worktree.path == path && worktree.locked);
     let path = path.to_string_lossy().to_string();
     let mut args = vec!["worktree", "remove"];
     if force {
+        args.push("--force");
+    }
+    if locked {
         args.push("--force");
     }
     args.push(&path);
@@ -978,6 +990,80 @@ pub fn pull_fast_forward(worktree: &Path) -> Result<String> {
         .with_context(|| format!("branch {branch} has no remote to pull"))?;
     git(worktree, &["fetch", "--prune", remote.trim()])?;
     git(worktree, &["merge", "--ff-only", upstream.trim()])
+}
+
+/// Merge `branch` into `into` — fan-out's "merge the winner".
+///
+/// The merge happens in the worktree that has `into` checked out, so the
+/// reader sees the result there rather than a ref that moved under them; it
+/// must be clean, because a merge over uncommitted work mixes the two. A fast
+/// forward is preferred, then a merge commit. A conflict is aborted and named:
+/// resolving it is a decision, not something to leave half-done in someone's
+/// checkout. A branch checked out nowhere can only be fast-forwarded, since
+/// there is nowhere to make a merge commit.
+pub fn merge_into(repo: &Path, branch: &str, into: &str) -> Result<MergeOutcome> {
+    for name in [branch, into] {
+        if name.starts_with('-') || !branch_exists(repo, name) {
+            bail!("there is no branch {name:?}");
+        }
+    }
+    let tip = git(repo, &["rev-parse", &format!("refs/heads/{branch}")])?;
+    let target = format!("refs/heads/{into}");
+    let checkout = list_worktrees(repo)?
+        .into_iter()
+        .find(|worktree| worktree.branch.as_deref() == Some(into) && !worktree.prunable);
+
+    let Some(checkout) = checkout else {
+        let old = git(repo, &["rev-parse", &target])?;
+        if !is_ancestor(repo, &old, &tip) {
+            bail!(
+                "{into} has moved on from {branch}; check out {into} somewhere to merge it with a merge commit"
+            );
+        }
+        git(repo, &["update-ref", &target, &tip, &old])?;
+        return Ok(MergeOutcome {
+            into: into.to_string(),
+            commit: tip,
+            fast_forward: true,
+        });
+    };
+
+    let path = checkout.path;
+    if branch_status(&path)?.dirty {
+        bail!(
+            "{into} has uncommitted work in {}; commit or stash it before merging",
+            path.display()
+        );
+    }
+    let fast_forward = git(&path, &["merge", "--ff-only", "--quiet", &tip]).is_ok();
+    if !fast_forward {
+        let message = format!("Merge {branch} into {into}");
+        if let Err(error) = git(
+            &path,
+            &["merge", "--no-ff", "--no-edit", "-m", &message, &tip],
+        ) {
+            let conflicted =
+                git(&path, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
+            let _ = git(&path, &["merge", "--abort"]);
+            if conflicted.trim().is_empty() {
+                return Err(error).context(format!("merging {branch} into {into}"));
+            }
+            bail!(
+                "merging {branch} into {into} conflicts in {}; nothing was changed",
+                conflicted.lines().collect::<Vec<_>>().join(", ")
+            );
+        }
+    }
+    Ok(MergeOutcome {
+        into: into.to_string(),
+        commit: head_commit(&path).context("merged, but git reports no HEAD")?,
+        fast_forward,
+    })
+}
+
+/// Whether `ancestor` is reachable from `descendant`.
+fn is_ancestor(repo: &Path, ancestor: &str, descendant: &str) -> bool {
+    git(repo, &["merge-base", "--is-ancestor", ancestor, descendant]).is_ok()
 }
 
 /// Drop git's records of worktrees whose directories are gone.

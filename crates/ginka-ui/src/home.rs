@@ -10,6 +10,7 @@
 //! they can be tested and translated in one place (`AGENTS.md` rule 8).
 
 use crate::assets::icon;
+use ginka_protocol::model::AgentStatus;
 use gpui::SharedString;
 
 /// One of the four ways in the home screen offers.
@@ -27,6 +28,52 @@ pub struct Starter {
     pub label: SharedString,
     /// What it puts in the composer.
     pub prompt: SharedString,
+}
+
+/// What still stands between a first run and a first prompt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetupStep {
+    /// None of the agents Ginka drives is installed on this machine.
+    InstallAgent {
+        /// What the agents are called, in offering order.
+        agents: Vec<String>,
+    },
+    /// Agents are installed but none is signed in: these ones say so.
+    SignIn {
+        /// `(driver id, display name)` of each one signed out.
+        agents: Vec<(String, String)>,
+    },
+    /// No project is registered yet.
+    AddProject,
+}
+
+/// The steps still to take, in order: an agent that can run, then a project
+/// to run it in. Empty once both are there — the home screen is then only
+/// the question and the starters. Agents not yet probed say nothing, so the
+/// card does not flash up on every launch.
+pub fn setup_steps(agents: &[AgentStatus], projects: usize) -> Vec<SetupStep> {
+    let mut steps = Vec::new();
+    if !agents.is_empty() && !agents.iter().any(AgentStatus::is_ready) {
+        let signed_out: Vec<(String, String)> = agents
+            .iter()
+            .filter(|agent| agent.installed && agent.authenticated == Some(false))
+            .map(|agent| (agent.id.clone(), agent.display_name.clone()))
+            .collect();
+        steps.push(if signed_out.is_empty() {
+            SetupStep::InstallAgent {
+                agents: agents
+                    .iter()
+                    .map(|agent| agent.display_name.clone())
+                    .collect(),
+            }
+        } else {
+            SetupStep::SignIn { agents: signed_out }
+        });
+    }
+    if projects == 0 {
+        steps.push(SetupStep::AddProject);
+    }
+    steps
 }
 
 /// The four starters, in the order they are drawn.
@@ -120,5 +167,66 @@ mod tests {
         ginka_core::i18n::apply("en");
         assert_ne!(japanese, greeting(None));
         assert_ne!(starters[0].label, self::starters()[0].label);
+    }
+}
+
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    fn agent(id: &str, installed: bool, authenticated: Option<bool>) -> AgentStatus {
+        AgentStatus {
+            id: id.into(),
+            display_name: id.to_uppercase(),
+            program: id.into(),
+            installed,
+            version: None,
+            authenticated,
+            detail: None,
+            models: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nothing_is_asked_before_the_agents_are_known() {
+        assert_eq!(setup_steps(&[], 1), []);
+        assert_eq!(setup_steps(&[], 0), [SetupStep::AddProject]);
+    }
+
+    #[test]
+    fn with_nothing_installed_the_first_step_is_an_agent() {
+        let agents = [agent("claude", false, None), agent("codex", false, None)];
+        assert_eq!(
+            setup_steps(&agents, 0),
+            [
+                SetupStep::InstallAgent {
+                    agents: vec!["CLAUDE".into(), "CODEX".into()]
+                },
+                SetupStep::AddProject
+            ]
+        );
+    }
+
+    #[test]
+    fn installed_but_signed_out_asks_for_a_sign_in_to_those_only() {
+        let agents = [
+            agent("claude", true, Some(false)),
+            agent("codex", false, None),
+        ];
+        assert_eq!(
+            setup_steps(&agents, 1),
+            [SetupStep::SignIn {
+                agents: vec![("claude".into(), "CLAUDE".into())]
+            }]
+        );
+    }
+
+    #[test]
+    fn one_ready_agent_and_a_project_is_ready() {
+        let agents = [
+            agent("claude", true, Some(false)),
+            agent("codex", true, None),
+        ];
+        assert_eq!(setup_steps(&agents, 2), []);
     }
 }

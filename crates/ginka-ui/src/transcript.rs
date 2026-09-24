@@ -241,6 +241,9 @@ pub enum Applied {
 #[derive(Debug, Clone, Default)]
 pub struct Transcript {
     blocks: Vec<Block>,
+    /// The first block changed since [`Transcript::take_changed`] was last
+    /// asked, so a virtualized list re-measures from there and no earlier.
+    changed_from: Option<usize>,
     /// Drawable block indexes for top-level user prompts. Interaction-card
     /// answers are user blocks too, but are not new turns in the outline.
     prompt_indices: Vec<usize>,
@@ -450,10 +453,31 @@ impl Transcript {
                 self.blocks.push(Block::User { text: text.clone() });
                 Some(self.blocks.len() - 1)
             }
-            TranscriptPayload::Agent { event } => self.fold(event, entry.seq),
+            TranscriptPayload::Agent { event } => {
+                if matches!(event, AgentEvent::TurnEnd { .. })
+                    && let Some(&prompt) = self.prompt_indices.last()
+                {
+                    // Settling a turn can close cards anywhere in it.
+                    self.touch(prompt);
+                }
+                self.fold(event, entry.seq)
+            }
         };
+        if let Some(index) = block {
+            self.touch(index);
+        }
         self.positions.push(block);
         Applied::Added
+    }
+
+    /// The first block that changed since this was last asked, if any, and
+    /// forget it: a view re-measures from there.
+    pub fn take_changed(&mut self) -> Option<usize> {
+        self.changed_from.take()
+    }
+
+    fn touch(&mut self, index: usize) {
+        self.changed_from = Some(self.changed_from.map_or(index, |from| from.min(index)));
     }
 
     /// Fold a page in, stopping at the first gap.
@@ -633,7 +657,8 @@ impl Transcript {
     /// A card that stays clickable after it has been clicked invites a second
     /// answer to a question that has one.
     pub fn answer(&mut self, id: &str) {
-        for block in &mut self.blocks {
+        let mut touched = None;
+        for (index, block) in self.blocks.iter_mut().enumerate() {
             match block {
                 Block::Question {
                     id: asked,
@@ -644,9 +669,15 @@ impl Transcript {
                     id: asked,
                     answered,
                     ..
-                } if asked == id => *answered = true,
+                } if asked == id => {
+                    *answered = true;
+                    touched.get_or_insert(index);
+                }
                 _ => {}
             }
+        }
+        if let Some(index) = touched {
+            self.touch(index);
         }
     }
 
@@ -1081,6 +1112,71 @@ pub fn head_of(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_changed_is_reported_from_the_first_block_it_touched_and_then_forgotten() {
+        let mut transcript = Transcript::new();
+        assert_eq!(transcript.take_changed(), None);
+
+        transcript.extend(&[user(1, "one"), text(2, "hel")]);
+        assert_eq!(transcript.take_changed(), Some(0));
+        assert_eq!(transcript.take_changed(), None, "taken");
+
+        // The answer growing touches only the answer.
+        transcript.apply(&text(3, "lo"));
+        assert_eq!(transcript.take_changed(), Some(1));
+
+        // A result arriving after later blocks goes back to its call.
+        let mut call = ActivityItem::from_tool(Some("c1".into()), "tool", &json!({}));
+        transcript.apply(&agent(
+            4,
+            AgentEvent::ToolCall {
+                activity: call.clone(),
+            },
+        ));
+        let call_block = transcript.blocks().len() - 1;
+        transcript.apply(&text(5, "meanwhile"));
+        transcript.take_changed();
+        call.complete_with("done", false);
+        transcript.apply(&agent(6, AgentEvent::ToolResult { activity: call }));
+        assert_eq!(transcript.take_changed(), Some(call_block));
+    }
+
+    #[test]
+    fn answering_a_question_changes_its_card() {
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            user(1, "go"),
+            agent(
+                2,
+                AgentEvent::AskUser {
+                    id: "q1".into(),
+                    question: "which?".into(),
+                    options: vec!["a".into()],
+                },
+            ),
+            text(3, "waiting"),
+        ]);
+        transcript.take_changed();
+        transcript.answer("q1");
+        assert_eq!(transcript.take_changed(), Some(1));
+    }
+
+    #[test]
+    fn a_turns_end_rereads_the_turn_it_ends() {
+        // Settling a turn can close cards anywhere in it — delegated agents
+        // that never reported — so the whole turn is measured again.
+        let mut transcript = Transcript::new();
+        transcript.extend(&[
+            user(1, "first"),
+            text(2, "a"),
+            user(3, "second"),
+            text(4, "b"),
+        ]);
+        transcript.take_changed();
+        transcript.apply(&agent(5, AgentEvent::TurnEnd { turn: 2 }));
+        assert_eq!(transcript.take_changed(), Some(2));
+    }
 
     #[test]
     fn a_block_names_the_position_it_was_folded_from() {

@@ -642,3 +642,106 @@ fn an_agent_can_drive_ginka_over_mcp() {
             .contains("ginka_nonsense")
     );
 }
+
+#[test]
+fn a_workspace_is_merged_into_the_branch_the_project_is_on() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "try-1"]);
+    let attempt = home.root().join("worktrees/comet/try-1");
+    std::fs::write(attempt.join("answer.txt"), "42\n").unwrap();
+
+    let refused = home.run(&["workspace", "merge", "comet/try-1"]);
+    assert!(
+        !refused.status.success(),
+        "uncommitted work needs a message"
+    );
+
+    let merged = home.ok(&[
+        "workspace",
+        "merge",
+        "comet/try-1",
+        "--message",
+        "Keep try-1",
+    ]);
+    assert!(merged.contains("main"), "{merged}");
+    assert!(repository.join("answer.txt").exists());
+}
+
+#[test]
+fn a_scheduled_job_is_added_listed_run_and_removed() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let refused = home.run(&[
+        "cron",
+        "add",
+        "comet",
+        "nightly",
+        "--schedule",
+        "61 * * * *",
+        "--shell",
+        "true",
+    ]);
+    assert!(!refused.status.success());
+
+    let added = home.ok(&[
+        "cron",
+        "add",
+        "comet",
+        "nightly",
+        "--schedule",
+        "@daily",
+        "--shell",
+        "touch .cron-ran",
+    ]);
+    let id = added
+        .split_whitespace()
+        .next()
+        .expect("the id comes first")
+        .to_string();
+    let listed = home.ok(&["cron", "list"]);
+    assert!(
+        listed.contains("nightly") && listed.contains("@daily"),
+        "{listed}"
+    );
+
+    home.ok(&["cron", "run", &id]);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !repository.join(".cron-ran").exists() {
+        assert!(std::time::Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let runs = home.ok(&["cron", "runs", &id]);
+    assert!(
+        runs.contains("started") || runs.contains("finished"),
+        "{runs}"
+    );
+
+    home.ok(&["cron", "remove", &id]);
+    assert!(!home.ok(&["cron", "list"]).contains("nightly"));
+}
+
+#[test]
+fn a_project_can_be_labelled_and_moved() {
+    let home = Home::new();
+    for name in ["comet", "aurora"] {
+        let repository = home.repository(name);
+        home.ok(&["project", "add", repository.to_str().unwrap()]);
+    }
+    home.ok(&["project", "move", "aurora", "0"]);
+    home.ok(&["project", "label", "comet", "Side projects"]);
+    let listed = home.ok(&["project", "list"]);
+    let aurora = listed.find("aurora").expect("listed");
+    let comet = listed.find("comet").expect("listed");
+    assert!(aurora < comet, "moved first: {listed}");
+    assert!(listed.contains("Side projects"), "{listed}");
+    assert!(
+        !home
+            .run(&["project", "move", "nowhere", "0"])
+            .status
+            .success()
+    );
+}

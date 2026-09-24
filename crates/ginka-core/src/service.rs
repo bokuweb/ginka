@@ -75,6 +75,13 @@ pub struct Service {
     settings: crate::settings::DaemonSettings,
     /// The last probe of every account's sign-in, and when it was taken.
     accounts: Option<(std::time::Instant, Vec<ginka_protocol::model::Account>)>,
+    /// The public rate table, as last cached, for pricing the turns a vendor
+    /// did not (§3.3 N13). Replaced by the daemon's daily refresh.
+    rates: Option<crate::usage::RateTable>,
+    /// Whether the drivers are the ones the settings describe, and so are
+    /// built again when the settings file changes. Not for a service given
+    /// its drivers, which is how a test puts a scripted agent in.
+    drivers_follow_settings: bool,
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
@@ -112,6 +119,9 @@ impl Service {
                 crate::tools::CLI_ENV
             );
         }
+        let rates = crate::usage::RateTable::load(&paths.rates_cache())
+            .ok()
+            .flatten();
         Self {
             cli,
             sessions: Supervisor::new(
@@ -130,6 +140,8 @@ impl Service {
             agents: None,
             settings,
             accounts: None,
+            rates,
+            drivers_follow_settings: false,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
         }
@@ -155,6 +167,44 @@ impl Service {
     pub fn with_drivers(mut self, drivers: Registry) -> Self {
         self.drivers = Arc::new(drivers);
         self
+    }
+
+    /// Use the drivers the settings describe — each agent's binary and
+    /// environment — and build them again when the settings file changes.
+    pub fn with_settings_drivers(mut self) -> Self {
+        self.drivers = Arc::new(Registry::from_settings(&self.settings));
+        self.drivers_follow_settings = true;
+        self
+    }
+
+    /// Read the settings file again if it says something other than what the
+    /// daemon is running with — someone edited it by hand — and say whether
+    /// it did. A file that does not parse is left for the reader to fix, and
+    /// the running settings stay. Keep-awake is read at start only.
+    pub fn reload_settings_if_changed(&mut self) -> bool {
+        let path = self.paths.daemon_settings();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let settings: crate::settings::DaemonSettings = match serde_json::from_str(&text) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "the edited settings do not parse; keeping the running ones");
+                return false;
+            }
+        };
+        if settings == self.settings {
+            return false;
+        }
+        tracing::info!(path = %path.display(), "settings changed on disk; reading them again");
+        self.settings = settings;
+        // What was probed under the old settings is stale.
+        self.accounts = None;
+        self.agents = None;
+        if self.drivers_follow_settings {
+            self.drivers = Arc::new(Registry::from_settings(&self.settings));
+        }
+        true
     }
 
     /// Hand agents this `ginka` command as their MCP bridge, rather than the
@@ -230,6 +280,22 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
+            Request::SetProjectLabel { project, label } => {
+                let label = label.trim();
+                let label = (!label.is_empty()).then_some(label);
+                if !project::set_label(&self.conn(), &project, label).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
+            Request::MoveProject { project, index } => {
+                if !project::move_to(&self.conn(), &project, index as usize).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
             Request::AddProject { path, label } => {
                 let project = registry::register_project_as(&self.conn(), &path, label.as_deref())
                     .map_err(failed)?;
@@ -687,6 +753,39 @@ impl Service {
                 });
                 Ok(Response::Committed { commit })
             }
+            Request::MergeWorkspace {
+                workspace,
+                into,
+                message,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let project = self.project(&worktree.project)?;
+                let into = into
+                    .filter(|branch| !branch.trim().is_empty())
+                    .or_else(|| git::current_branch(&project.path))
+                    .unwrap_or_else(|| project.default_branch.clone());
+                if into == worktree.branch {
+                    return Err(RpcError::failed(format!(
+                        "{into} is this workspace's own branch; choose another to merge into"
+                    )));
+                }
+                if git::branch_status(&worktree.path).map_err(failed)?.dirty {
+                    let message = message
+                        .filter(|message| !message.trim().is_empty())
+                        .ok_or_else(|| {
+                            RpcError::failed(
+                                "the workspace has uncommitted work; give a message to commit it with",
+                            )
+                        })?;
+                    git::commit(&worktree.path, &message, true).map_err(failed)?;
+                }
+                let outcome =
+                    git::merge_into(&project.path, &worktree.branch, &into).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Merged { outcome })
+            }
             Request::StageFile {
                 workspace,
                 path,
@@ -826,6 +925,67 @@ impl Service {
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
             }
+            Request::ListCronJobs { project } => Ok(Response::CronJobs {
+                jobs: crate::cron::list(&self.conn(), project.as_ref()).map_err(failed)?,
+            }),
+            Request::SaveCronJob {
+                id,
+                project,
+                workspace,
+                name,
+                schedule,
+                via,
+                agent,
+                body,
+                enabled,
+            } => {
+                self.project(&project)?;
+                if let Some(workspace) = &workspace
+                    && self.worktree(workspace)?.project != project
+                {
+                    return Err(RpcError::failed(format!(
+                        "{workspace} is not a workspace of {project}"
+                    )));
+                }
+                if let Some(agent) = &agent
+                    && via == ginka_protocol::model::CronVia::Chat
+                    && self.drivers.get(agent).is_none()
+                {
+                    return Err(RpcError::failed(format!("no agent named {agent}")));
+                }
+                let draft = crate::cron::Draft {
+                    project,
+                    workspace,
+                    name,
+                    schedule,
+                    via,
+                    agent,
+                    body,
+                    enabled,
+                };
+                let job =
+                    crate::cron::save(&self.conn(), id, &draft, chrono::Utc::now().timestamp())
+                        .map_err(failed)?;
+                Ok(Response::CronJob { job })
+            }
+            Request::RemoveCronJob { id } => {
+                crate::cron::remove(&self.conn(), id).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RunCronJob { id } => {
+                let job = crate::cron::get(&self.conn(), id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no scheduled job with id {id}")))?;
+                self.fire_cron(&job);
+                let job = crate::cron::get(&self.conn(), id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no scheduled job with id {id}")))?;
+                Ok(Response::CronJob { job })
+            }
+            Request::CronRuns { id, limit } => Ok(Response::CronRuns {
+                runs: crate::cron::runs(&self.conn(), id, limit.unwrap_or(50).min(500))
+                    .map_err(failed)?,
+            }),
             Request::RemoveNote { id } => {
                 crate::notes::remove(&self.conn(), &id).map_err(failed)?;
                 Ok(Response::Ack)
@@ -950,9 +1110,13 @@ impl Service {
                 let days = days.unwrap_or(30);
                 let conn = self.conn();
                 Ok(Response::Usage {
-                    by_day: crate::usage::by_day(&conn, days).map_err(failed)?,
-                    by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
-                    by_account: crate::usage::by_account(&conn, days).map_err(failed)?,
+                    by_day: crate::usage::by_day(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    by_agent: crate::usage::by_agent(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    by_account: crate::usage::by_account(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    rates_fetched_at: self.rates.as_ref().map(|rates| rates.fetched_at),
                     plans: crate::usage::plans(&conn).map_err(failed)?,
                 })
             }
@@ -1979,6 +2143,199 @@ impl Service {
                 known.join(", ")
             ))
         }
+    }
+
+    /// Fire every scheduled job a tick at `now` owes, and say how many were
+    /// due — skipped ones included. The daemon calls this on its own clock.
+    pub fn run_due_cron(&mut self, now: chrono::DateTime<chrono::Local>) -> usize {
+        let due = match crate::cron::take_due(&self.conn(), &now) {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::error!(%error, "could not read the scheduled jobs");
+                return 0;
+            }
+        };
+        for job in &due {
+            self.fire_cron(job);
+        }
+        due.len()
+    }
+
+    /// Whether the rate table should be fetched again at `now`: never when
+    /// the settings say not to, otherwise when there is none or it is a day
+    /// old. The fetch itself is the daemon's, outside the service's lock.
+    pub fn rates_due(&self, now: i64) -> Option<std::path::PathBuf> {
+        if !self.settings.fetch_rates {
+            return None;
+        }
+        let due = self
+            .rates
+            .as_ref()
+            .is_none_or(|rates| rates.is_empty() || rates.is_stale(now));
+        due.then(|| self.paths.rates_cache())
+    }
+
+    /// Use this rate table from now on.
+    pub fn set_rates(&mut self, rates: Option<crate::usage::RateTable>) {
+        if rates.is_some() {
+            self.rates = rates;
+        }
+    }
+
+    /// [`Service::run_due_cron`] on the daemon host's clock.
+    pub fn run_due_cron_now(&mut self) -> usize {
+        self.run_due_cron(chrono::Local::now())
+    }
+
+    /// Fire one job: skip it while what it last started is still running,
+    /// otherwise start its conversation or its terminal, and record the run.
+    fn fire_cron(&mut self, job: &ginka_protocol::model::CronJob) {
+        use ginka_protocol::model::{CronOutcome, CronVia};
+        let now = chrono::Utc::now().timestamp();
+        let record = |service: &Self, outcome: CronOutcome, detail: Option<&str>| {
+            crate::cron::record_run(&service.conn(), job.id, now, outcome, detail)
+        };
+        let workspace = match &job.workspace {
+            Some(workspace) => Some(workspace.clone()),
+            None => self.project_checkout(&job.project),
+        };
+        let Some(workspace) = workspace else {
+            let _ = record(
+                self,
+                CronOutcome::Failed,
+                Some(&format!("{} has no checkout to run in", job.project)),
+            );
+            return;
+        };
+        let last = crate::cron::last_started(&self.conn(), job.id).unwrap_or_default();
+        let still_running = match job.via {
+            CronVia::Chat => last
+                .session
+                .as_ref()
+                .is_some_and(|session| self.sessions.is_running(&SessionId(session.clone()))),
+            CronVia::Terminal => last.terminal.as_ref().is_some_and(|terminal| {
+                self.terminals
+                    .list(&workspace)
+                    .iter()
+                    .any(|open| &open.id.0 == terminal)
+            }),
+        };
+        if still_running {
+            let _ = record(
+                self,
+                CronOutcome::Skipped,
+                Some("the previous run is still going"),
+            );
+            return;
+        }
+
+        match job.via {
+            CronVia::Chat => {
+                let started = self.handle(Request::StartSession {
+                    workspace,
+                    agent: job.agent.clone().unwrap_or_default(),
+                    prompt: job.body.clone(),
+                    model: None,
+                    reasoning_effort: None,
+                    service_tier: None,
+                    account: None,
+                    access_mode: None,
+                    origin: None,
+                });
+                match started {
+                    Ok(Response::Session { session }) => {
+                        let _ = record(self, CronOutcome::Started, Some(&session.id.0));
+                        let _ = crate::cron::set_last_started(
+                            &self.conn(),
+                            job.id,
+                            &crate::cron::LastStarted {
+                                session: Some(session.id.0),
+                                terminal: None,
+                            },
+                        );
+                    }
+                    Ok(other) => {
+                        let _ = record(self, CronOutcome::Failed, Some(&format!("{other:?}")));
+                    }
+                    Err(error) => {
+                        let _ = record(self, CronOutcome::Failed, Some(&error.message));
+                    }
+                }
+            }
+            CronVia::Terminal => {
+                let Ok(run) = record(self, CronOutcome::Started, None) else {
+                    return;
+                };
+                let path = match self.worktree(&workspace) {
+                    Ok(worktree) => worktree.path,
+                    Err(error) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Failed,
+                            Some(&error.message),
+                        );
+                        return;
+                    }
+                };
+                let conn = self.conn.clone();
+                let opened = self.terminals.open_command(
+                    &workspace,
+                    &path,
+                    crate::terminal::TerminalCommand {
+                        program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                        args: vec!["-lc".into(), job.body.clone()],
+                        env: Vec::new(),
+                        title: job.name.clone(),
+                        on_exit: Some(Box::new(move || {
+                            let conn = conn.lock().unwrap_or_else(|e| e.into_inner());
+                            let _ =
+                                crate::cron::finish_run(&conn, run, chrono::Utc::now().timestamp());
+                        })),
+                    },
+                    24,
+                    100,
+                );
+                match opened {
+                    Ok(terminal) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Started,
+                            Some(&terminal.0),
+                        );
+                        let _ = crate::cron::set_last_started(
+                            &self.conn(),
+                            job.id,
+                            &crate::cron::LastStarted {
+                                session: None,
+                                terminal: Some(terminal.0),
+                            },
+                        );
+                    }
+                    Err(error) => {
+                        let _ = crate::cron::set_run(
+                            &self.conn(),
+                            run,
+                            CronOutcome::Failed,
+                            Some(&format!("{error:#}")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The workspace that is the project's own checkout — where a job with no
+    /// workspace runs.
+    fn project_checkout(&self, name: &ProjectName) -> Option<WorkspaceId> {
+        let project = self.project(name).ok()?;
+        let worktrees = project::list_worktrees(&self.conn(), name).ok()?;
+        worktrees
+            .iter()
+            .find(|worktree| worktree.path == project.path)
+            .or(worktrees.first())
+            .map(|worktree| worktree.workspace_id())
     }
 
     /// Resolve a workspace id to the worktree it names.

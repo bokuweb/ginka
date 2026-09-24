@@ -17,6 +17,8 @@ pub struct UsageReport {
     pub by_account: Vec<UsageRow>,
     /// The latest reading per login, for those that have one.
     pub plans: Vec<PlanSnapshot>,
+    /// When the rate table behind any estimate was fetched.
+    pub rates_fetched_at: Option<i64>,
 }
 
 impl UsageReport {
@@ -43,7 +45,13 @@ pub fn totals_line(totals: &UsageTotals) -> String {
     }
     parts.push(format!("{} turns", totals.turns));
     if let Some(cost) = totals.cost_usd {
-        parts.push(format!("${cost:.2}"));
+        // Priced from the public table rather than by the vendor: an
+        // estimate, and marked as one (§3.3 N13).
+        let about = if totals.estimated { "≈" } else { "" };
+        parts.push(format!("{about}${cost:.2}"));
+    }
+    if totals.unpriced > 0 {
+        parts.push(format!("{} unpriced", totals.unpriced));
     }
     parts.join(" · ")
 }
@@ -119,6 +127,7 @@ mod tests {
             reasoning_tokens: 0,
             cost_usd: Some(0.42),
             turns: 4,
+            ..UsageTotals::default()
         };
         assert_eq!(
             totals_line(&priced),
@@ -133,6 +142,33 @@ mod tests {
         assert_eq!(
             totals_line(&unpriced),
             "12.3k in · 1.2k out · 900 cached · 4 turns"
+        );
+    }
+
+    #[test]
+    fn an_estimated_cost_and_what_could_not_be_priced_are_both_said() {
+        let totals = UsageTotals {
+            input_tokens: 1_000_000,
+            output_tokens: 0,
+            cost_usd: Some(1.25),
+            turns: 3,
+            estimated: true,
+            unpriced: 2,
+            ..UsageTotals::default()
+        };
+        assert_eq!(
+            totals_line(&totals),
+            "1.0M in · 0 out · 3 turns · ≈$1.25 · 2 unpriced"
+        );
+        let nothing_known = UsageTotals {
+            cost_usd: None,
+            estimated: false,
+            unpriced: 1,
+            ..totals
+        };
+        assert_eq!(
+            totals_line(&nothing_known),
+            "1.0M in · 0 out · 3 turns · 1 unpriced"
         );
     }
 

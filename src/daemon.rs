@@ -246,11 +246,13 @@ impl DaemonLink {
                 by_agent,
                 by_account,
                 plans,
+                rates_fetched_at,
             }) => Some(ginka_ui::reports::UsageReport {
                 by_day,
                 by_agent,
                 by_account,
                 plans,
+                rates_fetched_at,
             }),
             _ => None,
         }
@@ -448,6 +450,26 @@ impl DaemonLink {
                     Err(error.message)
                 }
             }
+        }
+    }
+
+    /// Merge a workspace's branch into the branch its project is on,
+    /// committing what it left uncommitted with `message` first.
+    pub async fn merge_workspace(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+    ) -> Result<ginka_protocol::model::MergeOutcome, String> {
+        match self
+            .ask_result(Request::MergeWorkspace {
+                workspace: workspace.clone(),
+                into: None,
+                message: Some(message),
+            })
+            .await?
+        {
+            Response::Merged { outcome } => Ok(outcome),
+            other => Err(format!("unexpected answer: {other:?}")),
         }
     }
 
@@ -952,6 +974,34 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Scheduled jobs for a project, or every one.
+    pub async fn cron_jobs(
+        &self,
+        project: Option<ProjectName>,
+    ) -> Vec<ginka_protocol::model::CronJob> {
+        match self.ask(Request::ListCronJobs { project }).await {
+            Some(Response::CronJobs { jobs }) => jobs,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Save a scheduled job; the refusal is the daemon's own words.
+    pub async fn save_cron_job(&self, request: Request) -> Result<(), String> {
+        self.ask_result(request).await.map(|_| ())
+    }
+
+    /// Forget a scheduled job.
+    pub async fn remove_cron_job(&self, id: i64) {
+        self.ask(Request::RemoveCronJob { id }).await;
+    }
+
+    /// Fire a scheduled job now.
+    pub async fn run_cron_job(&self, id: i64) -> Result<(), String> {
+        self.ask_result(Request::RunCronJob { id })
+            .await
+            .map(|_| ())
+    }
+
     /// Forget a quick command.
     pub async fn remove_quick_command(&self, id: String) {
         self.ask(Request::RemoveQuickCommand { id }).await;
@@ -1233,6 +1283,30 @@ impl DaemonLink {
     }
 
     /// Give a conversation a title; an empty one clears it back to none.
+    /// Show a project under another name; blank goes back to its own.
+    pub async fn set_project_label(
+        &self,
+        project: &ProjectName,
+        label: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetProjectLabel {
+            project: project.clone(),
+            label,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Put a project at `index` in the rail.
+    pub async fn move_project(&self, project: &ProjectName, index: u32) -> Result<(), String> {
+        self.ask_result(Request::MoveProject {
+            project: project.clone(),
+            index,
+        })
+        .await
+        .map(|_| ())
+    }
+
     pub async fn rename_session(&self, session: &SessionId, title: String) -> Result<(), String> {
         self.ask_result(Request::RenameSession {
             session: session.clone(),

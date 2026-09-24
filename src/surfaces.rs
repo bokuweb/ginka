@@ -78,6 +78,8 @@ pub struct SurfacePanel {
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
+    /// Diffs side by side — the old file on the left — rather than unified.
+    split: bool,
     /// The comments waiting to go back to the agent.
     comments: Vec<ginka_protocol::model::ReviewComment>,
     /// The line a comment is being written on, and the box it is written in.
@@ -320,6 +322,7 @@ impl SurfacePanel {
             pull_request: None,
             opening_pull_request: false,
             expanded: None,
+            split: false,
             comments: Vec::new(),
             commenting: None,
             staged: Vec::new(),
@@ -1286,18 +1289,42 @@ impl SurfacePanel {
         v_flex()
             .w_full()
             .child(
-                div()
+                h_flex()
                     .w_full()
                     .px_3()
                     .py_1()
+                    .gap_2()
+                    .items_center()
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
                     .bg(tokens.colors().bg_surface)
-                    .child(if staged {
+                    .child(div().flex_1().child(if staged {
                         rust_i18n::t!("surface.git.section.staged").to_string()
                     } else {
                         rust_i18n::t!("surface.git.section.unstaged").to_string()
-                    }),
+                    }))
+                    .children(
+                        [(false, "surface.git.unified"), (true, "surface.git.split")].map(
+                            |(split, key)| {
+                                let on = self.split == split;
+                                div()
+                                    .id(SharedString::from(format!("diff-layout:{staged}:{split}")))
+                                    .px_1p5()
+                                    .rounded(px(5.))
+                                    .cursor_pointer()
+                                    .when(on, |this| {
+                                        this.bg(tokens.colors().row_active())
+                                            .text_color(tokens.colors().text_primary)
+                                    })
+                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.split = split;
+                                        cx.notify();
+                                    }))
+                                    .child(rust_i18n::t!(key).to_string())
+                            },
+                        ),
+                    ),
             )
             .children(
                 changes
@@ -2306,55 +2333,68 @@ impl SurfacePanel {
                                     )
                                 }),
                         )
-                        .children(hunk.lines.iter().map(|line| {
-                            let anchor = match line.kind {
-                                LineKind::Removed => line.old_line,
-                                _ => line.new_line,
-                            };
-                            let path = file.path.clone();
-                            h_flex()
-                                .id(SharedString::from(format!(
-                                    "line:{}:{:?}:{:?}",
-                                    file.path, line.kind, anchor
-                                )))
-                                .w_full()
-                                .px_3()
-                                .gap_2()
-                                .cursor_pointer()
-                                .hover(|this| this.bg(tokens.colors().row_hover()))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.comment_on(path.clone(), anchor, window, cx)
-                                }))
-                                .font_family(mono.clone())
-                                .text_xs()
-                                .line_height(px(17.))
-                                .when(line.kind == LineKind::Added, |this| {
-                                    this.bg(tokens.colors().status_done.opacity(0.10))
-                                })
-                                .when(line.kind == LineKind::Removed, |this| {
-                                    this.bg(tokens.colors().status_error.opacity(0.10))
-                                })
-                                .child(
-                                    div()
-                                        .w(px(34.))
-                                        .text_color(tokens.colors().text_muted.opacity(0.7))
-                                        .child(match line.kind {
-                                            // The number a comment would be
-                                            // anchored to: the new side for
-                                            // anything that still exists.
-                                            LineKind::Removed => line
-                                                .old_line
-                                                .map(|at| at.to_string())
-                                                .unwrap_or_default(),
-                                            _ => line
-                                                .new_line
-                                                .map(|at| at.to_string())
-                                                .unwrap_or_default(),
-                                        }),
-                                )
-                                .child(diff_text(line, &tokens))
-                                .into_any_element()
-                        }))
+                        .when(self.split, |this| {
+                            this.children(
+                                ginka_ui::split_diff::rows(hunk).into_iter().map(|row| {
+                                    split_row(&file.path, row, &tokens, mono.clone(), cx)
+                                }),
+                            )
+                        })
+                        .children(
+                            (!self.split)
+                                .then(|| hunk.lines.iter())
+                                .into_iter()
+                                .flatten()
+                                .map(|line| {
+                                    let anchor = match line.kind {
+                                        LineKind::Removed => line.old_line,
+                                        _ => line.new_line,
+                                    };
+                                    let path = file.path.clone();
+                                    h_flex()
+                                        .id(SharedString::from(format!(
+                                            "line:{}:{:?}:{:?}",
+                                            file.path, line.kind, anchor
+                                        )))
+                                        .w_full()
+                                        .px_3()
+                                        .gap_2()
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.comment_on(path.clone(), anchor, window, cx)
+                                        }))
+                                        .font_family(mono.clone())
+                                        .text_xs()
+                                        .line_height(px(17.))
+                                        .when(line.kind == LineKind::Added, |this| {
+                                            this.bg(tokens.colors().status_done.opacity(0.10))
+                                        })
+                                        .when(line.kind == LineKind::Removed, |this| {
+                                            this.bg(tokens.colors().status_error.opacity(0.10))
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(34.))
+                                                .text_color(tokens.colors().text_muted.opacity(0.7))
+                                                .child(match line.kind {
+                                                    // The number a comment would be
+                                                    // anchored to: the new side for
+                                                    // anything that still exists.
+                                                    LineKind::Removed => line
+                                                        .old_line
+                                                        .map(|at| at.to_string())
+                                                        .unwrap_or_default(),
+                                                    _ => line
+                                                        .new_line
+                                                        .map(|at| at.to_string())
+                                                        .unwrap_or_default(),
+                                                }),
+                                        )
+                                        .child(diff_text(line, &tokens))
+                                        .into_any_element()
+                                }),
+                        )
                         .children(hunk.lines.iter().flat_map(|line| {
                             let anchor = match line.kind {
                                 LineKind::Removed => line.old_line,
@@ -2626,6 +2666,22 @@ impl SurfacePanel {
             .children(usage_rows(&usage.by_agent))
             .child(heading(rust_i18n::t!("surface.reports.by_day").to_string()))
             .children(usage_rows(&usage.by_day))
+            // Where the estimates came from, so a `≈` is never unexplained.
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(match usage.rates_fetched_at {
+                        Some(at) => rust_i18n::t!(
+                            "surface.reports.rates",
+                            age = ginka_ui::workspace::relative_age(now, at)
+                        )
+                        .to_string(),
+                        None => rust_i18n::t!("surface.reports.no_rates").to_string(),
+                    }),
+            )
             .into_any_element()
     }
 
@@ -3667,6 +3723,77 @@ impl SurfacePanel {
                 }
             })
     }
+}
+
+/// One row of the split view: the old line on the left, the new on the
+/// right, either side possibly empty. Clicking a side comments on that line,
+/// as clicking a unified line does.
+fn split_row(
+    path: &str,
+    row: ginka_ui::split_diff::SplitRow<'_>,
+    tokens: &Tokens,
+    mono: SharedString,
+    cx: &mut Context<SurfacePanel>,
+) -> AnyElement {
+    let side = |line: Option<&ginka_protocol::model::DiffLine>,
+                old: bool,
+                cx: &mut Context<SurfacePanel>| {
+        let Some(line) = line else {
+            return div()
+                .flex_1()
+                .min_w_0()
+                .bg(tokens.colors().bg_surface.opacity(0.5))
+                .into_any_element();
+        };
+        let number = if old { line.old_line } else { line.new_line };
+        // A context line is anchored to its new number either side, as the
+        // unified view anchors it.
+        let anchor = match line.kind {
+            LineKind::Removed => line.old_line,
+            _ => line.new_line,
+        };
+        let path = path.to_string();
+        h_flex()
+            .id(SharedString::from(format!(
+                "split:{path}:{old}:{:?}:{number:?}",
+                line.kind
+            )))
+            .flex_1()
+            .min_w_0()
+            .gap_2()
+            .overflow_hidden()
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .when(line.kind == LineKind::Added, |this| {
+                this.bg(tokens.colors().status_done.opacity(0.10))
+            })
+            .when(line.kind == LineKind::Removed, |this| {
+                this.bg(tokens.colors().status_error.opacity(0.10))
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.comment_on(path.clone(), anchor, window, cx)
+            }))
+            .child(
+                div()
+                    .w(px(30.))
+                    .flex_shrink_0()
+                    .text_color(tokens.colors().text_muted.opacity(0.7))
+                    .child(number.map(|at| at.to_string()).unwrap_or_default()),
+            )
+            .child(diff_text(line, tokens))
+            .into_any_element()
+    };
+    h_flex()
+        .w_full()
+        .px_3()
+        .gap_1()
+        .font_family(mono)
+        .text_xs()
+        .line_height(px(17.))
+        .child(side(row.left, true, cx))
+        .child(div().w(px(1.)).h_full().bg(tokens.colors().border_subtle))
+        .child(side(row.right, false, cx))
+        .into_any_element()
 }
 
 /// One line of a diff, with the parts that actually changed marked.

@@ -234,3 +234,76 @@ fn the_tightest_window_is_the_one_to_show() {
     assert_eq!(usage.tightest().unwrap().label, "5-hour window");
     assert!(PlanUsage::default().tightest().is_none());
 }
+
+/// The public table's shape: dollars per token, keyed by model, some with a
+/// vendor prefix, and entries that are not models at all.
+const PUBLISHED: &str = r#"{
+    "sample_spec": {"input_cost_per_token": 0, "output_cost_per_token": 0},
+    "claude-sonnet-4-5": {
+        "input_cost_per_token": 3e-6,
+        "output_cost_per_token": 1.5e-5,
+        "cache_read_input_token_cost": 3e-7,
+        "cache_creation_input_token_cost": 3.75e-6
+    },
+    "openai/gpt-5": {"input_cost_per_token": 1.25e-6, "output_cost_per_token": 1e-5},
+    "dall-e-3": {"output_cost_per_image": 0.04},
+    "broken": "not an object"
+}"#;
+
+#[test]
+fn the_published_table_is_read_per_million_tokens() {
+    let table = usage::pricing::parse_published(PUBLISHED, DAY_ONE).unwrap();
+    let tokens = TokenTotals {
+        input: 1_000_000,
+        output: 1_000_000,
+        cache_read: 1_000_000,
+        cache_write: 1_000_000,
+    };
+    let cost = table
+        .cost_of("claude-sonnet-4-5-20250929", &tokens)
+        .unwrap();
+    assert!((cost - (3.0 + 15.0 + 0.3 + 3.75)).abs() < 1e-9, "{cost}");
+    assert!(
+        table.cost_of("gpt-5", &tokens).is_some(),
+        "without its prefix"
+    );
+    assert!(
+        table.cost_of("dall-e-3", &tokens).is_none(),
+        "not priced per token"
+    );
+    assert!(table.cost_of("sample_spec", &tokens).is_none());
+    assert!(usage::pricing::parse_published("[]", DAY_ONE).is_err());
+}
+
+#[test]
+fn a_fresh_cache_is_used_and_a_stale_one_refetched_or_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rates.json");
+    let fetched = std::cell::Cell::new(0);
+    let fetch_ok = || {
+        fetched.set(fetched.get() + 1);
+        Ok(PUBLISHED.to_string())
+    };
+
+    // Nothing cached and nothing reachable: no table, and no pretending.
+    let unreachable = || anyhow::bail!("offline");
+    assert!(usage::pricing::refresh(&path, DAY_ONE, unreachable).is_none());
+
+    let table = usage::pricing::refresh(&path, DAY_ONE, fetch_ok).unwrap();
+    assert_eq!(fetched.get(), 1);
+    assert_eq!(table.fetched_at, DAY_ONE);
+    assert!(path.exists(), "cached beside the database");
+
+    // Within a day: the cache, without asking.
+    usage::pricing::refresh(&path, DAY_ONE + 3_600, fetch_ok).unwrap();
+    assert_eq!(fetched.get(), 1);
+
+    // A day later and offline: yesterday's prices rather than none.
+    let kept = usage::pricing::refresh(&path, DAY_TWO + 60, unreachable).unwrap();
+    assert_eq!(kept.fetched_at, DAY_ONE);
+
+    // A day later and online: fetched again.
+    let again = usage::pricing::refresh(&path, DAY_TWO + 60, fetch_ok).unwrap();
+    assert_eq!(fetched.get(), 2);
+    assert_eq!(again.fetched_at, DAY_TWO + 60);
+}

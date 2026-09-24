@@ -13,6 +13,7 @@ mod assets;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod browser;
 mod daemon;
+mod dock;
 mod inbox;
 mod lsp;
 mod notes;
@@ -32,6 +33,7 @@ fn main() -> Result<()> {
     let paths = Paths::from_env()?;
     paths.ensure()?;
     let _log_guard = ginka_core::logging::init(&paths, "app")?;
+    ginka_core::crash::install(paths.logs(), "app");
     let app_settings: settings::AppSettings = settings::load(&paths.app_settings());
     let locale = ginka_core::i18n::init(app_settings.locale.as_deref());
     tracing::info!(%locale, "language");

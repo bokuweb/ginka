@@ -472,3 +472,48 @@ fn an_edited_prompt_names_its_session_position_and_text() {
         json!({"method": "edit_prompt", "session": "s-1", "seq": 4, "text": "again"})
     );
 }
+
+#[test]
+fn a_merge_names_the_workspace_and_optionally_its_target_and_message() {
+    assert_eq!(
+        wire(&Request::MergeWorkspace {
+            workspace: WorkspaceId("comet/try-1".into()),
+            into: None,
+            message: Some("Keep try-1".into()),
+        }),
+        json!({"method": "merge_workspace", "workspace": "comet/try-1", "into": null, "message": "Keep try-1"})
+    );
+}
+
+#[test]
+fn a_scheduled_job_says_how_it_runs_in_words() {
+    assert_eq!(
+        wire(&Request::SaveCronJob {
+            id: None,
+            project: ginka_protocol::ProjectName("comet".into()),
+            workspace: None,
+            name: "nightly".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "cargo test".into(),
+            enabled: true,
+        }),
+        json!({
+            "method": "save_cron_job", "id": null, "project": "comet", "workspace": null,
+            "name": "nightly", "schedule": "@daily", "via": "terminal", "agent": null,
+            "body": "cargo test", "enabled": true
+        })
+    );
+}
+
+#[test]
+fn a_project_is_moved_by_name_to_an_index() {
+    assert_eq!(
+        wire(&Request::MoveProject {
+            project: ginka_protocol::ProjectName("comet".into()),
+            index: 2,
+        }),
+        json!({"method": "move_project", "project": "comet", "index": 2})
+    );
+}

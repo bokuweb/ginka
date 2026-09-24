@@ -12,6 +12,7 @@ fn main() -> Result<()> {
     let paths = Paths::from_env()?;
     paths.ensure()?;
     let _log_guard = logging::init(&paths, "daemon")?;
+    ginka_core::crash::install(paths.logs(), "daemon");
 
     // One daemon per state directory. Taken before anything else — before
     // the migrations, which are what makes a first start slow — so a second

@@ -1387,3 +1387,421 @@ fn a_quick_command_runs_in_a_terminal_named_after_it() {
         "a prompt is the conversation's to send"
     );
 }
+
+#[test]
+fn the_winning_attempt_is_merged_into_the_branch_the_project_is_on() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "try-1".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    // Agents leave their work uncommitted.
+    std::fs::write(workspace.worktree.path.join("answer.txt"), "42\n").unwrap();
+
+    // Without a message there is no way to carry that work over: refused.
+    assert!(
+        fixture
+            .service
+            .handle(Request::MergeWorkspace {
+                workspace: workspace.id(),
+                into: None,
+                message: None,
+            })
+            .is_err()
+    );
+    assert!(!fixture.repo().join("answer.txt").exists());
+
+    let outcome = match fixture.ask(Request::MergeWorkspace {
+        workspace: workspace.id(),
+        into: None,
+        message: Some("Keep try-1".into()),
+    }) {
+        Response::Merged { outcome } => outcome,
+        other => panic!("expected a merge, got {other:?}"),
+    };
+    assert_eq!(outcome.into, "main", "the branch the project is on");
+    assert!(outcome.fast_forward);
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo().join("answer.txt")).unwrap(),
+        "42\n"
+    );
+    assert_eq!(
+        support::git(&fixture.repo(), &["log", "-1", "--format=%s"]).trim(),
+        "Keep try-1"
+    );
+
+    // A workspace cannot be merged into its own branch.
+    assert!(
+        fixture
+            .service
+            .handle(Request::MergeWorkspace {
+                workspace: workspace.id(),
+                into: Some("try-1".into()),
+                message: None,
+            })
+            .is_err()
+    );
+}
+
+/// Save a scheduled job and take it back.
+fn save_cron(fixture: &mut Fixture, request: Request) -> ginka_protocol::model::CronJob {
+    match fixture.ask(request) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    }
+}
+
+fn cron_runs(fixture: &mut Fixture, id: i64) -> Vec<ginka_protocol::model::CronRun> {
+    match fixture.ask(Request::CronRuns { id, limit: None }) {
+        Response::CronRuns { runs } => runs,
+        other => panic!("expected runs, got {other:?}"),
+    }
+}
+
+fn terminal_job(project: &ProjectName, schedule: &str, body: &str) -> Request {
+    Request::SaveCronJob {
+        id: None,
+        project: project.clone(),
+        workspace: None,
+        name: "nightly".into(),
+        schedule: schedule.into(),
+        via: ginka_protocol::model::CronVia::Terminal,
+        agent: None,
+        body: body.into(),
+        enabled: true,
+    }
+}
+
+#[test]
+fn a_scheduled_job_is_checked_when_it_is_written() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+
+    for bad in [
+        terminal_job(&project, "61 * * * *", "true"),
+        terminal_job(&project, "0 0 31 2 *", "true"),
+        terminal_job(&ProjectName("nowhere".into()), "@daily", "true"),
+        terminal_job(&project, "@daily", "  "),
+        Request::SaveCronJob {
+            id: None,
+            project: project.clone(),
+            workspace: None,
+            name: "review".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Chat,
+            agent: None,
+            body: "review the diff".into(),
+            enabled: true,
+        },
+    ] {
+        assert!(fixture.service.handle(bad.clone()).is_err(), "{bad:?}");
+    }
+
+    let job = save_cron(&mut fixture, terminal_job(&project, "@daily", "true"));
+    let now = chrono::Utc::now().timestamp();
+    let next = job.next_run_at.expect("an enabled job says when it fires");
+    assert!(next > now && next <= now + 86_400, "{next} vs {now}");
+
+    let disabled = save_cron(
+        &mut fixture,
+        Request::SaveCronJob {
+            id: Some(job.id),
+            project: project.clone(),
+            workspace: None,
+            name: "nightly".into(),
+            schedule: "@daily".into(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "true".into(),
+            enabled: false,
+        },
+    );
+    assert_eq!(disabled.id, job.id, "saved in place");
+    assert_eq!(disabled.next_run_at, None);
+
+    match fixture.ask(Request::ListCronJobs {
+        project: Some(project),
+    }) {
+        Response::CronJobs { jobs } => assert_eq!(jobs.len(), 1),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+    fixture.ask(Request::RemoveCronJob { id: job.id });
+    match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => assert!(jobs.is_empty()),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_due_terminal_job_runs_once_and_is_skipped_while_it_is_still_running() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let marker = fixture.repo().join(".cron-ran");
+    let job = save_cron(
+        &mut fixture,
+        terminal_job(&project, "* * * * *", "echo ran >> .cron-ran; sleep 30"),
+    );
+
+    // Nothing is owed before the schedule's next minute.
+    assert_eq!(fixture.service.run_due_cron(chrono::Local::now()), 0);
+
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !marker.is_file() {
+        assert!(std::time::Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    // Missed minutes are not replayed: the tick that fired moved it on.
+    assert_eq!(fixture.service.run_due_cron(later), 0);
+
+    // Its command is still sleeping, so the next firing is skipped.
+    let even_later = later + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(even_later), 1);
+    let runs = cron_runs(&mut fixture, job.id);
+    let outcomes: Vec<_> = runs.iter().map(|run| run.outcome).collect();
+    assert_eq!(
+        outcomes,
+        [
+            ginka_protocol::model::CronOutcome::Skipped,
+            ginka_protocol::model::CronOutcome::Started,
+        ],
+        "most recent first"
+    );
+    assert_eq!(std::fs::read_to_string(&marker).unwrap(), "ran\n");
+
+    match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => assert_eq!(
+            jobs[0].last_run.as_ref().map(|run| run.outcome),
+            Some(ginka_protocol::model::CronOutcome::Skipped)
+        ),
+        other => panic!("expected jobs, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_terminal_job_is_finished_when_its_terminal_closes_and_can_be_run_by_hand() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let job = save_cron(&mut fixture, terminal_job(&project, "@yearly", "true"));
+
+    fixture.ask(Request::RunCronJob { id: job.id });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let runs = cron_runs(&mut fixture, job.id);
+        if runs[0].outcome == ginka_protocol::model::CronOutcome::Finished {
+            assert!(runs[0].finished_at.is_some());
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "never finished: {runs:?}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert!(
+        fixture
+            .service
+            .handle(Request::RunCronJob { id: 999 })
+            .is_err()
+    );
+}
+
+fn project_names(fixture: &mut Fixture) -> Vec<(String, Option<String>)> {
+    match fixture.ask(Request::ListProjects) {
+        Response::Projects { projects } => projects
+            .into_iter()
+            .map(|project| (project.name.0, project.label))
+            .collect(),
+        other => panic!("expected projects, got {other:?}"),
+    }
+}
+
+#[test]
+fn projects_keep_the_order_and_labels_the_reader_gives_them() {
+    let mut fixture = Fixture::new();
+    for name in ["comet", "aurora", "nebula"] {
+        let root = fixture.work.path().join(name);
+        support::repository(&root);
+        fixture.ask(Request::AddProject {
+            path: root,
+            label: None,
+        });
+    }
+    // A new project goes to the end rather than into the alphabet.
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["comet", "aurora", "nebula"]);
+
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("nebula".into()),
+        index: 0,
+    });
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("comet".into()),
+        index: 99,
+    });
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        ["nebula", "aurora", "comet"],
+        "a far index is the end"
+    );
+
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "Work".into(),
+    });
+    assert_eq!(
+        project_names(&mut fixture)[1],
+        ("aurora".to_string(), Some("Work".to_string()))
+    );
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "  ".into(),
+    });
+    assert_eq!(project_names(&mut fixture)[1].1, None, "blank clears it");
+
+    assert!(
+        fixture
+            .service
+            .handle(Request::MoveProject {
+                project: ProjectName("nowhere".into()),
+                index: 0,
+            })
+            .is_err()
+    );
+}
+
+fn new_workspace(
+    fixture: &mut Fixture,
+    project: &ProjectName,
+    branch: &str,
+) -> Result<ginka_protocol::model::WorkspaceSummary, String> {
+    match fixture.service.handle(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: branch.into(),
+        base: None,
+    }) {
+        Ok(Response::Workspace { workspace }) => Ok(workspace),
+        Ok(other) => panic!("expected a workspace, got {other:?}"),
+        Err(error) => Err(error.message),
+    }
+}
+
+#[test]
+fn a_worktree_deleted_by_hand_does_not_hold_its_branch_hostage() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "doomed").unwrap();
+    // Deleted outside the app, the way a cleanup script or a reader would.
+    std::fs::remove_dir_all(&workspace.worktree.path).unwrap();
+
+    fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    });
+    let listed = support::git(&fixture.repo(), &["worktree", "list", "--porcelain"]);
+    assert!(
+        !listed.contains("prunable"),
+        "git's record is gone too: {listed}"
+    );
+
+    // The branch is free again: a new workspace can take it.
+    new_workspace(&mut fixture, &project, "doomed").expect("the branch is not held");
+}
+
+#[test]
+fn a_locked_worktree_is_named_as_locked_and_removed_only_when_forced() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "pinned-down").unwrap();
+    support::git(
+        &fixture.repo(),
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on a USB disk",
+            workspace.worktree.path.to_str().unwrap(),
+        ],
+    );
+
+    let refused = fixture
+        .service
+        .handle(Request::RemoveWorkspace {
+            workspace: workspace.id(),
+            force: false,
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("locked"), "{}", refused.message);
+    assert!(
+        refused.message.contains("on a USB disk"),
+        "{}",
+        refused.message
+    );
+    assert!(workspace.worktree.path.exists());
+
+    fixture.ask(Request::RemoveWorkspace {
+        workspace: workspace.id(),
+        force: true,
+    });
+    assert!(
+        !workspace.worktree.path.exists(),
+        "force goes through the lock"
+    );
+}
+
+#[test]
+fn a_settings_file_edited_by_hand_is_read_again_without_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::with_root(home.path().join("state"));
+    paths.ensure().unwrap();
+    let mut service = Service::new(
+        paths.clone(),
+        db::open_in_memory().unwrap(),
+        Arc::new(Recorder::default()),
+    );
+    service
+        .handle(Request::AddAccount {
+            id: ginka_protocol::AccountId("codex-work".into()),
+            provider: ginka_protocol::ProviderKind::Codex,
+            label: "Work".into(),
+        })
+        .unwrap();
+    // Nothing has changed since the service wrote the file itself.
+    assert!(!service.reload_settings_if_changed());
+
+    // The reader edits the file in their editor.
+    let file = paths.daemon_settings();
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    settings["accounts"]["codex-work"]["label"] = "Day job".into();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&file, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+    assert!(service.reload_settings_if_changed());
+    let accounts = match service.handle(Request::Accounts).unwrap() {
+        Response::Accounts { accounts } => accounts,
+        other => panic!("expected accounts, got {other:?}"),
+    };
+    let work = accounts
+        .iter()
+        .find(|account| account.id.0 == "codex-work")
+        .unwrap();
+    assert_eq!(work.label, "Day job");
+    assert!(!service.reload_settings_if_changed(), "read once");
+
+    // A file that no longer parses is not taken: the running settings stay.
+    std::fs::write(&file, "{ not json").unwrap();
+    assert!(!service.reload_settings_if_changed());
+}

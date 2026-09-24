@@ -32,6 +32,9 @@ pub struct AppSettings {
     /// Tell the desktop when an agent finishes, fails or needs the reader
     /// while the window is not the one in front.
     pub notifications: bool,
+    /// Play a sound with each notification — a different one for done,
+    /// asked and failed.
+    pub notification_sounds: bool,
     /// The conversations open as tabs across the centre column, by
     /// workspace id, left to right. Restored where the workspace still exists.
     pub open_tabs: Vec<String>,
@@ -58,6 +61,7 @@ impl Default for AppSettings {
             recent_models: BTreeMap::new(),
             recent_model_options: BTreeMap::new(),
             notifications: true,
+            notification_sounds: true,
             open_tabs: Vec::new(),
         }
     }
@@ -218,6 +222,9 @@ pub struct DaemonSettings {
     /// that stops halfway; one that has finished lets the machine sleep again.
     /// macOS only (`caffeinate -i -w <pid>`); ignored elsewhere.
     pub keep_awake: bool,
+    /// Fetch the public rate table, at most daily, to price the turns a
+    /// vendor does not (§3.3 N13). Off, costs are only what vendors report.
+    pub fetch_rates: bool,
     /// Providers the user has switched off. Absent means enabled, so the file
     /// stays empty until someone actually turns something off.
     pub disabled_providers: Vec<ProviderKind>,
@@ -324,6 +331,7 @@ impl Default for DaemonSettings {
             retention_days: 30,
             checkpoint_limit: 200,
             keep_awake: true,
+            fetch_rates: true,
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),

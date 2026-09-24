@@ -122,6 +122,16 @@ struct QuickForm {
     error: Option<String>,
 }
 
+/// The settings page's form for a new scheduled job.
+struct CronForm {
+    name: Entity<InputState>,
+    schedule: Entity<InputState>,
+    body: Entity<InputState>,
+    /// A prompt for an agent rather than a shell command.
+    chat: bool,
+    error: Option<String>,
+}
+
 const CONTEXT: &str = "Shell";
 
 /// Bind the panel toggles.
@@ -273,10 +283,9 @@ const TERMINAL_CELL_WIDTH: f32 = 7.5;
 /// re-wrapping instead of working. Eighty is what everything assumes anyway.
 const TERMINAL_COLUMNS: u16 = 100;
 
-/// How far from the foot still counts as being at it. About a line of text:
-/// enough that an answer growing between one frame and the next does not read
-/// as the reader scrolling away.
-const NEARLY_THE_FOOT: f32 = 24.;
+/// How far past the screen the transcript list lays blocks out, so a short
+/// scroll does not show a block being measured.
+const TRANSCRIPT_OVERDRAW: f32 = 1200.;
 
 /// The turn-level handoff choice currently expanded in the transcript.
 /// The composer's fan-out panel: how many attempts each agent gets.
@@ -293,6 +302,13 @@ struct Compare {
     /// The attempt whose *Keep* was pressed once and waits for the second
     /// press, which archives the others.
     keeping: Option<ginka_protocol::WorkspaceId>,
+    /// The attempt whose *Merge* was pressed once, the same way.
+    merging: Option<ginka_protocol::WorkspaceId>,
+    /// Set while a merge runs.
+    busy: bool,
+    /// Why the last merge was refused — a conflict, or uncommitted work in
+    /// the project's own checkout.
+    error: Option<String>,
 }
 
 /// One attempt in the comparison.
@@ -620,11 +636,16 @@ pub struct Shell {
     /// which is why a window that closes and reopens finds the build still
     /// running and picks the tab back up.
     terminals: ginka_ui::terminal::TerminalTabs,
-    /// The transcript's scroll position, so the answer can be followed.
-    transcript_scroll: ScrollHandle,
+    /// The transcript, as a virtualized list (`AGENTS.md` rule 5): only the
+    /// blocks near the screen are laid out, however long the conversation.
+    /// One item per block, and the activity line as the last.
+    transcript_list: ListState,
     /// Whether the transcript is still following the answer. Dropped by the
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
+    /// Set once the window has gone back to the workspace it was left on,
+    /// so a later refresh does not take the reader there again.
+    selection_restored: bool,
     /// Project/session visits addressed by the title-bar arrows.
     navigation: NavigationHistory<NavigationTarget>,
     composer: Entity<TextareaState>,
@@ -657,6 +678,9 @@ pub struct Shell {
     quick_menu_open: bool,
     /// The settings page's new-quick-command form.
     quick_form: QuickForm,
+    /// The scheduled jobs of the project on screen.
+    cron_jobs: Vec<ginka_protocol::model::CronJob>,
+    cron_form: CronForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -711,6 +735,22 @@ impl Shell {
             }),
             kind: ginka_protocol::model::QuickCommandKind::Shell,
             project_only: true,
+            error: None,
+        };
+        let cron_form = CronForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.name").to_string())
+            }),
+            schedule: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.schedule").to_string())
+            }),
+            body: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.body").to_string())
+            }),
+            chat: false,
             error: None,
         };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
@@ -854,6 +894,21 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::LabelProject { project, label } => {
+                        let (link, project, label) =
+                            (this.link.clone(), project.clone(), label.clone());
+                        this.after_row_change(
+                            async move { link.set_project_label(&project, label).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::MoveProject { project, index } => {
+                        let (link, project, index) = (this.link.clone(), project.clone(), *index);
+                        this.after_row_change(
+                            async move { link.move_project(&project, index).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::Rename { session, title } => {
                         let (link, session, title) =
                             (this.link.clone(), session.clone(), title.clone());
@@ -912,7 +967,7 @@ impl Shell {
                         this.transcript_search = None;
                         this.session_state = None;
                         this.submitted = false;
-                        this.transcript_follows = true;
+                        this.follow_transcript();
                         this.picker = None;
                         this.attachments.clear();
                         this.image_markup = None;
@@ -1322,8 +1377,13 @@ impl Shell {
             forking: None,
             fan_out: None,
             comparing: None,
-            transcript_scroll: ScrollHandle::new(),
+            transcript_list: {
+                let list = ListState::new(0, ListAlignment::Top, px(TRANSCRIPT_OVERDRAW));
+                list.set_follow_mode(FollowMode::Tail);
+                list
+            },
             transcript_follows: true,
+            selection_restored: false,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
             composer,
             model_query,
@@ -1346,6 +1406,8 @@ impl Shell {
             quick_commands: Vec::new(),
             quick_menu_open: false,
             quick_form,
+            cron_jobs: Vec::new(),
+            cron_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -1807,7 +1869,7 @@ impl Shell {
         self.transcript_search = None;
         self.session_state = None;
         self.submitted = false;
-        self.transcript_follows = true;
+        self.follow_transcript();
         // The next prompt opens a session rather than continuing whichever one
         // the workspace it lands in happens to hold: that is what "new" said.
         self.start_fresh = true;
@@ -1989,6 +2051,118 @@ impl Shell {
         )
     }
 
+    /// Read the scheduled jobs for the project on screen.
+    fn refresh_cron_jobs(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        cx.spawn(async move |this, cx| {
+            let jobs = cx
+                .background_spawn(async move { link.cron_jobs(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.cron_jobs != jobs {
+                    this.cron_jobs = jobs;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Send one change to the scheduled jobs, then read them again.
+    fn cron_request(
+        &mut self,
+        work: impl std::future::Future<Output = Result<(), String>> + Send + 'static,
+        clear_form: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn_in(window, async move |this, cx| {
+            let done = cx.background_spawn(work).await;
+            this.update_in(cx, |this, window, cx| {
+                match done {
+                    Ok(()) => {
+                        this.cron_form.error = None;
+                        if clear_form {
+                            for input in [
+                                this.cron_form.name.clone(),
+                                this.cron_form.schedule.clone(),
+                                this.cron_form.body.clone(),
+                            ] {
+                                input.update(cx, |state, cx| state.set_value("", window, cx));
+                            }
+                        }
+                    }
+                    Err(error) => this.cron_form.error = Some(error),
+                }
+                this.refresh_cron_jobs(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Save the settings page's new scheduled job, in the project on screen.
+    fn save_cron_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(project) = self.target_project.clone() else {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.needs_project").to_string());
+            cx.notify();
+            return;
+        };
+        let chat = self.cron_form.chat;
+        let request = ginka_protocol::rpc::Request::SaveCronJob {
+            id: None,
+            project,
+            workspace: None,
+            name: self.cron_form.name.read(cx).value().to_string(),
+            schedule: self.cron_form.schedule.read(cx).value().to_string(),
+            via: if chat {
+                ginka_protocol::model::CronVia::Chat
+            } else {
+                ginka_protocol::model::CronVia::Terminal
+            },
+            agent: if chat { self.agent_to_start() } else { None },
+            body: self.cron_form.body.read(cx).value().to_string(),
+            enabled: true,
+        };
+        let link = self.link.clone();
+        self.cron_request(
+            async move { link.save_cron_job(request).await },
+            true,
+            window,
+            cx,
+        );
+    }
+
+    /// Switch a job on or off, keeping everything else about it.
+    fn toggle_cron_job(
+        &mut self,
+        job: ginka_protocol::model::CronJob,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request = ginka_protocol::rpc::Request::SaveCronJob {
+            id: Some(job.id),
+            project: job.project,
+            workspace: job.workspace,
+            name: job.name,
+            schedule: job.schedule,
+            via: job.via,
+            agent: job.agent,
+            body: job.body,
+            enabled: !job.enabled,
+        };
+        let link = self.link.clone();
+        self.cron_request(
+            async move { link.save_cron_job(request).await },
+            false,
+            window,
+            cx,
+        );
+    }
+
     /// Save the settings page's new quick command.
     fn save_quick_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let name = self.quick_form.name.read(cx).value().to_string();
@@ -2029,6 +2203,8 @@ impl Shell {
 
     /// Write the open tabs back to `app.json`.
     fn persist_tabs(&mut self) {
+        // The workspace on screen is where the next launch opens.
+        self.settings.last_workspace = self.session.as_ref().map(|row| row.workspace.0.clone());
         self.settings.open_tabs = self
             .tabs
             .workspaces()
@@ -2320,6 +2496,7 @@ impl Shell {
     /// keeps it going; with nothing left to write nothing is asked for, and
     /// the window goes back to sleep.
     fn write_a_little_more(&mut self, window: &mut Window) {
+        self.sync_transcript_list();
         self.follow_the_answer();
 
         let arrived = self
@@ -2333,33 +2510,48 @@ impl Shell {
     }
 
     /// Keep the foot of the conversation in view while it is being written.
-    fn follow_the_answer(&mut self) {
-        let (pull, follows) = ginka_ui::transcript::following(
-            self.is_working(),
-            self.transcript_follows,
-            self.transcript_at_foot(),
-        );
-        self.transcript_follows = follows;
-        if pull {
-            self.transcript_scroll.scroll_to_bottom();
-        }
-    }
-
-    /// Whether the transcript is scrolled to its foot, near enough.
     ///
-    /// Near enough because the foot moves as the answer grows: by the time a
-    /// frame is drawn the text is a line longer than when the offset was set.
-    fn transcript_at_foot(&self) -> bool {
-        let offset = f32::from(self.transcript_scroll.offset().y);
-        let furthest = f32::from(self.transcript_scroll.max_offset().y);
-        // Scrolling down counts down from zero, so the foot is the most
-        // negative the offset gets.
-        furthest + offset <= NEARLY_THE_FOOT
+    /// The list follows its tail itself: it stops when the reader scrolls
+    /// up, and picks the tail up again when they come back to the foot.
+    /// What is left here is to tell the rest of the window which it is doing.
+    fn follow_the_answer(&mut self) {
+        self.transcript_follows = self.transcript_list.is_following_tail();
     }
 
-    /// The reader has taken the transcript somewhere themselves.
-    fn transcript_scrolled(&mut self) {
+    /// Follow the answer again from its foot, as sending a prompt does.
+    fn follow_transcript(&mut self) {
+        self.transcript_follows = true;
+        self.transcript_list.set_follow_mode(FollowMode::Tail);
+    }
+
+    /// Bring block `index` to the top of the transcript, which stops
+    /// following the answer.
+    fn show_transcript_block(&mut self, index: usize) {
         self.transcript_follows = false;
+        self.transcript_list.scroll_to(ListOffset {
+            item_ix: index,
+            offset_in_item: px(0.),
+        });
+    }
+
+    /// Tell the list what changed in the transcript since the last frame:
+    /// the blocks from the first one touched are measured again, and none
+    /// before it.
+    fn sync_transcript_list(&mut self) {
+        let count = self.transcript.blocks().len() + 1;
+        let old = self.transcript_list.item_count();
+        let changed = self.transcript.take_changed();
+        if old == 0 || old > count {
+            // Another conversation, or this one read again from the start.
+            self.transcript_list.reset(count);
+            if self.transcript_follows {
+                self.transcript_list.set_follow_mode(FollowMode::Tail);
+            }
+            return;
+        }
+        // The activity line, last, changes with every state the agent is in.
+        let from = changed.unwrap_or(old - 1).min(old - 1);
+        self.transcript_list.splice(from..old, count - from);
     }
 
     /// Put the workspace back to a checkpoint, and read the transcript again.
@@ -3812,7 +4004,7 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value(draft, window, cx));
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
         let link = self.link.clone();
         cx.spawn(async move |this, cx| {
@@ -4063,7 +4255,7 @@ impl Shell {
         // because making a worktree is a round trip and a window that says
         // nothing for one reads as a window that dropped the prompt.
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
         let link = self.link.clone();
         cx.spawn_in(window, async move |this, cx| {
@@ -4116,7 +4308,7 @@ impl Shell {
         // window saying nothing for a round trip reads as a window that
         // dropped it.
         self.submitted = true;
-        self.transcript_follows = true;
+        self.follow_transcript();
         cx.notify();
 
         let link = self.link.clone();
@@ -4250,7 +4442,11 @@ impl Shell {
             .find(|row| row.session.as_ref() == Some(session))
             .map(|row| row.title.to_string())
             .unwrap_or_else(|| "Ginka".to_string());
-        let script = ginka_ui::notify::applescript(&notable.heading(), &title);
+        let script = ginka_ui::notify::applescript_with_sound(
+            &notable.heading(),
+            &title,
+            self.settings.notification_sounds.then(|| notable.sound()),
+        );
         if cfg!(target_os = "macos") {
             cx.background_spawn(async move {
                 if let Err(error) = std::process::Command::new("osascript")
@@ -4412,6 +4608,7 @@ impl Shell {
             }))
             .into_any_element();
         let quick_section = self.quick_settings(cx);
+        let cron_section = self.cron_settings(cx);
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -4429,6 +4626,29 @@ impl Shell {
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.settings.notifications = value;
+                            this.save_settings();
+                            cx.notify();
+                        }))
+                    }),
+            )
+            .into_any_element();
+        let sounding = self.settings.notification_sounds;
+        let sounds_control = h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().bg_surface)
+            .children(
+                [(true, "settings.on"), (false, "settings.off")]
+                    .into_iter()
+                    .map(|(value, key)| {
+                        choice(
+                            format!("sounds:{value}"),
+                            rust_i18n::t!(key).to_string(),
+                            sounding == value,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings.notification_sounds = value;
                             this.save_settings();
                             cx.notify();
                         }))
@@ -4513,6 +4733,11 @@ impl Shell {
                                 notifications_control,
                             ))
                             .child(row(
+                                rust_i18n::t!("settings.sounds").to_string(),
+                                rust_i18n::t!("settings.sounds.note").to_string(),
+                                sounds_control,
+                            ))
+                            .child(row(
                                 rust_i18n::t!("settings.version").to_string(),
                                 self.paths.root().display().to_string(),
                                 div()
@@ -4521,7 +4746,8 @@ impl Shell {
                                     .child(env!("CARGO_PKG_VERSION"))
                                     .into_any_element(),
                             ))
-                            .child(quick_section),
+                            .child(quick_section)
+                            .child(cron_section),
                     ),
             )
     }
@@ -4714,6 +4940,221 @@ impl Shell {
                     ),
             )
             .children(self.quick_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
+    }
+
+    /// Scheduled prompts and commands for the project on screen: what each
+    /// runs, when it next fires, how it last went, and the way to switch it
+    /// off, run it now or forget it.
+    fn cron_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let now = chrono::Utc::now().timestamp();
+        let chat = self.cron_form.chat;
+        let chip = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py_0p5()
+                .rounded(px(7.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        let rows: Vec<AnyElement> = self
+            .cron_jobs
+            .iter()
+            .map(|job| {
+                let id = job.id;
+                let toggled = job.clone();
+                let when = match job.next_run_at {
+                    Some(at) => rust_i18n::t!(
+                        "settings.cron.next",
+                        when = ginka_ui::workspace::relative_age(at, now)
+                    )
+                    .to_string(),
+                    None => rust_i18n::t!("settings.cron.off").to_string(),
+                };
+                let last = job
+                    .last_run
+                    .as_ref()
+                    .map(|run| run.outcome.as_str().to_string())
+                    .unwrap_or_default();
+                h_flex()
+                    .w_full()
+                    .py_1p5()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(110.))
+                            .font_family(cx.theme_mono_font())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(job.schedule.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(job.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(format!("{} · {}", job.via.as_str(), job.body)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{when}  {last}")),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-toggle-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(if job.enabled {
+                                rust_i18n::t!("settings.cron.pause").to_string()
+                            } else {
+                                rust_i18n::t!("settings.cron.resume").to_string()
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_cron_job(toggled.clone(), window, cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-run-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("settings.cron.run").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let link = this.link.clone();
+                                this.cron_request(
+                                    async move { link.run_cron_job(id).await },
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("cron-remove-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("notes.remove").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                let link = this.link.clone();
+                                this.cron_request(
+                                    async move {
+                                        link.remove_cron_job(id).await;
+                                        Ok(())
+                                    },
+                                    false,
+                                    window,
+                                    cx,
+                                )
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .pt_5()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.cron").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.cron.note").to_string()),
+            )
+            .children(rows)
+            .child(
+                h_flex()
+                    .w_full()
+                    .pt_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        chip(
+                            "cron-via-terminal",
+                            rust_i18n::t!("settings.quick.shell").to_string(),
+                            !chat,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cron_form.chat = false;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        chip(
+                            "cron-via-chat",
+                            rust_i18n::t!("settings.quick.prompt").to_string(),
+                            chat,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.cron_form.chat = true;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .child(ginka_ui::field::input(&self.cron_form.name)),
+                    )
+                    .child(
+                        div()
+                            .w(px(130.))
+                            .child(ginka_ui::field::input(&self.cron_form.schedule)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.cron_form.body)),
+                    )
+                    .child(
+                        Button::new("cron-save")
+                            .compact()
+                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_cron_form(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.cron_form.error.clone().map(|error| {
                 div()
                     .text_xs()
                     .text_color(tokens.colors().status_error)
@@ -5131,8 +5572,7 @@ impl Shell {
             return;
         };
         if let Some(index) = self.transcript.block_index_for_seq(seq) {
-            self.transcript_follows = false;
-            self.transcript_scroll.scroll_to_top_of_item(index);
+            self.show_transcript_block(index);
         }
     }
 
@@ -5595,63 +6035,12 @@ impl Shell {
         if self.transcript.is_empty() && !self.is_working() {
             return self.home(cx);
         }
-        let hit = self.transcript_search.as_ref().and_then(|search| {
-            search
-                .chosen
-                .and_then(|chosen| search.matches.get(chosen))
-                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
-        });
-        let scroller = v_flex()
-            .id("transcript-scroll")
-            .flex_1()
-            .px_8()
-            .py_6()
-            .overflow_y_scroll()
-            .track_scroll(&self.transcript_scroll)
-            // The gesture, not the resulting offset: an answer that grows
-            // moves the foot away from the reader too.
-            .on_scroll_wheel(cx.listener(|this, _, _, _| this.transcript_scrolled()))
-            .children({
-                let last = self.transcript.blocks().len().saturating_sub(1);
-                self.transcript
-                    .blocks()
-                    .iter()
-                    .enumerate()
-                    .map(|(index, block)| {
-                        let block = match block {
-                            // Only the tail is still being written; every
-                            // block before it is finished text.
-                            TranscriptBlock::Assistant { text } if index == last => self.block(
-                                index,
-                                &TranscriptBlock::Assistant {
-                                    text: self.reveal.shown(text).to_string(),
-                                },
-                                cx,
-                            ),
-                            block => self.block(index, block, cx),
-                        };
-                        // Each block is a direct child of the scroller so its
-                        // persisted sequence can be brought into view by ⌘F.
-                        div()
-                            .w_full()
-                            .max_w(px(TRANSCRIPT_MEASURE))
-                            .mx_auto()
-                            .mb_5()
-                            .when(hit == Some(index), |this| {
-                                this.rounded(px(Tokens::global(cx).radius.card))
-                                    .bg(Tokens::global(cx).colors().row_active())
-                            })
-                            .child(block)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .child(
-                div()
-                    .w_full()
-                    .max_w(px(TRANSCRIPT_MEASURE))
-                    .mx_auto()
-                    .children(self.activity_line(cx)),
-            );
+        let scroller = list(
+            self.transcript_list.clone(),
+            cx.processor(|this, index: usize, _window, cx| this.transcript_item(index, cx)),
+        )
+        .flex_1()
+        .size_full();
         v_flex()
             .id("transcript")
             .relative()
@@ -5661,6 +6050,65 @@ impl Shell {
             .children(self.transcript_search_bar(cx))
             .child(scroller)
             .children(self.transcript_selection_action(selected_text, cx))
+            .into_any_element()
+    }
+
+    /// One item of the transcript list: a block, or — last — the activity
+    /// line. Padded here rather than on the list, so the list's own scroll
+    /// area is the whole column.
+    fn transcript_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let blocks = self.transcript.blocks().len();
+        let tokens = Tokens::global(cx).clone();
+        let frame = div()
+            .w_full()
+            .px_8()
+            .pt(if index == 0 { px(24.) } else { px(0.) });
+        if index >= blocks {
+            return frame
+                .pb_6()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(TRANSCRIPT_MEASURE))
+                        .mx_auto()
+                        .children(self.activity_line(cx)),
+                )
+                .into_any_element();
+        }
+        let hit = self.transcript_search.as_ref().and_then(|search| {
+            search
+                .chosen
+                .and_then(|chosen| search.matches.get(chosen))
+                .and_then(|found| self.transcript.block_index_for_seq(found.seq))
+        });
+        let block = match &self.transcript.blocks()[index] {
+            // Only the tail is still being written; every block before it is
+            // finished text.
+            TranscriptBlock::Assistant { text } if index + 1 == blocks => self.block(
+                index,
+                &TranscriptBlock::Assistant {
+                    text: self.reveal.shown(text).to_string(),
+                },
+                cx,
+            ),
+            block => {
+                let block = block.clone();
+                self.block(index, &block, cx)
+            }
+        };
+        frame
+            .child(
+                div()
+                    .w_full()
+                    .max_w(px(TRANSCRIPT_MEASURE))
+                    .mx_auto()
+                    .mb_5()
+                    .when(hit == Some(index), |this| {
+                        this.rounded(px(tokens.radius.card))
+                            .bg(tokens.colors().row_active())
+                    })
+                    .child(block),
+            )
             .into_any_element()
     }
 
@@ -5767,8 +6215,7 @@ impl Shell {
                                 ),
                         )
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.transcript_follows = false;
-                            this.transcript_scroll.scroll_to_top_of_item(block);
+                            this.show_transcript_block(block);
                             cx.notify();
                         }))
                 }))
@@ -5916,6 +6363,97 @@ impl Shell {
     /// One question, naming the project the answer would run in, over four
     /// starters. Choosing one fills the composer rather than sending it: the
     /// starter is the first half of a sentence the reader finishes.
+    /// What still stands between this machine and a first prompt
+    /// (`ginka_ui::home::setup_steps`): an agent that can run, and a project
+    /// to run it in. Nothing once both are there.
+    fn setup_card(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let steps = home::setup_steps(&self.agents, self.sidebar.read(cx).project_count());
+        if steps.is_empty() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let rows: Vec<AnyElement> = steps
+            .into_iter()
+            .enumerate()
+            .map(|(number, step)| {
+                let (text, action) = match step {
+                    home::SetupStep::InstallAgent { agents } => (
+                        rust_i18n::t!("home.setup.install", agents = agents.join(", ")).to_string(),
+                        None,
+                    ),
+                    home::SetupStep::SignIn { agents } => (
+                        agents
+                            .into_iter()
+                            .map(|(id, name)| {
+                                rust_i18n::t!("home.setup.sign_in", agent = name, id = id)
+                                    .to_string()
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                        None,
+                    ),
+                    home::SetupStep::AddProject => (
+                        rust_i18n::t!("home.setup.project").to_string(),
+                        Some(
+                            Button::new("setup-add-project")
+                                .compact()
+                                .label(rust_i18n::t!("home.setup.project.add").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_add_project(window, cx)
+                                })),
+                        ),
+                    ),
+                };
+                h_flex()
+                    .w_full()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .w(px(20.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!("{}.", number + 1)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(text),
+                    )
+                    .children(action)
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            // Inset like the starters under it, so the two line up with the
+            // composer rather than sitting a hair wider.
+            div()
+                .w_full()
+                .max_w(px(TRANSCRIPT_MEASURE))
+                .px_4()
+                .child(
+                    v_flex()
+                        .w_full()
+                        .p_4()
+                        .gap_2()
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().bg_surface)
+                        .border_1()
+                        .border_color(tokens.colors().border_subtle)
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("home.setup.title").to_string()),
+                        )
+                        .children(rows),
+                )
+                .into_any_element(),
+        )
+    }
+
     fn home(&self, cx: &mut Context<Self>) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
         let project = self.project_label();
@@ -5936,6 +6474,7 @@ impl Shell {
                     .text_color(tokens.colors().text_primary)
                     .child(home::greeting(project.as_deref())),
             )
+            .children(self.setup_card(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -6721,6 +7260,9 @@ impl Shell {
                 })
                 .collect(),
             keeping: None,
+            merging: None,
+            busy: false,
+            error: None,
         });
         cx.notify();
         let link = self.link.clone();
@@ -6785,6 +7327,18 @@ impl Shell {
             cx.notify();
             return;
         }
+        self.archive_other_attempts(workspace, cx);
+    }
+
+    /// Close the comparison on `workspace`, archiving every other attempt.
+    fn archive_other_attempts(
+        &mut self,
+        workspace: ginka_protocol::WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(compare) = self.comparing.as_ref() else {
+            return;
+        };
         let others: Vec<_> = compare
             .entries
             .iter()
@@ -6808,12 +7362,72 @@ impl Shell {
         );
     }
 
+    /// Merge the winner into the branch the project is on — Orca's last
+    /// step — then keep it as *Keep* does. Two presses, like *Keep*; a
+    /// refusal stays on screen and nothing is archived.
+    fn merge_attempt(
+        &mut self,
+        workspace: ginka_protocol::WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(compare) = self.comparing.as_mut() else {
+            return;
+        };
+        if compare.busy {
+            return;
+        }
+        if compare.merging.as_ref() != Some(&workspace) {
+            compare.merging = Some(workspace);
+            compare.keeping = None;
+            cx.notify();
+            return;
+        }
+        let Some(entry) = compare
+            .entries
+            .iter()
+            .find(|entry| entry.workspace == workspace)
+        else {
+            return;
+        };
+        let message =
+            rust_i18n::t!("compare.merge.message", branch = entry.title.as_ref()).to_string();
+        compare.busy = true;
+        compare.error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let target = workspace.clone();
+            let result = cx
+                .background_spawn(async move { link.merge_workspace(&target, message).await })
+                .await;
+            this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(_) => this.archive_other_attempts(workspace, cx),
+                    Err(error) => {
+                        if let Some(compare) = this.comparing.as_mut() {
+                            compare.busy = false;
+                            compare.merging = None;
+                            compare.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The comparison: an attempt a column — agent, branch, state, diff size
     /// and last answer — with *Open* and *Keep*.
     fn compare_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let compare = self.comparing.as_ref()?;
         let tokens = Tokens::global(cx).clone();
         let keeping = compare.keeping.clone();
+        let merging = compare.merging.clone();
+        let busy = compare.busy;
+        let refused = compare.error.clone();
         let count = compare.entries.len();
         let columns: Vec<AnyElement> = compare
             .entries
@@ -6824,6 +7438,8 @@ impl Shell {
                 let open = entry.workspace.clone();
                 let keep = entry.workspace.clone();
                 let armed = keeping.as_ref() == Some(&entry.workspace);
+                let merging_this = merging.as_ref() == Some(&entry.workspace);
+                let merge = entry.workspace.clone();
                 let state = entry
                     .state
                     .label()
@@ -6904,6 +7520,19 @@ impl Shell {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.keep_attempt(keep.clone(), cx)
                                     })),
+                            )
+                            .child(
+                                Button::new(("compare-merge", index))
+                                    .compact()
+                                    .disabled(busy)
+                                    .label(if merging_this {
+                                        rust_i18n::t!("compare.merge.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("compare.merge").to_string()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.merge_attempt(merge.clone(), window, cx)
+                                    })),
                             ),
                     )
                     .child(match entry.answer {
@@ -6956,6 +7585,12 @@ impl Shell {
                                 })),
                         ),
                 )
+                .children(refused.map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
                 .child(
                     h_flex()
                         .id("compare-columns")
@@ -7078,6 +7713,9 @@ impl Shell {
             .map(|agent| {
                 let id = agent.id.clone();
                 Button::new(SharedString::from(format!("review-{turn}-{id}")))
+                    // The toolkit draws a button's hover itself; a second
+                    // one trips its debug assertion.
+                    .ghost()
                     .disabled(fork_busy)
                     .px(px(7.))
                     .py(px(2.))
@@ -7086,7 +7724,6 @@ impl Shell {
                     .text_color(tokens.colors().text_secondary)
                     .when(!fork_busy, |this| {
                         this.cursor_pointer()
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.fork_from_as(seq, id.clone(), true, cx)
                             }))
@@ -7104,6 +7741,9 @@ impl Shell {
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+                // The toolkit draws a button's hover itself; a second
+                // one trips its debug assertion.
+                .ghost()
                 .disabled(fork_busy)
                 .px(px(7.))
                 .py(px(2.))
@@ -7111,11 +7751,9 @@ impl Shell {
                 .text_xs()
                 .text_color(tokens.colors().text_primary)
                 .when(!fork_busy, |this| {
-                    this.cursor_pointer()
-                        .hover(|this| this.bg(tokens.colors().row_hover()))
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
-                        )
+                    this.cursor_pointer().on_click(
+                        cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
+                    )
                 })
                 .child(agent.display_name.clone())
                 .into_any_element()
@@ -7219,6 +7857,9 @@ impl Shell {
                     .items_center()
                     .child(
                         Button::new(SharedString::from(format!("fork-menu-{turn}")))
+                            // The toolkit draws a button's hover itself; a second
+                            // one trips its debug assertion.
+                            .ghost()
                             .disabled(fork_busy)
                             .px(px(7.))
                             .py(px(2.))
@@ -7231,7 +7872,6 @@ impl Shell {
                             })
                             .when(!fork_busy, |this| {
                                 this.cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
                                     .tooltip(rust_i18n::t!("transcript.fork.hint").to_string())
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.rewinding = None;
@@ -10583,13 +11223,15 @@ impl Shell {
                     .items_center()
                     .children(indexed.map(|ready| {
                         Button::new("workspace-index")
+                            // The toolkit draws a button's hover itself; a second
+                            // one trips its debug assertion.
+                            .ghost()
                             .disabled(self.index_starting)
                             .h(px(22.))
                             .px(px(6.))
                             .rounded(px(tokens.radius.row))
                             .text_size(px(11.))
                             .text_color(index_colour)
-                            .hover(|this| this.bg(tokens.colors().row_hover()))
                             .tooltip(self.index_error.clone().map_or_else(
                                 || {
                                     if ready {
@@ -11410,10 +12052,37 @@ async fn pull_rows(
                 surfaces.set_history(history, cx);
             });
         }
+        crate::dock::set_badge(ginka_ui::notify::badge(
+            rows.iter().filter(|row| !row.archived).map(|row| row.state),
+        ));
+        // The first time there are rows to choose from, open where the
+        // window was left (`ginka_ui::tabs::restore_selection`).
+        let restore = (!this.selection_restored && !rows.is_empty())
+            .then(|| {
+                this.selection_restored = true;
+                let live: Vec<_> = rows
+                    .iter()
+                    .filter(|row| !row.archived)
+                    .map(|row| row.workspace.clone())
+                    .collect();
+                ginka_ui::tabs::restore_selection(
+                    this.settings.last_workspace.as_deref(),
+                    &this.tabs.workspaces(),
+                    &live,
+                )
+            })
+            .flatten();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        if let Some(workspace) = restore
+            && this.sidebar.read(cx).selected_row().is_none()
+        {
+            this.sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+        }
         // The saved commands follow the project on screen, on the same tick.
         this.refresh_quick_commands(cx);
+        this.refresh_cron_jobs(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
             Some(row) => {
                 this.target_project = Some(ProjectName(row.origin.to_string()));

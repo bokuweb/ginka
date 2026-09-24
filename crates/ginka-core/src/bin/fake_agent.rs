@@ -11,6 +11,13 @@
 use std::io::{BufRead, Write};
 
 fn main() {
+    if std::env::args().any(|argument| argument == "--crash") {
+        // Stands in for a daemon or window that panics: the report must land
+        // in the state directory's logs.
+        let paths = ginka_core::Paths::from_env().expect("GINKA_HOME");
+        ginka_core::crash::install(paths.logs(), "fake");
+        panic!("the fake agent was asked to crash");
+    }
     if std::env::args().any(|argument| argument == "--lsp") {
         return language_server();
     }

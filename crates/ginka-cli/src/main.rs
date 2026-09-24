@@ -263,6 +263,9 @@ enum Command {
     /// Saved shell commands and prompts, run in a workspace.
     #[command(subcommand)]
     Quick(QuickCommand),
+    /// Prompts and commands run on a cron schedule, on this machine's clock.
+    #[command(subcommand)]
+    Cron(CronCommand),
     /// Serve Ginka's operations to an agent over MCP, on stdin and stdout.
     ///
     /// Spawned by the agent, not by the user: the state stays in the daemon
@@ -305,6 +308,10 @@ enum ProjectCommand {
     },
     /// Forget a project. Its files are left alone.
     Remove { project: String },
+    /// Name a project the way you group it; an empty label clears it.
+    Label { project: String, label: String },
+    /// Put a project at a position in the order, 0 first.
+    Move { project: String, index: u32 },
 }
 
 #[derive(Subcommand)]
@@ -353,6 +360,18 @@ enum WorkspaceCommand {
         /// Create the branch from HEAD first.
         #[arg(long)]
         create: bool,
+    },
+    /// Merge a workspace's branch into another — by default the branch the
+    /// project is on. A conflict is aborted and named.
+    Merge {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The branch to merge into.
+        #[arg(long)]
+        into: Option<String>,
+        /// Commit the workspace's uncommitted work with this message first.
+        #[arg(long, short)]
+        message: Option<String>,
     },
     /// Build zvec-grep's index for a workspace, here in this terminal, so
     /// agents started in it get semantic search. Needs `zg` on PATH.
@@ -456,6 +475,46 @@ enum QuickCommand {
     Remove { id: String },
     /// Run a shell quick command in a new terminal in the workspace.
     Run { workspace: String, id: String },
+}
+
+#[derive(Subcommand)]
+enum CronCommand {
+    /// List scheduled jobs, with when each fires next and how it last went.
+    List {
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Schedule a shell command (`--shell`) or a prompt for an agent
+    /// (`--prompt` with `--agent`).
+    Add {
+        project: String,
+        name: String,
+        /// Five cron fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`.
+        #[arg(long)]
+        schedule: String,
+        #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
+        shell: Option<String>,
+        #[arg(long, requires = "agent")]
+        prompt: Option<String>,
+        #[arg(long)]
+        agent: Option<String>,
+        /// A workspace id; the project's own checkout when omitted.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Save it switched off.
+        #[arg(long)]
+        disabled: bool,
+    },
+    /// Forget a scheduled job and its history.
+    Remove { id: i64 },
+    /// Fire a job now, as its schedule would.
+    Run { id: i64 },
+    /// A job's firings, most recent first.
+    Runs {
+        id: i64,
+        #[arg(long)]
+        limit: Option<u32>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -888,6 +947,14 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
             project: ProjectName(project),
         },
+        Command::Project(ProjectCommand::Label { project, label }) => Request::SetProjectLabel {
+            project: ProjectName(project),
+            label,
+        },
+        Command::Project(ProjectCommand::Move { project, index }) => Request::MoveProject {
+            project: ProjectName(project),
+            index,
+        },
 
         Command::Workspace(WorkspaceCommand::List { project }) => Request::ListWorkspaces {
             project: project.map(ProjectName),
@@ -979,6 +1046,15 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             branch,
             create,
+        },
+        Command::Workspace(WorkspaceCommand::Merge {
+            workspace,
+            into,
+            message,
+        }) => Request::MergeWorkspace {
+            workspace: WorkspaceId(workspace),
+            into,
+            message,
         },
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
             project: project.map(ProjectName),
@@ -1202,6 +1278,39 @@ fn request_for(command: Command) -> Result<Request> {
             body: body_or_stdin(body)?,
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
+        Command::Cron(CronCommand::List { project }) => Request::ListCronJobs {
+            project: project.map(ProjectName),
+        },
+        Command::Cron(CronCommand::Add {
+            project,
+            name,
+            schedule,
+            shell,
+            prompt,
+            agent,
+            workspace,
+            disabled,
+        }) => {
+            let (via, body) = match (shell, prompt) {
+                (Some(shell), _) => (ginka_protocol::model::CronVia::Terminal, shell),
+                (None, Some(prompt)) => (ginka_protocol::model::CronVia::Chat, prompt),
+                (None, None) => unreachable!("clap requires one of --shell and --prompt"),
+            };
+            Request::SaveCronJob {
+                id: None,
+                project: ProjectName(project),
+                workspace: workspace.map(WorkspaceId),
+                name,
+                schedule,
+                via,
+                agent,
+                body,
+                enabled: !disabled,
+            }
+        }
+        Command::Cron(CronCommand::Remove { id }) => Request::RemoveCronJob { id },
+        Command::Cron(CronCommand::Run { id }) => Request::RunCronJob { id },
+        Command::Cron(CronCommand::Runs { id, limit }) => Request::CronRuns { id, limit },
         Command::Quick(QuickCommand::List { project }) => Request::ListQuickCommands {
             project: project.map(ProjectName),
         },
@@ -1615,6 +1724,22 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::CronJobs { jobs } => {
+            for job in &jobs {
+                print_cron_job(job);
+            }
+        }
+        Response::CronJob { job } => print_cron_job(&job),
+        Response::CronRuns { runs } => {
+            for run in runs {
+                println!(
+                    "{}  {:<8} {}",
+                    format_time(run.started_at),
+                    run.outcome.as_str(),
+                    run.detail.unwrap_or_default()
+                );
+            }
+        }
         Response::Account { account } => print_accounts(std::slice::from_ref(&account), &[]),
         Response::PlanUsage { snapshot } => match snapshot {
             Some(snapshot) => print_plans(std::slice::from_ref(&snapshot)),
@@ -1698,6 +1823,7 @@ fn print(response: Response, patch: bool) {
             by_agent,
             by_account,
             plans,
+            rates_fetched_at: _,
         } => print_usage(&by_day, &by_agent, &by_account, &plans),
         Response::ReviewComments { comments } => {
             if comments.is_empty() {
@@ -1773,6 +1899,22 @@ fn print(response: Response, patch: bool) {
                 );
             }
         }
+        Response::Merged { outcome } => println!(
+            "{}",
+            if outcome.fast_forward {
+                rust_i18n::t!(
+                    "cli.merged.fast_forward",
+                    into = &outcome.into,
+                    commit = &outcome.commit[..outcome.commit.len().min(12)]
+                )
+            } else {
+                rust_i18n::t!(
+                    "cli.merged",
+                    into = &outcome.into,
+                    commit = &outcome.commit[..outcome.commit.len().min(12)]
+                )
+            }
+        ),
         Response::Committed { commit } => println!(
             "{}",
             rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])
@@ -1810,10 +1952,15 @@ fn print_projects(projects: &[Project]) {
     }
     for project in projects {
         println!(
-            "{:<24} {:<6} {}",
+            "{:<24} {:<6} {}{}",
             project.name.0,
             project.kind.as_str(),
-            project.path.display()
+            project.path.display(),
+            project
+                .label
+                .as_ref()
+                .map(|label| format!("  [{label}]"))
+                .unwrap_or_default()
         );
     }
 }
@@ -1966,10 +2113,18 @@ fn print_usage(
             row.totals.turns,
             // A vendor that does not price its work says nothing rather than
             // zero, which would be a claim that it was free.
-            row.totals
-                .cost_usd
-                .map(|cost| format!("${cost:.2}"))
-                .unwrap_or_default()
+            match (row.totals.cost_usd, row.totals.unpriced) {
+                // `≈` for a figure priced from the public table rather than
+                // by the vendor (§3.3 N13).
+                (Some(cost), 0) if row.totals.estimated => format!("≈${cost:.2}"),
+                (Some(cost), 0) => format!("${cost:.2}"),
+                (Some(cost), unpriced) => format!(
+                    "{}${cost:.2} + {unpriced} unpriced",
+                    if row.totals.estimated { "≈" } else { "" }
+                ),
+                (None, unpriced) if unpriced > 0 => format!("{unpriced} unpriced"),
+                (None, _) => String::new(),
+            }
         )
     };
     for entry in by_day {
@@ -2370,4 +2525,38 @@ mod ginka_cli_format {
             assert!(!line.contains("more"), "only the first line: {line}");
         }
     }
+}
+
+/// One scheduled job on a line: id first, so a script can take it.
+fn print_cron_job(job: &ginka_protocol::model::CronJob) {
+    let next = match job.next_run_at {
+        Some(at) => format_time(at),
+        None => rust_i18n::t!("cli.cron.off").to_string(),
+    };
+    let last = job
+        .last_run
+        .as_ref()
+        .map(|run| run.outcome.as_str())
+        .unwrap_or("-");
+    println!(
+        "{}  {:<16} {:<8} {:<12} {:<20} next {}  last {}  {}",
+        job.id,
+        job.schedule,
+        job.via.as_str(),
+        job.project.0,
+        job.name,
+        next,
+        last,
+        job.body.replace(['\r', '\n'], " ")
+    );
+}
+
+/// A Unix time as local wall-clock time.
+fn format_time(at: i64) -> String {
+    use chrono::TimeZone as _;
+    chrono::Local
+        .timestamp_opt(at, 0)
+        .single()
+        .map(|time| time.format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| at.to_string())
 }

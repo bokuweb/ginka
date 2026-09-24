@@ -37,6 +37,12 @@ pub enum Request {
     /// Forget a project. The worktrees on disk are left alone: the daemon
     /// registered them, it did not create the user's code.
     RemoveProject { project: ProjectName },
+    /// Name a project the way the reader groups it; blank clears it. The
+    /// project's `name` — its identity — does not change.
+    SetProjectLabel { project: ProjectName, label: String },
+    /// Put a project at `index` in the rail's order; an index past the end
+    /// is the end.
+    MoveProject { project: ProjectName, index: u32 },
 
     /// Every workspace, reconciled against git first. `project` limits it.
     ListWorkspaces { project: Option<ProjectName> },
@@ -314,6 +320,15 @@ pub enum Request {
         workspace: WorkspaceId,
         message: String,
         all: bool,
+    },
+    /// Merge a workspace's branch into another — fan-out's "merge the
+    /// winner". `into` defaults to the branch the project's own checkout is
+    /// on. Uncommitted work in the workspace is committed first with
+    /// `message`, and refused without one.
+    MergeWorkspace {
+        workspace: WorkspaceId,
+        into: Option<String>,
+        message: Option<String>,
     },
     /// Put one file into the next commit, or take it back out.
     ///
@@ -598,6 +613,30 @@ pub enum Request {
     /// Close a terminal and stop its shell.
     CloseTerminal { terminal: TerminalId },
 
+    /// Scheduled jobs: a project's, or every project's.
+    ListCronJobs { project: Option<ProjectName> },
+    /// Save a scheduled job: new without an `id`, a replacement with one.
+    /// The schedule is checked here, so a job that can never fire is refused
+    /// when it is written rather than found silent later.
+    SaveCronJob {
+        id: Option<i64>,
+        project: ProjectName,
+        workspace: Option<WorkspaceId>,
+        name: String,
+        schedule: String,
+        via: crate::model::CronVia,
+        agent: Option<String>,
+        body: String,
+        enabled: bool,
+    },
+    /// Forget a scheduled job and its history.
+    RemoveCronJob { id: i64 },
+    /// Fire a job now, as its schedule would — including skipping it while
+    /// its previous run is still going.
+    RunCronJob { id: i64 },
+    /// A job's firings, most recent first.
+    CronRuns { id: i64, limit: Option<u32> },
+
     /// Every chat connector this daemon hosts, and whether each is connected
     /// (`docs/connectors.md` §3.3).
     ListConnectors,
@@ -767,10 +806,18 @@ pub enum Response {
         by_day: Vec<UsageRow>,
         by_agent: Vec<UsageRow>,
         by_account: Vec<UsageRow>,
+        /// When the rate table that priced unpriced turns was fetched; absent
+        /// when there is none, and nothing was estimated.
+        #[serde(default)]
+        rates_fetched_at: Option<i64>,
         /// The latest reading per account, for those that have one.
         plans: Vec<PlanSnapshot>,
     },
     /// A commit was made, and this is what it is called.
+    /// What a merge did.
+    Merged {
+        outcome: crate::model::MergeOutcome,
+    },
     Committed {
         commit: String,
     },
@@ -786,6 +833,15 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    CronJobs {
+        jobs: Vec<crate::model::CronJob>,
+    },
+    CronJob {
+        job: crate::model::CronJob,
+    },
+    CronRuns {
+        runs: Vec<crate::model::CronRun>,
     },
     QuickCommands {
         commands: Vec<crate::model::QuickCommand>,

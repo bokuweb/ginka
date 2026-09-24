@@ -811,6 +811,12 @@ surface.git.summary:
 surface.git.section.unstaged:
   en: Changes
   ja: 未ステージの変更
+surface.git.unified:
+  en: Unified
+  ja: 統合
+surface.git.split:
+  en: Split
+  ja: 左右
 surface.git.section.staged:
   en: Staged changes
   ja: ステージ済みの変更
@@ -917,6 +923,69 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.cron.off:
+  en: "off"
+  ja: "停止中"
+settings.cron:
+  en: Scheduled
+  ja: スケジュール
+settings.cron.note:
+  en: "Prompts and commands run on a cron schedule in this project's checkout, on this machine's clock. A run is skipped while the last one is still going."
+  ja: "cron のスケジュールで、このプロジェクトのチェックアウトでプロンプトやコマンドを実行します（このマシンの時刻）。前回の実行が続いている間はスキップします。"
+settings.cron.name:
+  en: "Name"
+  ja: "名前"
+settings.cron.schedule:
+  en: "0 9 * * 1-5"
+  ja: "0 9 * * 1-5"
+settings.cron.body:
+  en: "Command or prompt"
+  ja: "コマンドまたはプロンプト"
+settings.cron.next:
+  en: "in %{when}"
+  ja: "%{when}後"
+settings.cron.off:
+  en: "paused"
+  ja: "停止中"
+settings.cron.pause:
+  en: "Pause"
+  ja: "停止"
+settings.cron.resume:
+  en: "Resume"
+  ja: "再開"
+settings.cron.run:
+  en: "Run now"
+  ja: "今すぐ実行"
+settings.cron.needs_project:
+  en: "Choose a project first."
+  ja: "先にプロジェクトを選んでください。"
+surface.reports.rates:
+  en: "≈ is priced from the public rate table, fetched %{age} ago; the vendor's own figure has no mark. Unpriced sessions are left out of the total."
+  ja: "≈ は公開レート表（%{age}前に取得）からの見積もりです。印のないものはベンダー自身の金額です。価格不明のセッションは合計に含めていません。"
+surface.reports.no_rates:
+  en: "Costs are only what vendors report; the public rate table has not been fetched yet."
+  ja: "コストはベンダーが報告した分だけです。公開レート表はまだ取得していません。"
+home.setup.title:
+  en: Before the first prompt
+  ja: 最初のプロンプトの前に
+home.setup.install:
+  en: "Install a coding agent — none of %{agents} is on this machine's PATH. Ginka starts whichever one is there."
+  ja: "コーディングエージェントをインストールしてください。%{agents} のどれも PATH にありません。入っているものを Ginka が起動します。"
+home.setup.sign_in:
+  en: "Sign in to %{agent}: run `ginka account login %{id}` in a terminal."
+  ja: "%{agent} にサインインしてください: ターミナルで `ginka account login %{id}` を実行します。"
+home.setup.project:
+  en: Add a project — a repository or a folder — for agents to work in.
+  ja: エージェントが作業するプロジェクト（リポジトリかフォルダ）を追加してください。
+home.setup.project.add:
+  en: Add project…
+  ja: プロジェクトを追加…
+cli.merged:
+  en: "merged into %{into} as %{commit}"
+  ja: "%{into} にマージしました (%{commit})"
+cli.merged.fast_forward:
+  en: "fast-forwarded %{into} to %{commit}"
+  ja: "%{into} を %{commit} まで早送りしました"
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
@@ -1151,6 +1220,12 @@ composer.queue.clear:
 sidebar.queued:
   en: "%{count} queued"
   ja: "%{count} 件待ち"
+sidebar.action.move_up:
+  en: Move up
+  ja: 上へ
+sidebar.action.move_down:
+  en: Move down
+  ja: 下へ
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
@@ -1181,6 +1256,12 @@ settings.notifications:
 settings.notifications.note:
   en: Tell the desktop when an agent finishes, fails or asks something while this window is in the background.
   ja: ウィンドウが背面にあるとき、エージェントの完了・失敗・質問をデスクトップに通知します。
+settings.sounds:
+  en: Sounds
+  ja: 通知音
+settings.sounds.note:
+  en: "Play a sound with each notification: one for done, one for a question, one for a failure."
+  ja: "通知ごとに音を鳴らします（完了・質問・失敗で別の音）。"
 settings.on:
   en: "On"
   ja: オン
@@ -1271,6 +1352,15 @@ compare.open:
 compare.keep:
   en: "Keep"
   ja: "採用"
+compare.merge:
+  en: "Merge"
+  ja: "マージ"
+compare.merge.confirm:
+  en: "Merge into the project's branch?"
+  ja: "プロジェクトのブランチにマージ?"
+compare.merge.message:
+  en: "Keep %{branch}"
+  ja: "Keep %{branch}"
 compare.keep.confirm:
   en: "Archive the others?"
   ja: "他をアーカイブ?"

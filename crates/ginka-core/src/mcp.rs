@@ -435,6 +435,82 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_merge",
+            description: "Merge a workspace's branch into another — by default the branch the project is on. Uncommitted work is committed first with `message`; a conflict is aborted and named.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "into": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_cron_jobs",
+            description: "List the prompts and commands scheduled with cron, with when each fires next.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}},
+            }),
+        },
+        Tool {
+            name: "ginka_cron_save",
+            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal) on a cron expression — five fields or @daily and the like, on the daemon host's clock. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "id": {"type": "integer"},
+                    "project": {"type": "string"},
+                    "workspace": workspace,
+                    "name": {"type": "string"},
+                    "schedule": {"type": "string"},
+                    "via": {"type": "string", "enum": ["chat", "terminal"]},
+                    "agent": {"type": "string"},
+                    "body": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                },
+                "required": ["project", "name", "schedule", "via", "body"],
+            }),
+        },
+        Tool {
+            name: "ginka_cron_remove",
+            description: "Forget a scheduled job and its history.",
+            schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+            }),
+        },
+        Tool {
+            name: "ginka_cron_run",
+            description: "Fire a scheduled job now, skipping it if its previous run is still going.",
+            schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}},
+                "required": ["id"],
+            }),
+        },
+        Tool {
+            name: "ginka_project_label",
+            description: "Label a project the way the reader groups it; an empty label clears it.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}, "label": {"type": "string"}},
+                "required": ["project", "label"],
+            }),
+        },
+        Tool {
+            name: "ginka_project_move",
+            description: "Put a project at a position in the sidebar order, 0 first.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}, "index": {"type": "integer", "minimum": 0}},
+                "required": ["project", "index"],
+            }),
+        },
+        Tool {
             name: "ginka_push",
             description: "Push a workspace branch, setting its upstream on the first push.",
             schema: json!({
@@ -796,6 +872,49 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             message: text("message")?,
             all: !flag("staged_only"),
         },
+        "ginka_cron_jobs" => Request::ListCronJobs {
+            project: text("project").ok().map(ProjectName),
+        },
+        "ginka_cron_save" => Request::SaveCronJob {
+            id: arguments.get("id").and_then(Value::as_i64),
+            project: ProjectName(text("project")?),
+            workspace: text("workspace").ok().map(WorkspaceId),
+            name: text("name")?,
+            schedule: text("schedule")?,
+            via: ginka_protocol::model::CronVia::parse(&text("via")?)
+                .ok_or_else(|| anyhow!("{tool}: `via` is chat or terminal"))?,
+            agent: text("agent").ok(),
+            body: text("body")?,
+            enabled: arguments
+                .get("enabled")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        },
+        "ginka_cron_remove" => Request::RemoveCronJob {
+            id: arguments
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_cron_run" => Request::RunCronJob {
+            id: arguments
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+        },
+        "ginka_project_label" => Request::SetProjectLabel {
+            project: ProjectName(text("project")?),
+            label: text("label")?,
+        },
+        "ginka_project_move" => Request::MoveProject {
+            project: ProjectName(text("project")?),
+            index: number("index").ok_or_else(|| anyhow!("{tool} needs an `index`"))? as u32,
+        },
+        "ginka_workspace_merge" => Request::MergeWorkspace {
+            workspace: WorkspaceId(text("workspace")?),
+            into: text("into").ok(),
+            message: text("message").ok(),
+        },
         "ginka_push" => Request::Push {
             workspace: WorkspaceId(text("workspace")?),
         },
@@ -947,6 +1066,9 @@ mod tests {
                 "agents": ["claude", "codex:gpt-5"],
                 "name": "release-notes",
                 "enabled": false,
+                "label": "Work",
+                "schedule": "@daily",
+                "via": "terminal",
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));

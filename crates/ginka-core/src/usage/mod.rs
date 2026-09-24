@@ -166,6 +166,7 @@ pub fn for_session(conn: &Connection, session: &SessionId) -> Result<UsageTotals
             reasoning_tokens: row.get(3)?,
             cost_usd: row.get(4)?,
             turns: row.get(5)?,
+            ..UsageTotals::default()
         })
     })?;
     Ok(rows.next().transpose()?.unwrap_or_default())
@@ -176,61 +177,127 @@ pub fn for_session(conn: &Connection, session: &SessionId) -> Result<UsageTotals
 /// One row per session per day is summed, because a session's numbers are
 /// cumulative: taking the last turn of each session on each day is what makes
 /// the total mean anything.
-pub fn by_day(conn: &Connection, days: u32) -> Result<Vec<UsageRow>> {
-    grouped(conn, "date(last.at, 'unixepoch', 'localtime')", Some(days))
+pub fn by_day(conn: &Connection, days: u32, rates: Option<&RateTable>) -> Result<Vec<UsageRow>> {
+    grouped(
+        conn,
+        "date(last.at, 'unixepoch', 'localtime')",
+        Some(days),
+        rates,
+    )
 }
 
 /// What each agent cost over the last `days`.
-pub fn by_agent(conn: &Connection, days: u32) -> Result<Vec<UsageRow>> {
-    grouped(conn, "last.agent", Some(days))
+pub fn by_agent(conn: &Connection, days: u32, rates: Option<&RateTable>) -> Result<Vec<UsageRow>> {
+    grouped(conn, "last.agent", Some(days), rates)
 }
 
 /// What each login cost over the last `days`.
 ///
 /// A session on an account since removed is still counted under it: the
 /// cost was real, and the id is what it was known by.
-pub fn by_account(conn: &Connection, days: u32) -> Result<Vec<UsageRow>> {
-    grouped(conn, "last.account_id", Some(days))
+pub fn by_account(
+    conn: &Connection,
+    days: u32,
+    rates: Option<&RateTable>,
+) -> Result<Vec<UsageRow>> {
+    grouped(conn, "last.account_id", Some(days), rates)
 }
 
 /// Sum the last turn of every session, grouped by `label`.
-fn grouped(conn: &Connection, label: &str, days: Option<u32>) -> Result<Vec<UsageRow>> {
-    // The inner query takes each session's highest turn — its cumulative total
-    // — and the outer one groups those.
+///
+/// A session the vendor did not price is priced from `rates` where the table
+/// knows its model, and the row says so; one neither knows is counted as
+/// unpriced rather than as free (§3.3 N13).
+fn grouped(
+    conn: &Connection,
+    label: &str,
+    days: Option<u32>,
+    rates: Option<&RateTable>,
+) -> Result<Vec<UsageRow>> {
+    // The inner query takes each session's highest turn — its cumulative
+    // total — and the fold below groups those.
     let cutoff = days
         .map(|days| format!("WHERE last.at >= strftime('%s', 'now', '-{days} days')"))
         .unwrap_or_default();
     let sql = format!(
-        "SELECT {label} AS label,
-                sum(last.input_tokens), sum(last.output_tokens),
-                sum(last.cache_read_tokens), sum(last.reasoning_tokens),
-                sum(last.cost_usd), sum(last.turn)
+        "SELECT {label} AS label, last.model, last.agent,
+                last.input_tokens, last.output_tokens,
+                last.cache_read_tokens, last.reasoning_tokens,
+                last.cost_usd, last.turn
            FROM (
              SELECT * FROM usage_events
               WHERE (session_id, turn) IN (
                 SELECT session_id, max(turn) FROM usage_events GROUP BY session_id
               )
            ) AS last
-           {cutoff}
-          GROUP BY label
-          ORDER BY label DESC"
+           {cutoff}"
     );
 
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map([], |row| {
-        Ok(UsageRow {
-            label: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-            totals: UsageTotals {
-                input_tokens: row.get::<_, Option<u64>>(1)?.unwrap_or_default(),
-                output_tokens: row.get::<_, Option<u64>>(2)?.unwrap_or_default(),
-                cache_read_tokens: row.get::<_, Option<u64>>(3)?.unwrap_or_default(),
-                reasoning_tokens: row.get::<_, Option<u64>>(4)?.unwrap_or_default(),
-                cost_usd: row.get(5)?,
-                turns: row.get::<_, Option<u32>>(6)?.unwrap_or_default(),
+    let sessions = statement.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, String>(2)?,
+            UsageTotals {
+                input_tokens: row.get(3)?,
+                output_tokens: row.get(4)?,
+                cache_read_tokens: row.get(5)?,
+                reasoning_tokens: row.get(6)?,
+                cost_usd: row.get(7)?,
+                turns: row.get(8)?,
+                estimated: false,
+                unpriced: 0,
             },
-        })
+        ))
     })?;
-    Ok(rows.collect::<Result<_, _>>()?)
+
+    let mut groups: std::collections::BTreeMap<String, UsageTotals> = Default::default();
+    for session in sessions {
+        let (label, model, agent, session) = session?;
+        let cost = session.cost_usd.map(|cost| (cost, false)).or_else(|| {
+            let tokens = TokenTotals {
+                input: if input_counts_cache_reads(&agent) {
+                    session
+                        .input_tokens
+                        .saturating_sub(session.cache_read_tokens)
+                } else {
+                    session.input_tokens
+                },
+                output: session.output_tokens,
+                cache_read: session.cache_read_tokens,
+                cache_write: 0,
+            };
+            rates?
+                .cost_of(model.as_deref()?, &tokens)
+                .map(|cost| (cost, true))
+        });
+        let group = groups.entry(label).or_default();
+        group.input_tokens += session.input_tokens;
+        group.output_tokens += session.output_tokens;
+        group.cache_read_tokens += session.cache_read_tokens;
+        group.reasoning_tokens += session.reasoning_tokens;
+        group.turns += session.turns;
+        match cost {
+            Some((cost, estimated)) => {
+                group.cost_usd = Some(group.cost_usd.unwrap_or(0.0) + cost);
+                group.estimated |= estimated;
+            }
+            None => group.unpriced += 1,
+        }
+    }
+    Ok(groups
+        .into_iter()
+        .rev()
+        .map(|(label, totals)| UsageRow { label, totals })
+        .collect())
+}
+
+/// Whether an agent's input count already includes the tokens read from its
+/// cache. Codex reports cached input as part of input; Anthropic's API, and
+/// so Claude Code, reports it beside it.
+fn input_counts_cache_reads(agent: &str) -> bool {
+    agent == "codex"
 }
 
 /// Forget usage older than `days`.
@@ -398,14 +465,14 @@ mod tests {
         )
         .unwrap();
 
-        let agents = by_agent(&conn, 30).unwrap();
+        let agents = by_agent(&conn, 30, None).unwrap();
         let claude = agents.iter().find(|row| row.label == "claude").unwrap();
         assert_eq!(claude.totals.input_tokens, 300, "not 400");
         let codex = agents.iter().find(|row| row.label == "codex").unwrap();
         assert_eq!(codex.totals.input_tokens, 50);
 
         // And a day's worth is the same numbers under a date.
-        let days = by_day(&conn, 30).unwrap();
+        let days = by_day(&conn, 30, None).unwrap();
         assert_eq!(days.len(), 1, "it all happened today: {days:?}");
         assert_eq!(days[0].totals.input_tokens, 350);
     }
@@ -427,8 +494,8 @@ mod tests {
             now - 60 * 60 * 24 * 200,
         )
         .unwrap();
-        assert!(by_agent(&conn, 30).unwrap().is_empty());
-        assert!(!by_agent(&conn, 365).unwrap().is_empty());
+        assert!(by_agent(&conn, 30, None).unwrap().is_empty());
+        assert!(!by_agent(&conn, 365, None).unwrap().is_empty());
     }
 
     #[test]
@@ -530,12 +597,15 @@ mod tests {
         // No account record exists for `claude-work` in this database — it
         // was configuration, and it has been removed — and the row still
         // says who paid.
-        let rows = by_account(&conn, 30).unwrap();
+        let rows = by_account(&conn, 30, None).unwrap();
         let find = |id: &str| rows.iter().find(|row| row.label == id).unwrap();
         assert_eq!(find("claude-work").totals.input_tokens, 300);
         assert_eq!(find("claude").totals.input_tokens, 100);
         // And the agent view still sums both logins.
-        assert_eq!(by_agent(&conn, 30).unwrap()[0].totals.input_tokens, 400);
+        assert_eq!(
+            by_agent(&conn, 30, None).unwrap()[0].totals.input_tokens,
+            400
+        );
     }
 
     #[test]
@@ -593,5 +663,87 @@ mod tests {
             .query_row("SELECT count(*) FROM usage_events", [], |row| row.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    fn unpriced(input: u64, output: u64) -> Usage {
+        Usage {
+            input_tokens: input,
+            output_tokens: output,
+            cache_read_tokens: 0,
+            reasoning_tokens: 0,
+            cost_usd: None,
+        }
+    }
+
+    #[test]
+    fn a_turn_the_vendor_did_not_price_is_priced_from_the_table_and_says_so() {
+        let conn = db::open_in_memory().unwrap();
+        let now = chrono::Utc::now().timestamp();
+        let reported = session_in(&conn, "a", "claude");
+        let codex = session_in(&conn, "b", "codex");
+        let unknown = session_in(&conn, "c", "codex");
+        let account = AccountId("x".into());
+        record(
+            &conn,
+            &reported,
+            1,
+            "claude",
+            &account,
+            Some("opus"),
+            &usage(10, 10, 0.5),
+            now,
+        )
+        .unwrap();
+        record(
+            &conn,
+            &codex,
+            1,
+            "codex",
+            &account,
+            Some("gpt-5"),
+            &unpriced(1_000_000, 0),
+            now,
+        )
+        .unwrap();
+        record(
+            &conn,
+            &unknown,
+            1,
+            "codex",
+            &account,
+            Some("mystery"),
+            &unpriced(5, 5),
+            now,
+        )
+        .unwrap();
+
+        let mut rates = RateTable::empty(now);
+        rates.insert(
+            "gpt-5",
+            ModelRate {
+                input_per_million: 1.25,
+                output_per_million: 10.0,
+                cache_read_per_million: 0.0,
+                cache_write_per_million: 0.0,
+            },
+        );
+
+        let agents = by_agent(&conn, 30, Some(&rates)).unwrap();
+        let claude = agents.iter().find(|row| row.label == "claude").unwrap();
+        assert_eq!(claude.totals.cost_usd, Some(0.5));
+        assert!(!claude.totals.estimated, "the vendor's own figure");
+        let codex = agents.iter().find(|row| row.label == "codex").unwrap();
+        assert_eq!(codex.totals.cost_usd, Some(1.25));
+        assert!(codex.totals.estimated, "priced from the table");
+        assert_eq!(
+            codex.totals.unpriced, 1,
+            "the model the table does not know"
+        );
+
+        // Without a table the same rows are unpriced, not free.
+        let bare = by_agent(&conn, 30, None).unwrap();
+        let codex = bare.iter().find(|row| row.label == "codex").unwrap();
+        assert_eq!(codex.totals.cost_usd, None);
+        assert_eq!(codex.totals.unpriced, 2);
     }
 }

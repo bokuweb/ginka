@@ -2726,6 +2726,9 @@ dependencies = [
  "gpui_platform",
  "lb-wry",
  "lsp-types",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "raw-window-handle",
  "rust-i18n",
  "serde",
@@ -2740,6 +2743,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "chrono",
  "clap",
  "ginka-client",
  "ginka-core",
