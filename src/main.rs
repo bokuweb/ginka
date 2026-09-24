@@ -13,6 +13,7 @@ mod assets;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod browser;
 mod daemon;
+mod dock;
 mod inbox;
 mod lsp;
 mod notes;

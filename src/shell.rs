@@ -4400,7 +4400,11 @@ impl Shell {
             .find(|row| row.session.as_ref() == Some(session))
             .map(|row| row.title.to_string())
             .unwrap_or_else(|| "Ginka".to_string());
-        let script = ginka_ui::notify::applescript(&notable.heading(), &title);
+        let script = ginka_ui::notify::applescript_with_sound(
+            &notable.heading(),
+            &title,
+            self.settings.notification_sounds.then(|| notable.sound()),
+        );
         if cfg!(target_os = "macos") {
             cx.background_spawn(async move {
                 if let Err(error) = std::process::Command::new("osascript")
@@ -4586,6 +4590,29 @@ impl Shell {
                     }),
             )
             .into_any_element();
+        let sounding = self.settings.notification_sounds;
+        let sounds_control = h_flex()
+            .p_0p5()
+            .gap_0p5()
+            .rounded(px(tokens.radius.row))
+            .bg(tokens.colors().bg_surface)
+            .children(
+                [(true, "settings.on"), (false, "settings.off")]
+                    .into_iter()
+                    .map(|(value, key)| {
+                        choice(
+                            format!("sounds:{value}"),
+                            rust_i18n::t!(key).to_string(),
+                            sounding == value,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.settings.notification_sounds = value;
+                            this.save_settings();
+                            cx.notify();
+                        }))
+                    }),
+            )
+            .into_any_element();
         let language_control = h_flex()
             .p_0p5()
             .gap_0p5()
@@ -4662,6 +4689,11 @@ impl Shell {
                                 rust_i18n::t!("settings.notifications").to_string(),
                                 rust_i18n::t!("settings.notifications.note").to_string(),
                                 notifications_control,
+                            ))
+                            .child(row(
+                                rust_i18n::t!("settings.sounds").to_string(),
+                                rust_i18n::t!("settings.sounds.note").to_string(),
+                                sounds_control,
                             ))
                             .child(row(
                                 rust_i18n::t!("settings.version").to_string(),
@@ -11847,6 +11879,9 @@ async fn pull_rows(
                 surfaces.set_history(history, cx);
             });
         }
+        crate::dock::set_badge(ginka_ui::notify::badge(
+            rows.iter().filter(|row| !row.archived).map(|row| row.state),
+        ));
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
         // The saved commands follow the project on screen, on the same tick.

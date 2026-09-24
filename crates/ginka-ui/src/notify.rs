@@ -48,6 +48,42 @@ pub fn notable(before: Option<SessionState>, after: SessionState) -> Option<Nota
     }
 }
 
+impl Notable {
+    /// The system sound it plays: a bright one for done, a question's ping,
+    /// and a low one for a failure — told apart without looking.
+    pub fn sound(self) -> &'static str {
+        match self {
+            Self::Finished => "Glass",
+            Self::NeedsYou => "Ping",
+            Self::Failed => "Basso",
+        }
+    }
+}
+
+/// [`applescript`], playing `sound` as it shows; silent without one.
+pub fn applescript_with_sound(title: &str, body: &str, sound: Option<&str>) -> String {
+    let script = applescript(title, body);
+    match sound {
+        Some(sound) => format!("{script} sound name {}", quote(sound)),
+        None => script,
+    }
+}
+
+/// The Dock badge: how many sessions are waiting on the reader — asked
+/// something or failed — or none. Work in progress is not counted; it needs
+/// nobody yet.
+pub fn badge(states: impl IntoIterator<Item = crate::workspace::AgentState>) -> Option<String> {
+    let waiting = states
+        .into_iter()
+        .filter(|state| *state == crate::workspace::AgentState::NeedsAttention)
+        .count();
+    match waiting {
+        0 => None,
+        1..=99 => Some(waiting.to_string()),
+        _ => Some("99+".to_string()),
+    }
+}
+
 /// The AppleScript that shows a notification, with both strings quoted so
 /// nothing in a session title can end the string early.
 pub fn applescript(title: &str, body: &str) -> String {
@@ -93,6 +129,36 @@ mod tests {
         );
         assert_eq!(notable(Some(Idle), Idle), None, "nothing new");
         assert_eq!(notable(None, Finished), None, "a first reading is not news");
+    }
+
+    #[test]
+    fn each_kind_of_news_has_its_own_sound_and_silence_is_a_choice() {
+        assert_eq!(Notable::Finished.sound(), "Glass");
+        assert_eq!(Notable::NeedsYou.sound(), "Ping");
+        assert_eq!(Notable::Failed.sound(), "Basso");
+        assert_eq!(
+            applescript_with_sound("Done", "Fix login", Some("Glass")),
+            "display notification \"Fix login\" with title \"Done\" sound name \"Glass\""
+        );
+        assert_eq!(
+            applescript_with_sound("Done", "Fix login", None),
+            applescript("Done", "Fix login")
+        );
+    }
+
+    #[test]
+    fn the_dock_counts_what_is_waiting_on_the_reader() {
+        use crate::workspace::AgentState::*;
+        assert_eq!(badge([Idle, Working, Idle]), None, "nothing waits");
+        assert_eq!(
+            badge([NeedsAttention, Working, NeedsAttention]).as_deref(),
+            Some("2")
+        );
+        assert_eq!(
+            badge(std::iter::repeat_n(NeedsAttention, 120)).as_deref(),
+            Some("99+"),
+            "a badge has room for two digits"
+        );
     }
 
     #[test]

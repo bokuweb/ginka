@@ -1229,6 +1229,12 @@ settings.notifications:
 settings.notifications.note:
   en: Tell the desktop when an agent finishes, fails or asks something while this window is in the background.
   ja: ウィンドウが背面にあるとき、エージェントの完了・失敗・質問をデスクトップに通知します。
+settings.sounds:
+  en: Sounds
+  ja: 通知音
+settings.sounds.note:
+  en: "Play a sound with each notification: one for done, one for a question, one for a failure."
+  ja: "通知ごとに音を鳴らします（完了・質問・失敗で別の音）。"
 settings.on:
   en: "On"
   ja: オン

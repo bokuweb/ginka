@@ -32,6 +32,9 @@ pub struct AppSettings {
     /// Tell the desktop when an agent finishes, fails or needs the reader
     /// while the window is not the one in front.
     pub notifications: bool,
+    /// Play a sound with each notification — a different one for done,
+    /// asked and failed.
+    pub notification_sounds: bool,
     /// The conversations open as tabs across the centre column, by
     /// workspace id, left to right. Restored where the workspace still exists.
     pub open_tabs: Vec<String>,
@@ -58,6 +61,7 @@ impl Default for AppSettings {
             recent_models: BTreeMap::new(),
             recent_model_options: BTreeMap::new(),
             notifications: true,
+            notification_sounds: true,
             open_tabs: Vec::new(),
         }
     }
