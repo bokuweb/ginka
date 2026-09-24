@@ -174,12 +174,15 @@ pub enum SurfaceEvent {
     /// The visible right-panel surface changed and should be remembered.
     SurfaceShown(Option<Surface>),
     /// A page loaded in a workspace's browser: keep it in its history.
+    /// Only a platform with the browser surface sends this or the next.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     BrowserVisited {
         workspace: WorkspaceId,
         url: String,
         title: Option<String>,
     },
     /// A workspace's address bar changed: find pages to offer.
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
     BrowserTyped {
         workspace: WorkspaceId,
         query: String,
