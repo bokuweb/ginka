@@ -386,10 +386,21 @@ pub fn add_worktree(repo: &Path, path: &Path, branch: &str, base: &str) -> Resul
 }
 
 /// Remove a worktree. `force` is required for one that is dirty or locked.
+///
+/// git asks for `--force` twice to remove a locked worktree — once for the
+/// changes, once for the lock — so a forced removal of a locked one says it
+/// twice. Unforced, git's refusal already names the lock and its reason.
 pub fn remove_worktree(repo: &Path, path: &Path, force: bool) -> Result<()> {
+    let locked = force
+        && list_worktrees(repo)?
+            .iter()
+            .any(|worktree| worktree.path == path && worktree.locked);
     let path = path.to_string_lossy().to_string();
     let mut args = vec!["worktree", "remove"];
     if force {
+        args.push("--force");
+    }
+    if locked {
         args.push("--force");
     }
     args.push(&path);

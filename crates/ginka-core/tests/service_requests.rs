@@ -1611,3 +1611,197 @@ fn a_terminal_job_is_finished_when_its_terminal_closes_and_can_be_run_by_hand() 
             .is_err()
     );
 }
+
+fn project_names(fixture: &mut Fixture) -> Vec<(String, Option<String>)> {
+    match fixture.ask(Request::ListProjects) {
+        Response::Projects { projects } => projects
+            .into_iter()
+            .map(|project| (project.name.0, project.label))
+            .collect(),
+        other => panic!("expected projects, got {other:?}"),
+    }
+}
+
+#[test]
+fn projects_keep_the_order_and_labels_the_reader_gives_them() {
+    let mut fixture = Fixture::new();
+    for name in ["comet", "aurora", "nebula"] {
+        let root = fixture.work.path().join(name);
+        support::repository(&root);
+        fixture.ask(Request::AddProject {
+            path: root,
+            label: None,
+        });
+    }
+    // A new project goes to the end rather than into the alphabet.
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["comet", "aurora", "nebula"]);
+
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("nebula".into()),
+        index: 0,
+    });
+    fixture.ask(Request::MoveProject {
+        project: ProjectName("comet".into()),
+        index: 99,
+    });
+    let names: Vec<String> = project_names(&mut fixture)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(
+        names,
+        ["nebula", "aurora", "comet"],
+        "a far index is the end"
+    );
+
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "Work".into(),
+    });
+    assert_eq!(
+        project_names(&mut fixture)[1],
+        ("aurora".to_string(), Some("Work".to_string()))
+    );
+    fixture.ask(Request::SetProjectLabel {
+        project: ProjectName("aurora".into()),
+        label: "  ".into(),
+    });
+    assert_eq!(project_names(&mut fixture)[1].1, None, "blank clears it");
+
+    assert!(
+        fixture
+            .service
+            .handle(Request::MoveProject {
+                project: ProjectName("nowhere".into()),
+                index: 0,
+            })
+            .is_err()
+    );
+}
+
+fn new_workspace(
+    fixture: &mut Fixture,
+    project: &ProjectName,
+    branch: &str,
+) -> Result<ginka_protocol::model::WorkspaceSummary, String> {
+    match fixture.service.handle(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: branch.into(),
+        base: None,
+    }) {
+        Ok(Response::Workspace { workspace }) => Ok(workspace),
+        Ok(other) => panic!("expected a workspace, got {other:?}"),
+        Err(error) => Err(error.message),
+    }
+}
+
+#[test]
+fn a_worktree_deleted_by_hand_does_not_hold_its_branch_hostage() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "doomed").unwrap();
+    // Deleted outside the app, the way a cleanup script or a reader would.
+    std::fs::remove_dir_all(&workspace.worktree.path).unwrap();
+
+    fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    });
+    let listed = support::git(&fixture.repo(), &["worktree", "list", "--porcelain"]);
+    assert!(
+        !listed.contains("prunable"),
+        "git's record is gone too: {listed}"
+    );
+
+    // The branch is free again: a new workspace can take it.
+    new_workspace(&mut fixture, &project, "doomed").expect("the branch is not held");
+}
+
+#[test]
+fn a_locked_worktree_is_named_as_locked_and_removed_only_when_forced() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "pinned-down").unwrap();
+    support::git(
+        &fixture.repo(),
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on a USB disk",
+            workspace.worktree.path.to_str().unwrap(),
+        ],
+    );
+
+    let refused = fixture
+        .service
+        .handle(Request::RemoveWorkspace {
+            workspace: workspace.id(),
+            force: false,
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("locked"), "{}", refused.message);
+    assert!(
+        refused.message.contains("on a USB disk"),
+        "{}",
+        refused.message
+    );
+    assert!(workspace.worktree.path.exists());
+
+    fixture.ask(Request::RemoveWorkspace {
+        workspace: workspace.id(),
+        force: true,
+    });
+    assert!(
+        !workspace.worktree.path.exists(),
+        "force goes through the lock"
+    );
+}
+
+#[test]
+fn a_settings_file_edited_by_hand_is_read_again_without_a_restart() {
+    let home = tempfile::tempdir().unwrap();
+    let paths = Paths::with_root(home.path().join("state"));
+    paths.ensure().unwrap();
+    let mut service = Service::new(
+        paths.clone(),
+        db::open_in_memory().unwrap(),
+        Arc::new(Recorder::default()),
+    );
+    service
+        .handle(Request::AddAccount {
+            id: ginka_protocol::AccountId("codex-work".into()),
+            provider: ginka_protocol::ProviderKind::Codex,
+            label: "Work".into(),
+        })
+        .unwrap();
+    // Nothing has changed since the service wrote the file itself.
+    assert!(!service.reload_settings_if_changed());
+
+    // The reader edits the file in their editor.
+    let file = paths.daemon_settings();
+    let mut settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    settings["accounts"]["codex-work"]["label"] = "Day job".into();
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    std::fs::write(&file, serde_json::to_string_pretty(&settings).unwrap()).unwrap();
+
+    assert!(service.reload_settings_if_changed());
+    let accounts = match service.handle(Request::Accounts).unwrap() {
+        Response::Accounts { accounts } => accounts,
+        other => panic!("expected accounts, got {other:?}"),
+    };
+    let work = accounts
+        .iter()
+        .find(|account| account.id.0 == "codex-work")
+        .unwrap();
+    assert_eq!(work.label, "Day job");
+    assert!(!service.reload_settings_if_changed(), "read once");
+
+    // A file that no longer parses is not taken: the running settings stay.
+    std::fs::write(&file, "{ not json").unwrap();
+    assert!(!service.reload_settings_if_changed());
+}

@@ -337,6 +337,11 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Second opinion** — each completed turn's footer offers every other ready
   agent as *Second opinion: <agent>*, which forks the conversation there with
   a request to review the work and change nothing.
+- **Split diff** — each changes section has *Unified | Split*. Split puts the
+  old file on the left and the new on the right, a removed line beside the
+  line that replaced it; either side is clickable for a review comment.
+- **Project menu** — a project in the rail has a ⋯ that opens *Rename*
+  (in place), *Move up* and *Move down*.
 - **Scheduled jobs** — Settings lists the project's cron jobs: schedule,
   name, what runs, when it next fires and how it last went, with *Pause*,
   *Run now* and *Remove*, and a form for a new one (command or prompt).

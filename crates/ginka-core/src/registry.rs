@@ -172,7 +172,13 @@ pub fn sync_worktrees(conn: &Connection, project: &Project) -> Result<SyncReport
         return Ok(SyncReport::default());
     }
 
-    let live = git::list_worktrees(&project.path)?;
+    let mut live = git::list_worktrees(&project.path)?;
+    // A worktree whose directory was deleted by hand stays in git's records
+    // until pruned, and holds its branch: `worktree add` on it would refuse.
+    if live.iter().any(|worktree| worktree.prunable) {
+        git::prune_worktrees(&project.path)?;
+        live = git::list_worktrees(&project.path)?;
+    }
     let known = list_worktrees(conn, &project.name)?;
     let mut report = SyncReport::default();
 

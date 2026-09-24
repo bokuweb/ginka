@@ -308,6 +308,10 @@ enum ProjectCommand {
     },
     /// Forget a project. Its files are left alone.
     Remove { project: String },
+    /// Name a project the way you group it; an empty label clears it.
+    Label { project: String, label: String },
+    /// Put a project at a position in the order, 0 first.
+    Move { project: String, index: u32 },
 }
 
 #[derive(Subcommand)]
@@ -942,6 +946,14 @@ fn request_for(command: Command) -> Result<Request> {
         },
         Command::Project(ProjectCommand::Remove { project }) => Request::RemoveProject {
             project: ProjectName(project),
+        },
+        Command::Project(ProjectCommand::Label { project, label }) => Request::SetProjectLabel {
+            project: ProjectName(project),
+            label,
+        },
+        Command::Project(ProjectCommand::Move { project, index }) => Request::MoveProject {
+            project: ProjectName(project),
+            index,
         },
 
         Command::Workspace(WorkspaceCommand::List { project }) => Request::ListWorkspaces {
@@ -1940,10 +1952,15 @@ fn print_projects(projects: &[Project]) {
     }
     for project in projects {
         println!(
-            "{:<24} {:<6} {}",
+            "{:<24} {:<6} {}{}",
             project.name.0,
             project.kind.as_str(),
-            project.path.display()
+            project.path.display(),
+            project
+                .label
+                .as_ref()
+                .map(|label| format!("  [{label}]"))
+                .unwrap_or_default()
         );
     }
 }

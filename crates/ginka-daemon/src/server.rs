@@ -166,8 +166,7 @@ impl Daemon {
         };
 
         let hub = Arc::new(Hub::new(EVENT_WINDOW));
-        let service = Service::open(paths.clone(), hub.clone())?
-            .with_drivers(ginka_core::driver::Registry::from_settings(&settings));
+        let service = Service::open(paths.clone(), hub.clone())?.with_settings_drivers();
         let service = Arc::new(Mutex::new(service));
         // A connector that is written down is hosted, running or not: one
         // that is not running still answers `ginka slack status` with why
@@ -291,6 +290,9 @@ impl Daemon {
                     smol::unblock(move || {
                         let mut service = service.lock().unwrap_or_else(|e| e.into_inner());
                         if sync {
+                            // A settings file edited by hand is read on the
+                            // same beat as the worktrees.
+                            service.reload_settings_if_changed();
                             service.sync();
                         }
                         if status {

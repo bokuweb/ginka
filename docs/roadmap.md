@@ -327,8 +327,8 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
 - [ ] Motion helpers of our own; 260 ms list reordering
 - [x] `export-types` binary for the protocol crate (`--features export`; the output is a build product and is not committed)
-- [ ] Hot-reload settings on change
-- [ ] Crash handler
+- [x] Hot-reload settings on change: the daemon reads `settings.json` again on its sync beat and rebuilds accounts, agent probes and drivers from it; a file that does not parse is left alone (keep-awake stays start-only)
+- [x] Crash handler: `crash-<process>-<unix>.log` in the logs directory with the message, place, build and backtrace, then the default hook
 - [ ] `rust-i18n` wired up with `locales/{en,ja}.yml` — §6.4 assumes it and nothing is wired yet; every string added before it lands is one to retrofit
 
 **Exit criteria:** window opens in <300 ms warm; the three-column shell with a resizable sidebar and right panel renders against `docs/ui.md`; theme switches; migrations run on a fresh `~/.ginka`.
@@ -342,9 +342,9 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [x] Project registry: add/remove, `git` vs `plain` kind detection, default-branch probe
 - [x] Add a project from the window: the sidebar's `+` and the composer's project chip both open a folder picker, and the command the empty state shows still works
 - [x] Projects are selectable in the sidebar, and "new chat" starts a session in the selected one; a chat with no project at all runs in a scratch worktree
-- [ ] Project rename, labels, reordering
+- [x] Project rename, labels, reordering (`SetProjectLabel`, `MoveProject`; the rail's ⋯ menu, `ginka project label|move`)
 - [x] Worktree lifecycle: create (branch from base), remove (force for dirty), pin
-- [ ] Prune, and the locked-worktree cases `git worktree remove` refuses
+- [x] Prune, and the locked-worktree cases `git worktree remove` refuses: reconciling prunes worktrees deleted by hand so their branch is free again; a forced removal of a locked worktree forces twice, and an unforced one reports the lock and its reason
 - [x] Setup runner: `.ginka/config.json` per project — copy untracked files (`.env`, etc.) and run setup commands on worktree creation
 - [x] `syncWorktrees` equivalent: reconcile DB against `git worktree list`, updating `branch` / `head`
 - [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
@@ -363,12 +363,12 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 Goal: a real agent runs in a worktree and its transcript renders.
 
 - [x] Extract the daemon: WS RPC server, bearer token, `~/.ginka/daemon.json` discovery, auto-spawn, refusal to start on top of a live daemon
-- [ ] Graceful takeover of a running daemon by a newer build
+- [x] Graceful takeover of a running daemon by a newer build: a client or daemon of a newer protocol stops an older daemon (TERM, then KILL), never the other way round
 - [x] Request/response + server-push event streams with sequence numbers, a bounded replay window, and an explicit `gap` frame when a cursor falls out of it
 - [x] `AgentDriver` trait + `claude` driver (stream-json over stdio), process supervision, cancellation by process group
 - [x] Session persistence: sessions and transcripts as normalized events; resume from the vendor session id
 - [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, paged from a cursor and followed live off the daemon's push stream
-- [ ] Virtualize the transcript list (§6.2's budget is lost here first)
+- [x] Virtualize the transcript list (§6.2's budget is lost here first): a GPUI `list` of blocks, re-measured from the first block the fold reports changed, following its tail
 - [x] Message queueing while the agent is busy, with daemon-owned stable rows shared by the UI, CLI and MCP; pending prompts can be edited, removed, reordered and sent into a steerable live transport before they become transcript history
 - [x] Composer sends: a follow-up to the running session, or a new agent in the workspace
 - [x] Agent and model pickers in the composer, and a new-session toggle
@@ -427,7 +427,7 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] Selection exchange: saved editor selections add an exact one-based file location to the chat draft; current-buffer text, including unsaved edits, is pasted unchanged into the active daemon terminal without an extra Return, opening one when necessary; terminal mouse selections and exact transcript text ranges can be quoted into the existing chat draft
 - [x] Changes panel: file list expanding into per-file diff, parsed in `ginka-core`
 - [x] Intra-line word diff
-- [ ] Split diff
+- [x] Split diff (`ginka_ui::split_diff`; Unified / Split on each changes section)
 - [x] Commit and remote sync: message box plus persistent Pull/Push controls in the Git surface, with the same `ginka commit` / `pull` / `push` operations over CLI and MCP. Pull refuses dirty or diverged work and only fast-forwards the configured upstream
 - [x] Recent commit history: a bounded newest-first daemon query retains parent topology and is available from the Git surface, CLI and MCP; graph rendering remains M4 polish
 - [x] Stage/unstage per file and per exact hunk, with separate index/worktree sections and stale-hunk refusal; revert a file or one exact unstaged hunk, with destructive UI actions confirmed before applying
@@ -731,3 +731,5 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-24 | Cron jobs are daemon state (migration 0015, protocol 24) on the daemon host's clock; missed firings fire once; overlap-skip by what the last firing started | §4.4's `cronjobs`. The schedule is checked when saved, so a job that can never fire is refused rather than silent. A daemon that was down owes one firing, not one per missed minute. A terminal job's terminal closes with its command, which is what makes "still running" a question the terminal pool can answer and what marks the run finished. |
 | 2026-09-24 | Unpriced turns are priced at query time from the public per-token table, fetched hourly-checked/daily-refreshed outside the service lock, and every total says whether it is estimated and how much it could not price | N13. Pricing at query time keeps the stored events what the vendor said, so a better table reprices history. The table is data fetched at runtime, not code or data in the repository. Codex's input includes cache reads and Anthropic's does not; the estimate follows the vendor. |
 | 2026-09-24 | Notification sounds per kind of news and a Dock badge through AppKit (`objc2-app-kit`, macOS only) | GPUI has no Dock API. The AppKit crates are the versions GPUI and wry already link, and the calls used are safe, so the workspace's `unsafe_code = "deny"` stands. |
+| 2026-09-24 | The transcript is a GPUI `list`; the fold reports the first block it changed | Rule 5. Visible blocks are laid out every frame anyway, so what the fold has to say is only where cached heights went stale: a new block, the growing answer, a result going back to its call, an answered card, and a whole turn when it settles. The list's own tail mode replaces the hand-rolled follow-the-foot. |
+| 2026-09-24 | Crash reports stay on disk; settings hot-reload compares parsed contents | Rule 7: a report is for the reader and the issue they choose to open, never sent. Reloading on content rather than mtime ignores the daemon's own writes and a clock that moved, and a file that does not parse leaves the running settings alone rather than falling back to defaults mid-session. |

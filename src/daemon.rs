@@ -1283,6 +1283,30 @@ impl DaemonLink {
     }
 
     /// Give a conversation a title; an empty one clears it back to none.
+    /// Show a project under another name; blank goes back to its own.
+    pub async fn set_project_label(
+        &self,
+        project: &ProjectName,
+        label: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetProjectLabel {
+            project: project.clone(),
+            label,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Put a project at `index` in the rail.
+    pub async fn move_project(&self, project: &ProjectName, index: u32) -> Result<(), String> {
+        self.ask_result(Request::MoveProject {
+            project: project.clone(),
+            index,
+        })
+        .await
+        .map(|_| ())
+    }
+
     pub async fn rename_session(&self, session: &SessionId, title: String) -> Result<(), String> {
         self.ask_result(Request::RenameSession {
             session: session.clone(),

@@ -31,6 +31,7 @@ pub mod palette;
 pub mod reports;
 pub mod search;
 pub mod skills;
+pub mod split_diff;
 pub mod surface;
 pub mod tabs;
 pub mod terminal;

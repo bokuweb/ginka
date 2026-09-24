@@ -78,6 +78,10 @@ pub struct Service {
     /// The public rate table, as last cached, for pricing the turns a vendor
     /// did not (§3.3 N13). Replaced by the daemon's daily refresh.
     rates: Option<crate::usage::RateTable>,
+    /// Whether the drivers are the ones the settings describe, and so are
+    /// built again when the settings file changes. Not for a service given
+    /// its drivers, which is how a test puts a scripted agent in.
+    drivers_follow_settings: bool,
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
@@ -137,6 +141,7 @@ impl Service {
             settings,
             accounts: None,
             rates,
+            drivers_follow_settings: false,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
         }
@@ -162,6 +167,44 @@ impl Service {
     pub fn with_drivers(mut self, drivers: Registry) -> Self {
         self.drivers = Arc::new(drivers);
         self
+    }
+
+    /// Use the drivers the settings describe — each agent's binary and
+    /// environment — and build them again when the settings file changes.
+    pub fn with_settings_drivers(mut self) -> Self {
+        self.drivers = Arc::new(Registry::from_settings(&self.settings));
+        self.drivers_follow_settings = true;
+        self
+    }
+
+    /// Read the settings file again if it says something other than what the
+    /// daemon is running with — someone edited it by hand — and say whether
+    /// it did. A file that does not parse is left for the reader to fix, and
+    /// the running settings stay. Keep-awake is read at start only.
+    pub fn reload_settings_if_changed(&mut self) -> bool {
+        let path = self.paths.daemon_settings();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return false;
+        };
+        let settings: crate::settings::DaemonSettings = match serde_json::from_str(&text) {
+            Ok(settings) => settings,
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "the edited settings do not parse; keeping the running ones");
+                return false;
+            }
+        };
+        if settings == self.settings {
+            return false;
+        }
+        tracing::info!(path = %path.display(), "settings changed on disk; reading them again");
+        self.settings = settings;
+        // What was probed under the old settings is stale.
+        self.accounts = None;
+        self.agents = None;
+        if self.drivers_follow_settings {
+            self.drivers = Arc::new(Registry::from_settings(&self.settings));
+        }
+        true
     }
 
     /// Hand agents this `ginka` command as their MCP bridge, rather than the
@@ -237,6 +280,22 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
+            Request::SetProjectLabel { project, label } => {
+                let label = label.trim();
+                let label = (!label.is_empty()).then_some(label);
+                if !project::set_label(&self.conn(), &project, label).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
+            Request::MoveProject { project, index } => {
+                if !project::move_to(&self.conn(), &project, index as usize).map_err(failed)? {
+                    return Err(RpcError::not_found(format!("no project named {project}")));
+                }
+                self.events.emit(DaemonEvent::ProjectsChanged);
+                Ok(Response::Ack)
+            }
             Request::AddProject { path, label } => {
                 let project = registry::register_project_as(&self.conn(), &path, label.as_deref())
                     .map_err(failed)?;
