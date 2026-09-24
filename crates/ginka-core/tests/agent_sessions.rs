@@ -2959,7 +2959,9 @@ fn an_edited_prompt_runs_the_conversation_again_on_a_fresh_thread() {
         session: session.clone(),
         text: "second".into(),
     });
-    wait_for_prompts(&mut fixture, &session, 2);
+    // The second turn's end, not just its prompt: a turn that has not begun
+    // yet looks settled, and an edit is refused while one is running.
+    fixture.wait_for(&session, |turns| turns.len() >= 2);
     fixture.settle(&session);
 
     let second = match fixture.ask(Request::SessionTranscript {

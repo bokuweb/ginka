@@ -21,6 +21,9 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How often to look for the handshake while waiting.
 const STARTUP_POLL: Duration = Duration::from_millis(25);
+/// How long a daemon this client started gets to take the lock before the
+/// client starts another.
+const RESPAWN_AFTER: Duration = Duration::from_secs(2);
 
 /// The environment variable that overrides which daemon binary is started.
 pub const DAEMON_BINARY_ENV: &str = "GINKA_DAEMON";
@@ -124,9 +127,6 @@ impl Discovery {
         // A daemon that holds the lock is starting or running: wait for it
         // rather than starting another. Two callers in one window used to
         // both find no daemon and both start one.
-        if !self.daemon_holds_lock() {
-            self.spawn()?;
-        }
         self.wait_for_daemon(resume_from).await
     }
 
@@ -209,12 +209,25 @@ impl Discovery {
     async fn wait_for_daemon(&self, resume_from: Option<Seq>) -> Result<Client> {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let mut last_error = None;
+        let mut spawned_at: Option<Instant> = None;
         while Instant::now() < deadline {
             if let Some(handshake) = self.published() {
                 match Client::connect(&handshake, resume_from).await {
                     Ok(client) => return Ok(client),
                     Err(error) => last_error = Some(error),
                 }
+            }
+            if !self.daemon_holds_lock()
+                && spawned_at.is_none_or(|at| at.elapsed() >= RESPAWN_AFTER)
+            {
+                // No daemon to reach and nobody holding the lock — nothing
+                // published, or a dead daemon's stale file: start one.
+                // Checked on every poll, not once, because a daemon that is
+                // stopping still holds the lock for a moment after it has
+                // withdrawn its handshake. A spare daemon that loses the race
+                // for the lock exits on its own.
+                self.spawn()?;
+                spawned_at = Some(Instant::now());
             }
             smol::Timer::after(STARTUP_POLL).await;
         }
