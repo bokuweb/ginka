@@ -7,7 +7,7 @@ use ginka_ui::Tokens;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{IconName, h_flex, v_flex};
 use raw_window_handle::HasWindowHandle as _;
 use serde::Deserialize;
@@ -208,7 +208,7 @@ impl Render for BrowserPane {
                             .tooltip(rust_i18n::t!("surface.browser.reload").to_string())
                             .on_click(cx.listener(Self::reload)),
                     )
-                    .child(div().flex_1().child(Input::new(&self.address)))
+                    .child(div().flex_1().child(ginka_ui::field::input(&self.address)))
                     .child(
                         Button::new("browser-inspect")
                             .compact()
