@@ -1104,3 +1104,47 @@ pub struct Note {
     /// Unix seconds; notes are listed most recently touched first.
     pub updated_at: i64,
 }
+
+/// What a quick command does when it is run.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuickCommandKind {
+    /// A shell command, run in a terminal in the workspace.
+    Shell,
+    /// A prompt, sent to the workspace's agent.
+    Prompt,
+}
+
+impl QuickCommandKind {
+    /// The value stored in SQLite and printed by the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Shell => "shell",
+            Self::Prompt => "prompt",
+        }
+    }
+
+    /// Read a stored or typed value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "shell" => Some(Self::Shell),
+            "prompt" => Some(Self::Prompt),
+            _ => None,
+        }
+    }
+}
+
+/// A saved command or prompt — Orca's Quick Commands — for one project, or
+/// for every project when `project` is absent.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QuickCommand {
+    pub id: String,
+    pub project: Option<ProjectName>,
+    /// What the menu and the palette call it.
+    pub name: String,
+    pub kind: QuickCommandKind,
+    /// The shell command line, or the prompt text.
+    pub body: String,
+}

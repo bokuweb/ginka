@@ -30,6 +30,7 @@ pub mod mcp;
 pub mod notes;
 pub mod paths;
 pub mod project;
+pub mod quick_commands;
 pub mod registry;
 pub mod review;
 pub mod service;

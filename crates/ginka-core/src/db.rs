@@ -60,6 +60,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0013_queued_messages",
         include_str!("../../../db/migrations/0013_queued_messages.sql"),
     ),
+    (
+        "0014_quick_commands",
+        include_str!("../../../db/migrations/0014_quick_commands.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

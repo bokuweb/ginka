@@ -112,6 +112,16 @@ enum Picker {
     Command,
 }
 
+/// The settings page's form for a new quick command.
+struct QuickForm {
+    name: Entity<InputState>,
+    body: Entity<InputState>,
+    kind: ginka_protocol::model::QuickCommandKind,
+    /// For the project on screen rather than for every project.
+    project_only: bool,
+    error: Option<String>,
+}
+
 const CONTEXT: &str = "Shell";
 
 /// Bind the panel toggles.
@@ -607,6 +617,13 @@ pub struct Shell {
     surfaces: Entity<SurfacePanel>,
     /// The conversations open across the top of the centre column.
     tabs: ginka_ui::tabs::Tabs,
+    /// Saved commands and prompts for the project on screen (Orca's Quick
+    /// Commands), read from the daemon on the refresh tick.
+    quick_commands: Vec<ginka_protocol::model::QuickCommand>,
+    /// Whether the terminal dock's quick-command menu is open.
+    quick_menu_open: bool,
+    /// The settings page's new-quick-command form.
+    quick_form: QuickForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -650,6 +667,19 @@ impl Shell {
             window.refresh();
         });
         let notes = cx.new(|cx| crate::notes::NotesView::new(link.clone(), window, cx));
+        let quick_form = QuickForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.quick.name").to_string())
+            }),
+            body: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.quick.body").to_string())
+            }),
+            kind: ginka_protocol::model::QuickCommandKind::Shell,
+            project_only: true,
+            error: None,
+        };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
             settings
                 .open_tabs
@@ -1278,6 +1308,9 @@ impl Shell {
             surfaces,
             notes,
             tabs: restored_tabs,
+            quick_commands: Vec::new(),
+            quick_menu_open: false,
+            quick_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -1810,6 +1843,153 @@ impl Shell {
             self.save_settings();
         }
         cx.notify();
+    }
+
+    /// Read the saved commands for the project on screen.
+    fn refresh_quick_commands(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let project = self.target_project.clone();
+        cx.spawn(async move |this, cx| {
+            let commands = cx
+                .background_spawn(async move { link.quick_commands(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.quick_commands != commands {
+                    this.quick_commands = commands;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Run a saved command: a shell one in a new terminal in the dock, a
+    /// prompt sent to the conversation on screen.
+    fn run_quick(
+        &mut self,
+        command: ginka_protocol::model::QuickCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.quick_menu_open = false;
+        match command.kind {
+            ginka_protocol::model::QuickCommandKind::Prompt => {
+                self.composer
+                    .update(cx, |state, cx| state.set_value(command.body, window, cx));
+                self.submit(window, cx);
+            }
+            ginka_protocol::model::QuickCommandKind::Shell => {
+                let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+                    return;
+                };
+                if !self.layout.is_open(Panel::TerminalDock) {
+                    self.toggle(Panel::TerminalDock, cx);
+                }
+                let (rows, cols) = self.dock_size();
+                let link = self.link.clone();
+                let title = command.name.clone();
+                cx.spawn(async move |this, cx| {
+                    let opened = cx
+                        .background_spawn(async move {
+                            link.run_quick_command(&workspace, command.id, rows, cols)
+                                .await
+                        })
+                        .await;
+                    this.update(cx, |this, cx| {
+                        match opened {
+                            Ok(terminal) => {
+                                this.terminals.open(terminal, title, rows, cols);
+                                this.resize_terminal(cx);
+                                this.persist();
+                                this.adopt_terminals(cx);
+                            }
+                            Err(error) => tracing::warn!(%error, "a quick command did not run"),
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                })
+                .detach();
+            }
+        }
+        cx.notify();
+    }
+
+    /// The dock's quick-command menu: the project's shell commands, each a
+    /// button that runs it in a new terminal.
+    fn quick_menu(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !self.quick_menu_open {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let commands: Vec<_> = self
+            .quick_commands
+            .iter()
+            .filter(|command| command.kind == ginka_protocol::model::QuickCommandKind::Shell)
+            .cloned()
+            .collect();
+        Some(
+            h_flex()
+                .w_full()
+                .px_2()
+                .py_1()
+                .gap_1()
+                .flex_wrap()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .children(commands.into_iter().map(|command| {
+                    let label = command.name.clone();
+                    let tooltip = command.body.clone();
+                    Button::new(SharedString::from(format!("quick-run-{}", command.id)))
+                        .ghost()
+                        .compact()
+                        .tooltip(tooltip)
+                        .label(label)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.run_quick(command.clone(), window, cx)
+                        }))
+                }))
+                .into_any_element(),
+        )
+    }
+
+    /// Save the settings page's new quick command.
+    fn save_quick_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.quick_form.name.read(cx).value().to_string();
+        let body = self.quick_form.body.read(cx).value().to_string();
+        let kind = self.quick_form.kind;
+        let project = self
+            .quick_form
+            .project_only
+            .then(|| self.target_project.clone())
+            .flatten();
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move {
+                    link.save_quick_command(project, name, kind, body).await
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match saved {
+                    Ok(()) => {
+                        this.quick_form.error = None;
+                        this.quick_form
+                            .name
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                        this.quick_form
+                            .body
+                            .update(cx, |state, cx| state.set_value("", window, cx));
+                    }
+                    Err(error) => this.quick_form.error = Some(error),
+                }
+                this.refresh_quick_commands(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Write the open tabs back to `app.json`.
@@ -4196,6 +4376,7 @@ impl Shell {
                 }))
             }))
             .into_any_element();
+        let quick_section = self.quick_settings(cx);
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -4304,9 +4485,198 @@ impl Shell {
                                     .text_color(tokens.colors().text_secondary)
                                     .child(env!("CARGO_PKG_VERSION"))
                                     .into_any_element(),
-                            )),
+                            ))
+                            .child(quick_section),
                     ),
             )
+    }
+
+    /// The settings page's quick commands: the project's and the global ones,
+    /// each removable, and a form for a new one (`docs/ui.md` §3.7).
+    fn quick_settings(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let shell = self.quick_form.kind == ginka_protocol::model::QuickCommandKind::Shell;
+        let project_only = self.quick_form.project_only;
+        let project = self.target_project.clone();
+        let chip = |id: &'static str, label: String, on: bool| {
+            div()
+                .id(id)
+                .px_2()
+                .py_0p5()
+                .rounded(px(7.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        let rows: Vec<AnyElement> = self
+            .quick_commands
+            .iter()
+            .map(|command| {
+                let id = command.id.clone();
+                h_flex()
+                    .w_full()
+                    .py_1p5()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(60.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(command.kind.as_str()),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.))
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(command.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .font_family(cx.theme_mono_font())
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(command.body.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(
+                                command
+                                    .project
+                                    .as_ref()
+                                    .map(|project| project.0.clone())
+                                    .unwrap_or_else(|| {
+                                        rust_i18n::t!("settings.quick.everywhere").to_string()
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("quick-remove-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("notes.remove").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                let link = this.link.clone();
+                                let id = id.clone();
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_spawn(async move {
+                                        link.remove_quick_command(id).await
+                                    })
+                                    .await;
+                                    this.update(cx, |this, cx| this.refresh_quick_commands(cx))
+                                        .ok();
+                                })
+                                .detach();
+                            })),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .pt_5()
+            .gap_2()
+            .child(
+                div()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.quick").to_string()),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.quick.note").to_string()),
+            )
+            .children(rows)
+            .child(
+                h_flex()
+                    .w_full()
+                    .pt_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        chip(
+                            "quick-kind-shell",
+                            rust_i18n::t!("settings.quick.shell").to_string(),
+                            shell,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.kind = ginka_protocol::model::QuickCommandKind::Shell;
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        chip(
+                            "quick-kind-prompt",
+                            rust_i18n::t!("settings.quick.prompt").to_string(),
+                            !shell,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.kind = ginka_protocol::model::QuickCommandKind::Prompt;
+                            cx.notify();
+                        })),
+                    )
+                    .child(div().w(px(12.)))
+                    .children(project.map(|project| {
+                        chip("quick-scope-project", project.0, project_only).on_click(cx.listener(
+                            |this, _, _, cx| {
+                                this.quick_form.project_only = true;
+                                cx.notify();
+                            },
+                        ))
+                    }))
+                    .child(
+                        chip(
+                            "quick-scope-global",
+                            rust_i18n::t!("settings.quick.everywhere").to_string(),
+                            !project_only || self.target_project.is_none(),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.quick_form.project_only = false;
+                            cx.notify();
+                        })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(div().w(px(160.)).child(Input::new(&self.quick_form.name)))
+                    .child(div().flex_1().child(Input::new(&self.quick_form.body)))
+                    .child(
+                        Button::new("quick-save")
+                            .compact()
+                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.save_quick_form(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.quick_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
     }
 
     /// The Inbox: the GitHub client when it is built in, and how to build it
@@ -4781,6 +5151,10 @@ impl Shell {
             can_go_back,
             can_go_forward,
         );
+        entries.extend(ginka_ui::palette::quick_command_entries(
+            &self.quick_commands,
+            self.session.is_some(),
+        ));
         let active = self.terminals.active();
         entries.extend(ginka_ui::palette::terminal_entries(
             ginka_ui::palette::TerminalActions {
@@ -4852,6 +5226,7 @@ impl Shell {
                 self.surfaces
                     .update(cx, |surfaces, cx| surfaces.show(surface, cx));
             }
+            Command::RunQuick(command) => self.run_quick(command, window, cx),
             Command::NewTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -9782,6 +10157,29 @@ impl Shell {
                                 },
                             )),
                     )
+                    .children(
+                        (self.session.is_some()
+                            && self.quick_commands.iter().any(|command| {
+                                command.kind == ginka_protocol::model::QuickCommandKind::Shell
+                            }))
+                        .then(|| {
+                            let label = rust_i18n::t!("terminal.quick").to_string();
+                            Button::new("quick-commands")
+                                .ghost()
+                                .compact()
+                                .tooltip(label.clone())
+                                .accessibility_label(label)
+                                .child(
+                                    Icon::new(IconName::Play)
+                                        .size_3()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.quick_menu_open = !this.quick_menu_open;
+                                    cx.notify();
+                                }))
+                        }),
+                    )
                     .children(self.session.is_some().then(|| {
                         let label = rust_i18n::t!("terminal.open").to_string();
                         Button::new("new-terminal")
@@ -9877,6 +10275,7 @@ impl Shell {
                             )
                     })),
             )
+            .children(self.quick_menu(cx))
             .children(self.terminal_search_bar(cx))
             .child(self.terminal_panes(cx))
     }
@@ -10390,6 +10789,8 @@ async fn pull_rows(
         }
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        // The saved commands follow the project on screen, on the same tick.
+        this.refresh_quick_commands(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
             Some(row) => {
                 this.target_project = Some(ProjectName(row.origin.to_string()));

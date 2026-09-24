@@ -59,6 +59,36 @@ pub enum Command {
     NavigateForward,
     /// Select a workspace in the sidebar.
     Switch(WorkspaceId),
+    /// Run a saved shell command in a new terminal, or send a saved prompt.
+    RunQuick(ginka_protocol::model::QuickCommand),
+}
+
+/// The saved commands the palette offers, where there is a workspace to run
+/// them in: a shell command runs in a terminal there, a prompt is sent to
+/// its conversation.
+pub fn quick_command_entries(
+    commands: &[ginka_protocol::model::QuickCommand],
+    workspace_open: bool,
+) -> Vec<Entry> {
+    if !workspace_open {
+        return Vec::new();
+    }
+    commands
+        .iter()
+        .map(|command| Entry {
+            id: format!("quick:{}", command.id),
+            label: match command.kind {
+                ginka_protocol::model::QuickCommandKind::Shell => {
+                    rust_i18n::t!("palette.quick.run", name = command.name).to_string()
+                }
+                ginka_protocol::model::QuickCommandKind::Prompt => {
+                    rust_i18n::t!("palette.quick.send", name = command.name).to_string()
+                }
+            },
+            hint: None,
+            command: Command::RunQuick(command.clone()),
+        })
+        .collect()
 }
 
 /// Which contextual terminal actions can do something in the current window.
@@ -364,6 +394,32 @@ fn shortcut(panel: Panel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn saved_commands_are_offered_only_where_they_can_run() {
+        use ginka_protocol::model::{QuickCommand, QuickCommandKind};
+        let commands = vec![
+            QuickCommand {
+                id: "a".into(),
+                project: None,
+                name: "test".into(),
+                kind: QuickCommandKind::Shell,
+                body: "cargo test".into(),
+            },
+            QuickCommand {
+                id: "b".into(),
+                project: None,
+                name: "Review".into(),
+                kind: QuickCommandKind::Prompt,
+                body: "review".into(),
+            },
+        ];
+        assert!(quick_command_entries(&commands, false).is_empty());
+        let entries = quick_command_entries(&commands, true);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].label.contains("test"));
+        assert!(matches!(&entries[1].command, Command::RunQuick(command) if command.id == "b"));
+    }
     use ginka_core::settings::AppSettings;
 
     fn layout() -> Layout {

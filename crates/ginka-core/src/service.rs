@@ -305,7 +305,6 @@ impl Service {
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
-                self.set_up(&project.path, &path);
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: project.name.clone(),
@@ -321,6 +320,7 @@ impl Service {
                             path.display()
                         ))
                     })?;
+                self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
                 Ok(Response::Workspace {
                     workspace: self.summarize(worktree),
                 })
@@ -768,6 +768,64 @@ impl Service {
                 )
                 .map_err(failed)?,
             }),
+            Request::ListQuickCommands { project } => Ok(Response::QuickCommands {
+                commands: crate::quick_commands::list(&self.conn(), project.as_ref())
+                    .map_err(failed)?,
+            }),
+            Request::SaveQuickCommand {
+                id,
+                project,
+                name,
+                kind,
+                body,
+            } => Ok(Response::QuickCommand {
+                command: crate::quick_commands::save(
+                    &self.conn(),
+                    id.as_deref(),
+                    project.as_ref(),
+                    &name,
+                    kind,
+                    &body,
+                )
+                .map_err(failed)?,
+            }),
+            Request::RemoveQuickCommand { id } => {
+                crate::quick_commands::remove(&self.conn(), &id).map_err(failed)?;
+                Ok(Response::Ack)
+            }
+            Request::RunQuickCommand {
+                workspace,
+                id,
+                rows,
+                cols,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let command = crate::quick_commands::get(&self.conn(), &id)
+                    .map_err(failed)?
+                    .ok_or_else(|| RpcError::not_found(format!("no quick command with id {id}")))?;
+                if command.kind != ginka_protocol::model::QuickCommandKind::Shell {
+                    return Err(RpcError::failed(
+                        "a prompt is sent to the conversation, not run in a terminal",
+                    ));
+                }
+                let terminal = self
+                    .terminals
+                    .open_command(
+                        &workspace,
+                        &worktree.path,
+                        crate::terminal::TerminalCommand {
+                            program: std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into()),
+                            args: crate::quick_commands::shell_args(&command.body),
+                            env: Vec::new(),
+                            title: command.name.clone(),
+                            on_exit: None,
+                        },
+                        rows,
+                        cols,
+                    )
+                    .map_err(failed)?;
+                Ok(Response::Terminal { terminal })
+            }
             Request::RemoveNote { id } => {
                 crate::notes::remove(&self.conn(), &id).map_err(failed)?;
                 Ok(Response::Ack)
@@ -2115,7 +2173,12 @@ impl Service {
     /// rather than returned: the worktree exists by now, and removing it
     /// because an install failed would throw away the branch the user asked
     /// for.
-    fn set_up(&self, project: &std::path::Path, worktree: &std::path::Path) {
+    fn set_up(
+        &self,
+        project: &std::path::Path,
+        worktree: &std::path::Path,
+        workspace: &WorkspaceId,
+    ) {
         let setup = match crate::setup::read(project) {
             Ok(setup) => setup,
             Err(error) => {
@@ -2126,15 +2189,34 @@ impl Service {
         if setup.copy.is_empty() && setup.commands.is_empty() {
             return;
         }
-        let report = crate::setup::run(project, worktree, &setup);
+        // The files first, before anything can start in the worktree.
+        let copying = crate::setup::Setup {
+            copy: setup.copy.clone(),
+            commands: Vec::new(),
+        };
+        let report = crate::setup::run(project, worktree, &copying);
         for problem in &report.problems {
             tracing::warn!(problem, worktree = %worktree.display(), "setting up the worktree");
         }
-        tracing::info!(
-            copied = report.copied.len(),
-            ran = report.ran.len(),
-            "ran the project's setup"
-        );
+        // The commands in a terminal of the workspace's own, as Orca runs
+        // its setup script: an install is minutes, and the reader should see
+        // it happen rather than wait on a request that says nothing.
+        if !setup.commands.is_empty() {
+            let command = crate::terminal::TerminalCommand {
+                program: "sh".to_string(),
+                args: crate::setup::terminal_args(&setup.commands),
+                env: Vec::new(),
+                title: "setup".to_string(),
+                on_exit: None,
+            };
+            if let Err(error) = self
+                .terminals
+                .open_command(workspace, worktree, command, 24, 100)
+            {
+                tracing::warn!(%error, "could not start the project's setup");
+            }
+        }
+        tracing::info!(copied = report.copied.len(), "set up the worktree");
     }
 }
 

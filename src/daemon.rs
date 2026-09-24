@@ -898,6 +898,63 @@ impl DaemonLink {
         }
     }
 
+    /// A project's saved commands and the global ones.
+    pub async fn quick_commands(
+        &self,
+        project: Option<ProjectName>,
+    ) -> Vec<ginka_protocol::model::QuickCommand> {
+        match self.ask(Request::ListQuickCommands { project }).await {
+            Some(Response::QuickCommands { commands }) => commands,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Save a quick command; the refusal is the daemon's own words.
+    pub async fn save_quick_command(
+        &self,
+        project: Option<ProjectName>,
+        name: String,
+        kind: ginka_protocol::model::QuickCommandKind,
+        body: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SaveQuickCommand {
+            id: None,
+            project,
+            name,
+            kind,
+            body,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a quick command.
+    pub async fn remove_quick_command(&self, id: String) {
+        self.ask(Request::RemoveQuickCommand { id }).await;
+    }
+
+    /// Run a shell quick command in a new terminal in the workspace.
+    pub async fn run_quick_command(
+        &self,
+        workspace: &WorkspaceId,
+        id: String,
+        rows: u16,
+        cols: u16,
+    ) -> Result<TerminalId, String> {
+        match self
+            .ask_result(Request::RunQuickCommand {
+                workspace: workspace.clone(),
+                id,
+                rows,
+                cols,
+            })
+            .await?
+        {
+            Response::Terminal { terminal } => Ok(terminal),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// Run the conversation again from an edited prompt; answers with the
     /// session it now continues in.
     pub async fn edit_prompt(

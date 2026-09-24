@@ -391,6 +391,35 @@ pub enum Request {
     /// Forget a note.
     RemoveNote { id: String },
 
+    /// Saved commands and prompts: a project's own and the global ones, or
+    /// only the global ones when `project` is absent. By name.
+    ListQuickCommands {
+        #[serde(default)]
+        project: Option<ProjectName>,
+    },
+    /// Save a quick command: new without an `id`, a replacement with one.
+    SaveQuickCommand {
+        #[serde(default)]
+        id: Option<String>,
+        #[serde(default)]
+        project: Option<ProjectName>,
+        name: String,
+        kind: crate::model::QuickCommandKind,
+        body: String,
+    },
+    /// Forget a quick command.
+    RemoveQuickCommand { id: String },
+    /// Run a shell quick command in a new terminal in the workspace, which
+    /// stays open on a shell afterwards so its output can be read. A prompt
+    /// command is refused: sending a prompt is the conversation's to do,
+    /// through `SendMessage` or `StartSession`.
+    RunQuickCommand {
+        workspace: WorkspaceId,
+        id: String,
+        rows: u16,
+        cols: u16,
+    },
+
     /// The files in a workspace, best matches for `query` first.
     ///
     /// What `@` in the composer reaches for, and what a quick-open will.
@@ -757,6 +786,12 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    QuickCommands {
+        commands: Vec<crate::model::QuickCommand>,
+    },
+    QuickCommand {
+        command: crate::model::QuickCommand,
     },
 }
 

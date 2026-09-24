@@ -1140,10 +1140,25 @@ fn a_new_worktree_gets_what_the_project_said_it_needs() {
         "TOKEN=secret\n",
         "the untracked file the project named came across"
     );
-    assert!(
-        worktree.join(".setup-ran").is_file(),
-        "the setup command ran in the new worktree"
-    );
+    // The commands run in a terminal of the workspace's own, where the
+    // reader can watch them, rather than inside the request.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !worktree.join(".setup-ran").is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the setup command never ran in the new worktree"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    match fixture.ask(Request::WorkspaceTerminals {
+        workspace: workspace.id(),
+    }) {
+        Response::Terminals { terminals } => assert!(
+            terminals.iter().any(|terminal| terminal.title == "setup"),
+            "in a terminal called setup: {terminals:?}"
+        ),
+        other => panic!("expected terminals, got {other:?}"),
+    }
 }
 
 #[test]
@@ -1295,4 +1310,80 @@ fn notes_are_kept_per_project_and_survive_an_edit() {
         Response::Notes { notes } => assert!(notes.is_empty()),
         other => panic!("expected notes, got {other:?}"),
     }
+}
+
+#[test]
+fn a_quick_command_runs_in_a_terminal_named_after_it() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "quick".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let shell = match fixture.ask(Request::SaveQuickCommand {
+        id: None,
+        project: Some(project.clone()),
+        name: "mark".into(),
+        kind: ginka_protocol::model::QuickCommandKind::Shell,
+        body: "echo quick > .quick-ran".into(),
+    }) {
+        Response::QuickCommand { command } => command,
+        other => panic!("expected a command, got {other:?}"),
+    };
+    let prompt = match fixture.ask(Request::SaveQuickCommand {
+        id: None,
+        project: None,
+        name: "Review".into(),
+        kind: ginka_protocol::model::QuickCommandKind::Prompt,
+        body: "review the diff".into(),
+    }) {
+        Response::QuickCommand { command } => command,
+        other => panic!("expected a command, got {other:?}"),
+    };
+    match fixture.ask(Request::ListQuickCommands {
+        project: Some(project),
+    }) {
+        Response::QuickCommands { commands } => assert_eq!(commands.len(), 2),
+        other => panic!("expected commands, got {other:?}"),
+    }
+
+    fixture.ask(Request::RunQuickCommand {
+        workspace: workspace.id(),
+        id: shell.id,
+        rows: 24,
+        cols: 80,
+    });
+    let worktree = workspace.worktree.path.clone();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !worktree.join(".quick-ran").is_file() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the command never ran"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    match fixture.ask(Request::WorkspaceTerminals {
+        workspace: workspace.id(),
+    }) {
+        Response::Terminals { terminals } => {
+            assert!(terminals.iter().any(|terminal| terminal.title == "mark"))
+        }
+        other => panic!("expected terminals, got {other:?}"),
+    }
+    assert!(
+        fixture
+            .service
+            .handle(Request::RunQuickCommand {
+                workspace: workspace.id(),
+                id: prompt.id,
+                rows: 24,
+                cols: 80,
+            })
+            .is_err(),
+        "a prompt is the conversation's to send"
+    );
 }

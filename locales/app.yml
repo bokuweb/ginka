@@ -1205,3 +1205,36 @@ transcript.edit.tooltip:
 composer.prompt.editing:
   en: Editing a sent prompt — ↩ runs the conversation again from here; the original is kept
   ja: 送信済みプロンプトを編集中 — ↩ でここから会話をやり直します（元の会話は残ります）
+palette.quick.run:
+  en: "Run: %{name}"
+  ja: "実行: %{name}"
+palette.quick.send:
+  en: "Send: %{name}"
+  ja: "送信: %{name}"
+settings.quick:
+  en: Quick commands
+  ja: クイックコマンド
+settings.quick.note:
+  en: Saved shell commands and prompts. Shell ones run in a new terminal from the dock's ▶ or the palette; prompts are sent to the conversation.
+  ja: 保存したシェルコマンドとプロンプト。シェルはドックの ▶ かパレットから新しいターミナルで実行し、プロンプトは会話に送ります。
+settings.quick.name:
+  en: Name
+  ja: 名前
+settings.quick.body:
+  en: Command or prompt
+  ja: コマンドまたはプロンプト
+settings.quick.shell:
+  en: Shell
+  ja: シェル
+settings.quick.prompt:
+  en: Prompt
+  ja: プロンプト
+settings.quick.everywhere:
+  en: All projects
+  ja: すべてのプロジェクト
+settings.quick.add:
+  en: Add
+  ja: 追加
+terminal.quick:
+  en: Quick commands
+  ja: クイックコマンド

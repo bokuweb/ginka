@@ -344,6 +344,23 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_quick_commands",
+            description: "The reader's saved shell commands and prompts: a project's own and the global ones.",
+            schema: json!({
+                "type": "object",
+                "properties": {"project": {"type": "string"}},
+            }),
+        },
+        Tool {
+            name: "ginka_quick_run",
+            description: "Run a saved shell command in a new terminal in a workspace; answers with the terminal id.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace, "id": {"type": "string"}},
+                "required": ["workspace", "id"],
+            }),
+        },
+        Tool {
             name: "ginka_notes",
             description: "The reader's markdown notes, most recently touched first; one project's when project is given.",
             schema: json!({
@@ -733,6 +750,19 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 None if flag("unstaged") => ginka_protocol::model::ChangeSource::Unstaged,
                 None => ginka_protocol::model::ChangeSource::Uncommitted,
             },
+        },
+        "ginka_quick_commands" => Request::ListQuickCommands {
+            project: maybe("project").map(ProjectName),
+        },
+        "ginka_quick_run" => Request::RunQuickCommand {
+            workspace: WorkspaceId(text("workspace")?),
+            // A string id; a number is read as one, which is what an agent
+            // that copied it from a listing may hand back.
+            id: maybe("id")
+                .or_else(|| number("id").map(|id| id.to_string()))
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            rows: 24,
+            cols: 100,
         },
         "ginka_notes" => Request::ListNotes {
             project: maybe("project").map(ProjectName),
