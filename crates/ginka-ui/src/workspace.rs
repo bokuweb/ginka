@@ -341,6 +341,10 @@ pub struct SessionRow {
     /// Relative time, shown when the row is not running.
     pub age: SharedString,
     pub archived: bool,
+    /// Kept at the top of its project's list, in a section of its own.
+    pub pinned: bool,
+    /// Follow-ups waiting in the session's queue, shown beside the status.
+    pub queued: u32,
     /// Whether semantic search is ready for agents started in this worktree.
     pub indexed: bool,
 }
@@ -356,7 +360,16 @@ impl SessionRow {
         Self {
             workspace: summary.id(),
             session: session.map(|session| session.id.clone()),
-            title: title_for(&summary.worktree.name).into(),
+            // The conversation's own title when it has one — the reader's
+            // rename, or what the opening prompt seeded — and the worktree's
+            // name otherwise, which is what a row with no session is about.
+            title: session
+                .and_then(|session| session.title.as_deref())
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+                .map(str::to_string)
+                .unwrap_or_else(|| title_for(&summary.worktree.name))
+                .into(),
             account: session.map(|session| session.account.clone()),
             model: session.and_then(|session| session.model.clone()),
             reasoning_effort: session.and_then(|session| session.reasoning_effort.clone()),
@@ -379,6 +392,8 @@ impl SessionRow {
                 .unwrap_or_default()
                 .into(),
             archived: summary.worktree.archived,
+            pinned: summary.worktree.pinned,
+            queued: summary.queued,
             indexed: summary.indexed,
         }
     }
@@ -459,6 +474,8 @@ impl SessionRow {
             state,
             age: age.into(),
             archived,
+            pinned: false,
+            queued: 0,
             indexed: false,
         }
     }
@@ -537,6 +554,12 @@ impl SessionRow {
     /// The reorder animates on the standard curve (`docs/ui.md` §3.2). Sorting
     /// is stable so equal rows keep their relative order and nothing jumps
     /// under the cursor for no reason.
+    /// The order the session list uses: pinned rows first — the reader put
+    /// them there — and then the attention sort within each part.
+    pub fn list_rank(&self) -> (bool, u8) {
+        (!self.pinned, self.attention_rank())
+    }
+
     pub fn attention_rank(&self) -> u8 {
         match self.state {
             AgentState::Working => 0,
@@ -644,6 +667,45 @@ impl StatusFilter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pinned_row_comes_before_working_ones() {
+        let mut rows = SessionRow::samples();
+        let quiet = rows
+            .iter()
+            .position(|row| row.state == AgentState::Idle)
+            .expect("an idle sample");
+        rows[quiet].pinned = true;
+        rows.sort_by_key(SessionRow::list_rank);
+        assert!(rows[0].pinned);
+        assert_eq!(
+            rows[1].state,
+            AgentState::Working,
+            "then the attention sort"
+        );
+    }
+
+    #[test]
+    fn a_renamed_conversation_is_listed_by_its_title() {
+        let mut session = session("claude", SessionState::Idle);
+        session.title = Some("Speed up fixture CI".into());
+        let row = SessionRow::from_summary(&summary(Some(session.clone())), 1_000_000);
+        assert_eq!(row.title.as_ref(), "Speed up fixture CI");
+        session.title = Some("  ".into());
+        let row = SessionRow::from_summary(&summary(Some(session)), 1_000_000);
+        assert_ne!(
+            row.title.as_ref(),
+            "  ",
+            "a blank title falls back to the worktree"
+        );
+    }
+
+    #[test]
+    fn a_summary_carries_its_pin() {
+        let mut summary = summary(None);
+        summary.worktree.pinned = true;
+        assert!(SessionRow::from_summary(&summary, 1_000_000).pinned);
+    }
 
     #[test]
     fn the_status_filter_admits_its_own_state_and_cycles_back() {
@@ -874,6 +936,7 @@ mod tests {
             session,
             last_commit_at: Some(900_000),
             indexed: false,
+            queued: 0,
         }
     }
 

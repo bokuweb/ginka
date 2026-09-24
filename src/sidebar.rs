@@ -14,12 +14,12 @@
 //! chat" is how a chat is started in it, and a heading that could only be read
 //! would leave that flow with no way in.
 
-use ginka_protocol::{ProjectName, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::input::{Input, InputState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{
     Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
@@ -47,6 +47,21 @@ pub enum SidebarEvent {
     /// The reader picked one of the places beside the projects: the inbox,
     /// the notes, the settings — or a project again.
     Open(Place),
+    /// Keep a workspace at the top of its project's list, or stop.
+    Pin {
+        workspace: WorkspaceId,
+        pinned: bool,
+    },
+    /// Move a workspace to the archived section, or bring it back.
+    Archive {
+        workspace: WorkspaceId,
+        archived: bool,
+    },
+    /// Give a conversation a title of the reader's own.
+    Rename {
+        session: SessionId,
+        title: String,
+    },
 }
 
 /// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
@@ -104,6 +119,11 @@ pub struct SessionSidebar {
     inbox_unread: bool,
     /// Which sessions are listed, by what they are doing.
     status: ginka_ui::workspace::StatusFilter,
+    /// The row whose actions are open: MonoCode's session menu, drawn under
+    /// the row rather than floating, so the list stays one column.
+    menu_for: Option<WorkspaceId>,
+    /// The conversation being renamed, and the field its title is typed in.
+    renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
 }
 
 impl SessionSidebar {
@@ -122,6 +142,8 @@ impl SessionSidebar {
             place: Place::Workspace,
             inbox_unread: false,
             status: ginka_ui::workspace::StatusFilter::All,
+            menu_for: None,
+            renaming: None,
         }
     }
 
@@ -603,102 +625,281 @@ impl SessionSidebar {
         row: &SessionRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let menu_open = self.menu_for.as_ref() == Some(&row.workspace);
+        let actions = menu_open.then(|| self.row_actions(row, cx).into_any_element());
         let tokens = Tokens::global(cx);
         let selected = self.selected.as_ref() == Some(&row.workspace);
         let branch = row.branch_worth_showing();
         let workspace = row.workspace.clone();
+        let rename_field = self
+            .renaming
+            .as_ref()
+            .filter(|(renaming, _, _)| renaming == &row.workspace)
+            .map(|(_, _, field)| field.clone());
+
+        let menu_workspace = row.workspace.clone();
 
         v_flex()
-            .id(("session", index))
             .w_full()
-            // Indented under the project heading: the indent is what says
-            // these belong to it.
-            .ml_3()
-            .px_2p5()
-            .py_1p5()
-            .gap_0p5()
-            .rounded(px(tokens.radius.row))
-            .when(selected, |this| this.bg(tokens.colors().row_active()))
-            .hover(|this| this.bg(tokens.colors().row_hover()))
-            .on_click(cx.listener(move |this, _, _, cx| this.select_workspace(&workspace, cx)))
             .child(
-                h_flex()
+                v_flex()
+                    .id(("session", index))
                     .w_full()
-                    .gap_2()
-                    .items_center()
-                    .child(row.agent.glyph().size_3p5().text_color(if selected {
-                        tokens.colors().text_secondary
-                    } else {
-                        tokens.colors().text_muted
-                    }))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .when(selected, |this| this.font_medium())
-                            .text_color(if selected {
-                                tokens.colors().text_primary
-                            } else {
-                                tokens.colors().text_secondary
-                            })
-                            .truncate()
-                            .child(row.title.clone()),
+                    // Indented under the project heading: the indent is what says
+                    // these belong to it.
+                    .ml_3()
+                    .px_2p5()
+                    .py_1p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .when(selected, |this| this.bg(tokens.colors().row_active()))
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.select_workspace(&workspace, cx)),
                     )
-                    .child(self.status(row, cx)),
-            )
-            .when(branch || row.status.dirty || row.status.conflict, |this| {
-                this.child(
-                    h_flex()
-                        .w_full()
-                        .gap_1p5()
-                        .items_center()
-                        .when(branch, |this| {
-                            this.child(
-                                Icon::empty()
-                                    .path(ginka_ui::assets::icon::GIT_BRANCH)
-                                    .size_3()
-                                    .text_color(tokens.colors().text_muted),
-                            )
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(row.agent.glyph().size_3p5().text_color(if selected {
+                                tokens.colors().text_secondary
+                            } else {
+                                tokens.colors().text_muted
+                            }))
+                            .child(match rename_field {
+                                Some(field) => div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .child(Input::new(&field))
+                                    .into_any_element(),
+                                None => div()
+                                    .flex_1()
+                                    .text_sm()
+                                    .when(selected, |this| this.font_medium())
+                                    .text_color(if selected {
+                                        tokens.colors().text_primary
+                                    } else {
+                                        tokens.colors().text_secondary
+                                    })
+                                    .truncate()
+                                    .child(row.title.clone())
+                                    .into_any_element(),
+                            })
+                            .when(row.pinned, |this| {
+                                this.child(
+                                    Icon::new(IconName::StarFill)
+                                        .size_3()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                            })
+                            .when(row.queued > 0, |this| {
+                                // How much is waiting, in a word and a number,
+                                // so a held queue is findable from the list.
+                                this.child(
+                                    div()
+                                        .px_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .bg(tokens.colors().row_active())
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(
+                                            rust_i18n::t!("sidebar.queued", count = row.queued)
+                                                .to_string(),
+                                        ),
+                                )
+                            })
+                            .child(self.status(row, cx))
                             .child(
                                 div()
-                                    .flex_1()
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_muted)
-                                    // Paths and branches carry their meaning in
-                                    // the tail, so the head is what gets
-                                    // dropped.
-                                    .truncate()
-                                    .child(row.branch.clone()),
-                            )
-                        })
-                        .when(!branch, |this| this.child(div().flex_1()))
-                        .when(row.status.conflict, |this| {
-                            this.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(tokens.colors().status_error)
-                                    .child("!"),
-                            )
-                        })
-                        .when(row.status.dirty && !row.status.conflict, |this| {
-                            // An unlabelled dot: the sidebar has no room for
-                            // the word, and "there are changes here" is the
-                            // whole message.
-                            this.child(
-                                div()
-                                    .size_1p5()
-                                    .rounded_full()
-                                    .bg(tokens.colors().status_attention),
-                            )
-                        })
-                        .children(row.divergence().map(|summary| {
-                            div()
-                                .text_xs()
-                                .text_color(tokens.colors().text_muted)
-                                .child(summary)
-                        })),
+                                    .id(("session-menu", index))
+                                    .px_0p5()
+                                    .rounded(px(tokens.radius.control()))
+                                    .cursor_pointer()
+                                    .when(menu_open, |this| this.bg(tokens.colors().row_active()))
+                                    .hover(|this| this.bg(tokens.colors().row_active()))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.menu_for = (this.menu_for.as_ref()
+                                            != Some(&menu_workspace))
+                                        .then(|| menu_workspace.clone());
+                                        cx.notify();
+                                    }))
+                                    .child(
+                                        Icon::new(IconName::Ellipsis)
+                                            .size_3p5()
+                                            .text_color(tokens.colors().text_muted),
+                                    ),
+                            ),
+                    )
+                    .when(branch || row.status.dirty || row.status.conflict, |this| {
+                        this.child(
+                            h_flex()
+                                .w_full()
+                                .gap_1p5()
+                                .items_center()
+                                .when(branch, |this| {
+                                    this.child(
+                                        Icon::empty()
+                                            .path(ginka_ui::assets::icon::GIT_BRANCH)
+                                            .size_3()
+                                            .text_color(tokens.colors().text_muted),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            // Paths and branches carry their meaning in
+                                            // the tail, so the head is what gets
+                                            // dropped.
+                                            .truncate()
+                                            .child(row.branch.clone()),
+                                    )
+                                })
+                                .when(!branch, |this| this.child(div().flex_1()))
+                                .when(row.status.conflict, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.colors().status_error)
+                                            .child("!"),
+                                    )
+                                })
+                                .when(row.status.dirty && !row.status.conflict, |this| {
+                                    // An unlabelled dot: the sidebar has no room for
+                                    // the word, and "there are changes here" is the
+                                    // whole message.
+                                    this.child(
+                                        div()
+                                            .size_1p5()
+                                            .rounded_full()
+                                            .bg(tokens.colors().status_attention),
+                                    )
+                                })
+                                .children(row.divergence().map(|summary| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(summary)
+                                })),
+                        )
+                    }),
+            )
+            .children(actions)
+    }
+
+    /// Start renaming a conversation, with its title in a focused field.
+    fn start_rename(
+        &mut self,
+        workspace: WorkspaceId,
+        session: SessionId,
+        title: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut state = InputState::new(window, cx);
+            state.set_value(title.to_string(), window, cx);
+            state
+        });
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let title = field.read(cx).value().trim().to_string();
+                if let Some((_, session, _)) = this.renaming.take() {
+                    cx.emit(SidebarEvent::Rename { session, title });
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.renaming = None;
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.menu_for = None;
+        self.renaming = Some((workspace, session, field));
+        cx.notify();
+    }
+
+    /// The row's actions, under it while its menu is open.
+    fn row_actions(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        let action = |id: String, label: String| {
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py_0p5()
+                .rounded(px(tokens.radius.control()))
+                .text_xs()
+                .text_color(tokens.colors().text_secondary)
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .child(label)
+        };
+        let key = row.workspace.0.clone();
+        let (pin_ws, archive_ws) = (row.workspace.clone(), row.workspace.clone());
+        let pinned = row.pinned;
+        let rename = row.session.clone().map(|session| {
+            let workspace = row.workspace.clone();
+            let title = row.title.clone();
+            action(
+                format!("rename:{key}"),
+                rust_i18n::t!("sidebar.action.rename").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.start_rename(
+                    workspace.clone(),
+                    session.clone(),
+                    title.clone(),
+                    window,
+                    cx,
+                );
+            }))
+        });
+        h_flex()
+            .ml_3()
+            .px_2()
+            .pb_1()
+            .gap_1()
+            .children(rename)
+            .child(
+                action(
+                    format!("pin:{key}"),
+                    if pinned {
+                        rust_i18n::t!("sidebar.action.unpin").to_string()
+                    } else {
+                        rust_i18n::t!("sidebar.action.pin").to_string()
+                    },
                 )
-            })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.menu_for = None;
+                    cx.emit(SidebarEvent::Pin {
+                        workspace: pin_ws.clone(),
+                        pinned: !pinned,
+                    });
+                    cx.notify();
+                })),
+            )
+            .child(
+                action(
+                    format!("archive:{key}"),
+                    rust_i18n::t!("sidebar.action.archive").to_string(),
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    this.menu_for = None;
+                    cx.emit(SidebarEvent::Archive {
+                        workspace: archive_ws.clone(),
+                        archived: true,
+                    });
+                    cx.notify();
+                })),
+            )
     }
 
     fn archived_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -766,6 +967,25 @@ impl SessionSidebar {
                     .text_color(tokens.colors().text_muted)
                     .child(row.age.clone()),
             )
+            .child({
+                let workspace = row.workspace.clone();
+                div()
+                    .id(("restore", index))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(tokens.radius.control()))
+                    .text_xs()
+                    .text_color(tokens.colors().text_secondary)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .on_click(cx.listener(move |_, _, _, cx| {
+                        cx.emit(SidebarEvent::Archive {
+                            workspace: workspace.clone(),
+                            archived: false,
+                        });
+                    }))
+                    .child(rust_i18n::t!("sidebar.action.restore").to_string())
+            })
     }
 
     /// First run: nothing is registered yet.
@@ -857,7 +1077,9 @@ impl Render for SessionSidebar {
             .map(|(index, row)| (index, row.clone()))
             .collect();
         // Stable: equal ranks keep their insertion order.
-        active.sort_by_key(|(_, row)| row.attention_rank());
+        // Pinned first, then the attention sort; stable, so equal ranks keep
+        // their insertion order.
+        active.sort_by_key(|(_, row)| row.list_rank());
         // Grouped under their projects, which is also what orders the projects:
         // the one with an agent working in it rises the way a row does.
         let active_rows: Vec<SessionRow> = active.iter().map(|(_, row)| row.clone()).collect();

@@ -142,6 +142,10 @@ active conversation. With nothing selected, the rail stands alone.
   selected project remains highlighted while one of its sessions is open, and
   a lit place outranks it. The rail cannot be closed while a place other than
   a project is showing: there would be nothing on screen to get back from.
+- **Row menu** — a `…` on each session row opens its actions under it:
+  *Rename* (the title becomes a field; ↩ keeps it), *Pin* / *Unpin*
+  (pinned rows lead the list and carry a star) and *Archive*. Archived rows
+  offer *Restore*. A row with prompts waiting says how many.
 - **Status filter** — a chip beside the session search cycles *All*,
   *Working*, *Needs you* and *Done*; `⌘1–9` pick only the rows it shows.
 - **Session list header** — `Workspace` and a `+` for a new session. The whole
@@ -284,7 +288,12 @@ active conversation. With nothing selected, the rail stands alone.
   later without creating a transcript entry. *Send now* is enabled only when
   the current live transport accepts steering; a refusal leaves the row in
   place. A queued prompt becomes immutable transcript history at dispatch,
-  never at enqueue time.
+  never at enqueue time. `⌘↩` while an agent works queues even where the
+  turn could be steered (the Codex CLI's Tab). The card's head carries the
+  count, a *Held* mark, *Hold/Resume* and *Clear*; each row also offers
+  *Interrupt & send*, which stops the running turn and sends that row next
+  (opencodex's Steer). A Stop or a failed turn holds the queue rather than
+  emptying it, and a restarted daemon brings it back held.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
 - **Context bar** — a hairline strip under the composer: the project chip on
@@ -345,7 +354,8 @@ save button. The daemon keeps them (`ginka notes`, MCP).
 
 ### 3.7 Settings
 
-Appearance (System, Dark, Light) and language (System, English, 日本語), each
+Appearance (System, Dark, Light), language (System, English, 日本語) and
+notifications (on, off), each
 a segmented control that applies at once and persists to `app.json`, and the
 version with the state directory. Opened from the rail or `⌘,`.
 

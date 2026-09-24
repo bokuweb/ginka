@@ -29,6 +29,9 @@ pub struct AppSettings {
     pub recent_models: BTreeMap<String, String>,
     /// Last non-default effort and tier per provider/model pair.
     pub recent_model_options: BTreeMap<String, RecentModelOptions>,
+    /// Tell the desktop when an agent finishes, fails or needs the reader
+    /// while the window is not the one in front.
+    pub notifications: bool,
 }
 
 impl Default for AppSettings {
@@ -51,6 +54,7 @@ impl Default for AppSettings {
             locale: None,
             recent_models: BTreeMap::new(),
             recent_model_options: BTreeMap::new(),
+            notifications: true,
         }
     }
 }
@@ -205,6 +209,11 @@ pub struct DaemonSettings {
     /// git would otherwise collect. Rewinding is a thing done to recent work:
     /// past this many turns the reader is reading history, not undoing it.
     pub checkpoint_limit: u32,
+    /// Keep the machine awake while an agent is working: Orca's
+    /// "caffeinate". An agent left running when the lid closes is an agent
+    /// that stops halfway; one that has finished lets the machine sleep again.
+    /// macOS only (`caffeinate -i -w <pid>`); ignored elsewhere.
+    pub keep_awake: bool,
     /// Providers the user has switched off. Absent means enabled, so the file
     /// stays empty until someone actually turns something off.
     pub disabled_providers: Vec<ProviderKind>,
@@ -310,6 +319,7 @@ impl Default for DaemonSettings {
             status_poll_secs: 60,
             retention_days: 30,
             checkpoint_limit: 200,
+            keep_awake: true,
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),

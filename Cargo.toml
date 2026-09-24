@@ -50,6 +50,9 @@ wry = { version = "0.53.3", package = "lb-wry" }
 # The terminal stack the roadmap picked (§4.3): the same one Zed and waku use.
 alacritty_terminal = "0.26"
 anyhow = "1"
+# `.worktreeinclude` patterns, read the way gitignore reads them. Already in
+# the graph through the toolkit's `ignore`, at the version it locks.
+globset = "0.4"
 async-channel = "2"
 async-net = "2"
 # Signals as a stream, from the same ecosystem as the rest of the async stack.

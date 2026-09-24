@@ -118,7 +118,8 @@ impl Service {
                 events.clone(),
                 settings.checkpoint_limit,
                 crate::blob::BlobStore::new(paths.blobs()),
-            ),
+            )
+            .with_keep_awake(settings.keep_awake),
             paths,
             terminals: crate::terminal::Terminals::new(events.clone()),
             conn,
@@ -290,6 +291,16 @@ impl Service {
                     std::fs::create_dir_all(parent).map_err(failed)?;
                 }
                 git::add_worktree(&project.path, &path, &branch, &base).map_err(failed)?;
+                // The ignored files the repository asks every worktree to
+                // start with (`.worktreeinclude`). Best-effort: a missing
+                // `.env` should not cost the reader the worktree itself.
+                match crate::worktree_include::copy_included(&project.path, &path) {
+                    Ok(copied) if !copied.is_empty() => {
+                        tracing::info!(count = copied.len(), "copied .worktreeinclude files");
+                    }
+                    Ok(_) => {}
+                    Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
+                }
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
@@ -493,7 +504,42 @@ impl Service {
                 Ok(Response::QueuedMessages {
                     messages: self.sessions.queued_messages(&session),
                     can_send_now: self.sessions.can_send_queued_message_now(&session),
+                    paused: self.sessions.queue_paused(&session),
                 })
+            }
+            Request::QueueMessage { session, text } => {
+                self.session(&session)?;
+                if self.sessions.would_wait(&session) {
+                    let text = self.expand_attachments(&text);
+                    self.sessions.enqueue(&session, text).map_err(failed)?;
+                    Ok(Response::Ack)
+                } else {
+                    // Nothing to wait behind: a queue of one is a send.
+                    self.send_message(&session, text)
+                }
+            }
+            Request::InterruptWithQueuedMessage { session, id } => {
+                self.session(&session)?;
+                let stopped = self
+                    .sessions
+                    .interrupt_with_queued(&session, id)
+                    .map_err(failed)?;
+                if !stopped {
+                    self.dispatch_front(&session)?;
+                }
+                Ok(Response::Ack)
+            }
+            Request::SetQueuePaused { session, paused } => {
+                self.session(&session)?;
+                if self.sessions.set_queue_paused(&session, paused) {
+                    self.dispatch_front(&session)?;
+                }
+                Ok(Response::Ack)
+            }
+            Request::ClearQueue { session } => {
+                self.session(&session)?;
+                self.sessions.clear_queue(&session);
+                Ok(Response::Ack)
             }
             Request::EditQueuedMessage { session, id, text } => {
                 self.session(&session)?;
@@ -1593,6 +1639,14 @@ impl Service {
         Ok(Response::Ack)
     }
 
+    /// Send the front of an idle session's queue, the way a follow-up is sent.
+    fn dispatch_front(&mut self, session: &SessionId) -> Result<(), RpcError> {
+        if let Some(message) = self.sessions.take_front(session) {
+            self.send_message(session, message.text)?;
+        }
+        Ok(())
+    }
+
     /// Compact one provider thread as its own resumed turn.
     ///
     /// Refusing active sessions is load-bearing: a compact command must never
@@ -1820,12 +1874,17 @@ impl Service {
         let last_commit_at = git::last_commit_time(&worktree.path);
         let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
             .unwrap_or_default();
+        let queued = session
+            .as_ref()
+            .map(|session| self.sessions.queued_count(&session.id))
+            .unwrap_or(0);
         WorkspaceSummary {
             indexed: crate::tools::is_indexed(&worktree.path),
             worktree,
             status,
             session,
             last_commit_at,
+            queued,
         }
     }
 }

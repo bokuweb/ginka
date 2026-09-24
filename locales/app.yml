@@ -923,6 +923,9 @@ cli.search.empty:
 cli.notes.empty:
   en: "No notes yet."
   ja: "ノートはまだありません。"
+cli.queue.paused:
+  en: "(held — `ginka session queue-pause <session> --resume` lets it go)"
+  ja: "（保留中 — `ginka session queue-pause <session> --resume` で再開）"
 cli.review.empty:
   en: no comments are waiting
   ja: 保留中のコメントはありません
@@ -1127,3 +1130,66 @@ sessions.filter.attention:
 sessions.filter.idle:
   en: Done
   ja: 完了
+composer.queue.interrupt:
+  en: Interrupt & send
+  ja: 中断して送信
+composer.queue.interrupt_tooltip:
+  en: Stop the running turn and send this next; the rest keeps its order
+  ja: 実行中のターンを止めてこれを次に送ります。残りは順番どおり続きます
+composer.queue.held:
+  en: Held
+  ja: 保留中
+composer.queue.pause:
+  en: Hold
+  ja: 保留
+composer.queue.resume:
+  en: Resume
+  ja: 再開
+composer.queue.clear:
+  en: Clear
+  ja: すべて削除
+sidebar.queued:
+  en: "%{count} queued"
+  ja: "%{count} 件待ち"
+sidebar.action.rename:
+  en: Rename
+  ja: 名前を変更
+sidebar.action.pin:
+  en: Pin
+  ja: ピン留め
+sidebar.action.unpin:
+  en: Unpin
+  ja: ピンを外す
+sidebar.action.archive:
+  en: Archive
+  ja: アーカイブ
+sidebar.action.restore:
+  en: Restore
+  ja: 戻す
+notify.finished:
+  en: Finished
+  ja: 完了しました
+notify.needs_you:
+  en: Needs your answer
+  ja: 回答を待っています
+notify.failed:
+  en: Failed
+  ja: 失敗しました
+settings.notifications:
+  en: Notifications
+  ja: 通知
+settings.notifications.note:
+  en: Tell the desktop when an agent finishes, fails or asks something while this window is in the background.
+  ja: ウィンドウが背面にあるとき、エージェントの完了・失敗・質問をデスクトップに通知します。
+settings.on:
+  en: "On"
+  ja: オン
+settings.off:
+  en: "Off"
+  ja: オフ
+surface.git.commit_push:
+  en: Commit & Push
+  ja: コミットしてプッシュ
+surface.git.commit_pr:
+  en: Commit & Create PR
+  ja: コミットして PR を作成
