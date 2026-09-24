@@ -2646,7 +2646,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
             .map(|account| account.id.0.clone())
             .collect::<Vec<_>>()
     };
-    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert_eq!(
+        ids(&accounts_of(&mut fixture)),
+        vec!["claude", "codex", "gemini", "opencode"]
+    );
 
     fixture.ask(Request::AddAccount {
         id: ginka_protocol::AccountId("codex-work".into()),
@@ -2654,7 +2657,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         label: "Work".into(),
     });
     let accounts = accounts_of(&mut fixture);
-    assert_eq!(ids(&accounts), vec!["claude", "codex", "codex-work"]);
+    assert_eq!(
+        ids(&accounts),
+        vec!["claude", "codex", "codex-work", "gemini", "opencode"]
+    );
     let work = &accounts[2];
     assert_eq!(work.label, "Work");
     assert!(!work.is_default);
@@ -2697,7 +2703,10 @@ fn the_defaults_are_always_listed_and_a_named_account_can_be_forgotten() {
         id: ginka_protocol::AccountId("codex-work".into()),
         delete_home: false,
     });
-    assert_eq!(ids(&accounts_of(&mut fixture)), vec!["claude", "codex"]);
+    assert_eq!(
+        ids(&accounts_of(&mut fixture)),
+        vec!["claude", "codex", "gemini", "opencode"]
+    );
     assert!(
         accounts_of(&mut fixture)
             .iter()

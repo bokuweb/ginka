@@ -487,10 +487,18 @@ impl Registry {
     /// Add a driver, replacing any with the same id.
     ///
     /// Replacing rather than appending is what lets a test point the `claude`
-    /// id at a fake agent binary without the real one shadowing it.
+    /// id at a fake agent binary without the real one shadowing it. A
+    /// replacement keeps its predecessor's place, so the offering order does
+    /// not depend on which drivers were overridden.
     pub fn insert(&mut self, driver: Arc<dyn AgentDriver>) {
-        self.drivers.retain(|existing| existing.id() != driver.id());
-        self.drivers.push(driver);
+        match self
+            .drivers
+            .iter_mut()
+            .find(|existing| existing.id() == driver.id())
+        {
+            Some(existing) => *existing = driver,
+            None => self.drivers.push(driver),
+        }
     }
 
     /// The driver with this id.
@@ -534,6 +542,7 @@ mod tests {
         let before = registry.ids().len();
         registry.insert(Arc::new(claude::ClaudeDriver::with_program("/bin/echo")));
         assert_eq!(registry.ids().len(), before);
+        assert_eq!(registry.ids().first(), Some(&"claude"), "in its own place");
         assert_eq!(
             registry.get("claude").unwrap().probe_command().program,
             "/bin/echo"
