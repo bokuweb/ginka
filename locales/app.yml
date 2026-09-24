@@ -811,6 +811,12 @@ surface.git.summary:
 surface.git.section.unstaged:
   en: Changes
   ja: 未ステージの変更
+surface.git.unified:
+  en: Unified
+  ja: 統合
+surface.git.split:
+  en: Split
+  ja: 左右
 surface.git.section.staged:
   en: Staged changes
   ja: ステージ済みの変更
