@@ -1682,3 +1682,81 @@ fn projects_keep_the_order_and_labels_the_reader_gives_them() {
             .is_err()
     );
 }
+
+fn new_workspace(
+    fixture: &mut Fixture,
+    project: &ProjectName,
+    branch: &str,
+) -> Result<ginka_protocol::model::WorkspaceSummary, String> {
+    match fixture.service.handle(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: branch.into(),
+        base: None,
+    }) {
+        Ok(Response::Workspace { workspace }) => Ok(workspace),
+        Ok(other) => panic!("expected a workspace, got {other:?}"),
+        Err(error) => Err(error.message),
+    }
+}
+
+#[test]
+fn a_worktree_deleted_by_hand_does_not_hold_its_branch_hostage() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "doomed").unwrap();
+    // Deleted outside the app, the way a cleanup script or a reader would.
+    std::fs::remove_dir_all(&workspace.worktree.path).unwrap();
+
+    fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    });
+    let listed = support::git(&fixture.repo(), &["worktree", "list", "--porcelain"]);
+    assert!(
+        !listed.contains("prunable"),
+        "git's record is gone too: {listed}"
+    );
+
+    // The branch is free again: a new workspace can take it.
+    new_workspace(&mut fixture, &project, "doomed").expect("the branch is not held");
+}
+
+#[test]
+fn a_locked_worktree_is_named_as_locked_and_removed_only_when_forced() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = new_workspace(&mut fixture, &project, "pinned-down").unwrap();
+    support::git(
+        &fixture.repo(),
+        &[
+            "worktree",
+            "lock",
+            "--reason",
+            "on a USB disk",
+            workspace.worktree.path.to_str().unwrap(),
+        ],
+    );
+
+    let refused = fixture
+        .service
+        .handle(Request::RemoveWorkspace {
+            workspace: workspace.id(),
+            force: false,
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("locked"), "{}", refused.message);
+    assert!(
+        refused.message.contains("on a USB disk"),
+        "{}",
+        refused.message
+    );
+    assert!(workspace.worktree.path.exists());
+
+    fixture.ask(Request::RemoveWorkspace {
+        workspace: workspace.id(),
+        force: true,
+    });
+    assert!(
+        !workspace.worktree.path.exists(),
+        "force goes through the lock"
+    );
+}
