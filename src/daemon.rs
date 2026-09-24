@@ -246,11 +246,13 @@ impl DaemonLink {
                 by_agent,
                 by_account,
                 plans,
+                rates_fetched_at,
             }) => Some(ginka_ui::reports::UsageReport {
                 by_day,
                 by_agent,
                 by_account,
                 plans,
+                rates_fetched_at,
             }),
             _ => None,
         }

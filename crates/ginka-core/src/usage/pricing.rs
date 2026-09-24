@@ -154,6 +154,77 @@ impl RateTable {
     }
 }
 
+/// Where the rate table is fetched from: the public, community-maintained
+/// table of per-token prices that most usage tools read. Data, fetched at
+/// most daily — never code, and never shipped in the binary.
+pub const PUBLISHED_RATES_URL: &str =
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+/// Read the published table: dollars per token, keyed by model. Entries
+/// with no per-token input and output price — images, audio, the schema's
+/// own sample — are left out rather than priced at zero.
+pub fn parse_published(text: &str, fetched_at: i64) -> Result<RateTable> {
+    let value: serde_json::Value = serde_json::from_str(text).context("reading the rate table")?;
+    let entries = value
+        .as_object()
+        .context("the rate table is not an object of models")?;
+    let mut table = RateTable::empty(fetched_at);
+    for (model, entry) in entries {
+        if model == "sample_spec" {
+            continue;
+        }
+        let price = |key: &str| entry.get(key).and_then(serde_json::Value::as_f64);
+        let (Some(input), Some(output)) = (
+            price("input_cost_per_token"),
+            price("output_cost_per_token"),
+        ) else {
+            continue;
+        };
+        let million = 1_000_000.0;
+        table.insert(
+            model,
+            ModelRate {
+                input_per_million: input * million,
+                output_per_million: output * million,
+                // A cache price the table does not give is the input price:
+                // closer than zero, and never a claim of free.
+                cache_read_per_million: price("cache_read_input_token_cost").unwrap_or(input)
+                    * million,
+                cache_write_per_million: price("cache_creation_input_token_cost").unwrap_or(input)
+                    * million,
+            },
+        );
+    }
+    Ok(table)
+}
+
+/// The rate table to use at `now`: the cached one while it is current,
+/// otherwise a fresh one from `fetch`, saved to `path`. When fetching fails
+/// the stale cache is still returned — yesterday's prices beat none — and
+/// `None` means there has never been a table.
+pub fn refresh(path: &Path, now: i64, fetch: impl FnOnce() -> Result<String>) -> Option<RateTable> {
+    let cached = RateTable::load(path).ok().flatten();
+    if let Some(table) = &cached
+        && !table.is_stale(now)
+        && !table.is_empty()
+    {
+        return cached;
+    }
+    match fetch().and_then(|text| parse_published(&text, now)) {
+        Ok(table) if !table.is_empty() => {
+            if let Err(error) = table.save(path) {
+                tracing::warn!(%error, "could not cache the rate table");
+            }
+            Some(table)
+        }
+        Ok(_) => cached,
+        Err(error) => {
+            tracing::info!(%error, "could not fetch the rate table; keeping what is cached");
+            cached
+        }
+    }
+}
+
 /// How much of a summary's cost we actually know.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CostQuality {

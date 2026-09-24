@@ -75,6 +75,9 @@ pub struct Service {
     settings: crate::settings::DaemonSettings,
     /// The last probe of every account's sign-in, and when it was taken.
     accounts: Option<(std::time::Instant, Vec<ginka_protocol::model::Account>)>,
+    /// The public rate table, as last cached, for pricing the turns a vendor
+    /// did not (§3.3 N13). Replaced by the daemon's daily refresh.
+    rates: Option<crate::usage::RateTable>,
     /// Set when a sign-in terminal closed: whatever the vendor said before,
     /// the next `Accounts` asks again.
     accounts_stale: Arc<std::sync::atomic::AtomicBool>,
@@ -112,6 +115,9 @@ impl Service {
                 crate::tools::CLI_ENV
             );
         }
+        let rates = crate::usage::RateTable::load(&paths.rates_cache())
+            .ok()
+            .flatten();
         Self {
             cli,
             sessions: Supervisor::new(
@@ -130,6 +136,7 @@ impl Service {
             agents: None,
             settings,
             accounts: None,
+            rates,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
         }
@@ -1044,9 +1051,13 @@ impl Service {
                 let days = days.unwrap_or(30);
                 let conn = self.conn();
                 Ok(Response::Usage {
-                    by_day: crate::usage::by_day(&conn, days).map_err(failed)?,
-                    by_agent: crate::usage::by_agent(&conn, days).map_err(failed)?,
-                    by_account: crate::usage::by_account(&conn, days).map_err(failed)?,
+                    by_day: crate::usage::by_day(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    by_agent: crate::usage::by_agent(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    by_account: crate::usage::by_account(&conn, days, self.rates.as_ref())
+                        .map_err(failed)?,
+                    rates_fetched_at: self.rates.as_ref().map(|rates| rates.fetched_at),
                     plans: crate::usage::plans(&conn).map_err(failed)?,
                 })
             }
@@ -2089,6 +2100,27 @@ impl Service {
             self.fire_cron(job);
         }
         due.len()
+    }
+
+    /// Whether the rate table should be fetched again at `now`: never when
+    /// the settings say not to, otherwise when there is none or it is a day
+    /// old. The fetch itself is the daemon's, outside the service's lock.
+    pub fn rates_due(&self, now: i64) -> Option<std::path::PathBuf> {
+        if !self.settings.fetch_rates {
+            return None;
+        }
+        let due = self
+            .rates
+            .as_ref()
+            .is_none_or(|rates| rates.is_empty() || rates.is_stale(now));
+        due.then(|| self.paths.rates_cache())
+    }
+
+    /// Use this rate table from now on.
+    pub fn set_rates(&mut self, rates: Option<crate::usage::RateTable>) {
+        if rates.is_some() {
+            self.rates = rates;
+        }
     }
 
     /// [`Service::run_due_cron`] on the daemon host's clock.

@@ -55,6 +55,11 @@ impl Paths {
         self.root.join(ginka_protocol::handshake::DAEMON_LOCK_FILE)
     }
 
+    /// The cached public rate table (§3.3 N13), beside the database.
+    pub fn rates_cache(&self) -> PathBuf {
+        self.root.join("rates.json")
+    }
+
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }

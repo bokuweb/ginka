@@ -90,6 +90,44 @@ fn retire_older(existing: &Handshake) -> bool {
     !is_listening(existing.port)
 }
 
+/// Fetch the public rate table if the service says it is due, without
+/// holding the service while the network answers.
+async fn refresh_rates(service: &Arc<Mutex<Service>>) {
+    let service = service.clone();
+    smol::unblock(move || {
+        let now = chrono_now();
+        let due = service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .rates_due(now);
+        let Some(path) = due else {
+            return;
+        };
+        let rates = ginka_core::usage::pricing::refresh(&path, now, || {
+            let body = ureq::get(ginka_core::usage::pricing::PUBLISHED_RATES_URL)
+                .call()?
+                .body_mut()
+                .with_config()
+                .limit(32 * 1024 * 1024)
+                .read_to_string()?;
+            Ok(body)
+        });
+        service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .set_rates(rates);
+    })
+    .await;
+}
+
+/// Unix seconds now.
+fn chrono_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or_default()
+}
+
 impl Daemon {
     /// Bind a loopback port, open the database and publish the handshake file.
     ///
@@ -220,15 +258,24 @@ impl Daemon {
                 // Often enough that a job due on the minute fires within it.
                 let cron_every = std::time::Duration::from_secs(20);
                 let mut next_cron = std::time::Instant::now() + cron_every;
+                // Asked hourly; the service says whether a day has passed.
+                // Not at once: a daemon that starts and stops again — a
+                // test, a version swap — has no use for prices.
+                let rates_every = std::time::Duration::from_secs(3_600);
+                let mut next_rates = std::time::Instant::now() + std::time::Duration::from_secs(60);
                 loop {
                     let now = std::time::Instant::now();
-                    let wake = next_sync.min(next_status).min(next_cron);
+                    let wake = next_sync.min(next_status).min(next_cron).min(next_rates);
                     if wake > now {
                         smol::Timer::at(wake).await;
                     }
                     let now = std::time::Instant::now();
                     let (sync, status) = (now >= next_sync, now >= next_status);
                     let cron = now >= next_cron;
+                    if now >= next_rates {
+                        next_rates = now + rates_every;
+                        refresh_rates(&service).await;
+                    }
                     if cron {
                         next_cron = now + cron_every;
                     }

@@ -381,6 +381,14 @@ pub struct UsageTotals {
     pub cost_usd: Option<f64>,
     /// How many turns are behind these numbers.
     pub turns: u32,
+    /// Whether some of `cost_usd` was priced from the public rate table
+    /// rather than reported by the vendor (§3.3 N13).
+    #[serde(default)]
+    pub estimated: bool,
+    /// Sessions whose cost neither the vendor nor the rate table knows, and
+    /// which `cost_usd` therefore leaves out.
+    #[serde(default)]
+    pub unpriced: u32,
 }
 
 /// What one day, agent or session cost.

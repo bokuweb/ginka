@@ -218,6 +218,9 @@ pub struct DaemonSettings {
     /// that stops halfway; one that has finished lets the machine sleep again.
     /// macOS only (`caffeinate -i -w <pid>`); ignored elsewhere.
     pub keep_awake: bool,
+    /// Fetch the public rate table, at most daily, to price the turns a
+    /// vendor does not (§3.3 N13). Off, costs are only what vendors report.
+    pub fetch_rates: bool,
     /// Providers the user has switched off. Absent means enabled, so the file
     /// stays empty until someone actually turns something off.
     pub disabled_providers: Vec<ProviderKind>,
@@ -324,6 +327,7 @@ impl Default for DaemonSettings {
             retention_days: 30,
             checkpoint_limit: 200,
             keep_awake: true,
+            fetch_rates: true,
             disabled_providers: Vec::new(),
             agents: BTreeMap::new(),
             accounts: BTreeMap::new(),

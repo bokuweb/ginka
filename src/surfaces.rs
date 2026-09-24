@@ -2627,6 +2627,22 @@ impl SurfacePanel {
             .children(usage_rows(&usage.by_agent))
             .child(heading(rust_i18n::t!("surface.reports.by_day").to_string()))
             .children(usage_rows(&usage.by_day))
+            // Where the estimates came from, so a `≈` is never unexplained.
+            .child(
+                div()
+                    .px_3()
+                    .pt_3()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(match usage.rates_fetched_at {
+                        Some(at) => rust_i18n::t!(
+                            "surface.reports.rates",
+                            age = ginka_ui::workspace::relative_age(now, at)
+                        )
+                        .to_string(),
+                        None => rust_i18n::t!("surface.reports.no_rates").to_string(),
+                    }),
+            )
             .into_any_element()
     }
 

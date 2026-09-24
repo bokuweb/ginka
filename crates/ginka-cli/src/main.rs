@@ -1811,6 +1811,7 @@ fn print(response: Response, patch: bool) {
             by_agent,
             by_account,
             plans,
+            rates_fetched_at: _,
         } => print_usage(&by_day, &by_agent, &by_account, &plans),
         Response::ReviewComments { comments } => {
             if comments.is_empty() {
@@ -2095,10 +2096,18 @@ fn print_usage(
             row.totals.turns,
             // A vendor that does not price its work says nothing rather than
             // zero, which would be a claim that it was free.
-            row.totals
-                .cost_usd
-                .map(|cost| format!("${cost:.2}"))
-                .unwrap_or_default()
+            match (row.totals.cost_usd, row.totals.unpriced) {
+                // `≈` for a figure priced from the public table rather than
+                // by the vendor (§3.3 N13).
+                (Some(cost), 0) if row.totals.estimated => format!("≈${cost:.2}"),
+                (Some(cost), 0) => format!("${cost:.2}"),
+                (Some(cost), unpriced) => format!(
+                    "{}${cost:.2} + {unpriced} unpriced",
+                    if row.totals.estimated { "≈" } else { "" }
+                ),
+                (None, unpriced) if unpriced > 0 => format!("{unpriced} unpriced"),
+                (None, _) => String::new(),
+            }
         )
     };
     for entry in by_day {

@@ -800,6 +800,10 @@ pub enum Response {
         by_day: Vec<UsageRow>,
         by_agent: Vec<UsageRow>,
         by_account: Vec<UsageRow>,
+        /// When the rate table that priced unpriced turns was fetched; absent
+        /// when there is none, and nothing was estimated.
+        #[serde(default)]
+        rates_fetched_at: Option<i64>,
         /// The latest reading per account, for those that have one.
         plans: Vec<PlanSnapshot>,
     },

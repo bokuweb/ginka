@@ -2003,6 +2003,7 @@ fn what_a_turn_cost_is_kept_rather_than_watched_and_forgotten() {
             by_agent,
             by_account,
             plans,
+            ..
         } => {
             let day = by_day.first().expect("it happened today");
             assert_eq!(day.totals.input_tokens, 1200);

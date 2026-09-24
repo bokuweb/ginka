@@ -953,6 +953,12 @@ settings.cron.run:
 settings.cron.needs_project:
   en: "Choose a project first."
   ja: "先にプロジェクトを選んでください。"
+surface.reports.rates:
+  en: "≈ is priced from the public rate table, fetched %{age} ago; the vendor's own figure has no mark. Unpriced sessions are left out of the total."
+  ja: "≈ は公開レート表（%{age}前に取得）からの見積もりです。印のないものはベンダー自身の金額です。価格不明のセッションは合計に含めていません。"
+surface.reports.no_rates:
+  en: "Costs are only what vendors report; the public rate table has not been fetched yet."
+  ja: "コストはベンダーが報告した分だけです。公開レート表はまだ取得していません。"
 cli.merged:
   en: "merged into %{into} as %{commit}"
   ja: "%{into} にマージしました (%{commit})"
