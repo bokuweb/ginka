@@ -210,8 +210,32 @@ impl Discovery {
         let deadline = Instant::now() + STARTUP_TIMEOUT;
         let mut last_error = None;
         let mut spawned_at: Option<Instant> = None;
+        let mut retiring: Option<Instant> = None;
         while Instant::now() < deadline {
             if let Some(handshake) = self.published() {
+                if handshake.protocol_version < ginka_protocol::PROTOCOL_VERSION
+                    && self.daemon_holds_lock()
+                {
+                    // A daemon from an older build, still holding the state
+                    // directory: it cannot serve this client and the lock
+                    // keeps a new one from starting, so it is asked to go —
+                    // and made to, if it will not. Never the other way round:
+                    // an older client does not stop a newer daemon.
+                    let asked = *retiring.get_or_insert_with(|| {
+                        tracing::info!(
+                            pid = handshake.pid,
+                            protocol = handshake.protocol_version,
+                            "replacing a daemon from an older build"
+                        );
+                        signal(handshake.pid, "TERM");
+                        Instant::now()
+                    });
+                    if asked.elapsed() >= RESPAWN_AFTER {
+                        signal(handshake.pid, "KILL");
+                    }
+                    smol::Timer::after(STARTUP_POLL).await;
+                    continue;
+                }
                 match Client::connect(&handshake, resume_from).await {
                     Ok(client) => return Ok(client),
                     Err(error) => last_error = Some(error),
@@ -302,6 +326,24 @@ fn sibling_daemon() -> Option<PathBuf> {
             "ginka-daemon"
         });
     candidate.is_file().then_some(candidate)
+}
+
+/// Send `signal` to `pid`, through `kill(1)` so this crate needs no FFI. A
+/// process that is already gone is not an error.
+fn signal(pid: u32, signal: &str) {
+    #[cfg(unix)]
+    {
+        let _ = std::process::Command::new("kill")
+            .arg(format!("-{signal}"))
+            .arg(pid.to_string())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pid, signal);
+    }
 }
 
 #[cfg(test)]
