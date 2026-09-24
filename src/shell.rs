@@ -643,6 +643,9 @@ pub struct Shell {
     /// Whether the transcript is still following the answer. Dropped by the
     /// reader scrolling away, restored by them coming back to the foot.
     transcript_follows: bool,
+    /// Set once the window has gone back to the workspace it was left on,
+    /// so a later refresh does not take the reader there again.
+    selection_restored: bool,
     /// Project/session visits addressed by the title-bar arrows.
     navigation: NavigationHistory<NavigationTarget>,
     composer: Entity<TextareaState>,
@@ -1380,6 +1383,7 @@ impl Shell {
                 list
             },
             transcript_follows: true,
+            selection_restored: false,
             navigation: NavigationHistory::new(NavigationTarget::Home(None)),
             composer,
             model_query,
@@ -2199,6 +2203,8 @@ impl Shell {
 
     /// Write the open tabs back to `app.json`.
     fn persist_tabs(&mut self) {
+        // The workspace on screen is where the next launch opens.
+        self.settings.last_workspace = self.session.as_ref().map(|row| row.workspace.0.clone());
         self.settings.open_tabs = self
             .tabs
             .workspaces()
@@ -11931,8 +11937,31 @@ async fn pull_rows(
         crate::dock::set_badge(ginka_ui::notify::badge(
             rows.iter().filter(|row| !row.archived).map(|row| row.state),
         ));
+        // The first time there are rows to choose from, open where the
+        // window was left (`ginka_ui::tabs::restore_selection`).
+        let restore = (!this.selection_restored && !rows.is_empty())
+            .then(|| {
+                this.selection_restored = true;
+                let live: Vec<_> = rows
+                    .iter()
+                    .filter(|row| !row.archived)
+                    .map(|row| row.workspace.clone())
+                    .collect();
+                ginka_ui::tabs::restore_selection(
+                    this.settings.last_workspace.as_deref(),
+                    &this.tabs.workspaces(),
+                    &live,
+                )
+            })
+            .flatten();
         this.sidebar
             .update(cx, |sidebar, cx| sidebar.set_rows(rows, cx));
+        if let Some(workspace) = restore
+            && this.sidebar.read(cx).selected_row().is_none()
+        {
+            this.sidebar
+                .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+        }
         // The saved commands follow the project on screen, on the same tick.
         this.refresh_quick_commands(cx);
         this.refresh_cron_jobs(cx);
