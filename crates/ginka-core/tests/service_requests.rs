@@ -1387,3 +1387,63 @@ fn a_quick_command_runs_in_a_terminal_named_after_it() {
         "a prompt is the conversation's to send"
     );
 }
+
+#[test]
+fn the_winning_attempt_is_merged_into_the_branch_the_project_is_on() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "try-1".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    // Agents leave their work uncommitted.
+    std::fs::write(workspace.worktree.path.join("answer.txt"), "42\n").unwrap();
+
+    // Without a message there is no way to carry that work over: refused.
+    assert!(
+        fixture
+            .service
+            .handle(Request::MergeWorkspace {
+                workspace: workspace.id(),
+                into: None,
+                message: None,
+            })
+            .is_err()
+    );
+    assert!(!fixture.repo().join("answer.txt").exists());
+
+    let outcome = match fixture.ask(Request::MergeWorkspace {
+        workspace: workspace.id(),
+        into: None,
+        message: Some("Keep try-1".into()),
+    }) {
+        Response::Merged { outcome } => outcome,
+        other => panic!("expected a merge, got {other:?}"),
+    };
+    assert_eq!(outcome.into, "main", "the branch the project is on");
+    assert!(outcome.fast_forward);
+    assert_eq!(
+        std::fs::read_to_string(fixture.repo().join("answer.txt")).unwrap(),
+        "42\n"
+    );
+    assert_eq!(
+        support::git(&fixture.repo(), &["log", "-1", "--format=%s"]).trim(),
+        "Keep try-1"
+    );
+
+    // A workspace cannot be merged into its own branch.
+    assert!(
+        fixture
+            .service
+            .handle(Request::MergeWorkspace {
+                workspace: workspace.id(),
+                into: Some("try-1".into()),
+                message: None,
+            })
+            .is_err()
+    );
+}

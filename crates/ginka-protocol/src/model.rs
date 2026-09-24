@@ -808,6 +808,18 @@ pub struct FileChange {
     pub hunks: Vec<Hunk>,
 }
 
+/// What merging one branch into another did.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MergeOutcome {
+    /// The branch that moved.
+    pub into: String,
+    /// Where it is now.
+    pub commit: String,
+    /// Whether it moved without a merge commit.
+    pub fast_forward: bool,
+}
+
 /// One commit in a workspace's recent history.
 ///
 /// Parent ids are retained so a client can draw branch and merge topology

@@ -293,6 +293,13 @@ struct Compare {
     /// The attempt whose *Keep* was pressed once and waits for the second
     /// press, which archives the others.
     keeping: Option<ginka_protocol::WorkspaceId>,
+    /// The attempt whose *Merge* was pressed once, the same way.
+    merging: Option<ginka_protocol::WorkspaceId>,
+    /// Set while a merge runs.
+    busy: bool,
+    /// Why the last merge was refused — a conflict, or uncommitted work in
+    /// the project's own checkout.
+    error: Option<String>,
 }
 
 /// One attempt in the comparison.
@@ -6713,6 +6720,9 @@ impl Shell {
                 })
                 .collect(),
             keeping: None,
+            merging: None,
+            busy: false,
+            error: None,
         });
         cx.notify();
         let link = self.link.clone();
@@ -6777,6 +6787,18 @@ impl Shell {
             cx.notify();
             return;
         }
+        self.archive_other_attempts(workspace, cx);
+    }
+
+    /// Close the comparison on `workspace`, archiving every other attempt.
+    fn archive_other_attempts(
+        &mut self,
+        workspace: ginka_protocol::WorkspaceId,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(compare) = self.comparing.as_ref() else {
+            return;
+        };
         let others: Vec<_> = compare
             .entries
             .iter()
@@ -6800,12 +6822,72 @@ impl Shell {
         );
     }
 
+    /// Merge the winner into the branch the project is on — Orca's last
+    /// step — then keep it as *Keep* does. Two presses, like *Keep*; a
+    /// refusal stays on screen and nothing is archived.
+    fn merge_attempt(
+        &mut self,
+        workspace: ginka_protocol::WorkspaceId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(compare) = self.comparing.as_mut() else {
+            return;
+        };
+        if compare.busy {
+            return;
+        }
+        if compare.merging.as_ref() != Some(&workspace) {
+            compare.merging = Some(workspace);
+            compare.keeping = None;
+            cx.notify();
+            return;
+        }
+        let Some(entry) = compare
+            .entries
+            .iter()
+            .find(|entry| entry.workspace == workspace)
+        else {
+            return;
+        };
+        let message =
+            rust_i18n::t!("compare.merge.message", branch = entry.title.as_ref()).to_string();
+        compare.busy = true;
+        compare.error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let target = workspace.clone();
+            let result = cx
+                .background_spawn(async move { link.merge_workspace(&target, message).await })
+                .await;
+            this.update_in(cx, |this, _, cx| {
+                match result {
+                    Ok(_) => this.archive_other_attempts(workspace, cx),
+                    Err(error) => {
+                        if let Some(compare) = this.comparing.as_mut() {
+                            compare.busy = false;
+                            compare.merging = None;
+                            compare.error = Some(error);
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The comparison: an attempt a column — agent, branch, state, diff size
     /// and last answer — with *Open* and *Keep*.
     fn compare_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let compare = self.comparing.as_ref()?;
         let tokens = Tokens::global(cx).clone();
         let keeping = compare.keeping.clone();
+        let merging = compare.merging.clone();
+        let busy = compare.busy;
+        let refused = compare.error.clone();
         let count = compare.entries.len();
         let columns: Vec<AnyElement> = compare
             .entries
@@ -6816,6 +6898,8 @@ impl Shell {
                 let open = entry.workspace.clone();
                 let keep = entry.workspace.clone();
                 let armed = keeping.as_ref() == Some(&entry.workspace);
+                let merging_this = merging.as_ref() == Some(&entry.workspace);
+                let merge = entry.workspace.clone();
                 let state = entry
                     .state
                     .label()
@@ -6896,6 +6980,19 @@ impl Shell {
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.keep_attempt(keep.clone(), cx)
                                     })),
+                            )
+                            .child(
+                                Button::new(("compare-merge", index))
+                                    .compact()
+                                    .disabled(busy)
+                                    .label(if merging_this {
+                                        rust_i18n::t!("compare.merge.confirm").to_string()
+                                    } else {
+                                        rust_i18n::t!("compare.merge").to_string()
+                                    })
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.merge_attempt(merge.clone(), window, cx)
+                                    })),
                             ),
                     )
                     .child(match entry.answer {
@@ -6948,6 +7045,12 @@ impl Shell {
                                 })),
                         ),
                 )
+                .children(refused.map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
                 .child(
                     h_flex()
                         .id("compare-columns")

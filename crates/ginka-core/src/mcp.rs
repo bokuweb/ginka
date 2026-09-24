@@ -435,6 +435,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_merge",
+            description: "Merge a workspace's branch into another — by default the branch the project is on. Uncommitted work is committed first with `message`; a conflict is aborted and named.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "into": {"type": "string"},
+                    "message": {"type": "string"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_push",
             description: "Push a workspace branch, setting its upstream on the first push.",
             schema: json!({
@@ -795,6 +808,11 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
             message: text("message")?,
             all: !flag("staged_only"),
+        },
+        "ginka_workspace_merge" => Request::MergeWorkspace {
+            workspace: WorkspaceId(text("workspace")?),
+            into: text("into").ok(),
+            message: text("message").ok(),
         },
         "ginka_push" => Request::Push {
             workspace: WorkspaceId(text("workspace")?),

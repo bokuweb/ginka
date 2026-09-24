@@ -687,6 +687,39 @@ impl Service {
                 });
                 Ok(Response::Committed { commit })
             }
+            Request::MergeWorkspace {
+                workspace,
+                into,
+                message,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let project = self.project(&worktree.project)?;
+                let into = into
+                    .filter(|branch| !branch.trim().is_empty())
+                    .or_else(|| git::current_branch(&project.path))
+                    .unwrap_or_else(|| project.default_branch.clone());
+                if into == worktree.branch {
+                    return Err(RpcError::failed(format!(
+                        "{into} is this workspace's own branch; choose another to merge into"
+                    )));
+                }
+                if git::branch_status(&worktree.path).map_err(failed)?.dirty {
+                    let message = message
+                        .filter(|message| !message.trim().is_empty())
+                        .ok_or_else(|| {
+                            RpcError::failed(
+                                "the workspace has uncommitted work; give a message to commit it with",
+                            )
+                        })?;
+                    git::commit(&worktree.path, &message, true).map_err(failed)?;
+                }
+                let outcome =
+                    git::merge_into(&project.path, &worktree.branch, &into).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Merged { outcome })
+            }
             Request::StageFile {
                 workspace,
                 path,

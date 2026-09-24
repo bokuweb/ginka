@@ -354,6 +354,18 @@ enum WorkspaceCommand {
         #[arg(long)]
         create: bool,
     },
+    /// Merge a workspace's branch into another — by default the branch the
+    /// project is on. A conflict is aborted and named.
+    Merge {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The branch to merge into.
+        #[arg(long)]
+        into: Option<String>,
+        /// Commit the workspace's uncommitted work with this message first.
+        #[arg(long, short)]
+        message: Option<String>,
+    },
     /// Build zvec-grep's index for a workspace, here in this terminal, so
     /// agents started in it get semantic search. Needs `zg` on PATH.
     Index {
@@ -979,6 +991,15 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             branch,
             create,
+        },
+        Command::Workspace(WorkspaceCommand::Merge {
+            workspace,
+            into,
+            message,
+        }) => Request::MergeWorkspace {
+            workspace: WorkspaceId(workspace),
+            into,
+            message,
         },
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
             project: project.map(ProjectName),
@@ -1773,6 +1794,22 @@ fn print(response: Response, patch: bool) {
                 );
             }
         }
+        Response::Merged { outcome } => println!(
+            "{}",
+            if outcome.fast_forward {
+                rust_i18n::t!(
+                    "cli.merged.fast_forward",
+                    into = &outcome.into,
+                    commit = &outcome.commit[..outcome.commit.len().min(12)]
+                )
+            } else {
+                rust_i18n::t!(
+                    "cli.merged",
+                    into = &outcome.into,
+                    commit = &outcome.commit[..outcome.commit.len().min(12)]
+                )
+            }
+        ),
         Response::Committed { commit } => println!(
             "{}",
             rust_i18n::t!("cli.committed", commit = &commit[..commit.len().min(12)])

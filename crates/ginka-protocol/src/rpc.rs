@@ -315,6 +315,15 @@ pub enum Request {
         message: String,
         all: bool,
     },
+    /// Merge a workspace's branch into another — fan-out's "merge the
+    /// winner". `into` defaults to the branch the project's own checkout is
+    /// on. Uncommitted work in the workspace is committed first with
+    /// `message`, and refused without one.
+    MergeWorkspace {
+        workspace: WorkspaceId,
+        into: Option<String>,
+        message: Option<String>,
+    },
     /// Put one file into the next commit, or take it back out.
     ///
     /// Per file, because "these three are right and that one is not" is the
@@ -771,6 +780,10 @@ pub enum Response {
         plans: Vec<PlanSnapshot>,
     },
     /// A commit was made, and this is what it is called.
+    /// What a merge did.
+    Merged {
+        outcome: crate::model::MergeOutcome,
+    },
     Committed {
         commit: String,
     },

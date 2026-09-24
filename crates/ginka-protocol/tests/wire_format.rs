@@ -472,3 +472,15 @@ fn an_edited_prompt_names_its_session_position_and_text() {
         json!({"method": "edit_prompt", "session": "s-1", "seq": 4, "text": "again"})
     );
 }
+
+#[test]
+fn a_merge_names_the_workspace_and_optionally_its_target_and_message() {
+    assert_eq!(
+        wire(&Request::MergeWorkspace {
+            workspace: WorkspaceId("comet/try-1".into()),
+            into: None,
+            message: Some("Keep try-1".into()),
+        }),
+        json!({"method": "merge_workspace", "workspace": "comet/try-1", "into": null, "message": "Keep try-1"})
+    );
+}

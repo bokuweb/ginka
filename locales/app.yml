@@ -917,6 +917,12 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.merged:
+  en: "merged into %{into} as %{commit}"
+  ja: "%{into} にマージしました (%{commit})"
+cli.merged.fast_forward:
+  en: "fast-forwarded %{into} to %{commit}"
+  ja: "%{into} を %{commit} まで早送りしました"
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません
@@ -1271,6 +1277,15 @@ compare.open:
 compare.keep:
   en: "Keep"
   ja: "採用"
+compare.merge:
+  en: "Merge"
+  ja: "マージ"
+compare.merge.confirm:
+  en: "Merge into the project's branch?"
+  ja: "プロジェクトのブランチにマージ?"
+compare.merge.message:
+  en: "Keep %{branch}"
+  ja: "Keep %{branch}"
 compare.keep.confirm:
   en: "Archive the others?"
   ja: "他をアーカイブ?"

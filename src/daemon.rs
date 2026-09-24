@@ -451,6 +451,26 @@ impl DaemonLink {
         }
     }
 
+    /// Merge a workspace's branch into the branch its project is on,
+    /// committing what it left uncommitted with `message` first.
+    pub async fn merge_workspace(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+    ) -> Result<ginka_protocol::model::MergeOutcome, String> {
+        match self
+            .ask_result(Request::MergeWorkspace {
+                workspace: workspace.clone(),
+                into: None,
+                message: Some(message),
+            })
+            .await?
+        {
+            Response::Merged { outcome } => Ok(outcome),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// Push a workspace branch through the daemon.
     pub async fn push(&self, workspace: &WorkspaceId) -> Result<(), String> {
         self.git_sync(Request::Push {
