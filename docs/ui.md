@@ -314,6 +314,30 @@ active conversation. With nothing selected, the rail stands alone.
 
 Dragging across the terminal grid selects exact character cells in either direction and highlights the range; copying prefers that selection, including its line breaks, then falls back to the visible viewport. A non-blank selection can also be quoted into the existing chat draft from the fixed toolbar or command palette without replacing what was already typed. The copy action is exposed whenever the active viewport contains text; `⌘C` (`Ctrl+Shift+C` elsewhere) invokes it, while non-macOS `Ctrl+C` continues to interrupt the foreground process. A click without a drag remains ordinary terminal focus, and blank terminals do not offer no-op copy or quote actions.
 
+- **Conversation tabs** — once a second conversation is open, the column
+  header becomes a strip of tabs, one per open conversation plus an unsaved
+  *New chat*. `⌘T` opens a new one, `⌘W` closes the current, `⌘⇧]` / `⌘⇧[`
+  and `⌃Tab` cycle; the strip is restored on the next launch. A tab whose
+  workspace is archived closes itself.
+- **Edit and resend** — hovering a sent prompt shows a pencil. Editing fills
+  the composer under a banner that says what will happen; sending rewinds the
+  worktree to before that prompt and continues in a fork on a fresh thread, so
+  the original conversation and its changes are still there.
+- **Fan-out and compare** — before a conversation starts, the composer offers
+  *Try several ways*: a panel above it with an agent a row and a −/+ count
+  each (six attempts at most), and *Try N ways*, which starts every attempt in
+  its own worktree and opens each as a tab. A conversation that belongs to a
+  fan-out shows *Compare N* in the header, which replaces the column with the
+  attempts side by side — agent and branch, state, `+/−` lines, the last
+  answer as Markdown — each with *Open* and a two-step *Keep* that archives
+  the others.
+- **Second opinion** — each completed turn's footer offers every other ready
+  agent as *Second opinion: <agent>*, which forks the conversation there with
+  a request to review the work and change nothing.
+- **Quick commands** — the terminal dock's ▶ lists saved commands for the
+  project and globally; a shell command opens a terminal named after it, a
+  prompt command is sent as if typed. They are managed in Settings.
+
 > **Defaults.** The right panel and the terminal dock start closed. Their
 > surfaces land in M3, and two empty panels either side of the conversation is
 > a worse first impression than a window that is only what works. Their sizes
