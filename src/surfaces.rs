@@ -1015,7 +1015,7 @@ impl SurfacePanel {
                         }
                         match event {
                             crate::browser::BrowserEvent::Inspected(capture) => {
-                                this.browser_capture = Some(capture.clone());
+                                this.browser_capture = Some((**capture).clone());
                                 cx.notify();
                             }
                             crate::browser::BrowserEvent::Visited { url, title } => {

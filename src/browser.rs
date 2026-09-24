@@ -15,7 +15,7 @@ use serde::Deserialize;
 /// A browser selection ready to be reviewed or sent to the active agent.
 pub enum BrowserEvent {
     /// The page's untrusted payload after Rust-side validation and bounds.
-    Inspected(BrowserCapture),
+    Inspected(Box<BrowserCapture>),
     /// A page finished loading: history for the address bar.
     Visited { url: String, title: Option<String> },
     /// The address bar's text changed: time to offer pages from history.
@@ -139,7 +139,9 @@ impl BrowserPane {
                     Ok(envelope) if envelope.kind == "ginka-inspect" => {
                         self.inspecting = false;
                         self.complaint = None;
-                        cx.emit(BrowserEvent::Inspected(sanitize_capture(envelope.capture)));
+                        cx.emit(BrowserEvent::Inspected(Box::new(sanitize_capture(
+                            envelope.capture,
+                        ))));
                     }
                     Ok(_) => {}
                     Err(error) => {

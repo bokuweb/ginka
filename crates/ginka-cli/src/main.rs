@@ -1779,6 +1779,16 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::BrowserSuggestions { pages } => {
+            for page in pages {
+                println!(
+                    "{:>4}  {}  {}",
+                    page.visits,
+                    page.url,
+                    page.title.unwrap_or_default()
+                );
+            }
+        }
         Response::BundledSkillsInstalled { results } => {
             for result in results {
                 println!("{:<10} {}", result.outcome, result.path);
