@@ -38,6 +38,15 @@ impl Mode {
     }
 }
 
+/// The choice the dark-mode toggle makes: the opposite of what is on screen,
+/// made explicit, so one press always visibly switches — even from System.
+pub fn toggled(current: Appearance, system: WindowAppearance) -> Appearance {
+    match Mode::resolve(current, system) {
+        Mode::Dark => Appearance::Light,
+        Mode::Light => Appearance::Dark,
+    }
+}
+
 /// The complete token set.
 ///
 /// Fields are deliberately exhaustive rather than added on demand: the palette
@@ -315,7 +324,8 @@ impl Tokens {
 }
 
 impl Colors {
-    fn light(&self) -> bool {
+    /// Whether these are the light theme's colours.
+    pub fn light(&self) -> bool {
         self.appearance == ThemeAppearance::Light
     }
 
@@ -468,6 +478,27 @@ mod tests {
         assert_eq!(
             Mode::resolve(Appearance::Dark, WindowAppearance::Light),
             Mode::Dark
+        );
+    }
+
+    #[test]
+    fn the_toggle_switches_to_the_other_mode_from_whatever_is_on_screen() {
+        assert_eq!(
+            toggled(Appearance::Dark, WindowAppearance::Light),
+            Appearance::Light
+        );
+        assert_eq!(
+            toggled(Appearance::Light, WindowAppearance::Dark),
+            Appearance::Dark
+        );
+        // From System, it leaves what the OS shows, and says so explicitly.
+        assert_eq!(
+            toggled(Appearance::System, WindowAppearance::Dark),
+            Appearance::Light
+        );
+        assert_eq!(
+            toggled(Appearance::System, WindowAppearance::VibrantLight),
+            Appearance::Dark
         );
     }
 

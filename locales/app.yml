@@ -478,6 +478,9 @@ palette.transcript.find.hint:
 palette.transcript.outline:
   en: Toggle prompt outline
   ja: プロンプト一覧を切り替え
+palette.appearance.toggle:
+  en: Switch between dark and light
+  ja: ダーク／ライトを切り替える
 palette.composer.attach:
   en: Attach files to prompt
   ja: プロンプトにファイルを添付

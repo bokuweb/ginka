@@ -61,6 +61,8 @@ pub enum Command {
     Switch(WorkspaceId),
     /// Run a saved shell command in a new terminal, or send a saved prompt.
     RunQuick(ginka_protocol::model::QuickCommand),
+    /// Switch between the dark and the light theme.
+    ToggleAppearance,
 }
 
 /// The saved commands the palette offers, where there is a workspace to run
@@ -310,6 +312,12 @@ pub fn entries(
             command: Command::NewTerminal,
         });
     }
+    all.push(Entry {
+        id: "appearance:toggle".into(),
+        label: rust_i18n::t!("palette.appearance.toggle").to_string(),
+        hint: None,
+        command: Command::ToggleAppearance,
+    });
     all.push(Entry {
         id: "composer:attach".into(),
         label: rust_i18n::t!("palette.composer.attach").to_string(),
@@ -568,6 +576,21 @@ mod tests {
                 .map(|entry| entry.command)
                 .collect::<Vec<_>>(),
             vec![Command::QuoteTranscriptSelection]
+        );
+    }
+
+    #[test]
+    fn switching_between_dark_and_light_is_always_offered() {
+        let all = entries(&layout(), &[], None, false, false, false);
+        assert!(
+            all.iter()
+                .any(|entry| entry.command == Command::ToggleAppearance)
+        );
+        assert_eq!(
+            filter(all, "dark")
+                .first()
+                .map(|entry| entry.command.clone()),
+            Some(Command::ToggleAppearance)
         );
     }
 

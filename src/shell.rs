@@ -970,6 +970,7 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::ToggleAppearance => this.toggle_appearance(window, cx),
                     SidebarEvent::NewChatRequested => {
                         sidebar.update(cx, |sidebar, cx| {
                             sidebar.set_place(crate::sidebar::Place::Workspace, cx)
@@ -4713,10 +4714,7 @@ impl Shell {
                     appearance == mode,
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.settings.appearance = mode;
-                    this.save_settings();
-                    apply_theme(ginka_ui::Mode::resolve(mode, window.appearance()), cx);
-                    window.refresh();
+                    this.set_appearance(mode, window, cx);
                 }))
             }))
             .into_any_element();
@@ -5830,6 +5828,7 @@ impl Shell {
                     .update(cx, |surfaces, cx| surfaces.show(surface, cx));
             }
             Command::RunQuick(command) => self.run_quick(command, window, cx),
+            Command::ToggleAppearance => self.toggle_appearance(window, cx),
             Command::NewTerminal => {
                 if !self.layout.is_open(Panel::TerminalDock) {
                     self.toggle(Panel::TerminalDock, cx);
@@ -12895,6 +12894,27 @@ fn access_note(mode: ginka_protocol::AccessMode) -> String {
 /// both read the same palette (`docs/ui.md` §2), from two globals of two
 /// types, and one following the system while the other did not would be two
 /// windows in one.
+impl Shell {
+    /// Choose the theme, remember the choice, and repaint with it.
+    fn set_appearance(
+        &mut self,
+        appearance: settings::Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.appearance = appearance;
+        self.save_settings();
+        apply_theme(ginka_ui::Mode::resolve(appearance, window.appearance()), cx);
+        window.refresh();
+    }
+
+    /// Switch to the other theme from the one on screen.
+    fn toggle_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = ginka_ui::theme::toggled(self.settings.appearance, window.appearance());
+        self.set_appearance(next, window, cx);
+    }
+}
+
 fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
     ginka_ui::theme::apply(mode, cx);
     #[cfg(feature = "github")]
