@@ -2821,6 +2821,28 @@ fn failed(error: impl std::fmt::Display) -> RpcError {
     RpcError::failed(error.to_string())
 }
 
+/// Replace every value in an `env` map with `[set]`: which variables an agent
+/// is given is the reader's to see; what they hold — keys, tokens — is not
+/// for the wire (`docs/accounts.md` §10).
+fn redact_env(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                match field {
+                    serde_json::Value::Object(env) if key == "env" => {
+                        for secret in env.values_mut() {
+                            *secret = serde_json::Value::String("[set]".into());
+                        }
+                    }
+                    other => redact_env(other),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_env),
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2873,27 +2895,5 @@ mod tests {
             })
             .unwrap_err();
         assert_eq!(error.code, "not_found");
-    }
-}
-
-/// Replace every value in an `env` map with `[set]`: which variables an agent
-/// is given is the reader's to see; what they hold — keys, tokens — is not
-/// for the wire (`docs/accounts.md` §10).
-fn redact_env(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(fields) => {
-            for (key, field) in fields.iter_mut() {
-                match field {
-                    serde_json::Value::Object(env) if key == "env" => {
-                        for secret in env.values_mut() {
-                            *secret = serde_json::Value::String("[set]".into());
-                        }
-                    }
-                    other => redact_env(other),
-                }
-            }
-        }
-        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_env),
-        _ => {}
     }
 }
