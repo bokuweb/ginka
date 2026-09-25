@@ -70,6 +70,7 @@ impl LanguageServer {
     /// Start, initialize and open the launch's document with its current text.
     pub fn start(launch: &LanguageServerLaunch, text: &str) -> Result<Arc<Self>> {
         let mut command = Command::new(&launch.program);
+        crate::tool_path::apply(&mut command);
         command
             .args(&launch.arguments)
             .current_dir(&launch.root)

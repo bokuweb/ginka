@@ -937,6 +937,7 @@ pub fn is_object_name(text: &str) -> bool {
 pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
     push(worktree)?;
     let mut command = Command::new("gh");
+    crate::tool_path::apply(&mut command);
     command
         .current_dir(worktree)
         .args(["pr", "create", "--fill"]);

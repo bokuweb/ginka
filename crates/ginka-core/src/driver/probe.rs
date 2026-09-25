@@ -31,7 +31,7 @@ pub struct ProbeResult {
 
 /// Where a provider's CLI is, honouring the user's settings.
 pub fn resolve_binary(provider: ProviderKind, settings: &DaemonSettings) -> Option<PathBuf> {
-    resolve_binary_in(provider, settings, &search_path())
+    resolve_binary_in(provider, settings, crate::tool_path::search_path())
 }
 
 /// The same, against an explicit search path.
@@ -64,7 +64,9 @@ pub fn probe(binary: &Path) -> ProbeResult {
 
 /// The same, for a CLI that spells the version flag differently.
 pub fn probe_with_arg(binary: &Path, arg: &str) -> ProbeResult {
-    let Ok(mut child) = Command::new(binary)
+    let mut command = Command::new(binary);
+    crate::tool_path::apply(&mut command);
+    let Ok(mut child) = command
         .arg(arg)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -118,12 +120,6 @@ fn version_in(text: &str) -> Option<String> {
             word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.')
                 .to_string()
         })
-}
-
-fn search_path() -> Vec<PathBuf> {
-    std::env::var_os("PATH")
-        .map(|value| std::env::split_paths(&value).collect())
-        .unwrap_or_default()
 }
 
 #[cfg(unix)]

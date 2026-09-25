@@ -42,6 +42,7 @@ pub mod settings;
 pub mod setup;
 pub mod skills;
 pub mod terminal;
+pub mod tool_path;
 pub mod tools;
 pub mod usage;
 pub mod worktree_include;
