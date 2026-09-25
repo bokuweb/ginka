@@ -329,7 +329,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] `export-types` binary for the protocol crate (`--features export`; the output is a build product and is not committed)
 - [x] Hot-reload settings on change: the daemon reads `settings.json` again on its sync beat and rebuilds accounts, agent probes and drivers from it; a file that does not parse is left alone (keep-awake stays start-only)
 - [x] Crash handler: `crash-<process>-<unix>.log` in the logs directory with the message, place, build and backtrace, then the default hook
-- [ ] `rust-i18n` wired up with `locales/{en,ja}.yml` — §6.4 assumes it and nothing is wired yet; every string added before it lands is one to retrofit
+- [x] `rust-i18n` wired up with `locales/{en,ja}.yml` — §6.4 assumes it and nothing is wired yet; every string added before it lands is one to retrofit
 
 **Exit criteria:** window opens in <300 ms warm; the three-column shell with a resizable sidebar and right panel renders against `docs/ui.md`; theme switches; migrations run on a fresh `~/.ginka`.
 
@@ -378,21 +378,22 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
 - [x] Per-agent settings in `settings.json`: which binary to run and what environment to give it
 - [x] `codex` driver (both generations of its JSONL)
-- [ ] Extract the daemon: WS RPC server, auto-spawn + health check + graceful takeover (discovery, the bearer token and the handshake gate are done)
+- [x] Extract the daemon: WS RPC server, auto-spawn + health check + graceful takeover (discovery, the bearer token and the handshake gate are done)
 - [x] Sequence numbers, replay cursors and the epoch that invalidates them, so a reconnecting UI never misses an event and never renders a hole — the policy, tested without a socket
-- [ ] Request/response types and the WebSocket transport that carries them
+- [x] Request/response types and the WebSocket transport that carries them
 - [x] The normalized `AgentEvent` stream and the activity shape every tool call collapses into
 - [x] Claude's stream-json read into it, against recorded lines rather than a live CLI (R6)
 - [x] Claude delegated-agent calls normalized into one parent transcript row, with bounded nested steps, lifecycle updates and turn-end settlement; Codex child threads wait on the app-server transport in M5
 - [x] Process supervision: one child, one reader thread, cancellation that takes the agent's own children with it, and a fake agent binary to pin it against
 - [x] The `claude` driver on top: launch arguments, resume from a session id, and `AgentSession` — steering writes a user message into the running turn, and only the permission mode forces a restart
 - [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
-- [ ] Session persistence: tasks, chats, messages; resume from vendor session id
-- [ ] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list, pagination
+- [x] Session persistence: tasks, chats, messages; resume from vendor session id
+- [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list
+- [ ] Transcript pagination: a long session is still fetched and folded whole when it opens
 - [x] Composer: `@file` mentions, slash commands, drafts persisted per workspace, and a visible editable follow-up queue while the agent is busy
 - [x] Plan approval and ask-user-question interaction modes at the protocol, supervisor and transcript layers; a shipped interactive driver remains M5
-- [ ] Agent status + "needs attention" derivation, surfaced back on the dashboard
-- [ ] `codex` driver
+- [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
+- [x] `codex` driver
 - [x] **Steering (N1):** a follow-up goes into the running turn on a transport that can take one — `claude` streams its input, so the prompt and everything after it are written to the agent as it works — and the queue is what happens where it cannot
 - [x] **Access mode per session (N2, first half):** `session start --access read-only|ask|auto`, the `access` argument over MCP, and an access chip in the composer; stored on the session so every follow-up runs under the mode the conversation began in. Claude takes it as `--permission-mode plan|acceptEdits|bypassPermissions`, Codex as `--sandbox read-only` or `--full-auto`, with `ask` left to what `codex exec` does on its own
 - [x] **Session options (N2 second half, N3):** the model catalogue is discovered from Codex's `model/list`, carries per-model effort/tier choices, falls back to a static driver table offline, and restores recent valid model/effort/tier choices in the composer. New and existing sessions persist those options, every follow-up reuses them, and each driver answers whether its provider thread absorbed the change. `restart_required` creates a fresh provider thread with the normalized transcript carried as a bounded digest
@@ -437,16 +438,16 @@ Goal: the loop that makes the app useful daily — read the diff, comment, send 
 - [x] Checkpoints: snapshot the worktree per turn, rewind to any of them
 - [x] Rewinding from the transcript in the UI, confirmed in two steps
 - [x] Pruning old checkpoint refs
-- [ ] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`)
-- [ ] Terminal tabs, splits, scrollback search, parking/reattach with replay + width sync
-- [ ] File-path detection in terminal and chat output → click opens the file
-- [ ] Selection → "add to chat" / "add to terminal"
-- [ ] Changes panel: status tree, per-file diff (unified + split), intra-line word diff, revert file
-- [ ] Commit dialog: stage/unstage, message composer, agent-generated message
-- [ ] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
-- [ ] **Checkpoints (N8):** three refs per turn — accepted-state, ending checkpoint, diff base — under `refs/ginka/`; rewind from any transcript position
-- [ ] **Turn-scoped diffs (N7):** the changes panel selects its source — this turn, uncommitted, unstaged, staged, committed, branch
-- [ ] **Commit messages (N9):** generated on a cheap tier at the lowest effort it accepts, independent of the session's model, over a size-capped diff
+- [x] PTY pool in the daemon; terminal grid view in GPUI (`alacritty_terminal`)
+- [x] Terminal tabs, splits, scrollback search, parking/reattach with replay + width sync
+- [x] File-path detection in terminal and chat output → click opens the file
+- [x] Selection → "add to chat" / "add to terminal"
+- [x] Changes panel: status tree, per-file diff (unified + split), intra-line word diff, revert file
+- [x] Commit dialog: stage/unstage, message composer, agent-generated message
+- [x] **Diff review comments (Orca):** anchor markdown comments to diff lines, batch them, send the batch as one agent message
+- [x] **Checkpoints (N8):** three refs per turn — accepted-state, ending checkpoint, diff base — under `refs/ginka/`; rewind from any transcript position
+- [x] **Turn-scoped diffs (N7):** the changes panel selects its source — this turn, uncommitted, unstaged, staged, committed, branch
+- [x] **Commit messages (N9):** generated on a cheap tier at the lowest effort it accepts, independent of the session's model, over a size-capped diff
 
 > **Landed already (domain layer):** N7 diff sources (`ginka-core::review`), N8 three-ref checkpoints and rewind (`ginka-core::checkpoint`), N9 the commit-message policy, prompt and commit path (`ginka-core::commit`). What remains is the terminal, the panels and the review interaction on top of them.
 
@@ -467,12 +468,12 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [x] Complete the code surface: the file tree, independent file tabs, back/forward visit history, live-buffer Markdown and bounded local image preview, find/replace, conflict-safe save and saved selection-to-chat with exact one-based line locations are wired; dirty tabs refuse to close rather than discarding their buffers
 - [x] LSP wiring through `CodeEditor`: `ginka-core` safely discovers and frames installed stdio servers for Rust, TypeScript/JavaScript, Python and Go; the editor sends whole-buffer versioned changes and consumes hover, diagnostics and definitions in the current file or another workspace tab. Missing or failed servers leave syntax-only editing usable, outside-worktree targets are refused, and an integration fake pins the JSON-RPC process boundary
 - [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea` and draggable tabs. The current resizable shell already persists right-panel visibility/width, terminal visibility/height and the selected surface per workspace; sidebar navigation remains global. Panel visibility rules, the `docs/ui.md` §3.4 empty state, the toolbar chooser and keyboard surface cycling are in
-- [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron
+- [ ] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron — all but settings
 - [x] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`): `skills/`, compiled in and installed by `ginka skills install`; the CLI gained `ginka terminal` for the terminal skill
 - [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
 - [x] **Fan-out (Orca):** one prompt → N worktrees, from `ginka fan-out` and over MCP
 - [x] Fan-out's side-by-side comparison view, and merging the winner: *Compare N* sets the attempts side by side, *Keep* archives the rest, and *Merge* merges the winner into the branch the project is on (`MergeWorkspace`) before doing the same
-- [ ] MCP server on the daemon exposing the same operations to agents
+- [x] MCP server on the daemon exposing the same operations to agents
 - [x] **Fan-out (Orca):** one prompt → N worktrees → side-by-side comparison view → merge the winner
 - [x] **Transcript search (N10):** daemon-side search across stored messages, with ⌘F/⌘K open-session results, previous/next navigation, excerpt, count and persisted-sequence to folded-block jump
 - [x] Manual context compaction: Codex advertises its provider-owned operation in `ContextUsage`; the window, `ginka session compact` and `ginka_session_compact` share one daemon request that refuses active or unsupported sessions
@@ -497,7 +498,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [x] Cronjobs: scheduler, project/workspace scope, `via: chat | terminal`, overlap-skip, run history (`ginka-core::cron`, migration 0015; `ginka cron`, `ginka_cron_*`, Settings → Scheduled)
 - [x] Reports: usage events from drivers, cost aggregation by day and agent, retention sweep
 - [x] On-disk session scanner with watermarks, and aggregation by project/model (`usage::scan`, Claude Code's and Codex's own logs)
-- [ ] Reports: usage events from drivers + on-disk session scanner with watermarks, cost aggregation by day/project/model, retention sweep
+- [x] Reports: usage events from drivers + on-disk session scanner with watermarks, cost aggregation by day/project/model, retention sweep
 - [x] **Accounts (N17):** several logins per provider as directories under `~/.ginka/accounts/`; the manually selected account persists per provider for future chats across the window, CLI and MCP, while an explicit `ginka session start --account` overrides it and existing chats retain their original login. Accounts are added from the pickers or `ginka account add`, signed in through the vendor's own command in a daemon terminal (`ginka account login` runs it in the user's own), and recorded on sessions and usage events — `docs/accounts.md` §3–5, §8–9
 - [x] **Plan usage meter (N12), per account:** rate-limit windows — percent used and reset time — shown on the account chip, in the picker, in the sidebar footer and in Reports with the reading's age; the always-visible composer usage chip combines the active session's live input-plus-output token count with its tightest window without double-counting cache or reasoning breakdowns. Windows are read on demand through `codex app-server`, from Codex's older `token_count` stream on every turn (the modern stream carries none, `docs/accounts.md` §6), and from Claude's refused turns as the wall and when it opens. A percentage for Claude waits on Q9
 - [x] **Pricing (N13):** cost from a public rate table, fetched at most daily and cached beside the database; the page states its cost quality rather than guessing silently — `≈` marks an estimate, unpriced sessions are counted and left out, and the table's age is shown
