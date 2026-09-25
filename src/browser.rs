@@ -50,6 +50,8 @@ pub struct BrowserPane {
     complaint: Option<SharedString>,
     /// Pages from this workspace's history that match what is typed.
     suggestions: Vec<ginka_protocol::model::VisitedPage>,
+    /// Find in the page, while its field is open.
+    finding: Option<Entity<InputState>>,
 }
 
 impl BrowserPane {
@@ -115,6 +117,7 @@ impl BrowserPane {
                 visible: true,
                 complaint: None,
                 suggestions: Vec::new(),
+                finding: None,
             }
         });
         Ok(pane)
@@ -206,6 +209,38 @@ impl BrowserPane {
         });
     }
 
+    /// Open the find field, or close it.
+    fn toggle_find(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.finding.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let field = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.browser.find").to_string())
+        });
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this: &mut Self, field, event: &InputEvent, cx| {
+            if let InputEvent::PressEnter { shift, .. } = event {
+                let query = field.read(cx).value().to_string();
+                this.find(&query, *shift, cx);
+            }
+        })
+        .detach();
+        self.finding = Some(field);
+        cx.notify();
+    }
+
+    /// Find `query` in the page, forwards or back, wrapping around.
+    fn find(&mut self, query: &str, backwards: bool, cx: &mut Context<Self>) {
+        let Some(script) = ginka_ui::browser::find_script(query, backwards) else {
+            return;
+        };
+        self.webview.update(cx, |view, _| {
+            let _ = view.evaluate_script(&script);
+        });
+    }
+
     fn toggle_inspect(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.inspecting = !self.inspecting;
         self.complaint = None;
@@ -257,6 +292,19 @@ impl Render for BrowserPane {
                             .on_click(cx.listener(Self::reload)),
                     )
                     .child(div().flex_1().child(ginka_ui::field::input(&self.address)))
+                    .children(
+                        self.finding
+                            .as_ref()
+                            .map(|field| div().w(px(180.)).child(ginka_ui::field::input(field))),
+                    )
+                    .child(
+                        Button::new("browser-find")
+                            .ghost()
+                            .compact()
+                            .icon(IconName::Search)
+                            .tooltip(rust_i18n::t!("surface.browser.find").to_string())
+                            .on_click(cx.listener(Self::toggle_find)),
+                    )
                     .child(
                         Button::new("browser-inspect")
                             .compact()
