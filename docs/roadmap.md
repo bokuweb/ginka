@@ -325,7 +325,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] `AGENTS.md` / `CLAUDE.md` conventions kept in sync with reality
 - [ ] **Visual sign-off against `docs/ui.md` (R8).** Blocked: this environment has neither screen-recording nor accessibility permission, so the window cannot be captured or measured here. Run `cargo run` and look.
 - [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
-- [ ] Motion helpers of our own; 260 ms list reordering
+- [x] Motion helpers of our own; 260 ms list reordering (`ginka_ui::motion`: the ease-out curve, and the rows that moved as those outside the longest run kept in order)
 - [x] `export-types` binary for the protocol crate (`--features export`; the output is a build product and is not committed)
 - [x] Hot-reload settings on change: the daemon reads `settings.json` again on its sync beat and rebuilds accounts, agent probes and drivers from it; a file that does not parse is left alone (keep-awake stays start-only)
 - [x] Crash handler: `crash-<process>-<unix>.log` in the logs directory with the message, place, build and backtrace, then the default hook
@@ -350,7 +350,7 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: project rail, session rows, status pills, archived section, attention sort, fuzzy metadata search and user footer — fed by real projects and worktrees, with a first-run line that names the command to fix it
 - [x] Virtualize the session list (`ginka_ui::session_list`, a GPUI `list`)
-- [ ] Animate the session list's reorder on the 260 ms curve
+- [x] Animate the session list's reorder on the 260 ms curve: a row that jumped slides in from a row away and fades up
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin|archive`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
 - [x] Command palette + global keymap infrastructure
 - [x] Workspace picker / quick switcher (in the palette)

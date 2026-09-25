@@ -26,6 +26,7 @@ pub mod home;
 pub mod layout;
 pub mod markup;
 pub mod models;
+pub mod motion;
 pub mod navigation;
 pub mod notify;
 pub mod palette;

@@ -117,6 +117,15 @@ pub struct SessionSidebar {
     session_list: ListState,
     /// What the list shows, one entry per item, as of the last frame.
     entries: Vec<ginka_ui::session_list::Entry>,
+    /// The live rows' order as of the last frame, to see which moved.
+    row_order: Vec<WorkspaceId>,
+    /// Rows that moved, which way, and when: they slide into place over
+    /// `ginka_ui::motion::REORDER`.
+    moving:
+        std::collections::HashMap<WorkspaceId, (ginka_ui::motion::Moved, std::time::Instant, u64)>,
+    /// Counts moves, so each gets an animation of its own rather than one a
+    /// row that moved before has already finished.
+    moves: u64,
     /// The login the next prompt runs on, and its headroom, for the footer
     /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
     /// them.
@@ -156,6 +165,9 @@ impl SessionSidebar {
             archived_open: true,
             session_list: ListState::new(0, ListAlignment::Top, px(600.)),
             entries: Vec::new(),
+            row_order: Vec::new(),
+            moving: std::collections::HashMap::new(),
+            moves: 0,
             account: None,
             search,
             search_query: String::new(),
@@ -1105,9 +1117,32 @@ impl SessionSidebar {
                     .into_any_element()
             }
             Entry::Row(row) => match self.rows.get(row).cloned() {
-                Some(session) => item
-                    .child(self.session_row(row, &session, cx))
-                    .into_any_element(),
+                Some(session) => {
+                    let moving = self.moving.get(&session.workspace).copied();
+                    let item = item.child(self.session_row(row, &session, cx));
+                    match moving {
+                        // Slides in from a row's height away, the way it
+                        // came, and fades up as it settles.
+                        Some((direction, _, number)) => {
+                            let from = match direction {
+                                ginka_ui::motion::Moved::Up => 28.,
+                                ginka_ui::motion::Moved::Down => -28.,
+                            };
+                            let key = format!("reorder:{}:{number}", session.workspace.0);
+                            item.relative()
+                                .with_animation(
+                                    SharedString::from(key),
+                                    Animation::new(ginka_ui::motion::REORDER)
+                                        .with_easing(ginka_ui::motion::ease_out),
+                                    move |item, delta| {
+                                        item.top(px(from * (1. - delta))).opacity(0.4 + 0.6 * delta)
+                                    },
+                                )
+                                .into_any_element()
+                        }
+                        None => item.into_any_element(),
+                    }
+                }
                 None => item.into_any_element(),
             },
             Entry::ArchivedHeading => item
@@ -1364,6 +1399,29 @@ impl Render for SessionSidebar {
             let old = self.entries.len();
             self.session_list.splice(from..old, entries.len() - from);
         }
+        // Which rows jumped since the last frame. Not on the first: a list
+        // appearing is not a list reordering.
+        let order: Vec<WorkspaceId> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ginka_ui::session_list::Entry::Row(row) => {
+                    self.rows.get(*row).map(|row| row.workspace.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if order != self.row_order {
+            if !self.row_order.is_empty() {
+                let now = std::time::Instant::now();
+                for (workspace, direction) in ginka_ui::motion::moved(&self.row_order, &order) {
+                    self.moves += 1;
+                    self.moving.insert(workspace, (direction, now, self.moves));
+                }
+            }
+            self.row_order = order;
+        }
+        self.moving
+            .retain(|_, (_, started, _)| started.elapsed() < ginka_ui::motion::REORDER);
         self.entries = entries;
 
         let project_rows = self.projects.clone();
