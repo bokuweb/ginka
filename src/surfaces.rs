@@ -1052,6 +1052,7 @@ impl SurfacePanel {
 
     /// Whether the native browser view may be drawn: it sits above every GPUI
     /// element, so it must be hidden whenever anything covers its place.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn browser_on_screen(&self) -> bool {
         self.shows(Surface::Browser) && !self.browser_suspended && !self.choosing
     }
