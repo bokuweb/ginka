@@ -1,0 +1,34 @@
+#!/bin/sh
+# Pack stand-in binaries into Ginka.app and a .dmg, and check the bundle:
+# where each binary landed, what Info.plist says, that the signature holds,
+# and that the image is one hdiutil reads. macOS only.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+
+mkdir -p "$work/built"
+for binary in ginka ginka-cli ginka-daemon; do
+    printf '#!/bin/sh\necho %s\n' "$binary" >"$work/built/$binary"
+    chmod +x "$work/built/$binary"
+done
+
+image=$(sh "$root/scripts/package-macos" --bin-dir "$work/built" --out-dir "$work/out" --version 9.9.9)
+app="$work/out/macos/Ginka.app"
+fail() { echo "FAIL: $1" >&2; exit 1; }
+
+[ "$("$app/Contents/MacOS/ginka-app")" = "ginka" ] || fail "the bundle's executable is the window"
+[ "$("$app/Contents/MacOS/ginka")" = "ginka-cli" ] || fail "ginka is the command line"
+[ "$("$app/Contents/MacOS/ginka-daemon")" = "ginka-daemon" ] || fail "the daemon is bundled beside them"
+plist="$app/Contents/Info.plist"
+[ "$(plutil -extract CFBundleExecutable raw "$plist")" = "ginka-app" ] || fail "CFBundleExecutable"
+[ "$(plutil -extract CFBundleIdentifier raw "$plist")" = "io.github.bokuweb.ginka" ] || fail "CFBundleIdentifier"
+[ "$(plutil -extract CFBundleShortVersionString raw "$plist")" = "9.9.9" ] || fail "the version"
+codesign --verify --strict "$app" || fail "the signature holds"
+case "$image" in
+*/Ginka-9.9.9.dmg) ;;
+*) fail "unexpected image name: $image" ;;
+esac
+hdiutil imageinfo "$image" >/dev/null || fail "the image is readable"
+echo "ok"

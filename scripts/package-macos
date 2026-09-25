@@ -1,0 +1,107 @@
+#!/bin/sh
+# Build Ginka.app and a .dmg holding it (RELEASING.md step 5).
+#
+#   scripts/package-macos                   # cargo build --release, then pack
+#   scripts/package-macos --universal       # arm64 + x86_64, joined with lipo
+#   scripts/package-macos --bin-dir DIR     # pack binaries built elsewhere
+#   scripts/package-macos --no-dmg          # the .app only
+#
+# The window (built as `ginka`) is the bundle's executable, `ginka-app`; the
+# command line (`ginka-cli`) ships as `ginka` and the daemon as
+# `ginka-daemon`, all three in Contents/MacOS, where each finds the others
+# (roadmap N16: the daemon is bundled and signed with the app).
+#
+# Signing: GINKA_SIGN_IDENTITY names a Developer ID certificate in the
+# keychain; without it the bundle is signed ad hoc, which runs on this Mac
+# and nowhere Gatekeeper is asked. GINKA_NOTARY_PROFILE names a
+# `notarytool store-credentials` profile; with it the .dmg is notarized and
+# stapled. GINKA_BUNDLE_ID overrides the bundle identifier.
+set -eu
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+bin_dir=""
+out_dir="$root/target/package"
+version=$(sed -n 's/^version = "\(.*\)"/\1/p' "$root/Cargo.toml" | head -n 1)
+universal=false
+dmg=true
+bundle_id="${GINKA_BUNDLE_ID:-io.github.bokuweb.ginka}"
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+    --bin-dir) bin_dir="$2"; shift 2 ;;
+    --out-dir) out_dir="$2"; shift 2 ;;
+    --version) version="$2"; shift 2 ;;
+    --universal) universal=true; shift ;;
+    --no-dmg) dmg=false; shift ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+
+packages="-p ginka -p ginka-cli -p ginka-daemon"
+binaries="ginka ginka-cli ginka-daemon"
+if [ -z "$bin_dir" ]; then
+    if $universal; then
+        for target in aarch64-apple-darwin x86_64-apple-darwin; do
+            # shellcheck disable=SC2086
+            (cd "$root" && cargo build --release --target "$target" $packages)
+        done
+        bin_dir="$root/target/universal-release"
+        mkdir -p "$bin_dir"
+        for binary in $binaries; do
+            lipo -create \
+                "$root/target/aarch64-apple-darwin/release/$binary" \
+                "$root/target/x86_64-apple-darwin/release/$binary" \
+                -output "$bin_dir/$binary"
+        done
+    else
+        # shellcheck disable=SC2086
+        (cd "$root" && cargo build --release $packages)
+        bin_dir="$root/target/release"
+    fi
+fi
+
+stage="$out_dir/macos"
+app="$stage/Ginka.app"
+rm -rf "$stage"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+cp "$bin_dir/ginka" "$app/Contents/MacOS/ginka-app"
+cp "$bin_dir/ginka-cli" "$app/Contents/MacOS/ginka"
+cp "$bin_dir/ginka-daemon" "$app/Contents/MacOS/ginka-daemon"
+chmod 0755 "$app/Contents/MacOS/"*
+sed -e "s|@BUNDLE_ID@|$bundle_id|" -e "s|@VERSION@|$version|" \
+    "$root/packaging/macos/Info.plist.in" >"$app/Contents/Info.plist"
+plutil -lint "$app/Contents/Info.plist" >/dev/null
+
+# The helpers first, the bundle last: signing the bundle seals what is in it.
+identity="${GINKA_SIGN_IDENTITY:--}"
+for helper in ginka ginka-daemon; do
+    if [ "$identity" = "-" ]; then
+        codesign --force --sign - "$app/Contents/MacOS/$helper"
+    else
+        codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/MacOS/$helper"
+    fi
+done
+if [ "$identity" = "-" ]; then
+    codesign --force --sign - "$app"
+else
+    codesign --force --options runtime --timestamp --sign "$identity" "$app"
+fi
+codesign --verify --strict "$app"
+
+if ! $dmg; then
+    echo "$app"
+    exit 0
+fi
+
+image="$out_dir/Ginka-$version.dmg"
+ln -s /Applications "$stage/Applications"
+rm -f "$image"
+hdiutil create -quiet -volname Ginka -srcfolder "$stage" -ov -format UDZO "$image"
+if [ "$identity" != "-" ]; then
+    codesign --force --timestamp --sign "$identity" "$image"
+fi
+if [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
+    xcrun notarytool submit "$image" --keychain-profile "$GINKA_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$image"
+fi
+echo "$image"

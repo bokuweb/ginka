@@ -36,3 +36,6 @@ jobs:
       - name: Package and install the Linux archive
         if: runner.os == 'Linux'
         run: sh scripts/test-package-linux
+      - name: Package the macOS app and disk image
+        if: runner.os == 'macOS'
+        run: sh scripts/test-package-macos

@@ -520,9 +520,11 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 
 ### M6 — Ship (target: 3 weeks)
 
-- [ ] macOS: universal build, codesign, notarize, `.dmg`, Sparkle auto-update, Homebrew cask
+- [x] macOS: universal build, codesign, notarize, `.dmg` (`scripts/package-macos`, checked in CI)
+- [ ] macOS: an app icon, Sparkle auto-update, Homebrew cask
 - [ ] **One update contract across platforms (N15):** a signed appcast that Sparkle consumes on macOS and that Windows and Linux implement directly against the same key. Linux updates only the user-writable install layout; a package-manager-owned build defers to its manager instead of overwriting files it does not own
-- [ ] **Bundle and sign the daemon with the app (N16);** keep a separately named debug daemon in development so daemon-side edits do not force an app relaunch
+- [x] **Bundle and sign the daemon with the app (N16)** — `Contents/MacOS/ginka-daemon`, signed before the bundle
+- [ ] A separately named debug daemon in development, so daemon-side edits do not force an app relaunch
 - [ ] Nightly channel from `main`
 - [x] Linux: `.tar.gz` + install script (`~/.local`) — `scripts/package-linux`, checked in CI
 - [ ] Linux: Wayland + X11 verified by a person
@@ -740,3 +742,4 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-25 | Ginka's own agent skills ship in the binary and are installed on request, never over an edit | They document the CLI, so they version with it; writing them only when asked, keeping an edited or disabled copy, respects the reader's skills directory as theirs. |
 | 2026-09-25 | Browser history keeps only what can be reopened, without secrets | Credentials, fragments and secret-looking query parameters are dropped before storage, the same caution the inspection path applies before a prompt; suggestions sit between toolbar and page because the page is a native view above GPUI. |
 | 2026-09-25 | The Linux archive installs the CLI as `ginka`, the window as `ginka-app`, and the daemon beside them in `~/.local/bin` | The CLI keeps the name agents and people type; the daemon is found beside the binary that starts it, so one directory is the whole install and needs no root. |
+| 2026-09-25 | The macOS bundle is `Ginka.app` with identifier `io.github.bokuweb.ginka` (overridable), the window as `ginka-app` and the CLI and daemon beside it; ad hoc signed unless an identity is given | The repository owner's GitHub namespace is a reverse domain the project controls today; a release can set its own. One directory holding all three keeps daemon discovery as it is everywhere else, and signing the helpers before the bundle is what makes the bundle's seal cover them. |
