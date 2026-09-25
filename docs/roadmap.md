@@ -502,7 +502,7 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [x] **Accounts (N17):** several logins per provider as directories under `~/.ginka/accounts/`; the manually selected account persists per provider for future chats across the window, CLI and MCP, while an explicit `ginka session start --account` overrides it and existing chats retain their original login. Accounts are added from the pickers or `ginka account add`, signed in through the vendor's own command in a daemon terminal (`ginka account login` runs it in the user's own), and recorded on sessions and usage events — `docs/accounts.md` §3–5, §8–9
 - [x] **Plan usage meter (N12), per account:** rate-limit windows — percent used and reset time — shown on the account chip, in the picker, in the sidebar footer and in Reports with the reading's age; the always-visible composer usage chip combines the active session's live input-plus-output token count with its tightest window without double-counting cache or reasoning breakdowns. Windows are read on demand through `codex app-server`, from Codex's older `token_count` stream on every turn (the modern stream carries none, `docs/accounts.md` §6), and from Claude's refused turns as the wall and when it opens. A percentage for Claude waits on Q9
 - [x] **Pricing (N13):** cost from a public rate table, fetched at most daily and cached beside the database; the page states its cost quality rather than guessing silently — `≈` marks an estimate, unpriced sessions are counted and left out, and the table's age is shown
-- [ ] Embedded browser surface via `gpui-component`'s same-revision `gpui-wry` crate: the macOS/Windows child view, address bar, navigation and one live tab per workspace are in; history autocomplete, find-in-page and persisted frecency remain History autocomplete by frecency is in (`browser_history`).
+- [x] Embedded browser surface via `gpui-component`'s same-revision `gpui-wry` crate: the macOS/Windows child view, address bar, navigation and one live tab per workspace, history autocomplete by persisted frecency (`browser_history`), and find-in-page
 - [ ] Design mode: inspect hover/click now sends bounded HTML, curated CSS, accessibility name, selector, bounds and development source location to the composer; a browser screenshot and browser-to-annotation shortcut remain
 - [x] Image annotation for agent instructions: an attached PNG/JPEG/GIF/WebP opens a full-size pen/highlight/arrow/rectangle/ellipse/text canvas with undo and clear, then replaces the source draft attachment with a self-contained SVG through the ordinary daemon upload path
 - [x] Notifications + sounds on agent completion / attention needed, and a Dock badge counting the sessions that wait on the reader
@@ -531,7 +531,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [ ] Windows: installer + portable zip (best-effort at v1)
 - [x] `CONTRIBUTING.md`, `RELEASING.md`, `SECURITY.md`, a maintained `CHANGELOG.md` — the release process has to be written down before the first release, not after it
 - [x] Onboarding: prerequisite checks (agent CLIs installed and authenticated), first-project flow — a card on the home screen while a step is left (`ginka_ui::home::setup_steps`)
-- [ ] Docs site + user documentation
+- [x] User documentation: `docs/guide.md`, and `docs/cli.md` generated from the CLI's help and kept complete by a test
+- [ ] A docs site
 - [ ] Performance pass against the budgets in §6.2
 
 ---

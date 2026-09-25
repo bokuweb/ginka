@@ -798,3 +798,44 @@ fn a_setting_is_read_and_changed_from_the_cli() {
     let file = std::fs::read_to_string(home.root().join("settings.json")).unwrap();
     assert!(file.contains("\"retention_days\": 7"), "{file}");
 }
+
+/// The commands `ginka --help` (or `ginka <command> --help`) lists.
+fn listed_commands(args: &[&str]) -> Vec<String> {
+    let output = Command::new(CLI)
+        .args(args)
+        .arg("--help")
+        .output()
+        .expect("the CLI runs");
+    let help = String::from_utf8_lossy(&output.stdout).to_string();
+    help.lines()
+        .skip_while(|line| !line.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|line| line.starts_with("  "))
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_string)
+        .collect()
+}
+
+#[test]
+fn every_command_is_in_the_cli_reference() {
+    // docs/cli.md is what a reader is sent to; a command added without it is
+    // one they cannot find.
+    let reference = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/cli.md"),
+    )
+    .unwrap();
+    let mut missing = Vec::new();
+    for command in listed_commands(&[]) {
+        let subcommands = listed_commands(&[command.as_str()]);
+        if subcommands.is_empty() && !reference.contains(&format!("`ginka {command}")) {
+            missing.push(command.clone());
+        }
+        for subcommand in subcommands {
+            if !reference.contains(&format!("`ginka {command} {subcommand}`")) {
+                missing.push(format!("{command} {subcommand}"));
+            }
+        }
+    }
+    assert!(missing.is_empty(), "missing from docs/cli.md: {missing:?}");
+}
