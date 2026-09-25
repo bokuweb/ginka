@@ -1951,3 +1951,53 @@ fn the_address_bar_completes_from_the_workspaces_own_history() {
     );
     assert_eq!(pages[0].visits, 2);
 }
+
+#[test]
+fn the_daemons_settings_are_shown_without_secrets_and_changed_by_key() {
+    let mut fixture = Fixture::new();
+    let shown = |fixture: &mut Fixture| -> serde_json::Value {
+        match fixture.ask(Request::DaemonSettings) {
+            Response::DaemonSettings { json } => serde_json::from_str(&json).unwrap(),
+            other => panic!("expected settings, got {other:?}"),
+        }
+    };
+    assert_eq!(shown(&mut fixture)["keep_awake"], true);
+
+    fixture.ask(Request::UpdateDaemonSettings {
+        key: "keep_awake".into(),
+        value: "false".into(),
+    });
+    fixture.ask(Request::UpdateDaemonSettings {
+        key: "agents".into(),
+        value: r#"{"claude": {"env": {"ANTHROPIC_API_KEY": "sk-secret"}}}"#.into(),
+    });
+    let now = shown(&mut fixture);
+    assert_eq!(now["keep_awake"], false);
+    assert_eq!(
+        now["agents"]["claude"]["env"]["ANTHROPIC_API_KEY"], "[set]",
+        "a value is never shown, only that it is set"
+    );
+    assert!(!now.to_string().contains("sk-secret"));
+
+    for (key, value) in [
+        ("keep_awak", "false"),    // a typo
+        ("keep_awake", "\"yes\""), // the wrong type
+        ("retention_days", "not json at all"),
+    ] {
+        assert!(
+            fixture
+                .service
+                .handle(Request::UpdateDaemonSettings {
+                    key: key.into(),
+                    value: value.into(),
+                })
+                .is_err(),
+            "{key} = {value}"
+        );
+    }
+    assert_eq!(
+        shown(&mut fixture)["keep_awake"],
+        false,
+        "a refusal changes nothing"
+    );
+}

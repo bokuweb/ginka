@@ -21,8 +21,14 @@ exist yet are marked as such.
    without `--features github`, `cargo test --workspace`.
 4. Tag the commit `vX.Y.Z` and push the tag.
 5. Build the artifacts *(not automated yet)*:
-   - macOS: a universal build, the daemon bundled and signed with the app
-     (N16), notarized, as a `.dmg` and a Homebrew cask;
+   - macOS: `scripts/package-macos --universal` builds `Ginka.app` — the
+     window as its executable, `ginka` and `ginka-daemon` beside it (N16) —
+     and `Ginka-<version>.dmg`. Set `GINKA_SIGN_IDENTITY` to a Developer ID
+     certificate to sign with the hardened runtime (ad hoc otherwise) and
+     `GINKA_NOTARY_PROFILE` to a `notarytool` keychain profile to notarize
+     and staple. CI checks the bundle with stand-in binaries
+     (`scripts/test-package-macos`). The app has no icon yet, and the
+     Homebrew cask is still to write;
    - Linux: `scripts/package-linux` builds `ginka-<version>-linux-<arch>.tar.gz`
      — `ginka`, `ginka-app`, `ginka-daemon`, a desktop entry and
      `install.sh`, which installs into `~/.local` (or `$PREFIX`) and

@@ -343,6 +343,9 @@ surface.browser.back:
 surface.browser.forward:
   en: Forward
   ja: 進む
+surface.browser.find:
+  en: Find in page — Enter for next, Shift-Enter for previous
+  ja: ページ内を検索 — Enter で次、Shift+Enter で前
 surface.browser.reload:
   en: Reload
   ja: 再読み込み

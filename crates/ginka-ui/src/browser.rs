@@ -36,8 +36,38 @@ pub fn append_context(draft: &str, context: &str) -> String {
     }
 }
 
+/// The script that finds `query` in the page — the next match, or the one
+/// before it with `backwards` — wrapping around, ignoring case. The query is
+/// passed as a JSON string, so nothing typed can end the call early; `None`
+/// for an empty query, which finds nothing worth a round trip.
+pub fn find_script(query: &str, backwards: bool) -> Option<String> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    let literal = serde_json::Value::String(query.to_string()).to_string();
+    Some(format!("window.find({literal}, false, {backwards}, true)"))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_search_is_a_find_call_nothing_typed_can_break_out_of() {
+        assert_eq!(
+            find_script("needle", false).as_deref(),
+            Some(r#"window.find("needle", false, false, true)"#)
+        );
+        assert_eq!(
+            find_script("back", true).as_deref(),
+            Some(r#"window.find("back", false, true, true)"#)
+        );
+        let hostile = find_script("\"); alert(1); (\"", false).unwrap();
+        assert!(
+            hostile.starts_with(r#"window.find("\"); alert(1); (\"""#),
+            "{hostile}"
+        );
+        assert_eq!(hostile.matches("window.find(").count(), 1);
+        assert_eq!(find_script("  ", false), None);
+    }
     use super::*;
 
     #[test]

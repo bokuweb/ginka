@@ -320,6 +320,12 @@ impl Service {
             return false;
         }
         tracing::info!(path = %path.display(), "settings changed on disk; reading them again");
+        self.take_settings(settings);
+        true
+    }
+
+    /// Run with these settings from now on.
+    fn take_settings(&mut self, settings: crate::settings::DaemonSettings) {
         self.settings = settings;
         // What was probed under the old settings is stale.
         self.accounts = None;
@@ -327,7 +333,6 @@ impl Service {
         if self.drivers_follow_settings {
             self.drivers = Arc::new(Registry::from_settings(&self.settings));
         }
-        true
     }
 
     /// Hand agents this `ginka` command as their MCP bridge, rather than the
@@ -1047,6 +1052,33 @@ impl Service {
                     )
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
+            }
+            Request::DaemonSettings => {
+                let mut value = serde_json::to_value(&self.settings).map_err(failed)?;
+                redact_env(&mut value);
+                Ok(Response::DaemonSettings {
+                    json: serde_json::to_string_pretty(&value).map_err(failed)?,
+                })
+            }
+            Request::UpdateDaemonSettings { key, value } => {
+                let value: serde_json::Value = serde_json::from_str(&value).map_err(|error| {
+                    RpcError::failed(format!("{key}: the value is not JSON ({error})"))
+                })?;
+                let mut current = serde_json::to_value(&self.settings).map_err(failed)?;
+                let fields = current
+                    .as_object_mut()
+                    .ok_or_else(|| RpcError::failed("the settings are not an object"))?;
+                if !fields.contains_key(&key) {
+                    return Err(RpcError::failed(format!(
+                        "there is no setting called {key}"
+                    )));
+                }
+                fields.insert(key.clone(), value);
+                let settings: crate::settings::DaemonSettings = serde_json::from_value(current)
+                    .map_err(|error| RpcError::failed(format!("{key}: {error}")))?;
+                crate::settings::save(&self.paths.daemon_settings(), &settings).map_err(failed)?;
+                self.take_settings(settings);
+                Ok(Response::Ack)
             }
             Request::RecordBrowserVisit {
                 workspace,
@@ -2787,6 +2819,28 @@ fn account_error(error: crate::account::AccountError) -> RpcError {
 
 fn failed(error: impl std::fmt::Display) -> RpcError {
     RpcError::failed(error.to_string())
+}
+
+/// Replace every value in an `env` map with `[set]`: which variables an agent
+/// is given is the reader's to see; what they hold — keys, tokens — is not
+/// for the wire (`docs/accounts.md` §10).
+fn redact_env(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                match field {
+                    serde_json::Value::Object(env) if key == "env" => {
+                        for secret in env.values_mut() {
+                            *secret = serde_json::Value::String("[set]".into());
+                        }
+                    }
+                    other => redact_env(other),
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_env),
+        _ => {}
+    }
 }
 
 #[cfg(test)]
