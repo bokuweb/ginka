@@ -670,9 +670,9 @@ pub struct Shell {
     model_query: Entity<InputState>,
     /// A copied query keeps filtering in the testable `ginka-ui` layer.
     model_filter: String,
-    /// The pointer is over the model chip, so a press there is the chip's to
-    /// toggle rather than a press outside the open picker.
-    model_chip_hovered: bool,
+    /// The pointer is over a chip whose picker floats from it, so a press
+    /// there is the chip's to toggle rather than a press outside the picker.
+    picker_chip_hovered: bool,
     /// Search or new-branch text in the branch popover.
     branch_query: Entity<InputState>,
     /// A copied query keeps branch filtering in the testable `ginka-ui` layer.
@@ -1445,7 +1445,7 @@ impl Shell {
             composer,
             model_query,
             model_filter: String::new(),
-            model_chip_hovered: false,
+            picker_chip_hovered: false,
             branch_query,
             branch_filter: String::new(),
             branches: Vec::new(),
@@ -6717,7 +6717,7 @@ impl Shell {
             .child(
                 div()
                     .text_size(px(PROSE_SIZE))
-                    .text_color(tokens.colors().prose())
+                    .text_color(tokens.colors().text_primary)
                     .child(question.to_string()),
             )
             .child(
@@ -6740,7 +6740,7 @@ impl Shell {
                             })
                             .when(!answered, |this| {
                                 this.bg(tokens.colors().row_active())
-                                    .text_color(tokens.colors().prose())
+                                    .text_color(tokens.colors().text_primary)
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().accent.opacity(0.35)))
                             })
@@ -6783,7 +6783,7 @@ impl Shell {
                 div()
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
-                    .text_color(tokens.colors().prose())
+                    .text_color(tokens.colors().text_primary)
                     .child(plan.to_string()),
             )
             .children((!answered).then(|| {
@@ -6994,7 +6994,7 @@ impl Shell {
                             .bg(tokens.colors().row_active())
                             .text_size(px(PROSE_SIZE))
                             .line_height(px(PROSE_LINE))
-                            .text_color(tokens.colors().prose())
+                            .text_color(tokens.colors().text_primary)
                             .child(text.clone()),
                     )
                     .child(self.message_actions(index, "user", text, cx))
@@ -7025,7 +7025,7 @@ impl Shell {
                     .gap_1()
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
-                    .text_color(tokens.colors().prose())
+                    .text_color(tokens.colors().text_primary)
                     .children((!formatted.is_empty()).then(|| {
                         TextView::markdown(("assistant", index), linked.markdown.clone())
                             .selectable(true)
@@ -8864,8 +8864,9 @@ impl Shell {
     /// picker that refuses the pick is not a picker.
     fn picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.picker?;
-        // Floats from its own chip instead; see `model_chip_button`.
-        if picker == Picker::Model {
+        // These float from their own chips instead; see `model_chip_button`
+        // and `access_chip_button`.
+        if matches!(picker, Picker::Model | Picker::Access) {
             return None;
         }
         if picker == Picker::Branch {
@@ -8926,24 +8927,7 @@ impl Shell {
             // the numbers beside the choice are what make a router
             // unnecessary (`docs/accounts.md` §7).
             Picker::Account => self.account_rows(cx),
-            Picker::Access => ginka_protocol::AccessMode::ALL
-                .into_iter()
-                .map(|mode| {
-                    let chosen = self.chosen_access.unwrap_or_default() == mode;
-                    self.picker_row(
-                        SharedString::from(format!("access-option:{}", mode.as_str())),
-                        access_label(mode),
-                        Some(access_note(mode)),
-                        chosen,
-                        cx.listener(move |this, _, _, cx| {
-                            this.chosen_access = Some(mode);
-                            this.picker = None;
-                            cx.notify();
-                        }),
-                        cx,
-                    )
-                })
-                .collect(),
+            Picker::Access => unreachable!("the access card floats from its chip"),
             Picker::Command => self
                 .commands
                 .iter()
@@ -9259,7 +9243,7 @@ impl Shell {
                 .overflow_hidden()
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     // The chip toggles itself; anywhere else puts it away.
-                    if !this.model_chip_hovered {
+                    if !this.picker_chip_hovered {
                         this.picker = None;
                         cx.notify();
                     }
@@ -10040,36 +10024,137 @@ impl Shell {
         if !starting_fresh {
             return None;
         }
+        let open = self.picker == Some(Picker::Access);
+        let flyout = open.then(|| chip_flyout(self.access_card(cx)));
         let tokens = Tokens::global(cx);
         let mode = self.chosen_access.unwrap_or_default();
         Some(
-            h_flex()
-                .id("access-chip")
-                .h(px(28.))
-                .px(px(9.))
-                .gap(px(6.))
-                .items_center()
-                .rounded(px(tokens.radius.row))
-                .bg(tokens.colors().row_hover())
-                .cursor_pointer()
-                .hover(|this| this.bg(tokens.colors().row_active()))
-                .tooltip(|window, cx| {
-                    Tooltip::new(rust_i18n::t!("composer.access.pick").to_string())
-                        .build(window, cx)
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Access, cx)))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(tokens.colors().text_secondary)
-                        .child(access_label(mode)),
-                )
-                .child(
-                    Icon::new(IconName::ChevronDown)
+            div().relative().children(flyout).child(
+                h_flex()
+                    .id("access-chip")
+                    .h(px(28.))
+                    .px(px(9.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .bg(if open {
+                        tokens.colors().row_active()
+                    } else {
+                        tokens.colors().row_hover()
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .when(!open, |this| {
+                        this.tooltip(|window, cx| {
+                            Tooltip::new(rust_i18n::t!("composer.access.pick").to_string())
+                                .build(window, cx)
+                        })
+                    })
+                    .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                        this.picker_chip_hovered = *hovered;
+                    }))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Access, cx)))
+                    .child(
+                        access_icon(mode)
+                            .size(px(13.))
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(tokens.colors().text_secondary)
+                            .child(access_label(mode)),
+                    )
+                    .child(
+                        Icon::new(if open {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
                         .size(px(12.))
                         .text_color(tokens.colors().text_muted),
-                ),
+                    ),
+            ),
         )
+    }
+
+    /// What the agent may do without asking, each mode with what it means:
+    /// the choice is about consequences, so the consequence is on the row.
+    fn access_card(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let current = self.chosen_access.unwrap_or_default();
+        let rows = ginka_protocol::AccessMode::ALL.into_iter().map(|mode| {
+            let chosen = current == mode;
+            h_flex()
+                .id(SharedString::from(format!(
+                    "access-option:{}",
+                    mode.as_str()
+                )))
+                .w_full()
+                .px(px(10.))
+                .py(px(8.))
+                .gap(px(10.))
+                .items_start()
+                .rounded(px(tokens.radius.row))
+                .cursor_pointer()
+                .when(chosen, |this| this.bg(tokens.colors().row_hover()))
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.chosen_access = Some(mode);
+                    this.picker = None;
+                    cx.notify();
+                }))
+                .child(
+                    div().pt(px(2.)).child(
+                        access_icon(mode)
+                            .size(px(15.))
+                            .text_color(tokens.colors().text_secondary),
+                    ),
+                )
+                .child(
+                    v_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .font_medium()
+                                .text_color(tokens.colors().text_primary)
+                                .child(access_label(mode)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(tokens.colors().text_muted)
+                                .child(access_note(mode)),
+                        ),
+                )
+                .children(chosen.then(|| {
+                    div().pt(px(2.)).child(
+                        Icon::new(IconName::Check)
+                            .size_3p5()
+                            .text_color(tokens.colors().text_secondary),
+                    )
+                }))
+        });
+        v_flex()
+            .w(px(380.))
+            .p_1()
+            .gap_0p5()
+            .rounded(px(tokens.radius.card))
+            .bg(tokens.colors().popover())
+            .border_1()
+            .border_color(tokens.colors().border_strong)
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                if !this.picker_chip_hovered {
+                    this.picker = None;
+                    cx.notify();
+                }
+            }))
+            .children(rows)
+            .into_any_element()
     }
 
     /// The agent chip, which is also how the agent is changed.
@@ -11138,21 +11223,7 @@ impl Shell {
         let flyout = (self.picker == Some(Picker::Model))
             .then(|| self.model_picker_panel(cx))
             .flatten()
-            .map(|card| {
-                // Pinned to the chip's top-left corner and opening upward:
-                // the composer sits at the foot of the window, and a list
-                // that opened down would open off it.
-                div().absolute().top_0().left_0().child(
-                    deferred(
-                        anchored()
-                            .anchor(Anchor::BottomLeft)
-                            .offset(point(px(0.), px(-6.)))
-                            .snap_to_window_with_margin(px(8.))
-                            .child(card),
-                    )
-                    .with_priority(1),
-                )
-            });
+            .map(chip_flyout);
         let tokens = Tokens::global(cx);
 
         Some(
@@ -11171,7 +11242,7 @@ impl Shell {
                         this.bg(tokens.colors().row_active())
                     })
                     .on_hover(cx.listener(|this, hovered: &bool, _, _| {
-                        this.model_chip_hovered = *hovered;
+                        this.picker_chip_hovered = *hovered;
                     }))
                     .on_click(cx.listener(|this, _, window, cx| {
                         if this.picker == Some(Picker::Model) {
@@ -12774,6 +12845,33 @@ struct Palette {
 }
 
 /// What the access chip and its rows call a mode.
+/// A picker card floating from the chip that opened it.
+///
+/// Pinned to the chip's top-left corner and opening upward: the composer sits
+/// at the foot of the window, and a list that opened down would open off it.
+fn chip_flyout(card: AnyElement) -> Div {
+    div().absolute().top_0().left_0().child(
+        deferred(
+            anchored()
+                .anchor(Anchor::BottomLeft)
+                .offset(point(px(0.), px(-6.)))
+                .snap_to_window_with_margin(px(8.))
+                .child(card),
+        )
+        .with_priority(1),
+    )
+}
+
+/// The mark each access mode is drawn with: an eye for looking only, a
+/// closed lock for asking first, an open one for asking nothing.
+fn access_icon(mode: ginka_protocol::AccessMode) -> Icon {
+    match mode {
+        ginka_protocol::AccessMode::ReadOnly => Icon::new(IconName::Eye),
+        ginka_protocol::AccessMode::Ask => Icon::empty().path(ginka_ui::assets::icon::LOCK),
+        ginka_protocol::AccessMode::Auto => Icon::empty().path(ginka_ui::assets::icon::LOCK_OPEN),
+    }
+}
+
 fn access_label(mode: ginka_protocol::AccessMode) -> String {
     match mode {
         ginka_protocol::AccessMode::ReadOnly => rust_i18n::t!("composer.access.read_only"),

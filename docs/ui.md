@@ -75,9 +75,12 @@ solved the same problem.)
 The one deliberate exception is where text is read at length: the conversation
 column and the right panel lay a second coat of `bg.window` over the glass, the
 way e1's conversation column does, so the desktop shows through the sidebar
-and not under a paragraph. Conversation text is `text.primary` a step down in
-lightness on the dark theme (`Colors::prose`): near-white at reading length on
-that darker surface blooms into what reads as bold.
+and not under a paragraph.
+
+Text is drawn without macOS glyph thickening unless the user set a smoothing
+level for the whole system (`ginka_ui::theme::font_smoothing_override`): the
+toolkit thickens strokes by colour brightness whenever the setting is absent,
+which is how a Mac ships, and near-white text then reads as bold.
 
 A light theme ships with the same token names and WCAG AA contrast pairs. The
 schema, palette, 13 px toolkit base and 12 px mono base intentionally match e1;

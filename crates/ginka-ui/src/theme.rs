@@ -333,17 +333,6 @@ impl Colors {
         color
     }
 
-    /// Conversation text: the primary colour a step down. Near-white set
-    /// at reading length on the dark surface blooms and reads as bold; the
-    /// light theme's dark text is left as it is.
-    pub fn prose(&self) -> Hsla {
-        let mut color = self.text_primary;
-        if !self.light() {
-            color.l *= 0.9;
-        }
-        color
-    }
-
     /// A row under the pointer.
     ///
     /// The accent at a fraction of itself rather than a grey fill: rows are
@@ -365,6 +354,19 @@ impl Colors {
     }
 }
 
+/// What the app sets macOS's `AppleFontSmoothing` to for itself, given what
+/// the user has set, if anything.
+///
+/// The toolkit thickens glyph strokes by their colour's brightness whenever
+/// the key is absent, which is how a Mac ships since 10.14; near-white text
+/// on the dark surface then reads as bold. An explicit choice is left alone.
+pub fn font_smoothing_override(current: Option<i64>) -> Option<i64> {
+    match current {
+        Some(_) => None,
+        None => Some(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -379,6 +381,13 @@ mod tests {
     }
 
     #[test]
+    fn text_is_drawn_unthickened_unless_the_user_asked_for_smoothing() {
+        assert_eq!(font_smoothing_override(None), Some(0));
+        assert_eq!(font_smoothing_override(Some(0)), None);
+        assert_eq!(font_smoothing_override(Some(2)), None);
+    }
+
+    #[test]
     fn corners_are_tight_enough_to_read_as_a_tool() {
         // Softer than this reads as a toy at this density; the window's own
         // corner is the platform's and stays as it is.
@@ -389,14 +398,6 @@ mod tests {
                 (10.0, 7.0, 6.0, 3.0)
             );
         }
-    }
-
-    #[test]
-    fn conversation_text_is_a_step_down_from_primary_on_the_dark_surface() {
-        let dark = Tokens::load(Mode::Dark).colors;
-        assert!(dark.prose().l < dark.text_primary.l);
-        let light = Tokens::load(Mode::Light).colors;
-        assert_eq!(light.prose(), light.text_primary);
     }
 
     #[test]
