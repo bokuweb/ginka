@@ -131,6 +131,10 @@ impl Layout {
             .workspace_layouts
             .get(&workspace.0)
             .and_then(|saved| saved.terminal_active.clone());
+        let surface_dock = settings
+            .workspace_layouts
+            .get(&workspace.0)
+            .and_then(|saved| saved.surface_dock.clone());
         settings.workspace_layouts.insert(
             workspace.0.clone(),
             WorkspaceLayoutSettings {
@@ -141,6 +145,7 @@ impl Layout {
                 active_surface,
                 terminal_split,
                 terminal_active,
+                surface_dock,
             },
         );
         settings.sidebar_open = self.sidebar_open;
@@ -233,6 +238,7 @@ impl Layout {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ginka_core::settings::SurfaceArrangement;
 
     /// Settings with every panel open.
     ///
@@ -381,6 +387,7 @@ mod tests {
                 active_surface: Some("files".into()),
                 terminal_split: None,
                 terminal_active: None,
+                surface_dock: None,
             },
         );
         let workspace = WorkspaceId("comet/main".into());
@@ -402,6 +409,10 @@ mod tests {
                 active_surface: Some("files".into()),
                 terminal_split: Some(["left".into(), "right".into()]),
                 terminal_active: Some("right".into()),
+                surface_dock: Some(SurfaceArrangement::Tabs {
+                    surfaces: vec!["files".into(), "git".into()],
+                    active: 0,
+                }),
                 ..WorkspaceLayoutSettings::default()
             },
         );
@@ -413,6 +424,7 @@ mod tests {
             active_surface: Some("git".into()),
             terminal_split: None,
             terminal_active: None,
+            surface_dock: None,
         };
         settings
             .workspace_layouts
@@ -428,6 +440,13 @@ mod tests {
         assert_eq!(saved.active_surface.as_deref(), Some("files"));
         assert_eq!(saved.terminal_split, Some(["left".into(), "right".into()]));
         assert_eq!(saved.terminal_active.as_deref(), Some("right"));
+        assert_eq!(
+            saved.surface_dock,
+            Some(SurfaceArrangement::Tabs {
+                surfaces: vec!["files".into(), "git".into()],
+                active: 0,
+            })
+        );
         assert_eq!(saved.right_panel_width, 510.0);
         assert_eq!(settings.workspace_layouts.get("comet/review"), Some(&other));
     }

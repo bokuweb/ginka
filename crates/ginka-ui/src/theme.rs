@@ -354,6 +354,19 @@ impl Colors {
     }
 }
 
+/// What the app sets macOS's `AppleFontSmoothing` to for itself, given what
+/// the user has set, if anything.
+///
+/// The toolkit thickens glyph strokes by their colour's brightness whenever
+/// the key is absent, which is how a Mac ships since 10.14; near-white text
+/// on the dark surface then reads as bold. An explicit choice is left alone.
+pub fn font_smoothing_override(current: Option<i64>) -> Option<i64> {
+    match current {
+        Some(_) => None,
+        None => Some(0),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,6 +377,26 @@ mod tests {
             let tokens = Tokens::load(mode);
             assert!(!tokens.name.is_empty());
             assert_eq!(tokens.radius.window, 12.0);
+        }
+    }
+
+    #[test]
+    fn text_is_drawn_unthickened_unless_the_user_asked_for_smoothing() {
+        assert_eq!(font_smoothing_override(None), Some(0));
+        assert_eq!(font_smoothing_override(Some(0)), None);
+        assert_eq!(font_smoothing_override(Some(2)), None);
+    }
+
+    #[test]
+    fn corners_are_tight_enough_to_read_as_a_tool() {
+        // Softer than this reads as a toy at this density; the window's own
+        // corner is the platform's and stays as it is.
+        for mode in [Mode::Dark, Mode::Light] {
+            let radius = Tokens::load(mode).radius;
+            assert_eq!(
+                (radius.card, radius.panel, radius.row, radius.control()),
+                (10.0, 7.0, 6.0, 3.0)
+            );
         }
     }
 

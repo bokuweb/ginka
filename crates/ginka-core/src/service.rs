@@ -825,6 +825,22 @@ impl Service {
                 self.sessions.cancel(&session);
                 Ok(Response::Ack)
             }
+            Request::SessionTranscriptTail {
+                session,
+                before,
+                limit,
+            } => {
+                self.session(&session)?;
+                Ok(Response::Transcript {
+                    entries: session::transcript_tail(
+                        &self.conn(),
+                        &session,
+                        before,
+                        limit.min(5_000),
+                    )
+                    .map_err(failed)?,
+                })
+            }
             Request::SessionTranscript {
                 session,
                 after,

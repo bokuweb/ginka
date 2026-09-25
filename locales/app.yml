@@ -257,20 +257,20 @@ composer.access.read_only:
   en: Read-only
   ja: 読み取りのみ
 composer.access.read_only.note:
-  en: reads and proposes; changes nothing
-  ja: 読んで提案するだけで、何も変更しない
+  en: Reads and proposes; changes nothing.
+  ja: 読んで提案するだけで、何も変更しません。
 composer.access.ask:
   en: Edit
   ja: 編集
 composer.access.ask.note:
-  en: edits the worktree; commands are sandboxed or refused
-  ja: worktree を編集する。コマンドは sandbox 内か拒否
+  en: Edits the worktree; commands are sandboxed or refused.
+  ja: worktree を編集します。コマンドは sandbox 内で動くか、拒否されます。
 composer.access.auto:
   en: Full
   ja: フル
 composer.access.auto.note:
-  en: edits and runs commands without asking
-  ja: 確認なしで編集もコマンド実行も行う
+  en: Edits and runs commands without asking.
+  ja: 確認なしで編集もコマンド実行も行います。
 composer.account.pick:
   en: Choose which login runs this
   ja: 実行するログイン（アカウント）を選ぶ
@@ -534,6 +534,9 @@ home.starter.fix.prompt:
   en: "Fix this error: "
   ja: "次のエラーを直して: "
 
+transcript.earlier:
+  en: Show earlier messages
+  ja: 以前のメッセージを表示
 transcript.rewind.hint:
   en: Put the worktree back to how it was at this turn
   ja: このターン時点のワークツリーに戻す

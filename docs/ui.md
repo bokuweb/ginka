@@ -72,6 +72,16 @@ sidebar, the centre column and each card paint themselves once. Three coats of
 70 % is 97 %, which is no longer glass. (Both rules are pedro's, whose palette
 solved the same problem.)
 
+The one deliberate exception is where text is read at length: the conversation
+column and the right panel lay a second coat of `bg.window` over the glass, the
+way e1's conversation column does, so the desktop shows through the sidebar
+and not under a paragraph.
+
+Text is drawn without macOS glyph thickening unless the user set a smoothing
+level for the whole system (`ginka_ui::theme::font_smoothing_override`): the
+toolkit thickens strokes by colour brightness whenever the setting is absent,
+which is how a Mac ships, and near-white text then reads as bold.
+
 A light theme ships with the same token names and WCAG AA contrast pairs. The
 schema, palette, 13 px toolkit base and 12 px mono base intentionally match e1;
 Kirikumo consumes the same token contract. Keeping these as serialized tokens,
@@ -83,17 +93,18 @@ crate later without rewriting their views.
 | Role | Font | Size / line-height | Weight |
 | --- | --- | --- | --- |
 | Toolkit base | UI sans (system / Inter) | 13 / toolkit default | 400 |
-| Transcript body | UI sans | 15 / 1.65 | 400 |
+| Transcript body | UI sans | 14 / 1.6 | 400 |
 | Session title | UI sans | 14 / 1.3 | 500 |
 | Metadata | UI sans | 11–12 / 1.3 | 400 |
 | Code / terminal | Mono (system mono / JetBrains Mono) | 12–13 / 1.5 | 400 |
 
 ### Geometry
 
-4 px spacing grid. Radii: window 12, **card 16** (the composer and anything else
-holding a group of controls — a card is an object on the surface and the corner
-is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
-radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
+4 px spacing grid. Radii: window 12 (the platform's), **card 10** (the composer
+and anything else holding a group of controls — a card is an object on the
+surface and the corner is what says so), panel 7, row 6, control 3. Tight on
+purpose: softer corners at this density read as a toy rather than a tool.
+Chips are rows, not pills: 28 px tall, 6 px radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
 188 px project rail and a flexible session list shown only for the selected
 project. Right panel
 default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
@@ -174,7 +185,7 @@ active conversation. With nothing selected, the rail stands alone.
 - **Nothing registered** — one muted line under the section label. The adjacent
   `+` remains the single visual way into project registration; the CLI remains
   available without being repeated in the empty rail.
-- **Workspace row**, indented under its project (8 px radius, selected =
+- **Workspace row**, indented under its project (6 px radius, selected =
   `bg.raised` fill):
   1. Agent glyph, session title, right-aligned status: relative time (`now`,
      `46m`, `4h`) **or** a status pill (animated dot + `Working`).
@@ -206,7 +217,7 @@ active conversation. With nothing selected, the rail stands alone.
   prompt that sent itself would start an agent on a question nobody asked. The
   scrolling transcript takes over the moment a prompt is away, before the first
   word arrives, because that is where the activity line lives.
-- **Transcript** — one centred column at the measure (780 px), with the composer
+- **Transcript** — one centred column at the measure (720 px), with the composer
   under it at the same width: a conversation stranded against one edge of a wide
   window reads as a mistake rather than as a measure. Virtualized markdown:
   paragraphs, inline code chips, fenced code with tree-sitter highlighting,

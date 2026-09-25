@@ -39,6 +39,8 @@ fn main() -> Result<()> {
     tracing::info!(%locale, "language");
     let shell_paths = paths.clone();
 
+    #[cfg(target_os = "macos")]
+    draw_text_unthickened();
     let application = gpui_platform::application().with_assets(assets::Assets);
 
     application.run(move |cx: &mut App| {
@@ -99,4 +101,25 @@ fn main() -> Result<()> {
     });
 
     Ok(())
+}
+
+/// Turn off glyph thickening for this app unless the user chose a smoothing
+/// level for the whole system (`ginka_ui::theme::font_smoothing_override`).
+///
+/// The toolkit reads the key once, so this runs before it starts. The app's
+/// own value is cleared first so that what is found is the user's system-wide
+/// choice, never what an earlier launch wrote here.
+#[cfg(target_os = "macos")]
+fn draw_text_unthickened() {
+    use objc2_foundation::{NSString, NSUserDefaults};
+
+    let defaults = NSUserDefaults::standardUserDefaults();
+    let key = NSString::from_str("AppleFontSmoothing");
+    defaults.removeObjectForKey(&key);
+    let current = defaults
+        .objectForKey(&key)
+        .map(|_| defaults.integerForKey(&key) as i64);
+    if let Some(level) = ginka_ui::theme::font_smoothing_override(current) {
+        defaults.setInteger_forKey(level as isize, &key);
+    }
 }

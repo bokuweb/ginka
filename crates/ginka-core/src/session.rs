@@ -234,6 +234,43 @@ pub fn append(
 /// `after` pages forward from a sequence number; `limit` bounds the page. The
 /// UI asks for the tail of a long transcript and pages backwards into it, so
 /// an unbounded read is never on the path of opening a workspace.
+/// The last `limit` entries before position `before` (or the end), oldest
+/// first: a page read backwards from where the reader is.
+pub fn transcript_tail(
+    conn: &Connection,
+    id: &SessionId,
+    before: Option<u64>,
+    limit: u32,
+) -> Result<Vec<TranscriptEntry>> {
+    let mut statement = conn.prepare(
+        "SELECT seq, at, payload
+           FROM session_events
+          WHERE session_id = ?1 AND seq < ?2
+          ORDER BY seq DESC
+          LIMIT ?3",
+    )?;
+    let rows = statement.query_map(
+        rusqlite::params![id.0, before.map_or(i64::MAX, |before| before as i64), limit],
+        |row| {
+            let payload: String = row.get(2)?;
+            Ok(TranscriptEntry {
+                seq: row.get(0)?,
+                at: row.get(1)?,
+                payload: serde_json::from_str(&payload).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
+            })
+        },
+    )?;
+    let mut entries = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+    entries.reverse();
+    Ok(entries)
+}
+
 pub fn transcript(
     conn: &Connection,
     id: &SessionId,

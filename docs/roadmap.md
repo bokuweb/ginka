@@ -325,7 +325,7 @@ Goal: `cargo run` opens a GPUI window with the app's chrome, and CI is green on 
 - [x] `AGENTS.md` / `CLAUDE.md` conventions kept in sync with reality
 - [ ] **Visual sign-off against `docs/ui.md` (R8).** Blocked: this environment has neither screen-recording nor accessibility permission, so the window cannot be captured or measured here. Run `cargo run` and look.
 - [x] Glass window: `WindowBackgroundAppearance::Blurred` plus alpha carried in the theme's `bg.window`. Bezel's `glass.rs` turned out to be unnecessary — GPUI provides the backdrop directly
-- [ ] Motion helpers of our own; 260 ms list reordering
+- [x] Motion helpers of our own; 260 ms list reordering (`ginka_ui::motion`: the ease-out curve, and the rows that moved as those outside the longest run kept in order)
 - [x] `export-types` binary for the protocol crate (`--features export`; the output is a build product and is not committed)
 - [x] Hot-reload settings on change: the daemon reads `settings.json` again on its sync beat and rebuilds accounts, agent probes and drivers from it; a file that does not parse is left alone (keep-awake stays start-only)
 - [x] Crash handler: `crash-<process>-<unix>.log` in the logs directory with the message, place, build and backtrace, then the default hook
@@ -350,7 +350,7 @@ Goal: the workspace list from Band's dashboard, fully working, with no agents ye
 - [x] Branch status poller: dirty/conflict/ahead/behind, throttled, pushing only what changed
 - [x] Sidebar per `docs/ui.md` §3.2: project rail, session rows, status pills, archived section, attention sort, fuzzy metadata search and user footer — fed by real projects and worktrees, with a first-run line that names the command to fix it
 - [x] Virtualize the session list (`ginka_ui::session_list`, a GPUI `list`)
-- [ ] Animate the session list's reorder on the 260 ms curve
+- [x] Animate the session list's reorder on the 260 ms curve: a row that jumped slides in from a row away and fades up
 - [x] `ginka project add|list|remove`, `ginka workspace list|new|remove|pin|archive`, `ginka daemon status|start|stop`, `ginka session list|start|send|cancel|log`, `ginka checkpoint list|restore` — all through the daemon
 - [x] Command palette + global keymap infrastructure
 - [x] Workspace picker / quick switcher (in the palette)
@@ -389,7 +389,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
 - [x] Session persistence: tasks, chats, messages; resume from vendor session id
 - [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list
-- [ ] Transcript pagination: a long session is still fetched and folded whole when it opens
+- [x] Transcript pagination: a conversation opens on its last 400 entries (`SessionTranscriptTail`) and *Show earlier messages* reads the page before, folding again from there (`Transcript::starting_at`)
 - [x] Composer: `@file` mentions, slash commands, drafts persisted per workspace, and a visible editable follow-up queue while the agent is busy
 - [x] Plan approval and ask-user-question interaction modes at the protocol, supervisor and transcript layers; a shipped interactive driver remains M5
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard
@@ -467,7 +467,8 @@ Goal: stop context-switching to an editor for reads, and make the app scriptable
 - [x] A files surface: find a file in the worktree, edit complete UTF-8 files with `CodeEditor`, and save through the daemon with optimistic revision checks (`ginka save`, `ginka_write_file`)
 - [x] Complete the code surface: the file tree, independent file tabs, back/forward visit history, live-buffer Markdown and bounded local image preview, find/replace, conflict-safe save and saved selection-to-chat with exact one-based line locations are wired; dirty tabs refuse to close rather than discarding their buffers
 - [x] LSP wiring through `CodeEditor`: `ginka-core` safely discovers and frames installed stdio servers for Rust, TypeScript/JavaScript, Python and Go; the editor sends whole-buffer versioned changes and consumes hover, diagnostics and definitions in the current file or another workspace tab. Missing or failed servers leave syntax-only editing usable, outside-worktree targets are refused, and an integration fake pins the JSON-RPC process boundary
-- [ ] Surfaces: right-panel dock + centre dock via `gpui-component` `DockArea` and draggable tabs. The current resizable shell already persists right-panel visibility/width, terminal visibility/height and the selected surface per workspace; sidebar navigation remains global. Panel visibility rules, the `docs/ui.md` §3.4 empty state, the toolbar chooser and keyboard surface cycling are in
+- [x] Surfaces: the right panel is a `gpui-component` `DockArea` whose tabs are the open surfaces — reordered, grouped and split by dragging, every surface on screen drawn and refreshed at once, and the arrangement saved per workspace (`ginka_ui::dock`, mended on restore). Right-panel visibility/width, terminal visibility/height and the selected surface are per workspace; sidebar navigation remains global. Panel visibility rules, the `docs/ui.md` §3.4 empty state, the toolbar chooser and keyboard surface cycling are in
+- [ ] The centre column as a dock too (a surface beside the conversation)
 - [x] `ginka` CLI covering projects, workspaces, chats, terminals, settings, cron (`ginka settings show|set`, environment values hidden)
 - [x] Agent skills that drive the CLI (`ginka-start`, `ginka-chat`, `ginka-terminal`, `ginka-loop`): `skills/`, compiled in and installed by `ginka skills install`; the CLI gained `ginka terminal` for the terminal skill
 - [x] MCP server exposing the same operations to agents (`ginka mcp`, stdio)
@@ -744,3 +745,5 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 | 2026-09-25 | Browser history keeps only what can be reopened, without secrets | Credentials, fragments and secret-looking query parameters are dropped before storage, the same caution the inspection path applies before a prompt; suggestions sit between toolbar and page because the page is a native view above GPUI. |
 | 2026-09-25 | The Linux archive installs the CLI as `ginka`, the window as `ginka-app`, and the daemon beside them in `~/.local/bin` | The CLI keeps the name agents and people type; the daemon is found beside the binary that starts it, so one directory is the whole install and needs no root. |
 | 2026-09-25 | The macOS bundle is `Ginka.app` with identifier `io.github.bokuweb.ginka` (overridable), the window as `ginka-app` and the CLI and daemon beside it; ad hoc signed unless an identity is given | The repository owner's GitHub namespace is a reverse domain the project controls today; a release can set its own. One directory holding all three keeps daemon discovery as it is everywhere else, and signing the helpers before the bundle is what makes the bundle's seal cover them. |
+| 2026-09-25 | The right panel's arrangement is saved as surface keys in a tree of our own, not as the dock's own state | The dock's state names panels, carries sizes a drag writes on every step and whatever an older or newer build left; a tree of surface keys (`SurfaceArrangement`) is small, readable in `app.json`, and restored through one mending pass that drops unknown surfaces, duplicates and empty groups. The dock is rebuilt from it rather than loaded, so no panel registry is needed. |
+| 2026-09-25 | The conversation column and the right panel take a second coat of the window colour | Text read at length over a desktop showing through 28 % glass was the most-reported look problem; e1's conversation column is dense the same way. The sidebar keeps the single coat, so the window still reads as glass. |

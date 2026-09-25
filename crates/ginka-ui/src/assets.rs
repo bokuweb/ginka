@@ -69,6 +69,14 @@ const ICONS: &[(&str, &str)] = &[
         "icons/file-plus.svg",
         include_str!("../../../assets/icons/file-plus.svg"),
     ),
+    (
+        "icons/lock.svg",
+        include_str!("../../../assets/icons/lock.svg"),
+    ),
+    (
+        "icons/lock-open.svg",
+        include_str!("../../../assets/icons/lock-open.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -94,6 +102,9 @@ pub mod icon {
     pub const NOTEBOOK: &str = "icons/notebook.svg";
     /// A new note.
     pub const FILE_PLUS: &str = "icons/file-plus.svg";
+    /// Access modes: a closed lock for asking first, an open one for none.
+    pub const LOCK: &str = "icons/lock.svg";
+    pub const LOCK_OPEN: &str = "icons/lock-open.svg";
 }
 
 impl AssetSource for Assets {
@@ -149,6 +160,8 @@ mod tests {
             icon::BUG,
             icon::NOTEBOOK,
             icon::FILE_PLUS,
+            icon::LOCK,
+            icon::LOCK_OPEN,
         ] {
             assert!(
                 ICONS.iter().any(|(name, _)| *name == path),

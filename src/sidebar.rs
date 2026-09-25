@@ -117,6 +117,15 @@ pub struct SessionSidebar {
     session_list: ListState,
     /// What the list shows, one entry per item, as of the last frame.
     entries: Vec<ginka_ui::session_list::Entry>,
+    /// The live rows' order as of the last frame, to see which moved.
+    row_order: Vec<WorkspaceId>,
+    /// Rows that moved, which way, and when: they slide into place over
+    /// `ginka_ui::motion::REORDER`.
+    moving:
+        std::collections::HashMap<WorkspaceId, (ginka_ui::motion::Moved, std::time::Instant, u64)>,
+    /// Counts moves, so each gets an animation of its own rather than one a
+    /// row that moved before has already finished.
+    moves: u64,
     /// The login the next prompt runs on, and its headroom, for the footer
     /// (`docs/accounts.md` §11). The shell decides both; the sidebar draws
     /// them.
@@ -156,6 +165,9 @@ impl SessionSidebar {
             archived_open: true,
             session_list: ListState::new(0, ListAlignment::Top, px(600.)),
             entries: Vec::new(),
+            row_order: Vec::new(),
+            moving: std::collections::HashMap::new(),
+            moves: 0,
             account: None,
             search,
             search_query: String::new(),
@@ -573,69 +585,71 @@ impl SessionSidebar {
         }
         let menu_open = self.project_menu_for.as_ref() == Some(&project);
         let menu = menu_open.then(|| {
-            let action = |id: String, label: String| {
-                div()
-                    .id(SharedString::from(id))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(tokens.radius.control()))
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .cursor_pointer()
-                    .hover(|this| this.bg(tokens.colors().row_active()))
-                    .child(label)
-            };
             let (rename, up, down) = (project.clone(), project.clone(), project.clone());
             let current = label.clone();
-            h_flex()
-                .ml_5()
-                .pb_1()
-                .gap_1()
-                .child(
-                    action(
-                        format!("project-rename:{}", project.0),
-                        rust_i18n::t!("sidebar.action.rename").to_string(),
-                    )
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_labelling(rename.clone(), current.clone(), window, cx)
-                    })),
+            let mut items = vec![
+                menu_item(
+                    &tokens,
+                    format!("project-rename:{}", project.0),
+                    Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN),
+                    rust_i18n::t!("sidebar.action.rename").to_string(),
                 )
-                .when(index > 0, |this| {
-                    this.child(
-                        action(
-                            format!("project-up:{}", project.0),
-                            rust_i18n::t!("sidebar.action.move_up").to_string(),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.project_menu_for = None;
-                            cx.emit(SidebarEvent::MoveProject {
-                                project: up.clone(),
-                                index: index as u32 - 1,
-                            });
-                        })),
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.project_menu_for = None;
+                    this.start_labelling(rename.clone(), current.clone(), window, cx)
+                })),
+            ];
+            if index > 0 {
+                items.push(
+                    menu_item(
+                        &tokens,
+                        format!("project-up:{}", project.0),
+                        Icon::new(IconName::ArrowUp),
+                        rust_i18n::t!("sidebar.action.move_up").to_string(),
                     )
-                })
-                .when(index + 1 < count, |this| {
-                    this.child(
-                        action(
-                            format!("project-down:{}", project.0),
-                            rust_i18n::t!("sidebar.action.move_down").to_string(),
-                        )
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.project_menu_for = None;
-                            cx.emit(SidebarEvent::MoveProject {
-                                project: down.clone(),
-                                index: index as u32 + 1,
-                            });
-                        })),
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::MoveProject {
+                            project: up.clone(),
+                            index: index as u32 - 1,
+                        });
+                    })),
+                );
+            }
+            if index + 1 < count {
+                items.push(
+                    menu_item(
+                        &tokens,
+                        format!("project-down:{}", project.0),
+                        Icon::new(IconName::ArrowDown),
+                        rust_i18n::t!("sidebar.action.move_down").to_string(),
                     )
-                })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::MoveProject {
+                            project: down.clone(),
+                            index: index as u32 + 1,
+                        });
+                    })),
+                );
+            }
+            floating_menu(
+                &tokens,
+                items,
+                cx.listener(|this, _, _, cx| {
+                    this.project_menu_for = None;
+                    cx.notify();
+                }),
+            )
+            .into_any_element()
         });
         let toggle = project.clone();
         v_flex()
             .w_full()
-            .child(self.project_row(project, label, selected, menu_open, toggle, cx))
-            .children(menu)
+            .child(self.project_row(project, label, selected, menu, toggle, cx))
             .into_any_element()
     }
 
@@ -645,11 +659,12 @@ impl SessionSidebar {
         project: ProjectName,
         label: SharedString,
         selected: bool,
-        menu_open: bool,
+        menu: Option<AnyElement>,
         toggle: ProjectName,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let menu_open = menu.is_some();
         h_flex()
             .id(SharedString::from(format!("project:{}", project.0)))
             .w_full()
@@ -682,7 +697,8 @@ impl SessionSidebar {
             .child(
                 div()
                     .id(SharedString::from(format!("project-menu:{}", toggle.0)))
-                    .px_1()
+                    .flex_shrink_0()
+                    .px_0p5()
                     .rounded(px(tokens.radius.control()))
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
@@ -698,7 +714,12 @@ impl SessionSidebar {
                         };
                         cx.notify();
                     }))
-                    .child("⋯"),
+                    .child(
+                        Icon::new(IconName::Ellipsis)
+                            .size_3p5()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .children(menu),
             )
     }
 
@@ -820,13 +841,15 @@ impl SessionSidebar {
 
         v_flex()
             .w_full()
+            // Indented under the project heading: the indent is what says
+            // these belong to it. Padding on the outside rather than a margin
+            // on the row, so the row is the column's width less the indent
+            // instead of the column's width pushed right past its edge.
+            .pl_3()
             .child(
                 v_flex()
                     .id(("session", index))
                     .w_full()
-                    // Indented under the project heading: the indent is what says
-                    // these belong to it.
-                    .ml_3()
                     .px_2p5()
                     .py_1p5()
                     .gap_0p5()
@@ -892,6 +915,7 @@ impl SessionSidebar {
                             .child(
                                 div()
                                     .id(("session-menu", index))
+                                    .flex_shrink_0()
                                     .px_0p5()
                                     .rounded(px(tokens.radius.control()))
                                     .cursor_pointer()
@@ -908,7 +932,8 @@ impl SessionSidebar {
                                         Icon::new(IconName::Ellipsis)
                                             .size_3p5()
                                             .text_color(tokens.colors().text_muted),
-                                    ),
+                                    )
+                                    .children(actions),
                             ),
                     )
                     .when(branch || row.status.dirty || row.status.conflict, |this| {
@@ -965,7 +990,6 @@ impl SessionSidebar {
                         )
                     }),
             )
-            .children(actions)
     }
 
     /// Start renaming a conversation, with its title in a focused field.
@@ -1006,30 +1030,21 @@ impl SessionSidebar {
     /// The row's actions, under it while its menu is open.
     fn row_actions(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let action = |id: String, label: String| {
-            div()
-                .id(SharedString::from(id))
-                .px_2()
-                .py_0p5()
-                .rounded(px(tokens.radius.control()))
-                .text_xs()
-                .text_color(tokens.colors().text_secondary)
-                .cursor_pointer()
-                .hover(|this| this.bg(tokens.colors().row_active()))
-                .child(label)
-        };
         let key = row.workspace.0.clone();
         let (pin_ws, archive_ws) = (row.workspace.clone(), row.workspace.clone());
         let pinned = row.pinned;
         let rename = row.session.clone().map(|session| {
             let workspace = row.workspace.clone();
             let title = row.title.clone();
-            action(
+            menu_item(
+                &tokens,
                 format!("rename:{key}"),
+                Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN),
                 rust_i18n::t!("sidebar.action.rename").to_string(),
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
+                this.menu_for = None;
                 this.start_rename(
                     workspace.clone(),
                     session.clone(),
@@ -1039,46 +1054,52 @@ impl SessionSidebar {
                 );
             }))
         });
-        h_flex()
-            .ml_3()
-            .px_2()
-            .pb_1()
-            .gap_1()
-            .children(rename)
-            .child(
-                action(
-                    format!("pin:{key}"),
-                    if pinned {
-                        rust_i18n::t!("sidebar.action.unpin").to_string()
-                    } else {
-                        rust_i18n::t!("sidebar.action.pin").to_string()
-                    },
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_for = None;
-                    cx.emit(SidebarEvent::Pin {
-                        workspace: pin_ws.clone(),
-                        pinned: !pinned,
-                    });
-                    cx.notify();
-                })),
-            )
-            .child(
-                action(
-                    format!("archive:{key}"),
-                    rust_i18n::t!("sidebar.action.archive").to_string(),
-                )
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    cx.stop_propagation();
-                    this.menu_for = None;
-                    cx.emit(SidebarEvent::Archive {
-                        workspace: archive_ws.clone(),
-                        archived: true,
-                    });
-                    cx.notify();
-                })),
-            )
+        let pin = menu_item(
+            &tokens,
+            format!("pin:{key}"),
+            Icon::new(if pinned {
+                IconName::StarOff
+            } else {
+                IconName::Star
+            }),
+            if pinned {
+                rust_i18n::t!("sidebar.action.unpin").to_string()
+            } else {
+                rust_i18n::t!("sidebar.action.pin").to_string()
+            },
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.menu_for = None;
+            cx.emit(SidebarEvent::Pin {
+                workspace: pin_ws.clone(),
+                pinned: !pinned,
+            });
+            cx.notify();
+        }));
+        let archive = menu_item(
+            &tokens,
+            format!("archive:{key}"),
+            Icon::new(IconName::Inbox),
+            rust_i18n::t!("sidebar.action.archive").to_string(),
+        )
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.menu_for = None;
+            cx.emit(SidebarEvent::Archive {
+                workspace: archive_ws.clone(),
+                archived: true,
+            });
+            cx.notify();
+        }));
+        floating_menu(
+            &tokens,
+            rename.into_iter().chain([pin, archive]),
+            cx.listener(|this, _, _, cx| {
+                this.menu_for = None;
+                cx.notify();
+            }),
+        )
     }
 
     /// One item of the session list (`ginka_ui::session_list::Entry`).
@@ -1105,9 +1126,32 @@ impl SessionSidebar {
                     .into_any_element()
             }
             Entry::Row(row) => match self.rows.get(row).cloned() {
-                Some(session) => item
-                    .child(self.session_row(row, &session, cx))
-                    .into_any_element(),
+                Some(session) => {
+                    let moving = self.moving.get(&session.workspace).copied();
+                    let item = item.child(self.session_row(row, &session, cx));
+                    match moving {
+                        // Slides in from a row's height away, the way it
+                        // came, and fades up as it settles.
+                        Some((direction, _, number)) => {
+                            let from = match direction {
+                                ginka_ui::motion::Moved::Up => 28.,
+                                ginka_ui::motion::Moved::Down => -28.,
+                            };
+                            let key = format!("reorder:{}:{number}", session.workspace.0);
+                            item.relative()
+                                .with_animation(
+                                    SharedString::from(key),
+                                    Animation::new(ginka_ui::motion::REORDER)
+                                        .with_easing(ginka_ui::motion::ease_out),
+                                    move |item, delta| {
+                                        item.top(px(from * (1. - delta))).opacity(0.4 + 0.6 * delta)
+                                    },
+                                )
+                                .into_any_element()
+                        }
+                        None => item.into_any_element(),
+                    }
+                }
                 None => item.into_any_element(),
             },
             Entry::ArchivedHeading => item
@@ -1364,6 +1408,29 @@ impl Render for SessionSidebar {
             let old = self.entries.len();
             self.session_list.splice(from..old, entries.len() - from);
         }
+        // Which rows jumped since the last frame. Not on the first: a list
+        // appearing is not a list reordering.
+        let order: Vec<WorkspaceId> = entries
+            .iter()
+            .filter_map(|entry| match entry {
+                ginka_ui::session_list::Entry::Row(row) => {
+                    self.rows.get(*row).map(|row| row.workspace.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        if order != self.row_order {
+            if !self.row_order.is_empty() {
+                let now = std::time::Instant::now();
+                for (workspace, direction) in ginka_ui::motion::moved(&self.row_order, &order) {
+                    self.moves += 1;
+                    self.moving.insert(workspace, (direction, now, self.moves));
+                }
+            }
+            self.row_order = order;
+        }
+        self.moving
+            .retain(|_, (_, started, _)| started.elapsed() < ginka_ui::motion::REORDER);
         self.entries = entries;
 
         let project_rows = self.projects.clone();
@@ -1401,9 +1468,12 @@ impl Render for SessionSidebar {
             .border_color(border)
             .child(
                 v_flex()
-                    .w(px(188.))
+                    .w(ginka_ui::layout::PROJECT_RAIL_WIDTH)
                     .h_full()
                     .flex_shrink_0()
+                    // Kept free for the window's own controls, which the
+                    // shell lays over this strip.
+                    .pt(ginka_ui::layout::HEADER_HEIGHT)
                     .bg(sidebar_bg)
                     .border_r_1()
                     .border_color(border)
@@ -1547,4 +1617,53 @@ impl Render for SessionSidebar {
                 )
             })
     }
+}
+
+/// A menu of a row's actions, floating under the button that opened it.
+///
+/// Drawn over the list rather than into it: a menu that pushed the rows
+/// below it down would move the row the pointer was about to click.
+fn floating_menu(
+    tokens: &Tokens,
+    items: impl IntoIterator<Item = Stateful<Div>>,
+    dismiss: impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static,
+) -> Deferred {
+    deferred(
+        anchored()
+            .anchor(Anchor::TopRight)
+            .snap_to_window_with_margin(px(8.))
+            .child(
+                v_flex()
+                    .mt_1()
+                    .min_w(px(168.))
+                    .p_1()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.card))
+                    .bg(tokens.colors().popover())
+                    .border_1()
+                    .border_color(tokens.colors().border_strong)
+                    .shadow_lg()
+                    .on_mouse_down_out(dismiss)
+                    .children(items),
+            ),
+    )
+    .with_priority(1)
+}
+
+/// One action of a [`floating_menu`].
+fn menu_item(tokens: &Tokens, id: String, icon: Icon, label: String) -> Stateful<Div> {
+    h_flex()
+        .id(SharedString::from(id))
+        .w_full()
+        .px_2()
+        .py_1p5()
+        .gap_2()
+        .items_center()
+        .rounded(px(tokens.radius.control()))
+        .text_sm()
+        .text_color(tokens.colors().text_primary)
+        .cursor_pointer()
+        .hover(|this| this.bg(tokens.colors().row_hover()))
+        .child(icon.size_3p5().text_color(tokens.colors().text_muted))
+        .child(label)
 }
