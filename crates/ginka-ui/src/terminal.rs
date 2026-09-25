@@ -1011,6 +1011,25 @@ impl TerminalTabs {
     }
 }
 
+/// The rows and columns a terminal area of this size holds, at the given
+/// cell size, less the chrome above the grid, split between two panes when
+/// `split`. Never less than a usable minimum.
+pub fn grid_for_area(
+    width: f32,
+    height: f32,
+    cell_width: f32,
+    line_height: f32,
+    chrome: f32,
+    split: bool,
+) -> (u16, u16) {
+    let rows = ((height - chrome) / line_height).floor().max(4.) as u16;
+    let mut cols = (width / cell_width).floor().max(20.) as u16;
+    if split {
+        cols = (cols / 2).max(1);
+    }
+    (rows, cols)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1663,5 +1682,15 @@ mod tests {
         tabs.adopt(&[info("one", "shell 1")], 24, 80);
         assert_eq!(tabs.tabs().len(), 1);
         assert_eq!(tabs.active_id(), Some(TerminalId("one".into())));
+    }
+
+    #[test]
+    fn a_terminal_area_is_divided_into_whole_cells() {
+        // 800 x 400 at 8 x 20, with 40 of chrome: 18 rows of 100 columns.
+        assert_eq!(grid_for_area(800., 400., 8., 20., 40., false), (18, 100));
+        // Two panes share the width.
+        assert_eq!(grid_for_area(800., 400., 8., 20., 40., true), (18, 50));
+        // A panel too small for a shell still gets one that can be read.
+        assert_eq!(grid_for_area(10., 10., 8., 20., 40., false), (4, 20));
     }
 }

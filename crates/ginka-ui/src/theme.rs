@@ -255,7 +255,10 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.caret = tokens.accent;
 
     theme.colors.secondary = tokens.bg_surface;
-    theme.colors.secondary_foreground = tokens.text_primary;
+    // Ghost buttons — the Git and terminal toolbars, the file tabs — read in
+    // the secondary colour, like the sidebar's rows: they are controls around
+    // the content, not the content.
+    theme.colors.secondary_foreground = tokens.text_secondary;
     theme.colors.secondary_hover = tokens.surface_hover();
     theme.colors.secondary_active = tokens.surface_hover();
 
@@ -287,7 +290,9 @@ pub fn apply(mode: Mode, cx: &mut App) {
 
     theme.colors.tab_bar = tokens.transparent_surface();
     theme.colors.tab = tokens.transparent_surface();
-    theme.colors.tab_active = tokens.bg_raised;
+    // Clear: a dock tab draws the shared tab shape inside itself
+    // (`chrome::tab`), and a filled square around it would be a second tab.
+    theme.colors.tab_active = tokens.transparent_surface();
     theme.colors.tab_foreground = tokens.text_secondary;
     theme.colors.tab_active_foreground = tokens.text_primary;
 
