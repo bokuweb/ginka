@@ -9,7 +9,7 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 mkdir -p "$work/built"
-for binary in ginka ginka-cli ginka-daemon; do
+for binary in ginka ginka-helper ginka-cli ginka-daemon; do
     printf '#!/bin/sh\necho %s\n' "$binary" >"$work/built/$binary"
     chmod +x "$work/built/$binary"
 done
@@ -25,6 +25,13 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 [ "$("$app/Contents/MacOS/ginka-app")" = "ginka" ] || fail "the bundle's executable is the window"
 [ "$("$app/Contents/MacOS/ginka")" = "ginka-cli" ] || fail "ginka is the command line"
 [ "$("$app/Contents/MacOS/ginka-daemon")" = "ginka-daemon" ] || fail "the daemon is bundled beside them"
+# Chromium's framework, and its helper processes as apps of their own named
+# after the executable, which is how it finds them.
+[ -d "$app/Contents/Frameworks/Chromium Embedded Framework.framework" ] || fail "the browser's framework is bundled"
+for kind in "" " (GPU)" " (Renderer)" " (Plugin)" " (Alerts)"; do
+    helper="$app/Contents/Frameworks/ginka-app Helper$kind.app/Contents/MacOS/ginka-app Helper$kind"
+    [ "$("$helper")" = "ginka-helper" ] || fail "ginka-app Helper$kind runs ginka-helper"
+done
 plist="$app/Contents/Info.plist"
 [ "$(plutil -extract CFBundleExecutable raw "$plist")" = "ginka-app" ] || fail "CFBundleExecutable"
 [ "$(plutil -extract CFBundleIdentifier raw "$plist")" = "io.github.bokuweb.ginka" ] || fail "CFBundleIdentifier"

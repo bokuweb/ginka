@@ -28,6 +28,20 @@ jobs:
           sudo apt-get install -y \
             libasound2-dev libfontconfig-dev libwayland-dev libxkbcommon-x11-dev \
             libssl-dev libzstd-dev libvulkan1 libgit2-dev make cmake clang mold
+      # The macOS app's browser is Chromium (gpui-cef): cef-dll-sys downloads
+      # its distribution (~500MB) to CEF_PATH and builds a wrapper with cmake
+      # and ninja. Kept between runs, since that dominates a cold build.
+      - name: Prepare Chromium for the macOS browser
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja
+          echo "CEF_PATH=$HOME/.local/share/cef" >> "$GITHUB_ENV"
+      - name: Cache Chromium's distribution
+        if: runner.os == 'macOS'
+        uses: actions/cache@v4
+        with:
+          path: ~/.local/share/cef
+          key: cef-${{ runner.os }}-${{ runner.arch }}-151.3.24
       - run: cargo fmt --all -- --check
       # Scoped to our workspace: a global RUSTFLAGS=-D warnings would also
       # promote warnings in third-party crates and fail on their schedule.

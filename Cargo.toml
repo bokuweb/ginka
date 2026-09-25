@@ -7,6 +7,7 @@ publish = false
 
 [workspace]
 members = [
+    "crates/ginka-bundle",
     "crates/ginka-client",
     "crates/ginka-cli",
     "crates/ginka-core",
@@ -35,7 +36,6 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["fo
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
-gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 
 # The GitHub client, mounted as the Inbox (`docs/ui.md` §3.5). A git
 # dependency pinned by rev rather than a submodule: the rev lands in
@@ -44,8 +44,6 @@ gpui-wry = { git = "https://github.com/longbridge/gpui-component", rev = "5a564d
 e1-github = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
 e1-ui = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
 e1-views = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
-raw-window-handle = "0.6"
-wry = { version = "0.53.3", package = "lb-wry" }
 
 # The terminal stack the roadmap picked (§4.3): the same one Zed and waku use.
 alacritty_terminal = "0.26"
@@ -133,14 +131,16 @@ lsp-types.workspace = true
 # The Dock badge (`ginka_ui::notify::badge`), through AppKit directly: GPUI
 # has no Dock API. The same versions GPUI and wry already link.
 [target.'cfg(target_os = "macos")'.dependencies]
+# For `ginka-helper`, the program Chromium starts for its own processes; the
+# same version gpui-cef links.
+cef = "151"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSUserDefaults"] }
 
+# The workspace browser: Chromium off-screen on macOS, WebView2 on Windows.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-gpui-wry.workspace = true
-raw-window-handle.workspace = true
-wry.workspace = true
+gpui-cef = { git = "https://github.com/bokuweb/gpui-cef", rev = "af67688da187d6ac4292a59b56541ce527f359cc" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

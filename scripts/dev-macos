@@ -1,0 +1,40 @@
+#!/bin/sh
+# Run the window from an app bundle, as its browser needs: Chromium loads its
+# framework and starts its helper processes from inside `Ginka.app`.
+#
+#   scripts/dev-macos                 # debug build, then run
+#   scripts/dev-macos --release       # release build, then run
+#
+# The bundle is assembled on the system volume (GINKA_DEV_BUNDLE, default
+# ~/Library/Caches/ginka-dev): Chromium's framework is copied into it, and a
+# disk without extended attributes would sprinkle `._*` files through it.
+# CEF_PATH says where Chromium's distribution is (cef-dll-sys downloads it
+# there on the first build); ninja and cmake must be installed.
+set -eu
+
+# Where Chromium's distribution lives; the first build downloads it there.
+export CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+profile=debug
+cargo_profile=""
+if [ "${1:-}" = "--release" ]; then
+    profile=release
+    cargo_profile="--release"
+    shift
+fi
+target_dir="${CARGO_TARGET_DIR:-$root/target}"
+out="${GINKA_DEV_BUNDLE:-$HOME/Library/Caches/ginka-dev}"
+
+# shellcheck disable=SC2086
+(cd "$root" && cargo build $cargo_profile -p ginka -p ginka-cli -p ginka-daemon -p ginka-bundle)
+bin="$target_dir/$profile"
+
+stage=$(mktemp -d)
+trap 'rm -rf "$stage"' EXIT
+cp "$bin/ginka" "$stage/ginka-app"
+cp "$bin/ginka-helper" "$stage/ginka-helper"
+app=$("$bin/ginka-bundle" --binaries "$stage" --out "$out" --executable ginka-app --helper ginka-helper)
+cp "$bin/ginka-cli" "$app/Contents/MacOS/ginka"
+cp "$bin/ginka-daemon" "$app/Contents/MacOS/ginka-daemon"
+exec "$app/Contents/MacOS/ginka-app" "$@"

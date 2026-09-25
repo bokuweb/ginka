@@ -11,12 +11,21 @@
 # `ginka-daemon`, all three in Contents/MacOS, where each finds the others
 # (roadmap N16: the daemon is bundled and signed with the app).
 #
+# The workspace browser is Chromium: its framework goes in
+# Contents/Frameworks, and `ginka-helper` goes beside it as the five
+# `ginka-app Helper*.app` Chromium starts its processes from. `ginka-bundle`
+# lays that out; it needs Chromium's distribution at CEF_PATH, where the
+# first build downloads it.
+#
 # Signing: GINKA_SIGN_IDENTITY names a Developer ID certificate in the
 # keychain; without it the bundle is signed ad hoc, which runs on this Mac
 # and nowhere Gatekeeper is asked. GINKA_NOTARY_PROFILE names a
 # `notarytool store-credentials` profile; with it the .dmg is notarized and
 # stapled. GINKA_BUNDLE_ID overrides the bundle identifier.
 set -eu
+
+# Where Chromium's distribution lives; the first build downloads it there.
+export CEF_PATH="${CEF_PATH:-$HOME/.local/share/cef}"
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 bin_dir=""
@@ -38,7 +47,7 @@ while [ $# -gt 0 ]; do
 done
 
 packages="-p ginka -p ginka-cli -p ginka-daemon"
-binaries="ginka ginka-cli ginka-daemon"
+binaries="ginka ginka-helper ginka-cli ginka-daemon"
 if [ -z "$bin_dir" ]; then
     if $universal; then
         for target in aarch64-apple-darwin x86_64-apple-darwin; do
@@ -68,8 +77,19 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 stage="$work/macos"
 app="$stage/Ginka.app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$out_dir"
-cp "$bin_dir/ginka" "$app/Contents/MacOS/ginka-app"
+mkdir -p "$stage" "$out_dir"
+
+# The bundle tool runs here, whatever the binaries were built for.
+(cd "$root" && cargo build -q -p ginka-bundle)
+bundler="${CARGO_TARGET_DIR:-$root/target}/debug/ginka-bundle"
+inputs="$work/inputs"
+mkdir -p "$inputs"
+cp "$bin_dir/ginka" "$inputs/ginka-app"
+cp "$bin_dir/ginka-helper" "$inputs/ginka-helper"
+built=$("$bundler" --binaries "$inputs" --out "$work/bundle" --executable ginka-app \
+    --helper ginka-helper --identifier "$bundle_id" --version "$version")
+mv "$built" "$app"
+mkdir -p "$app/Contents/Resources"
 cp "$bin_dir/ginka-cli" "$app/Contents/MacOS/ginka"
 cp "$bin_dir/ginka-daemon" "$app/Contents/MacOS/ginka-daemon"
 chmod 0755 "$app/Contents/MacOS/"*
@@ -77,20 +97,27 @@ sed -e "s|@BUNDLE_ID@|$bundle_id|" -e "s|@VERSION@|$version|" \
     "$root/packaging/macos/Info.plist.in" >"$app/Contents/Info.plist"
 plutil -lint "$app/Contents/Info.plist" >/dev/null
 
-# The helpers first, the bundle last: signing the bundle seals what is in it.
+# Inside out, the bundle last: signing a bundle seals what is in it. Under
+# the hardened runtime Chromium's processes need JIT and the unsigned
+# framework loaded, which the entitlements grant.
 identity="${GINKA_SIGN_IDENTITY:--}"
-for helper in ginka ginka-daemon; do
+entitlements="$root/packaging/macos/browser.entitlements"
+sign() {
     if [ "$identity" = "-" ]; then
-        codesign --force --sign - "$app/Contents/MacOS/$helper"
+        codesign --force --sign - "$1"
     else
-        codesign --force --options runtime --timestamp --sign "$identity" "$app/Contents/MacOS/$helper"
+        codesign --force --options runtime --timestamp --entitlements "$entitlements" \
+            --sign "$identity" "$1"
     fi
+}
+sign "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
+for helper in "$app/Contents/Frameworks/"*Helper*.app; do
+    sign "$helper"
 done
-if [ "$identity" = "-" ]; then
-    codesign --force --sign - "$app"
-else
-    codesign --force --options runtime --timestamp --sign "$identity" "$app"
-fi
+for tool in ginka ginka-daemon; do
+    sign "$app/Contents/MacOS/$tool"
+done
+sign "$app"
 codesign --verify --strict "$app"
 
 if ! $dmg; then

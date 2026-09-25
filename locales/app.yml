@@ -355,6 +355,39 @@ surface.browser.inspect:
 surface.browser.feedback:
   en: What should change about this element?
   ja: この要素をどう変更しますか？
+surface.browser.import:
+  en: From Chrome
+  ja: Chrome から
+surface.browser.import.tip:
+  en: Bring Chrome's cookies over, so pages open signed in
+  ja: Chrome の Cookie を引き継いで、ログインしたままページを開く
+surface.browser.import.choose:
+  en: "Which Chrome profile?"
+  ja: "どの Chrome プロファイルですか？"
+surface.browser.import.confirm:
+  en: "Bring the cookies of Chrome's %{profile} profile into this browser? macOS will ask to let Ginka use Chrome's key in your Keychain."
+  ja: "Chrome の %{profile} プロファイルの Cookie をこのブラウザに引き継ぎますか？ キーチェーンにある Chrome の鍵の使用許可を macOS が尋ねます。"
+surface.browser.import.go:
+  en: Bring them over
+  ja: 引き継ぐ
+surface.browser.import.running:
+  en: Reading Chrome's cookies…
+  ja: Chrome の Cookie を読み込み中…
+surface.browser.import.done:
+  en: "Brought %{count} cookies over from %{profile}."
+  ja: "%{profile} から %{count} 件の Cookie を引き継ぎました。"
+surface.browser.import.failed:
+  en: "Could not bring the cookies over: %{error}"
+  ja: "Cookie を引き継げませんでした: %{error}"
+surface.browser.import.none:
+  en: No Chrome profile with cookies was found.
+  ja: Cookie のある Chrome プロファイルが見つかりませんでした。
+surface.browser.import.declined:
+  en: Access to Chrome's key was not given.
+  ja: Chrome の鍵へのアクセスが許可されませんでした。
+surface.browser.import.no_engine:
+  en: The browser is not running.
+  ja: ブラウザが起動していません。
 surface.browser.dismiss:
   en: Dismiss inspected element
   ja: 選択した要素を破棄

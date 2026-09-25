@@ -6,10 +6,10 @@ use ginka_core::browser::{BrowserCapture, sanitize_capture};
 use ginka_ui::Tokens;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_cef::{Webview, WebviewEvent, WebviewOptions};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::{IconName, h_flex, v_flex};
-use raw_window_handle::HasWindowHandle as _;
 use serde::Deserialize;
 
 /// A browser selection ready to be reviewed or sent to the active agent.
@@ -24,57 +24,66 @@ pub enum BrowserEvent {
 
 impl EventEmitter<BrowserEvent> for BrowserPane {}
 
-enum BrowserSignal {
-    Inspect(String),
-}
-
-#[derive(Deserialize)]
-struct VisitEnvelope {
-    kind: String,
-    url: String,
-    title: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct InspectEnvelope {
     kind: String,
     capture: BrowserCapture,
 }
 
-/// One native browser view with toolbar state scoped to the selected workspace.
+/// Whether the browser engine came up, set once at startup. On macOS it only
+/// can inside the bundled app, where Chromium's framework and helpers are.
+pub struct BrowserEngine {
+    /// Why there is no browser, when there is none.
+    pub status: Result<(), String>,
+    /// The engine, for what belongs to it rather than to one page — the
+    /// cookie store.
+    pub runtime: Option<gpui_cef::Runtime>,
+}
+
+impl Global for BrowserEngine {}
+
+/// One browser view with toolbar state scoped to the selected workspace.
 pub struct BrowserPane {
-    webview: Entity<gpui_wry::WebView>,
+    webview: Entity<Webview>,
     address: Entity<InputState>,
     inspecting: bool,
     visible: bool,
+    /// A page was loading when the view last changed; its finishing is when
+    /// the inspector is installed and the visit recorded.
+    loading: bool,
     complaint: Option<SharedString>,
     /// Pages from this workspace's history that match what is typed.
     suggestions: Vec<ginka_protocol::model::VisitedPage>,
     /// Find in the page, while its field is open.
     finding: Option<Entity<InputState>>,
+    /// Bringing Chrome's cookies over, while that is under way.
+    import: CookieImport,
+}
+
+/// Where bringing Chrome's cookies over has got to.
+#[derive(Clone, PartialEq)]
+enum CookieImport {
+    Idle,
+    /// Which Chrome profile to read.
+    Choosing(Vec<ginka_core::chrome_cookies::ChromeProfile>),
+    /// Said what will happen; waiting for a yes.
+    Confirming(ginka_core::chrome_cookies::ChromeProfile),
+    Running,
+    /// How it went, in a sentence.
+    Done(SharedString),
 }
 
 impl BrowserPane {
-    /// Create a browser child view attached to this GPUI window.
+    /// Create a browser view in this window, or say why there is none.
     pub fn create(window: &mut Window, cx: &mut App) -> Result<Entity<Self>, String> {
-        let (sender, receiver) = async_channel::unbounded();
-        let ipc_sender = sender.clone();
-        let builder = wry::WebViewBuilder::new()
-            .with_url("about:blank")
-            .with_initialization_script(INSPECT_SCRIPT)
-            .with_initialization_script(VISIT_SCRIPT)
-            .with_ipc_handler(move |request| {
-                let _ = ipc_sender.try_send(BrowserSignal::Inspect(request.body().clone()));
-            });
-        #[cfg(debug_assertions)]
-        let builder = builder.with_devtools(true);
-        let window_handle = window
-            .window_handle()
-            .map_err(|error| format!("browser window handle: {error}"))?;
-        let native = builder
-            .build_as_child(&window_handle)
-            .map_err(|error| format!("browser view: {error}"))?;
-        let webview = cx.new(|cx| gpui_wry::WebView::new(native, window, cx));
+        if let Some(BrowserEngine {
+            status: Err(reason),
+            ..
+        }) = cx.try_global::<BrowserEngine>()
+        {
+            return Err(reason.clone());
+        }
+        let webview = cx.new(|cx| Webview::new(window, cx, WebviewOptions::url("about:blank")));
         let address = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.browser.address").to_string())
@@ -99,15 +108,18 @@ impl BrowserPane {
                 },
             )
             .detach();
-            cx.spawn(async move |this, cx| {
-                while let Ok(signal) = receiver.recv().await {
-                    if this
-                        .update(cx, |this, cx| this.receive(signal, cx))
-                        .is_err()
-                    {
-                        break;
-                    }
+            cx.subscribe(&webview, |this: &mut Self, _, event: &WebviewEvent, cx| {
+                let WebviewEvent::Message(body) = event;
+                this.receive(body, cx);
+            })
+            .detach();
+            cx.observe(&webview, |this: &mut Self, webview, cx| {
+                let loading = webview.read(cx).is_loading();
+                if this.loading && !loading {
+                    this.page_loaded(&webview, cx);
                 }
+                this.loading = loading;
+                cx.notify();
             })
             .detach();
             Self {
@@ -115,59 +127,68 @@ impl BrowserPane {
                 address,
                 inspecting: false,
                 visible: true,
+                loading: false,
                 complaint: None,
                 suggestions: Vec::new(),
                 finding: None,
+                import: CookieImport::Idle,
             }
         });
         Ok(pane)
     }
 
-    fn receive(&mut self, signal: BrowserSignal, cx: &mut Context<Self>) {
-        match signal {
-            BrowserSignal::Inspect(body) => {
-                // A page load reports itself for history; anything else on
-                // this channel is an inspection.
-                if let Ok(visit) = serde_json::from_str::<VisitEnvelope>(&body)
-                    && visit.kind == "ginka-visit"
-                {
-                    cx.emit(BrowserEvent::Visited {
-                        url: visit.url.chars().take(4096).collect(),
-                        title: visit.title.map(|title| title.chars().take(512).collect()),
-                    });
-                    return;
-                }
-                let parsed = serde_json::from_str::<InspectEnvelope>(&body);
-                match parsed {
-                    Ok(envelope) if envelope.kind == "ginka-inspect" => {
-                        self.inspecting = false;
-                        self.complaint = None;
-                        cx.emit(BrowserEvent::Inspected(Box::new(sanitize_capture(
-                            envelope.capture,
-                        ))));
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        self.complaint = Some(format!("browser inspection: {error}").into());
-                    }
-                }
+    /// A page finished loading: give it the inspector, and record the visit.
+    ///
+    /// The engine has no scripts that run before each page's own, so the
+    /// inspector is installed here, and switched back on if it was on.
+    fn page_loaded(&mut self, webview: &Entity<Webview>, cx: &mut Context<Self>) {
+        let view = webview.read(cx);
+        view.eval(&inspect_script());
+        if self.inspecting {
+            view.eval("window.__ginkaSetInspect && window.__ginkaSetInspect(true)");
+        }
+        let url = view.url();
+        let title = view.title();
+        if url.starts_with("http://") || url.starts_with("https://") {
+            cx.emit(BrowserEvent::Visited {
+                url: url.chars().take(4096).collect(),
+                title: (!title.is_empty()).then(|| title.chars().take(512).collect()),
+            });
+        }
+    }
+
+    /// Something the page posted: an inspection, if it is one.
+    fn receive(&mut self, body: &str, cx: &mut Context<Self>) {
+        match serde_json::from_str::<InspectEnvelope>(body) {
+            Ok(envelope) if envelope.kind == "ginka-inspect" => {
+                self.inspecting = false;
+                self.complaint = None;
+                cx.emit(BrowserEvent::Inspected(Box::new(sanitize_capture(
+                    envelope.capture,
+                ))));
+            }
+            Ok(_) => {}
+            Err(error) => {
+                self.complaint = Some(format!("browser inspection: {error}").into());
             }
         }
         cx.notify();
     }
 
-    /// Show or hide the native child view as workspace navigation changes.
+    /// Show or hide the view as workspace navigation changes.
+    ///
+    /// On macOS the page is drawn by GPUI like anything else, so hiding is not
+    /// drawing it; on Windows it is a native child window that has to be told.
     pub fn set_visible(&mut self, visible: bool, cx: &mut Context<Self>) {
         if self.visible == visible {
             return;
         }
         self.visible = visible;
-        if visible {
-            self.webview.update(cx, |view, _| view.show());
-        } else {
+        if !visible {
             self.inspecting = false;
-            self.webview.update(cx, |view, _| view.hide());
         }
+        #[cfg(target_os = "windows")]
+        self.webview.update(cx, |view, _| view.set_visible(visible));
         cx.notify();
     }
 
@@ -187,26 +208,20 @@ impl BrowserPane {
         };
         self.complaint = None;
         self.suggestions.clear();
-        self.webview.update(cx, |view, _| view.load_url(&url));
+        self.webview.read(cx).load_url(&url);
         cx.notify();
     }
 
     fn back(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.webview.update(cx, |view, _| {
-            let _ = view.back();
-        });
+        self.webview.read(cx).go_back();
     }
 
     fn forward(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.webview.update(cx, |view, _| {
-            let _ = view.evaluate_script("history.forward()");
-        });
+        self.webview.read(cx).go_forward();
     }
 
     fn reload(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
-        self.webview.update(cx, |view, _| {
-            let _ = view.reload();
-        });
+        self.webview.read(cx).reload();
     }
 
     /// Open the find field, or close it.
@@ -236,22 +251,222 @@ impl BrowserPane {
         let Some(script) = ginka_ui::browser::find_script(query, backwards) else {
             return;
         };
-        self.webview.update(cx, |view, _| {
-            let _ = view.evaluate_script(&script);
-        });
+        self.webview.read(cx).eval(&script);
     }
 
     fn toggle_inspect(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.inspecting = !self.inspecting;
         self.complaint = None;
         let enabled = self.inspecting;
-        self.webview.update(cx, |view, _| {
-            let _ = view.evaluate_script(&format!(
-                "window.__ginkaSetInspect && window.__ginkaSetInspect({enabled})"
-            ));
-        });
+        let view = self.webview.read(cx);
+        // Installed again in case the page predates it; it ignores a second
+        // install.
+        view.eval(&inspect_script());
+        view.eval(&format!(
+            "window.__ginkaSetInspect && window.__ginkaSetInspect({enabled})"
+        ));
         cx.notify();
     }
+}
+
+impl BrowserPane {
+    /// Start bringing Chrome's cookies over: pick a profile, or go straight to
+    /// confirming when there is one.
+    fn begin_import(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.import != CookieImport::Idle && !matches!(self.import, CookieImport::Done(_)) {
+            self.import = CookieImport::Idle;
+            cx.notify();
+            return;
+        }
+        let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+            return;
+        };
+        let mut profiles =
+            ginka_core::chrome_cookies::profiles(&ginka_core::chrome_cookies::chrome_dir(&home));
+        profiles.retain(|profile| ginka_core::chrome_cookies::store_path(&profile.dir).is_some());
+        self.import = match profiles.len() {
+            0 => CookieImport::Done(
+                rust_i18n::t!("surface.browser.import.none")
+                    .to_string()
+                    .into(),
+            ),
+            1 => CookieImport::Confirming(profiles.remove(0)),
+            _ => CookieImport::Choosing(profiles),
+        };
+        cx.notify();
+    }
+
+    /// Read the profile's cookies — macOS asks the user before handing over
+    /// Chrome's key — and put them in this browser's own store.
+    fn run_import(
+        &mut self,
+        profile: ginka_core::chrome_cookies::ChromeProfile,
+        cx: &mut Context<Self>,
+    ) {
+        self.import = CookieImport::Running;
+        cx.notify();
+        let read = cx.background_spawn(async move { read_chrome_cookies(&profile) });
+        cx.spawn(async move |this, cx| {
+            let read = read.await;
+            this.update(cx, |this, cx| {
+                let outcome = read.and_then(|(name, cookies)| {
+                    let runtime = cx
+                        .try_global::<BrowserEngine>()
+                        .and_then(|engine| engine.runtime.clone())
+                        .ok_or_else(|| {
+                            rust_i18n::t!("surface.browser.import.no_engine").to_string()
+                        })?;
+                    let specs: Vec<gpui_cef::CookieSpec> =
+                        cookies.iter().map(cookie_spec).collect();
+                    let accepted = runtime
+                        .set_cookies(&specs)
+                        .map_err(|error| error.to_string())?;
+                    Ok(rust_i18n::t!(
+                        "surface.browser.import.done",
+                        count = accepted,
+                        profile = name
+                    )
+                    .to_string())
+                });
+                this.import = CookieImport::Done(match outcome {
+                    Ok(done) => done.into(),
+                    Err(error) => rust_i18n::t!("surface.browser.import.failed", error = error)
+                        .to_string()
+                        .into(),
+                });
+                // Pages open signed in from here on; the one showing now too.
+                this.webview.read(cx).reload();
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The strip under the toolbar while cookies are being brought over.
+    fn import_strip(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let tokens = Tokens::global(cx).clone();
+        let row = || {
+            h_flex()
+                .w_full()
+                .flex_shrink_0()
+                .px_3()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .border_b_1()
+                .border_color(tokens.colors().border_subtle)
+                .text_sm()
+                .text_color(tokens.colors().text_secondary)
+        };
+        let dismiss = Button::new("import-dismiss")
+            .ghost()
+            .compact()
+            .label(rust_i18n::t!("surface.browser.dismiss").to_string())
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.import = CookieImport::Idle;
+                cx.notify();
+            }));
+        Some(match &self.import {
+            CookieImport::Idle => return None,
+            CookieImport::Choosing(profiles) => row()
+                .child(div().child(rust_i18n::t!("surface.browser.import.choose").to_string()))
+                .children(profiles.iter().enumerate().map(|(index, profile)| {
+                    let chosen = profile.clone();
+                    Button::new(("import-profile", index))
+                        .compact()
+                        .label(profile.name.clone())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.import = CookieImport::Confirming(chosen.clone());
+                            cx.notify();
+                        }))
+                }))
+                .child(div().flex_1())
+                .child(dismiss)
+                .into_any_element(),
+            CookieImport::Confirming(profile) => {
+                let chosen = profile.clone();
+                row()
+                    .child(
+                        div().flex_1().min_w_0().child(
+                            rust_i18n::t!("surface.browser.import.confirm", profile = profile.name)
+                                .to_string(),
+                        ),
+                    )
+                    .child(
+                        Button::new("import-go")
+                            .compact()
+                            .label(rust_i18n::t!("surface.browser.import.go").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.run_import(chosen.clone(), cx)
+                            })),
+                    )
+                    .child(dismiss)
+                    .into_any_element()
+            }
+            CookieImport::Running => row()
+                .child(rust_i18n::t!("surface.browser.import.running").to_string())
+                .into_any_element(),
+            CookieImport::Done(message) => row()
+                .child(div().flex_1().min_w_0().child(message.clone()))
+                .child(dismiss)
+                .into_any_element(),
+        })
+    }
+}
+
+/// Chrome's key from the Keychain — macOS asks the user first — then the
+/// profile's cookies, decrypted. Blocking; run off the main thread.
+fn read_chrome_cookies(
+    profile: &ginka_core::chrome_cookies::ChromeProfile,
+) -> Result<(String, Vec<ginka_core::chrome_cookies::ChromeCookie>), String> {
+    use ginka_core::chrome_cookies::{derive_key, read_cookies, store_path};
+
+    let store = store_path(&profile.dir)
+        .ok_or_else(|| rust_i18n::t!("surface.browser.import.none").to_string())?;
+    let output = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-w", "-s", "Chrome Safe Storage"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(rust_i18n::t!("surface.browser.import.declined").to_string());
+    }
+    let password = String::from_utf8_lossy(&output.stdout);
+    let key = derive_key(password.trim_end_matches('\n').as_bytes());
+    let cookies = read_cookies(&store, &key).map_err(|error| error.to_string())?;
+    Ok((profile.name.clone(), cookies))
+}
+
+/// A Chrome cookie as the engine's store takes it.
+fn cookie_spec(cookie: &ginka_core::chrome_cookies::ChromeCookie) -> gpui_cef::CookieSpec {
+    use ginka_core::chrome_cookies::{SameSite, cookie_domain, cookie_url};
+    gpui_cef::CookieSpec {
+        url: cookie_url(cookie),
+        name: cookie.name.clone(),
+        value: cookie.value.clone(),
+        domain: cookie_domain(cookie),
+        path: cookie.path.clone(),
+        secure: cookie.secure,
+        http_only: cookie.http_only,
+        expires: cookie.expires,
+        same_site: match cookie.same_site {
+            SameSite::Unspecified => gpui_cef::SameSite::Unspecified,
+            SameSite::None => gpui_cef::SameSite::None,
+            SameSite::Lax => gpui_cef::SameSite::Lax,
+            SameSite::Strict => gpui_cef::SameSite::Strict,
+        },
+    }
+}
+
+/// The inspector, posting what it captures through the engine's message
+/// channel (`gpui_cef::post_message_script`'s console route).
+fn inspect_script() -> String {
+    format!(
+        "window.__ginkaPost = (message) => console.debug({prefix:?} + message);\n{INSPECT_SCRIPT}",
+        prefix = gpui_cef::MESSAGE_PREFIX,
+    )
 }
 
 impl Render for BrowserPane {
@@ -305,6 +520,16 @@ impl Render for BrowserPane {
                             .tooltip(rust_i18n::t!("surface.browser.find").to_string())
                             .on_click(cx.listener(Self::toggle_find)),
                     )
+                    .when(cfg!(target_os = "macos"), |this| {
+                        this.child(
+                            Button::new("browser-import")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("surface.browser.import").to_string())
+                                .tooltip(rust_i18n::t!("surface.browser.import.tip").to_string())
+                                .on_click(cx.listener(Self::begin_import)),
+                        )
+                    })
                     .child(
                         Button::new("browser-inspect")
                             .compact()
@@ -313,8 +538,10 @@ impl Render for BrowserPane {
                             .on_click(cx.listener(Self::toggle_inspect)),
                     ),
             )
-            // Between the toolbar and the page rather than over it: the page
-            // is a native view drawn above everything GPUI paints.
+            .children(self.import_strip(cx))
+            // Between the toolbar and the page rather than over it: on
+            // Windows the page is a native view drawn above everything GPUI
+            // paints.
             .when(!self.suggestions.is_empty(), |this| {
                 this.child(
                     v_flex()
@@ -369,23 +596,6 @@ impl Render for BrowserPane {
             .child(div().flex_1().min_h_0().child(self.webview.clone()))
     }
 }
-
-/// Installed in every page: says what loaded, for the address bar's history.
-const VISIT_SCRIPT: &str = r#"
-(() => {
-  if (window.__ginkaVisitInstalled) return;
-  window.__ginkaVisitInstalled = true;
-  window.addEventListener('load', () => {
-    try {
-      window.ipc.postMessage(JSON.stringify({
-        kind: 'ginka-visit',
-        url: String(location.href).slice(0, 4096),
-        title: String(document.title || '').slice(0, 512),
-      }));
-    } catch (_) {}
-  });
-})();
-"#;
 
 /// Installed in every page. It is inert until the native toolbar enables it.
 /// The page is untrusted, so the Rust boundary still validates every field.
@@ -482,7 +692,7 @@ const INSPECT_SCRIPT: &str = r#"
     event.preventDefault(); event.stopPropagation(); event.stopImmediatePropagation();
     const payload = { kind: 'ginka-inspect', capture: capture(hovered) };
     enabled = false; overlay.style.display = 'none';
-    window.ipc.postMessage(JSON.stringify(payload));
+    window.__ginkaPost(JSON.stringify(payload));
   }, true);
   addEventListener('keydown', event => {
     if (enabled && event.key === 'Escape') window.__ginkaSetInspect(false);

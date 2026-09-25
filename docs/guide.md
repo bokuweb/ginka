@@ -23,7 +23,10 @@ command.
   adds a desktop entry. `./install.sh uninstall` removes it again.
 
 - **From source:** `cargo run` starts the window; the command line is
-  `cargo run -p ginka-cli --`.
+  `cargo run -p ginka-cli --`. The browser surface needs the window run as
+  an app: `scripts/dev-macos` builds one with Chromium inside (the first
+  build downloads Chromium to `~/.local/share/cef`, about 500MB, and needs
+  `cmake` and `ninja`).
 
 Ginka runs the agent CLIs you already have and are signed in to; it never
 signs in for you. `ginka agents` says which ones it found.

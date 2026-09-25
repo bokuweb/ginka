@@ -207,6 +207,40 @@ pub fn profiles(chrome_dir: &Path) -> Vec<ChromeProfile> {
     found
 }
 
+/// A profile's cookie store: `Network/Cookies` since Chrome 96, `Cookies`
+/// before it.
+pub fn store_path(profile_dir: &Path) -> Option<PathBuf> {
+    [
+        profile_dir.join("Network/Cookies"),
+        profile_dir.join("Cookies"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
+}
+
+/// The URL a cookie is set against: its host without the leading dot, over
+/// HTTPS when it is secure.
+pub fn cookie_url(cookie: &ChromeCookie) -> String {
+    let scheme = if cookie.secure { "https" } else { "http" };
+    let host = cookie.host.trim_start_matches('.');
+    let path = if cookie.path.starts_with('/') {
+        cookie.path.as_str()
+    } else {
+        "/"
+    };
+    format!("{scheme}://{host}{path}")
+}
+
+/// The domain a cookie is set with: a domain cookie keeps its leading dot,
+/// and a host-only cookie has none, which the store reads as host-only.
+pub fn cookie_domain(cookie: &ChromeCookie) -> String {
+    if cookie.host.starts_with('.') {
+        cookie.host.clone()
+    } else {
+        String::new()
+    }
+}
+
 /// Where Chrome keeps its profiles on this machine.
 pub fn chrome_dir(home: &Path) -> PathBuf {
     home.join("Library/Application Support/Google/Chrome")
@@ -350,6 +384,40 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn a_profile_store_is_found_where_chrome_keeps_it_now_or_kept_it_before() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(store_path(dir.path()), None);
+        std::fs::write(dir.path().join("Cookies"), b"").unwrap();
+        assert_eq!(store_path(dir.path()), Some(dir.path().join("Cookies")));
+        std::fs::create_dir(dir.path().join("Network")).unwrap();
+        std::fs::write(dir.path().join("Network/Cookies"), b"").unwrap();
+        assert_eq!(
+            store_path(dir.path()),
+            Some(dir.path().join("Network/Cookies"))
+        );
+    }
+
+    #[test]
+    fn a_cookie_is_set_against_its_own_host() {
+        let cookie = |host: &str, path: &str, secure: bool| ChromeCookie {
+            host: host.into(),
+            name: "n".into(),
+            value: "v".into(),
+            path: path.into(),
+            expires: None,
+            secure,
+            http_only: false,
+            same_site: SameSite::Unspecified,
+        };
+        let domain = cookie(".github.com", "/", true);
+        assert_eq!(cookie_url(&domain), "https://github.com/");
+        assert_eq!(cookie_domain(&domain), ".github.com");
+        let host_only = cookie("example.com", "/app", false);
+        assert_eq!(cookie_url(&host_only), "http://example.com/app");
+        assert_eq!(cookie_domain(&host_only), "");
     }
 
     #[test]
