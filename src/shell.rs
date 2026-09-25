@@ -4643,7 +4643,7 @@ impl Shell {
                 .id(SharedString::from(id))
                 .px_3()
                 .py_1()
-                .rounded(px(7.))
+                .rounded(px(5.))
                 .text_size(px(12.5))
                 .cursor_pointer()
                 .when(on, |this| this.bg(tokens.colors().row_active()))
@@ -4877,7 +4877,7 @@ impl Shell {
                 .id(id)
                 .px_2()
                 .py_0p5()
-                .rounded(px(7.))
+                .rounded(px(5.))
                 .text_xs()
                 .cursor_pointer()
                 .when(on, |this| this.bg(tokens.colors().row_active()))
@@ -5073,7 +5073,7 @@ impl Shell {
                 .id(id)
                 .px_2()
                 .py_0p5()
-                .rounded(px(7.))
+                .rounded(px(5.))
                 .text_xs()
                 .cursor_pointer()
                 .when(on, |this| this.bg(tokens.colors().row_active()))
@@ -6987,7 +6987,7 @@ impl Shell {
                             .max_w(px(TRANSCRIPT_MEASURE * 0.8))
                             .px(px(13.))
                             .py(px(9.))
-                            .rounded(px(tokens.radius.panel + 2.))
+                            .rounded(px(tokens.radius.panel + 1.))
                             // Tinted rather than another grey box: the reader's
                             // own words are the one thing on screen that is not
                             // the agent's.

@@ -378,7 +378,7 @@ impl NotesView {
                 .id(id)
                 .px_2()
                 .py_0p5()
-                .rounded(px(7.))
+                .rounded(px(5.))
                 .text_size(px(11.5))
                 .cursor_pointer()
                 .when(on, |this| this.bg(tokens.colors().row_active()))

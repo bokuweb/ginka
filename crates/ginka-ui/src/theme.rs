@@ -379,6 +379,19 @@ mod tests {
     }
 
     #[test]
+    fn corners_are_tight_enough_to_read_as_a_tool() {
+        // Softer than this reads as a toy at this density; the window's own
+        // corner is the platform's and stays as it is.
+        for mode in [Mode::Dark, Mode::Light] {
+            let radius = Tokens::load(mode).radius;
+            assert_eq!(
+                (radius.card, radius.panel, radius.row, radius.control()),
+                (10.0, 7.0, 6.0, 3.0)
+            );
+        }
+    }
+
+    #[test]
     fn conversation_text_is_a_step_down_from_primary_on_the_dark_surface() {
         let dark = Tokens::load(Mode::Dark).colors;
         assert!(dark.prose().l < dark.text_primary.l);

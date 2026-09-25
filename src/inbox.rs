@@ -203,7 +203,7 @@ mod mounted {
                                 .id(SharedString::from(format!("inbox-section:{section:?}")))
                                 .px_2()
                                 .py_0p5()
-                                .rounded(px(7.))
+                                .rounded(px(5.))
                                 .text_size(px(11.5))
                                 .cursor_pointer()
                                 .when(chosen, |this| this.bg(tokens.colors().row_active()))

@@ -1528,7 +1528,7 @@ impl SurfacePanel {
                                 div()
                                     .id(SharedString::from(format!("diff-layout:{staged}:{split}")))
                                     .px_1p5()
-                                    .rounded(px(5.))
+                                    .rounded(px(4.))
                                     .cursor_pointer()
                                     .when(on, |this| {
                                         this.bg(tokens.colors().row_active())

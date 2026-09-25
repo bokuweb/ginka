@@ -97,10 +97,11 @@ crate later without rewriting their views.
 
 ### Geometry
 
-4 px spacing grid. Radii: window 12, **card 16** (the composer and anything else
-holding a group of controls — a card is an object on the surface and the corner
-is what says so), panel 10, row 9. Chips are rows, not pills: 28 px tall, 9 px
-radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
+4 px spacing grid. Radii: window 12 (the platform's), **card 10** (the composer
+and anything else holding a group of controls — a card is an object on the
+surface and the corner is what says so), panel 7, row 6, control 3. Tight on
+purpose: softer corners at this density read as a toy rather than a tool.
+Chips are rows, not pills: 28 px tall, 6 px radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
 188 px project rail and a flexible session list shown only for the selected
 project. Right panel
 default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre
@@ -181,7 +182,7 @@ active conversation. With nothing selected, the rail stands alone.
 - **Nothing registered** — one muted line under the section label. The adjacent
   `+` remains the single visual way into project registration; the CLI remains
   available without being repeated in the empty rail.
-- **Workspace row**, indented under its project (8 px radius, selected =
+- **Workspace row**, indented under its project (6 px radius, selected =
   `bg.raised` fill):
   1. Agent glyph, session title, right-aligned status: relative time (`now`,
      `46m`, `4h`) **or** a status pill (animated dot + `Working`).

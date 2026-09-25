@@ -19,6 +19,6 @@
     "status.error": "#ED7C7C",
     "code.bg": "#AF9AEB1A"
   },
-  "radius": { "window": 12.0, "card": 16.0, "panel": 10.0, "row": 9.0 },
+  "radius": { "window": 12.0, "card": 10.0, "panel": 7.0, "row": 6.0 },
   "duration_ms": { "quick": 120, "fade": 200, "standard": 260 }
 }
