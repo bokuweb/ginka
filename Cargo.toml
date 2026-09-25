@@ -80,6 +80,12 @@ lsp-types = { version = "0.97", features = ["proposed"] }
 parking_lot = "0.12"
 portable-pty = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
+# Reading the cookies Chrome stored, to bring them into the embedded browser
+# (`ginka_core::chrome_cookies`): Chrome's own scheme on macOS.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+pbkdf2 = { version = "0.12", default-features = false, features = ["hmac"] }
+sha1 = "0.10"
 rust-i18n = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
