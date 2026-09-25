@@ -2811,7 +2811,8 @@ impl SurfacePanel {
                 .child(
                     div()
                         .w(px(120.))
-                        .flex_shrink_0()
+                        .flex_shrink_1()
+                        .min_w(px(64.))
                         .text_sm()
                         .text_color(tokens.colors().text_primary)
                         .truncate()
@@ -2820,6 +2821,7 @@ impl SurfacePanel {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_xs()
                         .text_color(tokens.colors().text_secondary)
                         .child(detail),
@@ -4086,6 +4088,7 @@ impl Render for SurfacePanel {
         }
         let tokens = Tokens::global(cx);
         let border = tokens.colors().border_subtle;
+        let surface_bg = tokens.colors().bg_window;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(browser) = self
             .browser_workspace
@@ -4099,6 +4102,8 @@ impl Render for SurfacePanel {
 
         v_flex()
             .size_full()
+            // The same second coat as the conversation: a diff is read, too.
+            .bg(surface_bg)
             .border_l_1()
             .border_color(border)
             .child(self.toolbar(cx))
@@ -4108,7 +4113,9 @@ impl Render for SurfacePanel {
                 div()
                     .flex_1()
                     .min_h_0()
+                    .min_w_0()
                     .w_full()
+                    .overflow_hidden()
                     .child(self.dock_area.clone())
                     .into_any_element()
             })
@@ -4194,7 +4201,15 @@ impl Render for SurfaceTab {
             .panel
             .update(cx, |panel, cx| panel.surface_body(surface, cx))
             .unwrap_or_else(|_| div().into_any_element());
-        v_flex().size_full().track_focus(&self.focus).child(body)
+        // Bounded by the tab rather than by what is in it: a long line in one
+        // surface would otherwise widen the whole split, and every surface
+        // beside it would run out under the window's edge.
+        v_flex()
+            .size_full()
+            .min_w_0()
+            .overflow_hidden()
+            .track_focus(&self.focus)
+            .child(body)
     }
 }
 

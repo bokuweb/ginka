@@ -34,7 +34,8 @@ use gpui_base::TextSelection;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
-    Disableable as _, ElementExt as _, Icon, IconName, InteractiveElementExt as _, StyledExt as _,
+    ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName,
+    InteractiveElementExt as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState},
@@ -267,8 +268,19 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 
 /// The transcript's measure, in pixels: `docs/ui.md` §3.3's ~72 characters at
-/// the 15px body size. Reading is what this column is for.
-const TRANSCRIPT_MEASURE: f32 = 780.;
+/// the body size. Reading is what this column is for.
+const TRANSCRIPT_MEASURE: f32 = 720.;
+
+/// The size conversation text is set in: e1's reading size, so the two
+/// surfaces read as one app.
+const PROSE_SIZE: f32 = 14.;
+
+/// The line height conversation text is set on, 1.6 of its size.
+const PROSE_LINE: f32 = 22.5;
+
+/// How narrow the centre column may get before the panels beside it give
+/// way.
+const CENTRE_MIN_WIDTH: f32 = 380.;
 
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 17.;
@@ -658,6 +670,9 @@ pub struct Shell {
     model_query: Entity<InputState>,
     /// A copied query keeps filtering in the testable `ginka-ui` layer.
     model_filter: String,
+    /// The pointer is over the model chip, so a press there is the chip's to
+    /// toggle rather than a press outside the open picker.
+    model_chip_hovered: bool,
     /// Search or new-branch text in the branch popover.
     branch_query: Entity<InputState>,
     /// A copied query keeps branch filtering in the testable `ginka-ui` layer.
@@ -1430,6 +1445,7 @@ impl Shell {
             composer,
             model_query,
             model_filter: String::new(),
+            model_chip_hovered: false,
             branch_query,
             branch_filter: String::new(),
             branches: Vec::new(),
@@ -6629,7 +6645,9 @@ impl Shell {
                             // wider than the composer under it. They wrap
                             // instead.
                             .min_w(px(0.))
-                            .h(px(104.))
+                            // At least this tall, and taller when a narrow
+                            // column wraps a label onto a fourth line.
+                            .min_h(px(104.))
                             .p_3()
                             .gap_2()
                             .rounded(px(tokens.radius.card))
@@ -6698,8 +6716,8 @@ impl Shell {
             })
             .child(
                 div()
-                    .text_size(px(15.))
-                    .text_color(tokens.colors().text_primary)
+                    .text_size(px(PROSE_SIZE))
+                    .text_color(tokens.colors().prose())
                     .child(question.to_string()),
             )
             .child(
@@ -6722,7 +6740,7 @@ impl Shell {
                             })
                             .when(!answered, |this| {
                                 this.bg(tokens.colors().row_active())
-                                    .text_color(tokens.colors().text_primary)
+                                    .text_color(tokens.colors().prose())
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().accent.opacity(0.35)))
                             })
@@ -6763,9 +6781,9 @@ impl Shell {
             })
             .child(
                 div()
-                    .text_size(px(15.))
-                    .line_height(px(25.))
-                    .text_color(tokens.colors().text_primary)
+                    .text_size(px(PROSE_SIZE))
+                    .line_height(px(PROSE_LINE))
+                    .text_color(tokens.colors().prose())
                     .child(plan.to_string()),
             )
             .children((!answered).then(|| {
@@ -6950,8 +6968,8 @@ impl Shell {
         let prose = |text: &str, color: Hsla| {
             div()
                 .w_full()
-                .text_size(px(15.))
-                .line_height(px(25.))
+                .text_size(px(PROSE_SIZE))
+                .line_height(px(PROSE_LINE))
                 .text_color(color)
                 .child(text.to_string())
         };
@@ -6974,9 +6992,9 @@ impl Shell {
                             // own words are the one thing on screen that is not
                             // the agent's.
                             .bg(tokens.colors().row_active())
-                            .text_size(px(15.))
-                            .line_height(px(25.))
-                            .text_color(tokens.colors().text_primary)
+                            .text_size(px(PROSE_SIZE))
+                            .line_height(px(PROSE_LINE))
+                            .text_color(tokens.colors().prose())
                             .child(text.clone()),
                     )
                     .child(self.message_actions(index, "user", text, cx))
@@ -7005,9 +7023,9 @@ impl Shell {
                 v_flex()
                     .w_full()
                     .gap_1()
-                    .text_size(px(15.))
-                    .line_height(px(25.))
-                    .text_color(tokens.colors().text_primary)
+                    .text_size(px(PROSE_SIZE))
+                    .line_height(px(PROSE_LINE))
+                    .text_color(tokens.colors().prose())
                     .children((!formatted.is_empty()).then(|| {
                         TextView::markdown(("assistant", index), linked.markdown.clone())
                             .selectable(true)
@@ -8748,66 +8766,82 @@ impl Shell {
                                         ),
                                 )
                             })
-                            .child(div().flex_1())
-                            .children(model_chip)
-                            .children(effort_chip)
-                            .children(tier_chip)
-                            .children(access_chip)
-                            .child(agent_chip)
-                            .children(account_chip)
-                            .children(usage_chip)
-                            .children(compact_chip)
+                            // The chips wrap onto a second line, right
+                            // aligned, rather than running out of a narrow
+                            // column and under whatever sits beside it.
                             .child(
-                                if primary_action == ginka_ui::composer::PrimaryAction::Stop {
-                                    // With no follow-up waiting, stopping is the
-                                    // one useful action on a running turn. As
-                                    // soon as there is a draft this place turns
-                                    // back into Send for steer-or-queue.
-                                    div()
-                                        .id("stop")
-                                        .size(px(30.))
-                                        .rounded_full()
-                                        .bg(tokens.colors().bg_raised)
-                                        .border_1()
-                                        .border_color(tokens.colors().border_strong)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(tokens.colors().row_active()))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::new(rust_i18n::t!("composer.stop").to_string())
-                                                .build(window, cx)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| this.stop(cx)))
-                                        .child(
+                                h_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .flex_wrap()
+                                    .justify_end()
+                                    .items_center()
+                                    .gap_2()
+                                    .children(model_chip)
+                                    .children(effort_chip)
+                                    .children(tier_chip)
+                                    .children(access_chip)
+                                    .child(agent_chip)
+                                    .children(account_chip)
+                                    .children(usage_chip)
+                                    .children(compact_chip)
+                                    .child(
+                                        if primary_action == ginka_ui::composer::PrimaryAction::Stop
+                                        {
+                                            // With no follow-up waiting, stopping is the
+                                            // one useful action on a running turn. As
+                                            // soon as there is a draft this place turns
+                                            // back into Send for steer-or-queue.
                                             div()
-                                                .size(px(9.))
-                                                .rounded(px(2.5))
-                                                .bg(tokens.colors().text_primary),
-                                        )
-                                        .into_any_element()
-                                } else {
-                                    div()
-                                        .id("send")
-                                        .size(px(30.))
-                                        .rounded_full()
-                                        .bg(tokens.colors().text_primary)
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(tokens.colors().accent))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.submit(window, cx)
-                                        }))
-                                        .child(
-                                            Icon::new(IconName::ArrowUp)
-                                                .size_4()
-                                                .text_color(tokens.colors().bg_window),
-                                        )
-                                        .into_any_element()
-                                },
+                                                .id("stop")
+                                                .size(px(30.))
+                                                .rounded_full()
+                                                .bg(tokens.colors().bg_raised)
+                                                .border_1()
+                                                .border_color(tokens.colors().border_strong)
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(tokens.colors().row_active()))
+                                                .tooltip(|window, cx| {
+                                                    Tooltip::new(
+                                                        rust_i18n::t!("composer.stop").to_string(),
+                                                    )
+                                                    .build(window, cx)
+                                                })
+                                                .on_click(
+                                                    cx.listener(|this, _, _, cx| this.stop(cx)),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .size(px(9.))
+                                                        .rounded(px(2.5))
+                                                        .bg(tokens.colors().text_primary),
+                                                )
+                                                .into_any_element()
+                                        } else {
+                                            div()
+                                                .id("send")
+                                                .size(px(30.))
+                                                .rounded_full()
+                                                .bg(tokens.colors().text_primary)
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .cursor_pointer()
+                                                .hover(|this| this.bg(tokens.colors().accent))
+                                                .on_click(cx.listener(|this, _, window, cx| {
+                                                    this.submit(window, cx)
+                                                }))
+                                                .child(
+                                                    Icon::new(IconName::ArrowUp)
+                                                        .size_4()
+                                                        .text_color(tokens.colors().bg_window),
+                                                )
+                                                .into_any_element()
+                                        },
+                                    ),
                             ),
                     ),
             )
@@ -8815,8 +8849,9 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .gap_2()
+                    .flex_wrap()
                     .items_center()
-                    .child(div().flex_1().child(self.context_bar(cx)))
+                    .child(div().flex_1().min_w_0().child(self.context_bar(cx)))
                     .children(new_session),
             )
     }
@@ -8829,8 +8864,9 @@ impl Shell {
     /// picker that refuses the pick is not a picker.
     fn picker_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let picker = self.picker?;
+        // Floats from its own chip instead; see `model_chip_button`.
         if picker == Picker::Model {
-            return self.model_picker_panel(cx);
+            return None;
         }
         if picker == Picker::Branch {
             return self.branch_picker_panel(cx);
@@ -9121,22 +9157,14 @@ impl Shell {
         let provider_tabs = providers.into_iter().map(|provider| {
             let id = provider.id.clone();
             let label = provider.display_name.clone();
-            let initial = label.chars().next().unwrap_or('?').to_string();
             let selected = id == active_id;
             div()
                 .id(SharedString::from(format!("model-provider:{id}")))
-                .size(px(38.))
+                .size(px(32.))
                 .rounded(px(tokens.radius.control()))
                 .flex()
                 .items_center()
                 .justify_center()
-                .text_size(px(12.))
-                .font_medium()
-                .text_color(if selected {
-                    tokens.colors().text_primary
-                } else {
-                    tokens.colors().text_muted
-                })
                 .when(selected, |this| this.bg(tokens.colors().row_active()))
                 .hover(|this| this.bg(tokens.colors().row_hover()))
                 .tooltip(move |window, cx| Tooltip::new(label.clone()).build(window, cx))
@@ -9153,11 +9181,20 @@ impl Shell {
                     this.sync_footer(cx);
                     cx.notify();
                 }))
-                .child(initial)
+                .child(
+                    ginka_ui::workspace::Agent::from_id(&provider.id)
+                        .glyph()
+                        .size_4()
+                        .text_color(if selected {
+                            tokens.colors().text_primary
+                        } else {
+                            tokens.colors().text_muted
+                        }),
+                )
         });
 
         let default_provider = active_id.clone();
-        let mut rows = vec![self.picker_row(
+        let mut rows = vec![self.model_row(
             "model-option:default",
             rust_i18n::t!("composer.option.provider_default").to_string(),
             Some(active_display_name),
@@ -9182,7 +9219,7 @@ impl Shell {
                     .collect::<Vec<_>>()
                     .join(" · ")
             });
-            self.picker_row(
+            self.model_row(
                 SharedString::from(format!("model-option:{}:{}", provider, model.id)),
                 model.label,
                 note,
@@ -9211,20 +9248,27 @@ impl Shell {
 
         Some(
             h_flex()
-                .w_full()
-                .h(px(360.))
+                .w(px(440.))
+                .max_h(px(380.))
+                .items_stretch()
                 .rounded(px(tokens.radius.card))
                 .bg(tokens.colors().popover())
                 .border_1()
                 .border_color(tokens.colors().border_strong)
                 .shadow_lg()
                 .overflow_hidden()
+                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                    // The chip toggles itself; anywhere else puts it away.
+                    if !this.model_chip_hovered {
+                        this.picker = None;
+                        cx.notify();
+                    }
+                }))
                 .child(
                     v_flex()
-                        .h_full()
-                        .w(px(58.))
+                        .w(px(48.))
                         .p_2()
-                        .gap_2()
+                        .gap_1()
                         .items_center()
                         .border_r_1()
                         .border_color(tokens.colors().border_subtle)
@@ -9232,26 +9276,89 @@ impl Shell {
                 )
                 .child(
                     v_flex()
-                        .h_full()
                         .flex_1()
+                        .min_w_0()
                         .child(
-                            div()
-                                .p_2()
+                            h_flex()
+                                .h(px(40.))
+                                .px_3()
+                                .gap_2()
+                                .items_center()
                                 .border_b_1()
                                 .border_color(tokens.colors().border_subtle)
-                                .child(ginka_ui::field::input(&self.model_query)),
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&self.model_query)
+                                            .appearance(false)
+                                            .focus_bordered(false),
+                                    ),
+                                ),
                         )
                         .child(
                             v_flex()
-                                .flex_1()
+                                .id("model-options")
+                                .max_h(px(320.))
                                 .p_1()
                                 .gap_0p5()
-                                .overflow_y_scrollbar()
+                                .overflow_y_scroll()
                                 .children(rows),
                         ),
                 )
                 .into_any_element(),
         )
+    }
+
+    /// One model in the picker: its name, what it can be tuned by, and a
+    /// check on the one the next turn will use.
+    fn model_row(
+        &self,
+        id: impl Into<ElementId>,
+        label: String,
+        note: Option<String>,
+        chosen: bool,
+        on_click: impl Fn(&gpui::ClickEvent, &mut Window, &mut App) + 'static,
+        cx: &App,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx);
+        h_flex()
+            .id(id)
+            .w_full()
+            .h(px(32.))
+            .px(px(10.))
+            .gap(px(8.))
+            .items_center()
+            .rounded(px(tokens.radius.row))
+            .cursor_pointer()
+            .when(chosen, |this| this.bg(tokens.colors().row_hover()))
+            .hover(|this| this.bg(tokens.colors().row_active()))
+            .on_click(on_click)
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_size(px(13.))
+                    .text_color(tokens.colors().text_primary)
+                    .truncate()
+                    .child(label),
+            )
+            .children(note.map(|note| {
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(11.))
+                    .text_color(tokens.colors().text_muted)
+                    .child(note)
+            }))
+            .children(chosen.then(|| {
+                Icon::new(IconName::Check)
+                    .size_3p5()
+                    .text_color(tokens.colors().text_secondary)
+            }))
+            .into_any_element()
     }
 
     /// Open the branch picker and read git's current branch ownership.
@@ -10693,7 +10800,7 @@ impl Shell {
     }
 
     /// Project name and source-folder selection, drawn as one modal workflow.
-    fn add_project_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    fn add_project_view(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.add_project.as_ref()?;
         let tokens = Tokens::global(cx).clone();
         let source = dialog
@@ -10704,6 +10811,13 @@ impl Shell {
         let ready = !dialog.busy
             && validate_project_draft(dialog.name.read(cx).value().as_ref(), dialog.path.clone())
                 .is_ok();
+        // The box is the field's border, so it is the box that shows focus;
+        // the field inside draws none of its own.
+        let name_focused = dialog
+            .name
+            .read(cx)
+            .focus_handle(cx)
+            .contains_focused(window, cx);
 
         Some(
             div()
@@ -10768,17 +10882,22 @@ impl Shell {
                                 .items_center()
                                 .rounded(px(tokens.radius.control()))
                                 .border_1()
-                                .border_color(tokens.colors().border_strong)
+                                .border_color(if name_focused {
+                                    cx.theme().ring
+                                } else {
+                                    tokens.colors().border_strong
+                                })
                                 .child(
                                     Icon::new(IconName::Folder)
                                         .size_4()
                                         .text_color(tokens.colors().text_secondary),
                                 )
                                 .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .child(Input::new(&dialog.name).appearance(false)),
+                                    div().flex_1().min_w_0().child(
+                                        Input::new(&dialog.name)
+                                            .appearance(false)
+                                            .focus_bordered(false),
+                                    ),
                                 ),
                         )
                         .child(
@@ -11003,7 +11122,6 @@ impl Shell {
         if models.is_empty() {
             return None;
         }
-        let tokens = Tokens::global(cx);
         let selected = self
             .model_to_start()
             .and_then(|chosen| models.iter().find(|model| model.id == chosen));
@@ -11014,47 +11132,86 @@ impl Shell {
         let effort_label = selected
             .and_then(|model| ginka_ui::models::effort_label(model, effort.as_deref()))
             .map(str::to_string);
+        let glyph = self
+            .agent_to_start()
+            .map(|id| ginka_ui::workspace::Agent::from_id(&id).glyph());
+        let flyout = (self.picker == Some(Picker::Model))
+            .then(|| self.model_picker_panel(cx))
+            .flatten()
+            .map(|card| {
+                // Pinned to the chip's top-left corner and opening upward:
+                // the composer sits at the foot of the window, and a list
+                // that opened down would open off it.
+                div().absolute().top_0().left_0().child(
+                    deferred(
+                        anchored()
+                            .anchor(Anchor::BottomLeft)
+                            .offset(point(px(0.), px(-6.)))
+                            .snap_to_window_with_margin(px(8.))
+                            .child(card),
+                    )
+                    .with_priority(1),
+                )
+            });
+        let tokens = Tokens::global(cx);
 
         Some(
-            h_flex()
-                .id("model-chip")
-                .h(px(28.))
-                .px(px(9.))
-                .gap(px(6.))
-                .items_center()
-                .rounded(px(tokens.radius.row))
-                .bg(tokens.colors().row_hover())
-                .cursor_pointer()
-                .hover(|this| this.bg(tokens.colors().row_active()))
-                .on_click(cx.listener(|this, _, window, cx| {
-                    if this.picker == Some(Picker::Model) {
-                        this.picker = None;
-                    } else {
-                        this.picker = Some(Picker::Model);
-                        this.model_filter.clear();
-                        this.model_query
-                            .update(cx, |query, cx| query.set_value("", window, cx));
-                        this.model_query.read(cx).focus_handle(cx).focus(window, cx);
-                    }
-                    cx.notify();
-                }))
-                .child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(tokens.colors().text_secondary)
-                        .child(label),
-                )
-                .children(effort_label.map(|effort| {
-                    div()
-                        .text_size(px(11.))
-                        .text_color(tokens.colors().text_muted)
-                        .child(effort)
-                }))
-                .child(
-                    Icon::new(IconName::ChevronDown)
+            div().relative().children(flyout).child(
+                h_flex()
+                    .id("model-chip")
+                    .h(px(28.))
+                    .px(px(9.))
+                    .gap(px(6.))
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().row_hover())
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .when(self.picker == Some(Picker::Model), |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                        this.model_chip_hovered = *hovered;
+                    }))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.picker == Some(Picker::Model) {
+                            this.picker = None;
+                        } else {
+                            this.picker = Some(Picker::Model);
+                            this.model_filter.clear();
+                            this.model_query
+                                .update(cx, |query, cx| query.set_value("", window, cx));
+                            this.model_query.read(cx).focus_handle(cx).focus(window, cx);
+                        }
+                        cx.notify();
+                    }))
+                    .children(glyph.map(|glyph| {
+                        glyph
+                            .size(px(13.))
+                            .text_color(tokens.colors().text_secondary)
+                    }))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(tokens.colors().text_secondary)
+                            .child(label),
+                    )
+                    .children(effort_label.map(|effort| {
+                        div()
+                            .text_size(px(11.))
+                            .text_color(tokens.colors().text_muted)
+                            .child(effort)
+                    }))
+                    .child(
+                        Icon::new(if self.picker == Some(Picker::Model) {
+                            IconName::ChevronUp
+                        } else {
+                            IconName::ChevronDown
+                        })
                         .size(px(12.))
                         .text_color(tokens.colors().text_muted),
-                ),
+                    ),
+            ),
         )
     }
 
@@ -11309,11 +11466,13 @@ impl Shell {
             .w_full()
             .px(px(6.))
             .gap_2()
+            .flex_wrap()
             .justify_between()
             .items_center()
             .child(
                 h_flex()
                     .id("project-chip")
+                    .min_w_0()
                     .h(px(22.))
                     .px(px(6.))
                     .gap(px(5.))
@@ -12339,12 +12498,15 @@ impl Render for Shell {
         let right_width = self.layout.size(Panel::RightPanel);
         // Built before the column chain: both headers bind listeners, and the
         // chain's own closures hold `self` while they run.
+        // Over the rail only: the rail keeps a header's height free for it,
+        // and the workspace list beside it runs to the top of the window
+        // instead of leaving that strip empty.
         let window_controls = sidebar_open.then(|| {
             div()
-                .w_full()
-                .bg(tokens.colors().bg_sidebar)
-                .border_r_1()
-                .border_color(tokens.colors().border_subtle)
+                .absolute()
+                .top_0()
+                .left_0()
+                .w(PROJECT_RAIL_WIDTH)
                 .child(self.window_controls(cx))
                 .into_any_element()
         });
@@ -12419,19 +12581,37 @@ impl Render for Shell {
                                     .child(
                                         // The column runs to the top of the
                                         // window and carries the window's own
-                                        // controls; the strip paints the
-                                        // sidebar's background and border so
-                                        // the two read as one surface, and
-                                        // neither paints over the other.
-                                        v_flex()
+                                        // controls in the rail's top strip,
+                                        // over the rail's own background.
+                                        div()
+                                            .relative()
                                             .size_full()
-                                            .children(window_controls)
                                             .child(self.sidebar.clone())
+                                            .children(window_controls)
                                             .into_any_element(),
                                     ),
                             )
                         })
-                        .child(resizable_panel().child(main))
+                        // The conversation keeps a readable measure: the
+                        // panels either side give way before it does, and
+                        // what is left over is clipped rather than drawn
+                        // under them.
+                        .child(
+                            resizable_panel()
+                                .size_range(px(CENTRE_MIN_WIDTH)..Pixels::MAX)
+                                .child(
+                                    div()
+                                        .size_full()
+                                        .overflow_hidden()
+                                        // A second coat of the window's
+                                        // colour, the way e1 paints its
+                                        // conversation column: text is read
+                                        // here, and the desktop through the
+                                        // glass is noise under it.
+                                        .bg(tokens.colors().bg_window)
+                                        .child(main),
+                                ),
+                        )
                         .when(right_open, |this| {
                             this.child(
                                 resizable_panel()
@@ -12444,7 +12624,7 @@ impl Render for Shell {
             )
             .children(self.palette_view(cx))
             .children(self.image_markup_view(cx))
-            .children(self.add_project_view(cx))
+            .children(self.add_project_view(window, cx))
             .children(self.add_account_view(cx))
     }
 }

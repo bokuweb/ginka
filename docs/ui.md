@@ -72,6 +72,13 @@ sidebar, the centre column and each card paint themselves once. Three coats of
 70 % is 97 %, which is no longer glass. (Both rules are pedro's, whose palette
 solved the same problem.)
 
+The one deliberate exception is where text is read at length: the conversation
+column and the right panel lay a second coat of `bg.window` over the glass, the
+way e1's conversation column does, so the desktop shows through the sidebar
+and not under a paragraph. Conversation text is `text.primary` a step down in
+lightness on the dark theme (`Colors::prose`): near-white at reading length on
+that darker surface blooms into what reads as bold.
+
 A light theme ships with the same token names and WCAG AA contrast pairs. The
 schema, palette, 13 px toolkit base and 12 px mono base intentionally match e1;
 Kirikumo consumes the same token contract. Keeping these as serialized tokens,
@@ -83,7 +90,7 @@ crate later without rewriting their views.
 | Role | Font | Size / line-height | Weight |
 | --- | --- | --- | --- |
 | Toolkit base | UI sans (system / Inter) | 13 / toolkit default | 400 |
-| Transcript body | UI sans | 15 / 1.65 | 400 |
+| Transcript body | UI sans | 14 / 1.6 | 400 |
 | Session title | UI sans | 14 / 1.3 | 500 |
 | Metadata | UI sans | 11–12 / 1.3 | 400 |
 | Code / terminal | Mono (system mono / JetBrains Mono) | 12–13 / 1.5 | 400 |
@@ -206,7 +213,7 @@ active conversation. With nothing selected, the rail stands alone.
   prompt that sent itself would start an agent on a question nobody asked. The
   scrolling transcript takes over the moment a prompt is away, before the first
   word arrives, because that is where the activity line lives.
-- **Transcript** — one centred column at the measure (780 px), with the composer
+- **Transcript** — one centred column at the measure (720 px), with the composer
   under it at the same width: a conversation stranded against one edge of a wide
   window reads as a mistake rather than as a measure. Virtualized markdown:
   paragraphs, inline code chips, fenced code with tree-sitter highlighting,

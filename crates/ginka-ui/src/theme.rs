@@ -333,6 +333,17 @@ impl Colors {
         color
     }
 
+    /// Conversation text: the primary colour a step down. Near-white set
+    /// at reading length on the dark surface blooms and reads as bold; the
+    /// light theme's dark text is left as it is.
+    pub fn prose(&self) -> Hsla {
+        let mut color = self.text_primary;
+        if !self.light() {
+            color.l *= 0.9;
+        }
+        color
+    }
+
     /// A row under the pointer.
     ///
     /// The accent at a fraction of itself rather than a grey fill: rows are
@@ -365,6 +376,14 @@ mod tests {
             assert!(!tokens.name.is_empty());
             assert_eq!(tokens.radius.window, 12.0);
         }
+    }
+
+    #[test]
+    fn conversation_text_is_a_step_down_from_primary_on_the_dark_surface() {
+        let dark = Tokens::load(Mode::Dark).colors;
+        assert!(dark.prose().l < dark.text_primary.l);
+        let light = Tokens::load(Mode::Light).colors;
+        assert_eq!(light.prose(), light.text_primary);
     }
 
     #[test]
