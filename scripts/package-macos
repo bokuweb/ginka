@@ -60,10 +60,15 @@ if [ -z "$bin_dir" ]; then
     fi
 fi
 
-stage="$out_dir/macos"
+# Assembled and signed on the system volume: a disk without extended
+# attributes (exFAT, most external drives) grows `._*` AppleDouble files
+# beside anything copied onto it, and a bundle with those inside does not
+# verify.
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+stage="$work/macos"
 app="$stage/Ginka.app"
-rm -rf "$stage"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$out_dir"
 cp "$bin_dir/ginka" "$app/Contents/MacOS/ginka-app"
 cp "$bin_dir/ginka-cli" "$app/Contents/MacOS/ginka"
 cp "$bin_dir/ginka-daemon" "$app/Contents/MacOS/ginka-daemon"
@@ -89,14 +94,17 @@ fi
 codesign --verify --strict "$app"
 
 if ! $dmg; then
-    echo "$app"
+    rm -rf "$out_dir/Ginka.app"
+    ditto --norsrc --noextattr "$app" "$out_dir/Ginka.app"
+    echo "$out_dir/Ginka.app"
     exit 0
 fi
 
 image="$out_dir/Ginka-$version.dmg"
 ln -s /Applications "$stage/Applications"
 rm -f "$image"
-hdiutil create -quiet -volname Ginka -srcfolder "$stage" -ov -format UDZO "$image"
+hdiutil create -quiet -volname Ginka -srcfolder "$stage" -ov -format UDZO "$work/Ginka.dmg"
+cp "$work/Ginka.dmg" "$image"
 if [ "$identity" != "-" ]; then
     codesign --force --timestamp --sign "$identity" "$image"
 fi

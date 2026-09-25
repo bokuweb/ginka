@@ -15,7 +15,11 @@ for binary in ginka ginka-cli ginka-daemon; do
 done
 
 image=$(sh "$root/scripts/package-macos" --bin-dir "$work/built" --out-dir "$work/out" --version 9.9.9)
-app="$work/out/macos/Ginka.app"
+# The .app as it is inside the image.
+mount=$(mktemp -d)
+hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount" "$image"
+trap 'hdiutil detach -quiet "$mount" 2>/dev/null; rm -rf "$work" "$mount"' EXIT
+app="$mount/Ginka.app"
 fail() { echo "FAIL: $1" >&2; exit 1; }
 
 [ "$("$app/Contents/MacOS/ginka-app")" = "ginka" ] || fail "the bundle's executable is the window"
@@ -30,5 +34,7 @@ case "$image" in
 */Ginka-9.9.9.dmg) ;;
 *) fail "unexpected image name: $image" ;;
 esac
-hdiutil imageinfo "$image" >/dev/null || fail "the image is readable"
+[ -L "$mount/Applications" ] || fail "the image offers an Applications link"
+app_only=$(sh "$root/scripts/package-macos" --bin-dir "$work/built" --out-dir "$work/app-only" --version 9.9.9 --no-dmg)
+[ -x "$app_only/Contents/MacOS/ginka-app" ] || fail "--no-dmg leaves the .app"
 echo "ok"
