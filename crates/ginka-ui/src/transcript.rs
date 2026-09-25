@@ -250,6 +250,9 @@ pub struct Transcript {
     /// Drawable block for each stored sequence position. Hidden bookkeeping
     /// entries are `None`; positions are one-based while this vector is zero-based.
     positions: Vec<Option<usize>>,
+    /// Positions before the first one folded here: nonzero for a transcript
+    /// that starts partway through its session.
+    skipped: u64,
     cursor: u64,
     usage: Usage,
     context_usage: Option<ContextUsage>,
@@ -303,6 +306,27 @@ impl Transcript {
         Self::default()
     }
 
+    /// An empty transcript that folds from position `first` onward: a long
+    /// session's latest page, with the earlier ones read on request.
+    pub fn starting_at(first: u64) -> Self {
+        let skipped = first.saturating_sub(1);
+        Self {
+            cursor: skipped,
+            skipped,
+            ..Self::default()
+        }
+    }
+
+    /// The first position this transcript folds from.
+    pub fn first_seq(&self) -> u64 {
+        self.skipped + 1
+    }
+
+    /// Whether the session has entries before the ones folded here.
+    pub fn has_earlier(&self) -> bool {
+        self.skipped > 0
+    }
+
     /// The highest position folded in. This is the cursor to page from.
     pub fn cursor(&self) -> u64 {
         self.cursor
@@ -317,7 +341,7 @@ impl Transcript {
     pub fn block_index_for_seq(&self, seq: u64) -> Option<usize> {
         usize::try_from(seq)
             .ok()
-            .and_then(|seq| seq.checked_sub(1))
+            .and_then(|seq| seq.checked_sub(1 + self.skipped as usize))
             .and_then(|index| self.positions.get(index))
             .copied()
             .flatten()
@@ -330,7 +354,7 @@ impl Transcript {
         self.positions
             .iter()
             .position(|block| *block == Some(index))
-            .map(|position| position as u64 + 1)
+            .map(|position| position as u64 + 1 + self.skipped)
     }
 
     /// Top-level prompts in reading order, paired with their drawable block.
@@ -1112,6 +1136,37 @@ pub fn head_of(text: &str, limit: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transcript_can_start_partway_and_still_find_its_positions() {
+        // A long session opens on its latest page; the earlier ones are
+        // read when the reader asks for them.
+        let mut transcript = Transcript::starting_at(5);
+        assert!(transcript.has_earlier());
+        assert_eq!(transcript.first_seq(), 5);
+        assert!(matches!(
+            transcript.apply(&user(4, "before")),
+            Applied::AlreadySeen
+        ));
+        assert!(matches!(
+            transcript.apply(&user(6, "skipped")),
+            Applied::Gap { expected: 5 }
+        ));
+        transcript.extend(&[user(5, "five"), text(6, "answer"), user(7, "seven")]);
+        assert_eq!(transcript.cursor(), 7);
+        assert_eq!(transcript.block_index_for_seq(5), Some(0));
+        assert_eq!(transcript.block_index_for_seq(7), Some(2));
+        assert_eq!(transcript.block_index_for_seq(4), None, "not folded here");
+        assert_eq!(transcript.seq_for_block(2), Some(7));
+        assert_eq!(transcript.prompt_outline().count(), 2);
+
+        let whole = Transcript::new();
+        assert!(
+            !whole.has_earlier(),
+            "a transcript from the start has nothing before it"
+        );
+        assert_eq!(whole.first_seq(), 1);
+    }
 
     #[test]
     fn what_changed_is_reported_from_the_first_block_it_touched_and_then_forgotten() {

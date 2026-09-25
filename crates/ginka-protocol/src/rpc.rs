@@ -637,6 +637,15 @@ pub enum Request {
     /// A job's firings, most recent first.
     CronRuns { id: i64, limit: Option<u32> },
 
+    /// The last `limit` transcript entries before position `before` — or
+    /// before the end — oldest first. How a window opens a long session on
+    /// its latest page and reads the earlier ones on request.
+    SessionTranscriptTail {
+        session: SessionId,
+        before: Option<u64>,
+        limit: u32,
+    },
+
     /// The daemon's settings (`settings.json`) as JSON, with every
     /// environment value replaced by `[set]`: the names are the reader's to
     /// see, the values — keys and tokens — are not the wire's to carry.

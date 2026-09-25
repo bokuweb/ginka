@@ -142,6 +142,26 @@ impl DaemonLink {
     ///
     /// The centre column asks for what it has not folded in yet, so opening a
     /// long session reads it once and every later tick reads only the tail.
+    /// The last `limit` stored entries before `before` (or the end).
+    pub async fn transcript_tail(
+        &self,
+        session: &SessionId,
+        before: Option<u64>,
+        limit: u32,
+    ) -> Vec<TranscriptEntry> {
+        match self
+            .ask(Request::SessionTranscriptTail {
+                session: session.clone(),
+                before,
+                limit,
+            })
+            .await
+        {
+            Some(Response::Transcript { entries }) => entries,
+            _ => Vec::new(),
+        }
+    }
+
     pub async fn transcript(&self, session: &SessionId, after: u64) -> Vec<TranscriptEntry> {
         match self
             .ask(Request::SessionTranscript {

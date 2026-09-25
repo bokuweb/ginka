@@ -389,7 +389,7 @@ Goal: a real agent runs in a worktree and its transcript renders.
 - [x] Provider detection: the search path, the settings override that wins outright, and a version probe that never calls a working CLI missing
 - [x] Session persistence: tasks, chats, messages; resume from vendor session id
 - [x] Chat pane: streaming transcript, tool-call cards, reasoning blocks, virtualized list
-- [ ] Transcript pagination: a long session is still fetched and folded whole when it opens
+- [x] Transcript pagination: a conversation opens on its last 400 entries (`SessionTranscriptTail`) and *Show earlier messages* reads the page before, folding again from there (`Transcript::starting_at`)
 - [x] Composer: `@file` mentions, slash commands, drafts persisted per workspace, and a visible editable follow-up queue while the agent is busy
 - [x] Plan approval and ask-user-question interaction modes at the protocol, supervisor and transcript layers; a shipped interactive driver remains M5
 - [x] Agent status + "needs attention" derivation, surfaced back on the dashboard

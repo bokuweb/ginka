@@ -287,6 +287,11 @@ const TERMINAL_COLUMNS: u16 = 100;
 /// scroll does not show a block being measured.
 const TRANSCRIPT_OVERDRAW: f32 = 1200.;
 
+/// How many stored entries a conversation opens with, and how many more each
+/// *Show earlier* reads: enough for the last few turns of a long session,
+/// few enough that opening one does not wait on its whole history.
+const TRANSCRIPT_PAGE: u32 = 400;
+
 /// The turn-level handoff choice currently expanded in the transcript.
 /// The composer's fan-out panel: how many attempts each agent gets.
 struct FanOutPanel {
@@ -2473,7 +2478,8 @@ impl Shell {
         }
         let opening = self.transcript_of.as_ref() != Some(session);
         if opening {
-            self.transcript = Transcript::new();
+            // The latest page, when the session is longer than one.
+            self.transcript = Transcript::starting_at(entries.first().map_or(1, |entry| entry.seq));
             self.transcript_of = Some(session.clone());
             self.reveal.reset();
         }
@@ -2564,18 +2570,68 @@ impl Shell {
     fn show_transcript_block(&mut self, index: usize) {
         self.transcript_follows = false;
         self.transcript_list.scroll_to(ListOffset {
-            item_ix: index,
+            item_ix: index + self.earlier_item(),
             offset_in_item: px(0.),
         });
+    }
+
+    /// 1 while the list starts with *Show earlier* — the conversation opened
+    /// on its latest page — and 0 once it holds everything.
+    fn earlier_item(&self) -> usize {
+        usize::from(self.transcript.has_earlier())
+    }
+
+    /// Read the page before the one the transcript starts at, and fold the
+    /// conversation again from there, keeping the reader where they were.
+    fn show_earlier(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.transcript_of.clone() else {
+            return;
+        };
+        let first = self.transcript.first_seq();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let reading = link.clone();
+            let asked = session.clone();
+            let (start, entries) = cx
+                .background_spawn(async move {
+                    let page = reading
+                        .transcript_tail(&asked, Some(first), TRANSCRIPT_PAGE)
+                        .await;
+                    let start = page.first().map_or(first, |entry| entry.seq);
+                    let entries = reading.transcript(&asked, start.saturating_sub(1)).await;
+                    (start, entries)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.transcript_of.as_ref() != Some(&session) || start >= first {
+                    return;
+                }
+                let mut transcript = Transcript::starting_at(start);
+                if matches!(transcript.extend(&entries), Applied::Gap { .. }) {
+                    return;
+                }
+                let keep = transcript.block_index_for_seq(first);
+                this.transcript = transcript;
+                this.transcript_list.reset(0);
+                this.sync_transcript_list();
+                if let Some(keep) = keep {
+                    this.show_transcript_block(keep);
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// Tell the list what changed in the transcript since the last frame:
     /// the blocks from the first one touched are measured again, and none
     /// before it.
     fn sync_transcript_list(&mut self) {
-        let count = self.transcript.blocks().len() + 1;
+        let offset = self.earlier_item();
+        let count = self.transcript.blocks().len() + 1 + offset;
         let old = self.transcript_list.item_count();
-        let changed = self.transcript.take_changed();
+        let changed = self.transcript.take_changed().map(|block| block + offset);
         if old == 0 || old > count {
             // Another conversation, or this one read again from the start.
             self.transcript_list.reset(count);
@@ -6094,6 +6150,36 @@ impl Shell {
     fn transcript_item(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let blocks = self.transcript.blocks().len();
         let tokens = Tokens::global(cx).clone();
+        if self.transcript.has_earlier() {
+            if index == 0 {
+                return div()
+                    .w_full()
+                    .pt_6()
+                    .pb_3()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        Button::new("transcript-earlier")
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("transcript.earlier").to_string())
+                            .on_click(cx.listener(|this, _, _, cx| this.show_earlier(cx))),
+                    )
+                    .into_any_element();
+            }
+            return self.transcript_block_item(index - 1, blocks, &tokens, cx);
+        }
+        self.transcript_block_item(index, blocks, &tokens, cx)
+    }
+
+    /// A block of the transcript, or — past the last — the activity line.
+    fn transcript_block_item(
+        &mut self,
+        index: usize,
+        blocks: usize,
+        tokens: &Tokens,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let frame = div()
             .w_full()
             .px_8()
@@ -12149,7 +12235,14 @@ async fn pull_transcript(
     let reading = link.clone();
     let asked = session.clone();
     let entries = cx
-        .background_spawn(async move { reading.transcript(&asked, after).await })
+        .background_spawn(async move {
+            // Opening: the latest page, not the whole history.
+            if after == 0 {
+                reading.transcript_tail(&asked, None, TRANSCRIPT_PAGE).await
+            } else {
+                reading.transcript(&asked, after).await
+            }
+        })
         .await;
     this.update(cx, |this, cx| this.fold(&session, &entries, cx))
         .map_err(|_| ())

@@ -489,6 +489,21 @@ impl Fixture {
             other => panic!("expected a transcript, got {other:?}"),
         }
     }
+
+    /// The stored transcript, positions and all.
+    fn transcript_entries(
+        &mut self,
+        id: &SessionId,
+    ) -> Vec<ginka_protocol::model::TranscriptEntry> {
+        match self.ask(Request::SessionTranscript {
+            session: id.clone(),
+            after: None,
+            limit: None,
+        }) {
+            Response::Transcript { entries } => entries,
+            other => panic!("expected a transcript, got {other:?}"),
+        }
+    }
 }
 
 /// The text an agent produced, concatenated.
@@ -3138,4 +3153,51 @@ fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
         entry,
         TranscriptPayload::User { text } if text == "review yesterday's changes"
     )));
+}
+
+#[test]
+fn a_long_transcript_is_read_from_its_end_a_page_at_a_time() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(&default_script_for_pages(), "first");
+    fixture.settle(&session);
+    let all = fixture.transcript_entries(&session);
+    assert!(all.len() >= 4, "{all:?}");
+    let last = all.last().unwrap().seq;
+
+    let page = |fixture: &mut Fixture, before: Option<u64>, limit: u32| -> Vec<u64> {
+        match fixture.ask(Request::SessionTranscriptTail {
+            session: session.clone(),
+            before,
+            limit,
+        }) {
+            Response::Transcript { entries } => entries.iter().map(|entry| entry.seq).collect(),
+            other => panic!("expected a transcript, got {other:?}"),
+        }
+    };
+    assert_eq!(
+        page(&mut fixture, None, 2),
+        [last - 1, last],
+        "the end, oldest first"
+    );
+    assert_eq!(
+        page(&mut fixture, Some(last - 1), 2),
+        [last - 3, last - 2],
+        "the page before"
+    );
+    assert_eq!(
+        page(&mut fixture, Some(2), 10),
+        [1],
+        "the start, however much was asked"
+    );
+    assert!(page(&mut fixture, Some(1), 10).is_empty());
+}
+
+fn default_script_for_pages() -> String {
+    [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-pages"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"one"}]}}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"two"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-pages"}"#,
+    ]
+    .join("\n")
 }
