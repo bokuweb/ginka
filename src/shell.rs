@@ -788,9 +788,7 @@ impl Shell {
             &surfaces,
             window,
             |this, _, event, window, cx| match event {
-                crate::surfaces::SurfaceEvent::SurfaceShown(surface) => {
-                    this.persist_surface(*surface)
-                }
+                crate::surfaces::SurfaceEvent::Arranged => this.persist_surfaces(cx),
                 crate::surfaces::SurfaceEvent::BrowserVisited {
                     workspace,
                     url,
@@ -1045,14 +1043,18 @@ impl Shell {
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
                         this.refresh_queue(cx);
-                        if this.surfaces.read(cx).open_surface()
-                            == Some(ginka_ui::surface::Surface::Skills)
+                        if this
+                            .surfaces
+                            .read(cx)
+                            .shows(ginka_ui::surface::Surface::Skills)
                         {
                             this.refresh_skills(cx);
                         }
                         if changed_workspace
-                            && this.surfaces.read(cx).open_surface()
-                                == Some(ginka_ui::surface::Surface::Files)
+                            && this
+                                .surfaces
+                                .read(cx)
+                                .shows(ginka_ui::surface::Surface::Files)
                         {
                             this.find_files(String::new(), cx);
                         }
@@ -1939,7 +1941,11 @@ impl Shell {
         self.composer
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.composer.focus_handle(cx).focus(window, cx);
-        if self.surfaces.read(cx).open_surface() == Some(ginka_ui::surface::Surface::Skills) {
+        if self
+            .surfaces
+            .read(cx)
+            .shows(ginka_ui::surface::Surface::Skills)
+        {
             self.refresh_skills(cx);
         }
         cx.notify();
@@ -5284,12 +5290,12 @@ impl Shell {
         };
         self.layout
             .write_workspace_into(&workspace, &mut self.settings);
+        let surfaces = self.surfaces.read(cx);
         if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
-            saved.active_surface = self
-                .surfaces
-                .read(cx)
+            saved.active_surface = surfaces
                 .open_surface()
                 .map(|surface| surface.key().to_string());
+            saved.surface_dock = surfaces.arrangement();
         }
         self.write_terminal_arrangement(&workspace);
     }
@@ -5307,24 +5313,31 @@ impl Shell {
     /// Restore the panels and selected surface belonging to the new workspace.
     fn restore_workspace_view(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
         self.layout = Layout::for_workspace(&self.settings, Some(workspace));
-        let surface = self
-            .settings
-            .workspace_layouts
-            .get(&workspace.0)
+        let saved = self.settings.workspace_layouts.get(&workspace.0);
+        let selected = saved
             .and_then(|saved| saved.active_surface.as_deref())
             .and_then(ginka_ui::surface::Surface::from_key);
+        let dock = ginka_ui::dock::SurfaceDock::restore(
+            saved.and_then(|saved| saved.surface_dock.as_ref()),
+            selected,
+        );
         self.surfaces
-            .update(cx, |surfaces, cx| surfaces.restore_surface(surface, cx));
+            .update(cx, |surfaces, cx| surfaces.restore_dock(dock, cx));
     }
 
-    fn persist_surface(&mut self, surface: Option<ginka_ui::surface::Surface>) {
+    /// Remember which surfaces are open and how they are arranged.
+    fn persist_surfaces(&mut self, cx: &App) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
         self.layout
             .write_workspace_into(&workspace, &mut self.settings);
+        let surfaces = self.surfaces.read(cx);
         if let Some(saved) = self.settings.workspace_layouts.get_mut(&workspace.0) {
-            saved.active_surface = surface.map(|surface| surface.key().to_string());
+            saved.active_surface = surfaces
+                .open_surface()
+                .map(|surface| surface.key().to_string());
+            saved.surface_dock = surfaces.arrangement();
         }
         self.save_settings();
     }
@@ -12063,16 +12076,16 @@ async fn pull_rows(
     // worktree: off the main thread, or the window stalls on every refresh.
     let (showing, wants_changes, wants_usage, wants_history) = this
         .update(cx, |this, cx| {
-            let open = this.surfaces.read(cx).open_surface();
+            let surfaces = this.surfaces.read(cx);
+            let git = surfaces.shows(ginka_ui::surface::Surface::Git);
             (
                 this.session.as_ref().map(|row| row.workspace.clone()),
-                // Only while the surface that shows them is open: reading a
-                // diff runs git over the whole worktree, and a panel nobody
-                // opened is not worth that on every tick.
-                open == Some(ginka_ui::surface::Surface::Git),
-                open == Some(ginka_ui::surface::Surface::Reports),
-                open == Some(ginka_ui::surface::Surface::Git)
-                    && this.surfaces.read(cx).history_is_open(),
+                // Only while the surface that shows them is on screen: reading
+                // a diff runs git over the whole worktree, and a panel nobody
+                // is looking at is not worth that on every tick.
+                git,
+                surfaces.shows(ginka_ui::surface::Surface::Reports),
+                git && surfaces.history_is_open(),
             )
         })
         .map_err(|_| ())?;
@@ -12206,8 +12219,21 @@ async fn pull_rows(
         this.refresh_cron_jobs(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
             Some(row) => {
+                // The row a window opens on arrives here rather than through a
+                // selection, so its own arrangement is put back here; without
+                // it, the first switch away would save the bare defaults over
+                // it.
+                let arrived =
+                    this.session.as_ref().map(|shown| &shown.workspace) != Some(&row.workspace);
+                if arrived {
+                    this.remember_workspace_view(cx);
+                }
                 this.target_project = Some(ProjectName(row.origin.to_string()));
+                let workspace = row.workspace.clone();
                 this.session = Some(row);
+                if arrived {
+                    this.restore_workspace_view(&workspace, cx);
+                }
             }
             // Nothing selected is the home screen, which is where a window
             // opens and where "new chat" leaves it.

@@ -15,6 +15,7 @@ pub mod assets;
 pub mod branches;
 pub mod browser;
 pub mod composer;
+pub mod dock;
 pub mod editor;
 pub mod fan_out;
 pub mod field;

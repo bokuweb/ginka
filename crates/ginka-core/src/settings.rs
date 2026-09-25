@@ -88,6 +88,37 @@ pub struct WorkspaceLayoutSettings {
     pub terminal_split: Option<[String; 2]>,
     /// Daemon terminal id that receives keyboard input after restoration.
     pub terminal_active: Option<String>,
+    /// How the surfaces are arranged in the right panel: which are open, in
+    /// which tab group, and how the groups split the panel.
+    pub surface_dock: Option<SurfaceArrangement>,
+}
+
+/// A saved arrangement of the right panel's surfaces.
+///
+/// Surfaces are stored by their stable key rather than as a UI type, so this
+/// crate stays free of the window's vocabulary; the UI drops a key it does
+/// not know when it restores the arrangement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SurfaceArrangement {
+    /// Groups side by side, or one above another.
+    Split {
+        /// Whether the children are stacked top to bottom.
+        vertical: bool,
+        /// The groups or further splits, in order.
+        children: Vec<SurfaceArrangement>,
+        /// Each child's size in logical pixels, where one was dragged to.
+        #[serde(default)]
+        sizes: Vec<Option<f32>>,
+    },
+    /// Surfaces sharing one area as tabs.
+    Tabs {
+        /// The surfaces' keys, in tab order.
+        surfaces: Vec<String>,
+        /// The index of the tab in front.
+        #[serde(default)]
+        active: usize,
+    },
 }
 
 impl Default for WorkspaceLayoutSettings {
@@ -100,6 +131,7 @@ impl Default for WorkspaceLayoutSettings {
             active_surface: None,
             terminal_split: None,
             terminal_active: None,
+            surface_dock: None,
         }
     }
 }
@@ -436,6 +468,20 @@ mod tests {
                 active_surface: Some("files".into()),
                 terminal_split: None,
                 terminal_active: None,
+                surface_dock: Some(SurfaceArrangement::Split {
+                    vertical: true,
+                    children: vec![
+                        SurfaceArrangement::Tabs {
+                            surfaces: vec!["git".into(), "files".into()],
+                            active: 1,
+                        },
+                        SurfaceArrangement::Tabs {
+                            surfaces: vec!["browser".into()],
+                            active: 0,
+                        },
+                    ],
+                    sizes: vec![Some(320.0), None],
+                }),
             },
         );
         settings.workspace_layouts.insert(
@@ -448,6 +494,7 @@ mod tests {
                 active_surface: Some("git".into()),
                 terminal_split: None,
                 terminal_active: None,
+                surface_dock: None,
             },
         );
 

@@ -3,7 +3,7 @@
 use crate::assets::icon;
 use gpui_component::{Icon, IconName};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Surface {
     Terminal,
     Git,
@@ -57,6 +57,26 @@ impl Surface {
             .iter()
             .copied()
             .find(|surface| surface.key() == key)
+    }
+
+    /// The name the dock area saves this surface's panel under.
+    pub fn panel_name(self) -> &'static str {
+        match self {
+            Self::Terminal => "GinkaSurface.terminal",
+            Self::Git => "GinkaSurface.git",
+            Self::Files => "GinkaSurface.files",
+            Self::Browser => "GinkaSurface.browser",
+            Self::Reports => "GinkaSurface.reports",
+            Self::Skills => "GinkaSurface.skills",
+        }
+    }
+
+    /// The surface a dock panel name stands for.
+    pub fn from_panel_name(name: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|surface| surface.panel_name() == name)
     }
 
     /// The surface after `current`, wrapping to the first surface.

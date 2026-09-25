@@ -1,9 +1,9 @@
 //! The right panel: `docs/ui.md` §3.4.
 //!
-//! A surface is whatever the user wants beside the transcript — a terminal, git,
-//! files, an editor, later a browser. Git is real: it draws what the agent
-//! changed. The rest are placeholders until M3 and M4. M4 turns this into a
-//! `DockArea` so surfaces can be dragged, split and persisted per workspace.
+//! A surface is whatever the user wants beside the transcript — git, files,
+//! the browser, reports, skills. Each open surface is a tab of a `DockArea`,
+//! so tabs can be dragged into another order, into a group of their own, or
+//! beside one another; the arrangement is kept per workspace.
 
 use ginka_protocol::model::{
     ChangeKind, Changes, ContentMatch, FileContent, FileEntry, GitCommit, LineKind, Skill,
@@ -11,6 +11,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
+use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
     language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
@@ -23,14 +24,22 @@ use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::dock::{
+    BasePanel, DockArea, DockEvent, DockLayout, DockSkin, Panel, PanelControl, PanelEvent,
+    panel_handle,
+};
 use gpui_component::input::{
     Editor, EditorState, InputEvent, InputState, Replace, Search, TabSize, Textarea, TextareaState,
 };
 use gpui_component::text::TextView;
 use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Duration;
+
+/// How long the arrangement has to stay still before it is saved: the dock
+/// reports every step of a drag.
+const ARRANGEMENT_SETTLES: Duration = Duration::from_millis(400);
 
 struct FileBuffer {
     workspace: WorkspaceId,
@@ -47,7 +56,22 @@ enum FileOpenMode {
 }
 
 pub struct SurfacePanel {
+    /// The surface most recently brought forward, which the palette's
+    /// next/previous steps from.
     open: Option<Surface>,
+    /// How the open surfaces are arranged, at rest.
+    dock: SurfaceDock,
+    /// The dock area the arrangement is drawn and dragged in.
+    dock_area: Entity<DockArea>,
+    /// One panel per surface, kept so a rebuilt dock reuses them.
+    dock_tabs: HashMap<Surface, Entity<SurfaceTab>>,
+    /// The dock area is to be rebuilt from `dock` on the next render, which
+    /// is the first place a window is to hand.
+    dock_stale: bool,
+    /// The chooser is up in place of the dock.
+    choosing: bool,
+    /// Counts arrangement changes, so only the last of a burst is saved.
+    arrangement_changes: u64,
     /// Native browser view on platforms supported by the toolkit.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     browser_tabs: HashMap<WorkspaceId, Result<Entity<crate::browser::BrowserPane>, SharedString>>,
@@ -171,8 +195,9 @@ pub enum CommitThen {
 }
 
 pub enum SurfaceEvent {
-    /// The visible right-panel surface changed and should be remembered.
-    SurfaceShown(Option<Surface>),
+    /// The surfaces open in the right panel, or their arrangement, changed
+    /// and should be remembered.
+    Arranged,
     /// A page loaded in a workspace's browser: keep it in its history.
     /// Only a platform with the browser surface sends this or the next.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -302,7 +327,20 @@ impl SurfacePanel {
             TextareaState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.browser.feedback").to_string())
         });
+        let (dock_area, _) = DockSkin::dock_area("surfaces", Some(1), window, cx);
+        cx.subscribe(&dock_area, |this, area, event: &DockEvent, cx| {
+            if matches!(event, DockEvent::LayoutChanged) {
+                this.read_dock(&area, cx);
+            }
+        })
+        .detach();
         Self {
+            dock: SurfaceDock::empty(),
+            dock_area,
+            dock_tabs: HashMap::new(),
+            dock_stale: false,
+            choosing: false,
+            arrangement_changes: 0,
             finder,
             files: Vec::new(),
             tree_files: Vec::new(),
@@ -947,11 +985,28 @@ impl SurfacePanel {
         cx.notify();
     }
 
-    /// Show a surface, which is what the palette does when it is asked for
-    /// one.
+    /// Bring a surface forward, opening a tab for it when it has none: what
+    /// the chooser and the palette do when they are asked for one.
     pub fn show(&mut self, surface: Surface, cx: &mut Context<Self>) {
-        let changed = self.open != Some(surface);
+        let before = self.dock.visible();
+        let rearranged = self.dock.open(surface);
+        let changed = rearranged || self.open != Some(surface) || self.choosing;
         self.open = Some(surface);
+        self.choosing = false;
+        if rearranged {
+            self.dock_stale = true;
+        }
+        if !before.contains(&surface) {
+            self.arrived(surface, cx);
+        }
+        if changed {
+            cx.emit(SurfaceEvent::Arranged);
+        }
+        cx.notify();
+    }
+
+    /// What a surface needs the first time it comes on screen.
+    fn arrived(&mut self, surface: Surface, cx: &mut Context<Self>) {
         // A finder that opens empty is one the user has to type into before it
         // says anything; the start of the list is what a picker shows before
         // anything is typed.
@@ -963,25 +1018,146 @@ impl SurfacePanel {
             self.skill_error = None;
             cx.emit(SurfaceEvent::RefreshSkills);
         }
-        if changed {
-            cx.emit(SurfaceEvent::SurfaceShown(Some(surface)));
-        }
+    }
+
+    /// Put the chooser up in place of the dock, or take it down again.
+    fn toggle_chooser(&mut self, cx: &mut Context<Self>) {
+        self.choosing = !self.choosing;
         cx.notify();
     }
 
-    /// Return to the chooser so another surface can be opened with a pointer.
-    fn show_chooser(&mut self, cx: &mut Context<Self>) {
-        if self.open.take().is_some() {
-            cx.emit(SurfaceEvent::SurfaceShown(None));
-            cx.notify();
+    /// Restore one workspace's arrangement without treating it as a change.
+    pub fn restore_dock(&mut self, dock: SurfaceDock, cx: &mut Context<Self>) {
+        if self.dock != dock {
+            self.dock = dock;
+            self.dock_stale = true;
+        }
+        let visible = self.dock.visible();
+        if !self.open.is_some_and(|open| visible.contains(&open)) {
+            self.open = visible.first().copied();
+        }
+        self.choosing = false;
+        cx.notify();
+    }
+
+    /// The arrangement as it is saved for the workspace on screen.
+    pub fn arrangement(&self) -> Option<ginka_core::settings::SurfaceArrangement> {
+        self.dock.save()
+    }
+
+    /// Whether a surface is on screen: the front tab of one of the groups.
+    pub fn shows(&self, surface: Surface) -> bool {
+        self.dock.visible().contains(&surface)
+    }
+
+    /// Whether the native browser view may be drawn: it sits above every GPUI
+    /// element, so it must be hidden whenever anything covers its place.
+    fn browser_on_screen(&self) -> bool {
+        self.shows(Surface::Browser) && !self.browser_suspended && !self.choosing
+    }
+
+    /// Adopt what the dock area holds after the user dragged, closed or
+    /// switched a tab.
+    fn read_dock(&mut self, area: &Entity<DockArea>, cx: &mut Context<Self>) {
+        // A rebuild is on its way; what the area holds now is about to go.
+        if self.dock_stale {
+            return;
+        }
+        let dock = SurfaceDock::from_panel_state(&area.read(cx).dump(cx).center);
+        if dock == self.dock {
+            return;
+        }
+        let before = self.dock.visible();
+        self.dock = dock;
+        let visible = self.dock.visible();
+        for surface in &visible {
+            if !before.contains(surface) {
+                self.open = Some(*surface);
+                self.arrived(*surface, cx);
+            }
+        }
+        if !self.open.is_some_and(|open| visible.contains(&open)) {
+            self.open = visible.first().copied();
+        }
+        self.arrangement_changes += 1;
+        let change = self.arrangement_changes;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ARRANGEMENT_SETTLES).await;
+            this.update(cx, |this, cx| {
+                if this.arrangement_changes == change {
+                    cx.emit(SurfaceEvent::Arranged);
+                }
+            })
+            .ok();
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Rebuild the dock area from the arrangement at rest.
+    fn rebuild_dock(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(root) = self.dock.root().cloned() else {
+            return;
+        };
+        let panel = cx.entity();
+        let mut surfaces = Vec::new();
+        collect_surfaces(&root, &mut surfaces);
+        for surface in surfaces {
+            self.dock_tabs
+                .entry(surface)
+                .or_insert_with(|| cx.new(|cx| SurfaceTab::new(surface, &panel, cx)));
+        }
+        let layout = self.dock_layout(&root, cx);
+        // The centre is always a split; a lone group sits inside one.
+        let layout = match root {
+            DockNode::Tabs { .. } => DockLayout::h_split().child(layout, None),
+            DockNode::Split { .. } => layout,
+        };
+        self.dock_area
+            .update(cx, |area, cx| area.set_center(layout, window, cx));
+    }
+
+    fn dock_layout(&self, node: &DockNode, cx: &App) -> DockLayout {
+        match node {
+            DockNode::Split {
+                vertical,
+                children,
+                sizes,
+            } => {
+                let split = if *vertical {
+                    DockLayout::v_split()
+                } else {
+                    DockLayout::h_split()
+                };
+                children
+                    .iter()
+                    .enumerate()
+                    .fold(split, |split, (index, child)| {
+                        split.child(
+                            self.dock_layout(child, cx),
+                            sizes.get(index).copied().flatten().map(px),
+                        )
+                    })
+            }
+            DockNode::Tabs { surfaces, active } => surfaces
+                .iter()
+                .filter_map(|surface| self.dock_tabs.get(surface))
+                .fold(DockLayout::tabs(), |tabs, tab| {
+                    tabs.panel_view(panel_handle(tab.clone()), cx)
+                })
+                .active_index(*active),
         }
     }
 
-    /// Restore one workspace's selected surface without treating it as a click.
-    pub fn restore_surface(&mut self, surface: Option<Surface>, cx: &mut Context<Self>) {
-        if self.open != surface {
-            self.open = surface;
-            cx.notify();
+    /// One surface's content, drawn into its tab.
+    fn surface_body(&mut self, surface: Surface, cx: &mut Context<Self>) -> AnyElement {
+        match surface {
+            Surface::Git => self.git(cx).into_any_element(),
+            Surface::Files => self.files(cx).into_any_element(),
+            Surface::Browser => self.browser(cx),
+            Surface::Reports => self.reports(cx).into_any_element(),
+            Surface::Skills => self.skills(cx).into_any_element(),
+            Surface::Terminal => self.placeholder(surface, cx).into_any_element(),
         }
     }
 
@@ -1045,7 +1221,7 @@ impl SurfacePanel {
                 .get(&workspace)
                 .and_then(|browser| browser.as_ref().ok())
             {
-                let visible = self.open == Some(Surface::Browser) && !self.browser_suspended;
+                let visible = self.browser_on_screen();
                 browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
             }
         }
@@ -1131,7 +1307,7 @@ impl SurfacePanel {
                     .ghost()
                     .compact()
                     .tooltip(rust_i18n::t!("surface.choose").to_string())
-                    .on_click(cx.listener(|this, _, _, cx| this.show_chooser(cx))),
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx))),
             )
             .child(
                 h_flex()
@@ -3904,9 +4080,12 @@ impl Render for SurfacePanel {
         {
             state.update(cx, |state, cx| state.set_value(text, window, cx));
         }
+        if self.dock_stale {
+            self.dock_stale = false;
+            self.rebuild_dock(window, cx);
+        }
         let tokens = Tokens::global(cx);
         let border = tokens.colors().border_subtle;
-        let open = self.open;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         if let Some(browser) = self
             .browser_workspace
@@ -3914,12 +4093,8 @@ impl Render for SurfacePanel {
             .and_then(|workspace| self.browser_tabs.get(workspace))
             .and_then(|browser| browser.as_ref().ok())
         {
-            browser.update(cx, |browser, cx| {
-                browser.set_visible(
-                    open == Some(Surface::Browser) && !self.browser_suspended,
-                    cx,
-                )
-            });
+            let visible = self.browser_on_screen();
+            browser.update(cx, |browser, cx| browser.set_visible(visible, cx));
         }
 
         v_flex()
@@ -3927,15 +4102,99 @@ impl Render for SurfacePanel {
             .border_l_1()
             .border_color(border)
             .child(self.toolbar(cx))
-            .child(match open {
-                None => self.empty_state(cx).into_any_element(),
-                Some(Surface::Git) => self.git(cx).into_any_element(),
-                Some(Surface::Files) => self.files(cx).into_any_element(),
-                Some(Surface::Browser) => self.browser(cx),
-                Some(Surface::Reports) => self.reports(cx).into_any_element(),
-                Some(Surface::Skills) => self.skills(cx).into_any_element(),
-                Some(surface) => self.placeholder(surface, cx).into_any_element(),
+            .child(if self.choosing || self.dock.is_empty() {
+                self.empty_state(cx).into_any_element()
+            } else {
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .w_full()
+                    .child(self.dock_area.clone())
+                    .into_any_element()
             })
+    }
+}
+
+/// Every surface under a node, in reading order.
+fn collect_surfaces(node: &DockNode, into: &mut Vec<Surface>) {
+    match node {
+        DockNode::Split { children, .. } => {
+            for child in children {
+                collect_surfaces(child, into);
+            }
+        }
+        DockNode::Tabs { surfaces, .. } => into.extend(surfaces.iter().copied()),
+    }
+}
+
+/// One surface as a tab of the right panel's dock area.
+///
+/// It owns nothing of the surface: the panel keeps every surface's state, so
+/// a tab dragged elsewhere, or closed and opened again, shows the same diff,
+/// search and page it did before.
+pub struct SurfaceTab {
+    surface: Surface,
+    panel: WeakEntity<SurfacePanel>,
+    focus: FocusHandle,
+}
+
+impl SurfaceTab {
+    fn new(surface: Surface, panel: &Entity<SurfacePanel>, cx: &mut Context<Self>) -> Self {
+        // The panel's state is what the tab draws, so a change to it is a
+        // change to the tab.
+        cx.observe(panel, |_, _, cx| cx.notify()).detach();
+        Self {
+            surface,
+            panel: panel.downgrade(),
+            focus: cx.focus_handle(),
+        }
+    }
+}
+
+impl EventEmitter<PanelEvent> for SurfaceTab {}
+
+impl Focusable for SurfaceTab {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl BasePanel for SurfaceTab {
+    fn panel_name(&self) -> &'static str {
+        self.surface.panel_name()
+    }
+}
+
+impl Panel for SurfaceTab {
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some(self.surface.label().into())
+    }
+
+    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .gap_1p5()
+            .items_center()
+            .child(self.surface.icon().size_4())
+            .child(self.surface.label())
+    }
+
+    fn zoom_control(&self, _: &App) -> Option<PanelControl> {
+        None
+    }
+
+    fn inner_padding(&self, _: &App) -> bool {
+        false
+    }
+}
+
+impl Render for SurfaceTab {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let surface = self.surface;
+        let body = self
+            .panel
+            .update(cx, |panel, cx| panel.surface_body(surface, cx))
+            .unwrap_or_else(|_| div().into_any_element());
+        v_flex().size_full().track_focus(&self.focus).child(body)
     }
 }
 
