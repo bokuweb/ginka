@@ -775,3 +775,26 @@ fn a_terminal_is_opened_written_to_read_and_closed_from_the_cli() {
     home.ok(&["terminal", "close", &id]);
     assert!(!home.ok(&["terminal", "list", "comet/main"]).contains(&id));
 }
+
+#[test]
+fn a_setting_is_read_and_changed_from_the_cli() {
+    let home = Home::new();
+    assert!(
+        home.ok(&["settings", "show"])
+            .contains("\"keep_awake\": true")
+    );
+    home.ok(&["settings", "set", "keep_awake", "false"]);
+    home.ok(&["settings", "set", "retention_days", "7"]);
+    let shown = home.ok(&["settings", "show"]);
+    assert!(shown.contains("\"keep_awake\": false"), "{shown}");
+    assert!(shown.contains("\"retention_days\": 7"), "{shown}");
+    assert!(
+        !home
+            .run(&["settings", "set", "no_such_setting", "1"])
+            .status
+            .success()
+    );
+    // Written where the daemon keeps it, and taken without a restart.
+    let file = std::fs::read_to_string(home.root().join("settings.json")).unwrap();
+    assert!(file.contains("\"retention_days\": 7"), "{file}");
+}

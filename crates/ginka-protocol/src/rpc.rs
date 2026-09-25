@@ -637,6 +637,14 @@ pub enum Request {
     /// A job's firings, most recent first.
     CronRuns { id: i64, limit: Option<u32> },
 
+    /// The daemon's settings (`settings.json`) as JSON, with every
+    /// environment value replaced by `[set]`: the names are the reader's to
+    /// see, the values — keys and tokens — are not the wire's to carry.
+    DaemonSettings,
+    /// Change one top-level setting to a JSON value, checked against the
+    /// settings' shape before it is written and taken at once.
+    UpdateDaemonSettings { key: String, value: String },
+
     /// A page the browser surface finished loading in a workspace, for the
     /// address bar to complete from. Credentials, fragments and
     /// secret-looking query parameters are dropped before it is kept.
@@ -861,6 +869,10 @@ pub enum Response {
     },
     Note {
         note: Note,
+    },
+    /// The daemon's settings, secrets left out.
+    DaemonSettings {
+        json: String,
     },
     /// Pages the address bar can offer.
     BrowserSuggestions {

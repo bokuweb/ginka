@@ -263,6 +263,9 @@ enum Command {
     /// Saved shell commands and prompts, run in a workspace.
     #[command(subcommand)]
     Quick(QuickCommand),
+    /// The daemon's settings: show them, or change one.
+    #[command(subcommand)]
+    Settings(SettingsCommand),
     /// The daemon's terminals in a workspace: open one, type into it, read
     /// what it printed, close it.
     #[command(subcommand)]
@@ -479,6 +482,15 @@ enum QuickCommand {
     Remove { id: String },
     /// Run a shell quick command in a new terminal in the workspace.
     Run { workspace: String, id: String },
+}
+
+#[derive(Subcommand)]
+enum SettingsCommand {
+    /// Print the daemon's settings as JSON, environment values hidden.
+    Show,
+    /// Change one top-level setting. The value is JSON — `false`, `7`,
+    /// `["codex"]` — and anything that is not is taken as a string.
+    Set { key: String, value: String },
 }
 
 #[derive(Subcommand)]
@@ -1311,6 +1323,15 @@ fn request_for(command: Command) -> Result<Request> {
             body: body_or_stdin(body)?,
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
+        Command::Settings(SettingsCommand::Show) => Request::DaemonSettings,
+        Command::Settings(SettingsCommand::Set { key, value }) => Request::UpdateDaemonSettings {
+            key,
+            value: if serde_json::from_str::<serde_json::Value>(&value).is_ok() {
+                value
+            } else {
+                serde_json::Value::String(value).to_string()
+            },
+        },
         Command::Terminal(TerminalCommand::List { workspace }) => Request::WorkspaceTerminals {
             workspace: WorkspaceId(workspace),
         },
@@ -1779,6 +1800,7 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QuickCommand { command } => println!("{}", command.id),
+        Response::DaemonSettings { json } => println!("{json}"),
         Response::BrowserSuggestions { pages } => {
             for page in pages {
                 println!(

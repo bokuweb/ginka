@@ -537,3 +537,14 @@ fn a_browser_visit_names_its_workspace_url_and_title() {
         json!({"method": "record_browser_visit", "workspace": "comet/main", "url": "http://localhost:3000/", "title": null})
     );
 }
+
+#[test]
+fn a_setting_is_changed_by_its_key_and_a_json_value() {
+    assert_eq!(
+        wire(&Request::UpdateDaemonSettings {
+            key: "keep_awake".into(),
+            value: "false".into(),
+        }),
+        json!({"method": "update_daemon_settings", "key": "keep_awake", "value": "false"})
+    );
+}
