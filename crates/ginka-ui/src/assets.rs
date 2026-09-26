@@ -46,8 +46,8 @@ const ICONS: &[(&str, &str)] = &[
         include_str!("../../../assets/icons/logo-claude.svg"),
     ),
     (
-        "icons/logo-openai.svg",
-        include_str!("../../../assets/icons/logo-openai.svg"),
+        "icons/logo-codex.svg",
+        include_str!("../../../assets/icons/logo-codex.svg"),
     ),
     (
         "icons/logo-gemini.svg",
@@ -130,7 +130,7 @@ pub mod icon {
     /// vendors rather than scanning rows: the model picker's provider rail and
     /// its chip. Drawn here, single-colour, and tinted by the caller.
     pub const LOGO_CLAUDE: &str = "icons/logo-claude.svg";
-    pub const LOGO_OPENAI: &str = "icons/logo-openai.svg";
+    pub const LOGO_CODEX: &str = "icons/logo-codex.svg";
     pub const LOGO_GEMINI: &str = "icons/logo-gemini.svg";
     pub const LOGO_OPENCODE: &str = "icons/logo-opencode.svg";
     /// The four marks on the home screen's starters, one per kind of first
@@ -206,7 +206,7 @@ mod tests {
             icon::AGENT_SPARK,
             icon::AGENT_PROMPT,
             icon::LOGO_CLAUDE,
-            icon::LOGO_OPENAI,
+            icon::LOGO_CODEX,
             icon::LOGO_GEMINI,
             icon::LOGO_OPENCODE,
             icon::COMPASS,

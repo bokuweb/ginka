@@ -271,12 +271,11 @@ impl Agent {
 
     /// The vendor's own mark, for choosing between providers.
     ///
-    /// Codex carries OpenAI's mark because that is the vendor a reader picks
-    /// it for. The sidebar keeps [`Agent::glyph`]: a row is scanned, not chosen.
+    /// The sidebar keeps [`Agent::glyph`]: a row is scanned, not chosen.
     pub fn logo(self) -> Icon {
         Icon::empty().path(match self {
             Self::Claude => icon::LOGO_CLAUDE,
-            Self::Codex => icon::LOGO_OPENAI,
+            Self::Codex => icon::LOGO_CODEX,
             Self::Gemini => icon::LOGO_GEMINI,
             Self::OpenCode => icon::LOGO_OPENCODE,
         })
@@ -289,8 +288,9 @@ impl Agent {
     pub fn brand_color(self) -> Option<gpui::Hsla> {
         match self {
             Self::Claude => Some(gpui::rgb(0xd97757).into()),
+            Self::Codex => Some(gpui::rgb(0x6f7df7).into()),
             Self::Gemini => Some(gpui::rgb(0x4796e3).into()),
-            Self::Codex | Self::OpenCode => None,
+            Self::OpenCode => None,
         }
     }
 

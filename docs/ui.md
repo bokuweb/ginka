@@ -441,8 +441,8 @@ version with the state directory. Opened from the rail or `⌘,`.
 | Embedded browser (M5) | `gpui-cef` (Chromium off-screen on macOS, WebView2 on Windows), pinned by revision |
 
 The model picker is a searchable popover with a provider rail. The rail shows
-each vendor's own mark (Claude's, OpenAI's for Codex, Gemini's, OpenCode's) in
-its brand colour, and the model chip carries the same mark; the sidebar keeps
+each provider's own mark (Claude's starburst, Codex's prompt cloud, Gemini's
+sparkle, OpenCode's frame) in its colour, and the model chip carries the same mark; the sidebar keeps
 the neutral agent glyphs, because a row is scanned rather than chosen. It
 renders only installed CLI catalogues and their supported option metadata,
 never a view-owned model list. A CLI that reports itself signed out stays on
