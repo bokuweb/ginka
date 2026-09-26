@@ -99,6 +99,12 @@ pub struct Service {
     /// handed (`crate::tools`). Looked up once: it does not move while the
     /// daemon runs, and the log says once when it is missing.
     cli: Option<std::path::PathBuf>,
+    /// Where the agents' own CLIs keep their conversations, when a test
+    /// says; otherwise the system login's directories (`cli_sessions`).
+    cli_roots: Option<crate::cli_sessions::Roots>,
+    /// What was last read from the CLIs' files, so reopening the list does
+    /// not read them all again.
+    cli_index: crate::cli_sessions::Index,
 }
 
 /// How long a probe of the agent CLIs is trusted for.
@@ -152,6 +158,8 @@ impl Service {
             skills_home: None,
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
+            cli_roots: None,
+            cli_index: crate::cli_sessions::Index::default(),
         }
     }
 
@@ -192,6 +200,13 @@ impl Service {
         roots: Vec<(std::path::PathBuf, crate::usage::scan::Format)>,
     ) -> Self {
         self.vendor_logs = Some(roots);
+        self
+    }
+
+    /// Read the CLIs' conversations from these directories instead of the
+    /// system login's. How a test keeps the list out of the real home.
+    pub fn with_cli_roots(mut self, roots: crate::cli_sessions::Roots) -> Self {
+        self.cli_roots = Some(roots);
         self
     }
 
@@ -807,6 +822,27 @@ impl Service {
                 account,
             } => self.fork_session(&session, after, agent.as_deref(), model, account, false),
             Request::EditPrompt { session, seq, text } => self.edit_prompt(&session, seq, text),
+            Request::CliSessions { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                let known = session::vendor_ids(&self.conn()).map_err(failed)?;
+                let roots = self.cli_roots();
+                Ok(Response::CliSessions {
+                    sessions: crate::cli_sessions::list(
+                        &mut self.cli_index,
+                        &roots,
+                        &worktree.path,
+                        &known,
+                    )
+                    .into_iter()
+                    .map(|found| found.session)
+                    .collect(),
+                })
+            }
+            Request::AdoptCliSession {
+                workspace,
+                agent,
+                vendor_session_id,
+            } => self.adopt_cli_session(&workspace, &agent, &vendor_session_id),
             Request::SearchSessions {
                 workspace,
                 query,
@@ -2083,6 +2119,84 @@ impl Service {
             session: Box::new(fork.clone()),
         });
         Ok(Response::Session { session: fork })
+    }
+
+    /// Where the CLIs keep their conversations for this service.
+    fn cli_roots(&self) -> crate::cli_sessions::Roots {
+        self.cli_roots
+            .clone()
+            .unwrap_or_else(crate::cli_sessions::Roots::from_env)
+    }
+
+    /// Make a session of a conversation an agent's CLI started here.
+    fn adopt_cli_session(
+        &mut self,
+        workspace: &WorkspaceId,
+        agent: &str,
+        vendor_id: &str,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(workspace)?;
+        let driver = self.driver(agent)?;
+        if session::vendor_ids(&self.conn())
+            .map_err(failed)?
+            .contains(vendor_id)
+        {
+            return Err(RpcError::failed(format!(
+                "a session already holds {agent} conversation {vendor_id}"
+            )));
+        }
+        let roots = self.cli_roots();
+        let found = crate::cli_sessions::find(
+            &mut self.cli_index,
+            &roots,
+            &worktree.path,
+            agent,
+            vendor_id,
+        )
+        .ok_or_else(|| {
+            RpcError::not_found(format!(
+                "no {agent} conversation {vendor_id} was started in {}",
+                worktree.path.display()
+            ))
+        })?;
+        let imported = crate::cli_sessions::transcript(&found).map_err(failed)?;
+        let now = now();
+        let adopted = Session {
+            id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+            workspace: workspace.clone(),
+            agent: driver.id().to_string(),
+            // The CLI wrote it under the system login, and only that login
+            // can resume it.
+            account: ginka_protocol::AccountId(driver.id().to_string()),
+            model: None,
+            reasoning_effort: None,
+            service_tier: None,
+            access_mode: AccessMode::default(),
+            origin: None,
+            state: SessionState::Idle,
+            title: Some(found.session.title.clone()).filter(|title| !title.is_empty()),
+            summary: Some(format!("resumed from the {} CLI", driver.id())),
+            vendor_session_id: Some(found.session.vendor_session_id.clone()),
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let conn = self.conn();
+            session::insert(&conn, &adopted).map_err(failed)?;
+            for (at, payload) in &imported {
+                // An entry the vendor did not date is placed now.
+                let at = if *at > 0 { *at } else { now };
+                session::append(&conn, &adopted.id, payload, at).map_err(failed)?;
+            }
+            session::touch(&conn, &adopted.id, now).map_err(failed)?;
+        }
+        self.events.emit(DaemonEvent::SessionStarted {
+            session: Box::new(adopted.clone()),
+        });
+        if let Some((project, _)) = workspace.parts() {
+            self.events.emit(DaemonEvent::WorkspacesChanged { project });
+        }
+        Ok(Response::Session { session: adopted })
     }
 
     /// Edit a sent prompt and run the conversation again from it.

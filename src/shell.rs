@@ -539,6 +539,8 @@ pub struct Shell {
     pending_transcript_query: Option<(WorkspaceId, String)>,
     /// Searching conversations and files at once, while its dialog is open.
     everywhere: Option<Everywhere>,
+    /// Choosing a CLI conversation to bring in, while its dialog is open.
+    resume: Option<ResumeCli>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -1475,6 +1477,7 @@ impl Shell {
             pending_file_open: None,
             pending_transcript_query: None,
             everywhere: None,
+            resume: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -5875,6 +5878,7 @@ impl Shell {
             Command::RunQuick(command) => self.run_quick(command, window, cx),
             Command::ToggleAppearance => self.toggle_appearance(window, cx),
             Command::SearchEverywhere => self.on_search_everywhere(&SearchEverywhere, window, cx),
+            Command::ResumeFromCli => self.open_resume(window, cx),
             Command::NewTerminal => {
                 self.bring_terminals_on_screen(cx);
                 self.open_terminal(window, cx);
@@ -6726,6 +6730,18 @@ impl Shell {
                             )
                     })),
             )
+            // A conversation begun in a terminal is carried on here rather
+            // than started again: offered wherever there is a folder to look in.
+            .when(self.session.is_some(), |home| {
+                home.child(
+                    Button::new("home-resume-cli")
+                        .ghost()
+                        .small()
+                        .icon(IconName::SquareTerminal)
+                        .label(rust_i18n::t!("resume.home").to_string())
+                        .on_click(cx.listener(|this, _, window, cx| this.open_resume(window, cx))),
+                )
+            })
             .into_any_element()
     }
 
@@ -12786,6 +12802,10 @@ impl Render for Shell {
                     .map(|view| overlay_fade("everywhere", view)),
             )
             .children(
+                self.resume_view(cx)
+                    .map(|view| overlay_fade("resume", view)),
+            )
+            .children(
                 self.palette_view(cx)
                     .map(|view| overlay_fade("palette", view)),
             )
@@ -13481,6 +13501,327 @@ impl Shell {
                                 .overflow_y_scroll()
                                 .p_1()
                                 .children(rows)
+                                .children(status.map(|status| {
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(status)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// Bringing in a conversation an agent's CLI started, while its dialog is open.
+struct ResumeCli {
+    /// The workspace whose directory was looked in.
+    workspace: WorkspaceId,
+    /// What the workspace is called, for the dialog's line.
+    label: SharedString,
+    filter: Entity<InputState>,
+    /// `None` until the daemon has answered.
+    sessions: Option<Vec<ginka_protocol::model::CliSession>>,
+    /// Which row Return resumes.
+    chosen: usize,
+    /// A resume is under way; a second click would make two sessions.
+    busy: bool,
+    error: Option<String>,
+}
+
+impl Shell {
+    /// Open the dialog for the workspace on screen and ask what its CLIs kept.
+    fn open_resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.resume.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let Some(row) = self.session.as_ref() else {
+            return;
+        };
+        let workspace = row.workspace.clone();
+        let label = SharedString::from(format!("{} · {}", row.origin, row.branch));
+        let filter = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("resume.placeholder").to_string())
+        });
+        filter.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&filter, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change)
+                && let Some(resume) = this.resume.as_mut()
+            {
+                resume.chosen = 0;
+                cx.notify();
+            }
+        })
+        .detach();
+        self.resume = Some(ResumeCli {
+            workspace: workspace.clone(),
+            label,
+            filter,
+            sessions: None,
+            chosen: 0,
+            busy: false,
+            error: None,
+        });
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let asked = workspace.clone();
+            let listed = cx
+                .background_spawn(async move { link.cli_sessions(&asked).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(resume) = this.resume.as_mut()
+                    && resume.workspace == workspace
+                {
+                    match listed {
+                        Ok(sessions) => resume.sessions = Some(sessions),
+                        Err(error) => {
+                            resume.sessions = Some(Vec::new());
+                            resume.error = Some(error);
+                        }
+                    }
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The rows the filter leaves.
+    fn resume_rows(&self, cx: &App) -> Vec<ginka_protocol::model::CliSession> {
+        let Some(resume) = self.resume.as_ref() else {
+            return Vec::new();
+        };
+        let typed = resume.filter.read(cx).value().to_string();
+        ginka_ui::resume::filter(resume.sessions.as_deref().unwrap_or_default(), &typed)
+    }
+
+    fn resume_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let rows = self.resume_rows(cx);
+        let Some(resume) = self.resume.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.resume = None;
+                cx.notify();
+            }
+            "down" => {
+                resume.chosen = (resume.chosen + 1).min(rows.len().saturating_sub(1));
+                cx.notify();
+            }
+            "up" => {
+                resume.chosen = resume.chosen.saturating_sub(1);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(chosen) = rows.get(resume.chosen).cloned() {
+                    self.resume_cli_session(chosen, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Adopt the conversation and show it, as a fork is shown.
+    fn resume_cli_session(
+        &mut self,
+        chosen: ginka_protocol::model::CliSession,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(resume) = self.resume.as_mut() else {
+            return;
+        };
+        if resume.busy {
+            return;
+        }
+        resume.busy = true;
+        resume.error = None;
+        let workspace = resume.workspace.clone();
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requesting = link.clone();
+            let adopted = cx
+                .background_spawn(async move {
+                    requesting
+                        .adopt_cli_session(&workspace, chosen.agent, chosen.vendor_session_id)
+                        .await
+                })
+                .await;
+            match adopted {
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        if let Some(resume) = this.resume.as_mut() {
+                            resume.busy = false;
+                            resume.error =
+                                Some(rust_i18n::t!("resume.failed", error = error).to_string());
+                        }
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(adopted) => {
+                    this.update(cx, |this, cx| {
+                        this.resume = None;
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.transcript_search = None;
+                        this.session_state = Some(adopted.state);
+                        this.checkpoints.clear();
+                        this.rewinding = None;
+                        this.forking = None;
+                        this.chosen_agent = None;
+                        this.chosen_model = None;
+                        this.chosen_reasoning_effort = None;
+                        this.chosen_service_tier = None;
+                        this.chosen_account = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    if let Ok(Some(showing)) = pull_rows(&this, &link, cx).await
+                        && showing == adopted.id
+                    {
+                        let _ = pull_transcript(&this, &link, showing, cx).await;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// The dialog: which folder, a filter, and the conversations found.
+    fn resume_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let resume = self.resume.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let rows = self.resume_rows(cx);
+        let now = chrono::Utc::now().timestamp();
+        let chosen = resume.chosen.min(rows.len().saturating_sub(1));
+        let status = match (&resume.sessions, &resume.error) {
+            (_, Some(error)) => Some(error.clone()),
+            (None, None) => Some(rust_i18n::t!("resume.loading").to_string()),
+            (Some(_), None) if rows.is_empty() => Some(rust_i18n::t!("resume.empty").to_string()),
+            _ => None,
+        };
+        let busy = resume.busy;
+        let items: Vec<AnyElement> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, session)| {
+                let detail = ginka_ui::resume::detail(&session, now);
+                let title = session.title.clone();
+                let open = session.clone();
+                v_flex()
+                    .id(("resume-row", index))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .when(index == chosen, |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .when(!busy, |this| {
+                        this.cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_hover()))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.resume_cli_session(open.clone(), window, cx)
+                            }))
+                    })
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(title),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(detail),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .child(
+                    v_flex()
+                        .id("resume")
+                        .mt(px(110.))
+                        .w(px(560.))
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().popover())
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.resume_key(event, window, cx)
+                        }))
+                        .child(
+                            v_flex()
+                                .px_3()
+                                .pt_3()
+                                .pb_2()
+                                .gap_1()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(tokens.colors().text_primary)
+                                        .child(rust_i18n::t!("resume.title").to_string()),
+                                )
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(
+                                            rust_i18n::t!(
+                                                "resume.subtitle",
+                                                workspace = resume.label.clone()
+                                            )
+                                            .to_string(),
+                                        ),
+                                ),
+                        )
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .items_center()
+                                .border_y_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div().flex_1().child(ginka_ui::field::input(&resume.filter)),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .id("resume-results")
+                                .max_h(px(380.))
+                                .overflow_y_scroll()
+                                .p_1()
+                                .children(items)
                                 .children(status.map(|status| {
                                     div()
                                         .px_3()

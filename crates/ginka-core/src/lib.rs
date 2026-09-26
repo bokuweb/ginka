@@ -12,6 +12,7 @@ pub mod browser;
 pub mod browser_history;
 pub mod checkpoint;
 pub mod chrome_cookies;
+pub mod cli_sessions;
 pub mod commands;
 pub mod comments;
 pub mod commit;

@@ -657,6 +657,26 @@ pub struct SessionMatch {
     pub excerpt: String,
 }
 
+/// A conversation an agent's own CLI keeps, run outside Ginka in the same
+/// directory — what the Resume-from-CLI list offers to bring in.
+///
+/// Read from the vendor's store on the daemon host (`~/.claude/projects`,
+/// `~/.codex/sessions`); adopting it resumes that same vendor thread.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CliSession {
+    /// The driver that can resume it: `claude` or `codex`.
+    pub agent: String,
+    /// The vendor's own session id, which is what a resume is built from.
+    pub vendor_session_id: String,
+    /// The title the CLI gave it, or else its opening prompt, cut short.
+    pub title: String,
+    /// How many prompts the user sent in it.
+    pub prompts: u32,
+    /// Unix seconds of the last thing written to it.
+    pub updated_at: i64,
+}
+
 /// A workspace state snapshotted at a turn boundary, so a transcript position
 /// maps to a working tree the user can go back to.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]

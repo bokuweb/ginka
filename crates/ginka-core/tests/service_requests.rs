@@ -45,11 +45,20 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        Self::configured(|service| service)
+    }
+
+    /// A fixture whose service the test has set up further.
+    fn configured(configure: impl FnOnce(Service) -> Service) -> Self {
         let home = tempfile::tempdir().unwrap();
         let paths = Paths::with_root(home.path().join("state"));
         paths.ensure().unwrap();
         let recorder = Arc::new(Recorder::default());
-        let service = Service::new(paths, db::open_in_memory().unwrap(), recorder.clone());
+        let service = configure(Service::new(
+            paths,
+            db::open_in_memory().unwrap(),
+            recorder.clone(),
+        ));
         Self {
             service,
             recorder,
@@ -1999,5 +2008,112 @@ fn the_daemons_settings_are_shown_without_secrets_and_changed_by_key() {
         shown(&mut fixture)["keep_awake"],
         false,
         "a refusal changes nothing"
+    );
+}
+
+#[test]
+fn a_conversation_started_in_the_claude_cli_can_be_adopted_once() {
+    let claude = tempfile::tempdir().unwrap();
+    let roots = ginka_core::cli_sessions::Roots {
+        claude: Some(claude.path().to_path_buf()),
+        codex: None,
+    };
+    let mut fixture = Fixture::configured(|service| service.with_cli_roots(roots));
+    let folder = fixture.work.path().join("notes");
+    std::fs::create_dir_all(&folder).unwrap();
+    let project = match fixture.ask(Request::AddProject {
+        path: folder,
+        label: None,
+    }) {
+        Response::Project { project } => project,
+        other => panic!("expected a project, got {other:?}"),
+    };
+    let workspace = match fixture.ask(Request::ListWorkspaces {
+        project: Some(project.name.clone()),
+    }) {
+        Response::Workspaces { workspaces } => workspaces.into_iter().next().unwrap(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let cwd = workspace.worktree.path.to_string_lossy().into_owned();
+
+    // What `claude` wrote when it was run in that folder from a terminal.
+    let file = claude
+        .path()
+        .join("projects")
+        .join(ginka_core::cli_sessions::claude_project_dir(
+            &workspace.worktree.path,
+        ))
+        .join("c-1.jsonl");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    let line = |kind: &str, content: serde_json::Value| {
+        serde_json::json!({"type": kind, "sessionId": "c-1", "cwd": cwd,
+            "timestamp": "2026-09-26T01:00:00Z",
+            "message": {"id": "m1", "role": kind, "content": content}})
+        .to_string()
+    };
+    std::fs::write(
+        &file,
+        [
+            line("user", serde_json::json!("Tidy the notes")),
+            line(
+                "assistant",
+                serde_json::json!([{"type": "text", "text": "Tidied."}]),
+            ),
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let listed = match fixture.ask(Request::CliSessions {
+        workspace: workspace.id(),
+    }) {
+        Response::CliSessions { sessions } => sessions,
+        other => panic!("expected CLI sessions, got {other:?}"),
+    };
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].title, "Tidy the notes");
+
+    let adopted = match fixture.ask(Request::AdoptCliSession {
+        workspace: workspace.id(),
+        agent: "claude".into(),
+        vendor_session_id: "c-1".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    // Its next turn resumes the CLI's thread, on the login that wrote it.
+    assert_eq!(adopted.vendor_session_id.as_deref(), Some("c-1"));
+    assert_eq!(adopted.account.0, "claude");
+    assert_eq!(adopted.workspace, workspace.id());
+    assert!(fixture.recorder.taken().iter().any(|event| matches!(
+        event,
+        DaemonEvent::SessionStarted { session } if session.id == adopted.id
+    )));
+
+    let entries = match fixture.ask(Request::SessionTranscript {
+        session: adopted.id.clone(),
+        after: None,
+        limit: None,
+    }) {
+        Response::Transcript { entries } => entries,
+        other => panic!("expected a transcript, got {other:?}"),
+    };
+    assert_eq!(entries.len(), 3, "prompt, reply and the turn's end");
+
+    // Held now, so neither offered nor adoptable again.
+    match fixture.ask(Request::CliSessions {
+        workspace: workspace.id(),
+    }) {
+        Response::CliSessions { sessions } => assert!(sessions.is_empty()),
+        other => panic!("expected CLI sessions, got {other:?}"),
+    }
+    assert!(
+        fixture
+            .service
+            .handle(Request::AdoptCliSession {
+                workspace: workspace.id(),
+                agent: "claude".into(),
+                vendor_session_id: "c-1".into(),
+            })
+            .is_err()
     );
 }
