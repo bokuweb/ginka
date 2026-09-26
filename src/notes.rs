@@ -509,7 +509,13 @@ impl Render for NotesView {
         let editor = self.editor(window, cx);
         h_flex()
             .size_full()
-            .child(div().w(px(300.)).h_full().flex_shrink_0().child(list))
+            .child(
+                div()
+                    .w(ginka_ui::layout::PLACE_PANE_WIDTH)
+                    .h_full()
+                    .flex_shrink_0()
+                    .child(list),
+            )
             .child(div().flex_1().min_w_0().h_full().child(editor))
     }
 }
