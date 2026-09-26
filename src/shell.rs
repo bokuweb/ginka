@@ -9210,10 +9210,23 @@ impl Shell {
         let models = ginka_ui::models::matching_models(active, &self.model_filter);
         let active_display_name = active.display_name.clone();
 
+        let active_signed_out = ginka_ui::models::signed_out(active);
+        let active_program = active.program.clone();
+
         let provider_tabs = providers.into_iter().map(|provider| {
             let id = provider.id.clone();
-            let label = provider.display_name.clone();
+            let signed_out = ginka_ui::models::signed_out(&provider);
+            let label = if signed_out {
+                format!(
+                    "{} — {}",
+                    provider.display_name,
+                    rust_i18n::t!("composer.agent.signed_out")
+                )
+            } else {
+                provider.display_name.clone()
+            };
             let selected = id == active_id;
+            let agent = ginka_ui::workspace::Agent::from_id(&provider.id);
             div()
                 .id(SharedString::from(format!("model-provider:{id}")))
                 .size(px(32.))
@@ -9238,14 +9251,54 @@ impl Shell {
                     cx.notify();
                 }))
                 .child(
-                    ginka_ui::workspace::Agent::from_id(&provider.id)
-                        .glyph()
-                        .size_4()
-                        .text_color(if selected {
-                            tokens.colors().text_primary
-                        } else {
-                            tokens.colors().text_muted
-                        }),
+                    // The vendor's mark in its own colour; the rail is where
+                    // a reader picks a vendor, and a mark is read at a glance.
+                    // Unchosen marks recede, and a signed-out one further.
+                    agent.logo().size_4().text_color(
+                        agent
+                            .brand_color()
+                            .unwrap_or(tokens.colors().text_primary)
+                            .opacity(match (selected, signed_out) {
+                                (_, true) => 0.35,
+                                (true, false) => 1.0,
+                                (false, false) => 0.6,
+                            }),
+                    ),
+                )
+        });
+
+        // Said above the list rather than by hiding the provider: its models
+        // are still the ones it will run once signed in.
+        let signed_out_notice = active_signed_out.then(|| {
+            h_flex()
+                .mx_1()
+                .mt_1()
+                .px(px(10.))
+                .py(px(8.))
+                .gap(px(8.))
+                .items_start()
+                .rounded(px(tokens.radius.row))
+                .bg(tokens.colors().row_hover())
+                .child(
+                    Icon::new(IconName::TriangleAlert)
+                        .size_3p5()
+                        .mt(px(1.))
+                        .text_color(tokens.colors().text_secondary),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(
+                            rust_i18n::t!(
+                                "composer.model.signed_out",
+                                agent = active_display_name.clone(),
+                                program = active_program.clone()
+                            )
+                            .to_string(),
+                        ),
                 )
         });
 
@@ -9355,6 +9408,7 @@ impl Shell {
                                     ),
                                 ),
                         )
+                        .children(signed_out_notice)
                         .child(
                             v_flex()
                                 .id("model-options")
@@ -11289,9 +11343,10 @@ impl Shell {
         let effort_label = selected
             .and_then(|model| ginka_ui::models::effort_label(model, effort.as_deref()))
             .map(str::to_string);
-        let glyph = self
-            .agent_to_start()
-            .map(|id| ginka_ui::workspace::Agent::from_id(&id).glyph());
+        let logo = self.agent_to_start().map(|id| {
+            let agent = ginka_ui::workspace::Agent::from_id(&id);
+            (agent.logo(), agent.brand_color())
+        });
         let flyout = (self.picker == Some(Picker::Model))
             .then(|| self.model_picker_panel(cx))
             .flatten()
@@ -11328,10 +11383,9 @@ impl Shell {
                         }
                         cx.notify();
                     }))
-                    .children(glyph.map(|glyph| {
-                        glyph
-                            .size(px(13.))
-                            .text_color(tokens.colors().text_secondary)
+                    .children(logo.map(|(logo, color)| {
+                        logo.size(px(13.))
+                            .text_color(color.unwrap_or(tokens.colors().text_secondary))
                     }))
                     .child(
                         div()

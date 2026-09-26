@@ -42,6 +42,22 @@ const ICONS: &[(&str, &str)] = &[
         include_str!("../../../assets/icons/agent-prompt.svg"),
     ),
     (
+        "icons/logo-claude.svg",
+        include_str!("../../../assets/icons/logo-claude.svg"),
+    ),
+    (
+        "icons/logo-codex.svg",
+        include_str!("../../../assets/icons/logo-codex.svg"),
+    ),
+    (
+        "icons/logo-gemini.svg",
+        include_str!("../../../assets/icons/logo-gemini.svg"),
+    ),
+    (
+        "icons/logo-opencode.svg",
+        include_str!("../../../assets/icons/logo-opencode.svg"),
+    ),
+    (
         "icons/compass.svg",
         include_str!("../../../assets/icons/compass.svg"),
     ),
@@ -110,6 +126,13 @@ pub mod icon {
     pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
     pub const AGENT_SPARK: &str = "icons/agent-spark.svg";
     pub const AGENT_PROMPT: &str = "icons/agent-prompt.svg";
+    /// Each provider's own mark, where the reader is choosing between
+    /// vendors rather than scanning rows: the model picker's provider rail and
+    /// its chip. Drawn here, single-colour, and tinted by the caller.
+    pub const LOGO_CLAUDE: &str = "icons/logo-claude.svg";
+    pub const LOGO_CODEX: &str = "icons/logo-codex.svg";
+    pub const LOGO_GEMINI: &str = "icons/logo-gemini.svg";
+    pub const LOGO_OPENCODE: &str = "icons/logo-opencode.svg";
     /// The four marks on the home screen's starters, one per kind of first
     /// question: explore, build, review, fix.
     pub const COMPASS: &str = "icons/compass.svg";
@@ -182,6 +205,10 @@ mod tests {
             icon::AGENT_ORBIT,
             icon::AGENT_SPARK,
             icon::AGENT_PROMPT,
+            icon::LOGO_CLAUDE,
+            icon::LOGO_CODEX,
+            icon::LOGO_GEMINI,
+            icon::LOGO_OPENCODE,
             icon::COMPASS,
             icon::HAMMER,
             icon::LIST_CHECK,

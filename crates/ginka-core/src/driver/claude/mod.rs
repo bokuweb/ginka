@@ -120,10 +120,11 @@ impl AgentDriver for ClaudeDriver {
 
     fn models(&self) -> Vec<ProviderModel> {
         // Aliases rather than dated ids: the CLI resolves them, so this list
-        // does not go stale every time a model ships.
-        ["opus", "sonnet", "haiku"]
+        // does not go stale every time a model ships. The labels carry no
+        // version for the same reason.
+        [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
             .into_iter()
-            .map(|id| ProviderModel::new(id, id))
+            .map(|(id, label)| ProviderModel::new(id, label))
             .collect()
     }
 

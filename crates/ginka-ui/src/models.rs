@@ -5,14 +5,23 @@ use ginka_protocol::provider::ProviderModel;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
-/// Providers that can currently run and advertise at least one model.
+/// Providers installed here that advertise at least one model.
+///
+/// A signed-out CLI stays in the list: hiding it made the picker look as if
+/// the provider did not exist, when the fix is one `login` away — and the
+/// user may be signing in in another window. The panel says so instead
+/// (see [`signed_out`]).
 pub fn available_providers(agents: &[AgentStatus]) -> Vec<&AgentStatus> {
     agents
         .iter()
         .filter(|agent| agent.installed)
-        .filter(|agent| agent.authenticated != Some(false))
         .filter(|agent| !agent.models.is_empty())
         .collect()
+}
+
+/// Whether the CLI said it is not signed in. Unknown is not signed out.
+pub fn signed_out(agent: &AgentStatus) -> bool {
+    agent.authenticated == Some(false)
 }
 
 /// Models from one CLI matching a case-insensitive id or display-name query.
@@ -75,7 +84,7 @@ mod tests {
     }
 
     #[test]
-    fn only_runnable_cli_catalogues_become_provider_tabs() {
+    fn installed_cli_catalogues_become_provider_tabs_even_signed_out() {
         let mut no_models = agent("empty", true, Some(true));
         no_models.models.clear();
         let agents = [
@@ -91,8 +100,10 @@ mod tests {
                 .iter()
                 .map(|agent| agent.id.as_str())
                 .collect::<Vec<_>>(),
-            ["claude"]
+            ["claude", "signed-out"]
         );
+        assert!(!signed_out(providers[0]));
+        assert!(signed_out(providers[1]));
     }
 
     #[test]

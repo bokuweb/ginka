@@ -269,6 +269,31 @@ impl Agent {
         })
     }
 
+    /// The vendor's own mark, for choosing between providers.
+    ///
+    /// The sidebar keeps [`Agent::glyph`]: a row is scanned, not chosen.
+    pub fn logo(self) -> Icon {
+        Icon::empty().path(match self {
+            Self::Claude => icon::LOGO_CLAUDE,
+            Self::Codex => icon::LOGO_CODEX,
+            Self::Gemini => icon::LOGO_GEMINI,
+            Self::OpenCode => icon::LOGO_OPENCODE,
+        })
+    }
+
+    /// The colour the vendor paints its mark in, when it has one.
+    ///
+    /// `None` for a monochrome mark, which the caller tints with the text
+    /// colour so it reads on either theme.
+    pub fn brand_color(self) -> Option<gpui::Hsla> {
+        match self {
+            Self::Claude => Some(gpui::rgb(0xd97757).into()),
+            Self::Codex => Some(gpui::rgb(0x6f7df7).into()),
+            Self::Gemini => Some(gpui::rgb(0x4796e3).into()),
+            Self::OpenCode => None,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",

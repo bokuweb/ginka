@@ -151,6 +151,9 @@ composer.model.search:
 composer.model.empty:
   en: No models match this search.
   ja: 一致するモデルはありません。
+composer.model.signed_out:
+  en: "%{agent} is not signed in. Sign in with the %{program} CLI in a terminal; these models run once it is."
+  ja: "%{agent} はサインインしていません。ターミナルで %{program} CLI からサインインすると、これらのモデルが使えます。"
 composer.option.provider_default:
   en: Provider default
   ja: プロバイダー既定
