@@ -891,6 +891,10 @@ pub struct GitCommit {
     pub authored_at: i64,
     /// First line of the commit message.
     pub summary: String,
+    /// Whether a remote-tracking branch already has this commit, as of the
+    /// last fetch. An unpublished HEAD is one that can still be amended.
+    #[serde(default)]
+    pub published: bool,
 }
 
 impl FileChange {
@@ -1029,6 +1033,37 @@ pub struct WorkspaceSummary {
     /// machine without `gh`: the listing never waits on the network.
     #[serde(default)]
     pub pull_request: Option<PullRequest>,
+    /// The line of status last written on the workspace — by its agent over
+    /// MCP, or by a person — and when. Orca's worktree comment.
+    #[serde(default)]
+    pub status_note: Option<StatusNote>,
+}
+
+/// A short, free-text line saying where a workspace's work stands.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StatusNote {
+    /// One line, at most [`StatusNote::MAX_CHARS`] characters.
+    pub text: String,
+    /// Unix seconds it was written.
+    pub set_at: i64,
+}
+
+impl StatusNote {
+    /// Longest note kept. A sidebar row shows one line; a paragraph belongs
+    /// in the transcript or in Notes.
+    pub const MAX_CHARS: usize = 160;
+
+    /// What `text` is stored as: its first non-blank line, trimmed and
+    /// bounded, or `None` when there is nothing left — which clears the note.
+    pub fn normalize(text: &str) -> Option<String> {
+        let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+        if line.chars().count() <= Self::MAX_CHARS {
+            return Some(line.to_string());
+        }
+        let cut: String = line.chars().take(Self::MAX_CHARS - 1).collect();
+        Some(format!("{}…", cut.trim_end()))
+    }
 }
 
 impl WorkspaceSummary {
@@ -1135,9 +1170,23 @@ mod tests {
             indexed: false,
             queued: 0,
             pull_request: None,
+            status_note: None,
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn a_status_note_is_one_bounded_line_and_blank_clears_it() {
+        assert_eq!(StatusNote::normalize("  \n  "), None);
+        assert_eq!(
+            StatusNote::normalize("\n  waiting on CI  \nmore detail"),
+            Some("waiting on CI".to_string())
+        );
+        let long = "x".repeat(400);
+        let kept = StatusNote::normalize(&long).unwrap();
+        assert_eq!(kept.chars().count(), StatusNote::MAX_CHARS);
+        assert!(kept.ends_with('…'));
     }
 
     #[test]
@@ -1150,6 +1199,7 @@ mod tests {
             indexed: false,
             queued: 0,
             pull_request: None,
+            status_note: None,
         })
         .unwrap();
         let mut object = json.as_object().unwrap().clone();
@@ -1318,6 +1368,10 @@ pub struct CronJob {
     pub agent: Option<String>,
     /// The prompt, or the command line.
     pub body: String,
+    /// A shell command run in the job's checkout before a scheduled firing;
+    /// a non-zero exit, or no answer within a minute, skips that firing.
+    #[serde(default)]
+    pub precheck: Option<String>,
     pub enabled: bool,
     /// Unix seconds of the next firing; absent while disabled.
     pub next_run_at: Option<i64>,

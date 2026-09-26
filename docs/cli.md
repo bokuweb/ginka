@@ -46,6 +46,7 @@ Manage workspaces, which are git worktrees
 - `ginka workspace index` — Build zvec-grep's index for a workspace, here in this terminal, so agents started in it get semantic search. Needs `zg` on PATH (`ginka workspace index <WORKSPACE>`)
 - `ginka workspace pin` — Pin a workspace so it sorts first (`ginka workspace pin <WORKSPACE>`)
 - `ginka workspace archive` — Archive a workspace without removing its worktree or conversation (`ginka workspace archive <WORKSPACE>`)
+- `ginka workspace status` — Write the line of status the sidebar shows under a workspace, or clear it by giving none (`ginka workspace status <WORKSPACE> [NOTE]`)
 
 ## `ginka agents`
 
@@ -206,7 +207,7 @@ Throw away a file's uncommitted work
 
 ## `ginka commit`
 
-Commit a workspace's work
+Commit a workspace's work. `--amend` folds it into the last commit instead — keeping that commit's message when none is given — and is refused once the commit has been pushed.
 
 `ginka commit <WORKSPACE> [MESSAGE]`
 
@@ -275,7 +276,7 @@ The daemon's terminals in a workspace: open one, type into it, read what it prin
 Prompts and commands run on a cron schedule, on this machine's clock
 
 - `ginka cron list` — List scheduled jobs, with when each fires next and how it last went
-- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`) (`ginka cron add --schedule <SCHEDULE> <PROJECT> <NAME>`)
+- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`) (`ginka cron add --schedule <SCHEDULE> <PROJECT> <NAME>`). `--precheck '<command>'` runs first on every scheduled firing, in the job's checkout; a non-zero exit skips that firing
 - `ginka cron remove` — Forget a scheduled job and its history (`ginka cron remove <ID>`)
 - `ginka cron run` — Fire a job now, as its schedule would (`ginka cron run <ID>`)
 - `ginka cron runs` — A job's firings, most recent first (`ginka cron runs <ID>`)

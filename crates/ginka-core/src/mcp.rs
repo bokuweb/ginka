@@ -81,6 +81,17 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_status",
+            description: "Say in one line what the work in your workspace is doing or waiting on (\"tests green, writing docs\", \"blocked: need API key\"); the person watching sees it under the workspace in Ginka's sidebar. Omit `workspace` to mean the one you are running in; omit `note` to clear it.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "note": {"type": "string", "description": "One line, at most 160 characters"},
+                },
+            }),
+        },
+        Tool {
             name: "ginka_agents",
             description: "Which coding agents this machine has, and whether they are signed in.",
             schema: json!({"type": "object", "properties": {}}),
@@ -423,13 +434,14 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_commit",
-            description: "Commit a workspace's work.",
+            description: "Commit a workspace's work. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "workspace": workspace,
                     "message": {"type": "string"},
                     "staged_only": {"type": "boolean"},
+                    "amend": {"type": "boolean"},
                 },
                 "required": ["workspace", "message"],
             }),
@@ -469,6 +481,7 @@ pub fn tools() -> Vec<Tool> {
                     "via": {"type": "string", "enum": ["chat", "terminal"]},
                     "agent": {"type": "string"},
                     "body": {"type": "string"},
+                    "precheck": {"type": "string", "description": "A shell command run in the checkout before each scheduled firing; a non-zero exit skips that firing"},
                     "enabled": {"type": "boolean"},
                 },
                 "required": ["project", "name", "schedule", "via", "body"],
@@ -695,6 +708,19 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
             archived: !flag("restore"),
         },
+        "ginka_workspace_status" => {
+            let workspace = maybe("workspace").map(WorkspaceId);
+            Request::SetWorkspaceStatus {
+                // Without a name, the workspace is the one this bridge runs
+                // in: an agent's MCP servers start in its working directory.
+                path: match workspace {
+                    Some(_) => None,
+                    None => std::env::current_dir().ok(),
+                },
+                workspace,
+                note: maybe("note"),
+            }
+        }
         "ginka_agents" => Request::ListAgents,
         "ginka_accounts" => Request::Accounts,
         "ginka_account_select" => Request::SelectAccount {
@@ -880,6 +906,7 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
             message: text("message")?,
             all: !flag("staged_only"),
+            amend: flag("amend"),
         },
         "ginka_cron_jobs" => Request::ListCronJobs {
             project: text("project").ok().map(ProjectName),
@@ -894,6 +921,7 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
                 .ok_or_else(|| anyhow!("{tool}: `via` is chat or terminal"))?,
             agent: text("agent").ok(),
             body: text("body")?,
+            precheck: text("precheck").ok(),
             enabled: arguments
                 .get("enabled")
                 .and_then(Value::as_bool)
@@ -1166,6 +1194,35 @@ mod tests {
                 limit: Some(17),
             }
         );
+    }
+
+    #[test]
+    fn a_workspace_status_names_the_bridge_directory_when_no_workspace_is_given() {
+        let own = request_for("ginka_workspace_status", &json!({"note": "writing docs"})).unwrap();
+        match own {
+            Request::SetWorkspaceStatus {
+                workspace: None,
+                path: Some(path),
+                note: Some(note),
+            } => {
+                assert_eq!(path, std::env::current_dir().unwrap());
+                assert_eq!(note, "writing docs");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        let named = request_for(
+            "ginka_workspace_status",
+            &json!({"workspace": "comet/harbor"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            named,
+            Request::SetWorkspaceStatus {
+                workspace: Some(_),
+                path: None,
+                note: None,
+            }
+        ));
     }
 
     #[test]

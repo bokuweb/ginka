@@ -187,6 +187,7 @@ pub struct Draft {
     pub via: CronVia,
     pub agent: Option<String>,
     pub body: String,
+    pub precheck: Option<String>,
     pub enabled: bool,
 }
 
@@ -198,7 +199,7 @@ pub struct LastStarted {
 }
 
 const COLUMNS: &str =
-    "id, project, workspace, name, schedule, via, agent, body, enabled, checked_at";
+    "id, project, workspace, name, schedule, via, agent, body, enabled, checked_at, precheck";
 
 /// Every job, or one project's, by name.
 pub fn list(conn: &Connection, project: Option<&ProjectName>) -> Result<Vec<CronJob>> {
@@ -258,11 +259,17 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
         .workspace
         .as_ref()
         .map(|workspace| workspace.0.clone());
+    let precheck = draft
+        .precheck
+        .as_deref()
+        .map(str::trim)
+        .filter(|command| !command.is_empty());
     let id = match id {
         Some(id) => {
             let changed = conn.execute(
                 "UPDATE cron_jobs SET project = ?1, workspace = ?2, name = ?3, schedule = ?4,
-                        via = ?5, agent = ?6, body = ?7, enabled = ?8, checked_at = ?9
+                        via = ?5, agent = ?6, body = ?7, enabled = ?8, checked_at = ?9,
+                        precheck = ?11
                   WHERE id = ?10",
                 rusqlite::params![
                     draft.project.0,
@@ -275,6 +282,7 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
                     draft.enabled,
                     now,
                     id,
+                    precheck,
                 ],
             )?;
             if changed == 0 {
@@ -285,8 +293,8 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
         None => {
             conn.execute(
                 "INSERT INTO cron_jobs (project, workspace, name, schedule, via, agent, body,
-                                        enabled, checked_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                        enabled, checked_at, precheck)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 rusqlite::params![
                     draft.project.0,
                     workspace,
@@ -297,6 +305,7 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
                     draft.body,
                     draft.enabled,
                     now,
+                    precheck,
                 ],
             )?;
             conn.last_insert_rowid()
@@ -440,6 +449,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<(CronJob, i64)> {
             agent: row.get(6)?,
             body: row.get(7)?,
             enabled: row.get(8)?,
+            precheck: row.get(10)?,
             next_run_at: None,
             last_run: None,
         },
@@ -460,10 +470,131 @@ fn finish_job(conn: &Connection, mut job: CronJob, checked_at: i64) -> Result<Cr
     Ok(job)
 }
 
+/// What a job's precheck said about firing now.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Precheck {
+    /// It exited zero, or the job has none: fire.
+    Pass,
+    /// Do not fire; the reason is kept on the skipped run.
+    Skip(String),
+}
+
+/// How long a precheck may take before its silence counts as "no".
+pub const PRECHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Run `command` through the user's login shell in `dir` and say whether the
+/// job should fire.
+///
+/// A login shell for the same reason terminal jobs use one: the probe is
+/// usually `gh …` or a script, and it needs the PATH the user's terminal has.
+/// It runs with no stdin; the last line it printed becomes the skip reason,
+/// because "exit 1" alone does not say which of three conditions failed. The
+/// caller must not hold the service while this runs.
+pub fn run_precheck(
+    command: &str,
+    dir: &std::path::Path,
+    timeout: std::time::Duration,
+) -> Precheck {
+    use std::io::Read as _;
+    use std::process::{Command, Stdio};
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    let mut child = match Command::new(shell)
+        .args(["-lc", command])
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => return Precheck::Skip(format!("the precheck could not start: {error}")),
+    };
+    // Drained on their own threads so a chatty probe cannot fill a pipe and
+    // hang waiting for a reader that is waiting for it to exit.
+    let drain = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            if let Some(mut pipe) = pipe {
+                let _ = pipe.by_ref().take(64 * 1024).read_to_string(&mut text);
+            }
+            text
+        })
+    };
+    let stdout = drain(child.stdout.take().map(|pipe| Box::new(pipe) as _));
+    let stderr = drain(child.stderr.take().map(|pipe| Box::new(pipe) as _));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                break None;
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+            Err(error) => return Precheck::Skip(format!("the precheck was lost: {error}")),
+        }
+    };
+    let Some(status) = status else {
+        return Precheck::Skip(format!(
+            "the precheck gave no answer within {}s",
+            timeout.as_secs()
+        ));
+    };
+    if status.success() {
+        return Precheck::Pass;
+    }
+    let printed = format!(
+        "{}\n{}",
+        stdout.join().unwrap_or_default(),
+        stderr.join().unwrap_or_default()
+    );
+    let said = printed
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| line.chars().take(200).collect::<String>());
+    let code = status
+        .code()
+        .map_or_else(|| "a signal".to_string(), |code| code.to_string());
+    Precheck::Skip(match said {
+        Some(said) => format!("precheck exited {code}: {said}"),
+        None => format!("precheck exited {code}"),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn a_precheck_passes_on_zero_and_says_why_it_skipped_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let quick = std::time::Duration::from_secs(10);
+        assert_eq!(run_precheck("test -d .", dir.path(), quick), Precheck::Pass);
+        assert_eq!(
+            run_precheck("echo 'no new pull requests' >&2; exit 3", dir.path(), quick),
+            Precheck::Skip("precheck exited 3: no new pull requests".into())
+        );
+        std::fs::write(dir.path().join("flag"), "").unwrap();
+        assert_eq!(
+            run_precheck("test -f flag", dir.path(), quick),
+            Precheck::Pass,
+            "it runs in the job's checkout"
+        );
+    }
+
+    #[test]
+    fn a_precheck_that_does_not_answer_is_a_skip() {
+        let dir = tempfile::tempdir().unwrap();
+        let verdict = run_precheck("sleep 5", dir.path(), std::time::Duration::from_millis(300));
+        assert!(
+            matches!(&verdict, Precheck::Skip(why) if why.contains("no answer")),
+            "{verdict:?}"
+        );
+    }
 
     fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text)

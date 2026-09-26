@@ -591,6 +591,8 @@ pub struct Shell {
     queue_can_send_now: bool,
     /// Whether the session's queue is held (a stopped turn, a restart).
     queue_paused: bool,
+    /// When a usage limit's hold on the queue lets go, in Unix seconds.
+    queue_resume_at: Option<i64>,
     /// Whether this window is the one in front: a notification is for a
     /// change the reader is not already looking at.
     window_active: bool,
@@ -888,7 +890,8 @@ impl Shell {
                     message,
                     only_staged,
                     then,
-                } => this.commit(message.clone(), *only_staged, *then, cx),
+                    amend,
+                } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
                 crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
                     this.leave_comment(path.clone(), *line, text.clone(), cx)
                 }
@@ -1466,6 +1469,7 @@ impl Shell {
             queued_messages: Vec::new(),
             queue_can_send_now: false,
             queue_paused: false,
+            queue_resume_at: None,
             window_active: true,
             session_states: std::collections::HashMap::new(),
             queue_next: false,
@@ -2315,6 +2319,7 @@ impl Shell {
             },
             agent: if chat { self.agent_to_start() } else { None },
             body: self.cron_form.body.read(cx).value().to_string(),
+            precheck: None,
             enabled: true,
         };
         let link = self.link.clone();
@@ -2342,6 +2347,7 @@ impl Shell {
             via: job.via,
             agent: job.agent,
             body: job.body,
+            precheck: job.precheck,
             enabled: !job.enabled,
         };
         let link = self.link.clone();
@@ -2784,6 +2790,7 @@ impl Shell {
         message: String,
         only_staged: bool,
         then: crate::surfaces::CommitThen,
+        amend: bool,
         cx: &mut Context<Self>,
     ) {
         use crate::surfaces::CommitThen;
@@ -2795,7 +2802,7 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let (committed, after) = cx
                 .background_spawn(async move {
-                    let committed = link.commit(&workspace, message, !only_staged).await;
+                    let committed = link.commit(&workspace, message, !only_staged, amend).await;
                     // Only after a commit that went in: pushing or opening a
                     // pull request for the previous state is not what was asked.
                     let after = match (&committed, then) {
@@ -8644,7 +8651,26 @@ impl Shell {
                                     .bg(tokens.colors().status_attention.opacity(0.18))
                                     .text_xs()
                                     .text_color(tokens.colors().status_attention)
-                                    .child(rust_i18n::t!("composer.queue.held").to_string()),
+                                    .child(
+                                        match self
+                                            .queue_resume_at
+                                            .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+                                        {
+                                            // A limit's hold says when it lets go,
+                                            // so the reader can leave it to it.
+                                            Some(at) => rust_i18n::t!(
+                                                "composer.queue.resumes_at",
+                                                at = at
+                                                    .with_timezone(&chrono::Local)
+                                                    .format("%H:%M")
+                                                    .to_string()
+                                            )
+                                            .to_string(),
+                                            None => {
+                                                rust_i18n::t!("composer.queue.held").to_string()
+                                            }
+                                        },
+                                    ),
                             )
                         })
                         .child(
@@ -12740,7 +12766,7 @@ async fn pull_queue(
 ) -> Result<(), ()> {
     let listing = link.clone();
     let requested = session.clone();
-    let (messages, can_send_now, paused) = cx
+    let (messages, can_send_now, paused, resume_at) = cx
         .background_spawn(async move { listing.queued_messages(&requested).await })
         .await;
     this.update(cx, |this, cx| {
@@ -12748,6 +12774,7 @@ async fn pull_queue(
             this.queued_messages = messages;
             this.queue_can_send_now = can_send_now;
             this.queue_paused = paused;
+            this.queue_resume_at = resume_at;
             this.queue_error = None;
             cx.notify();
         }

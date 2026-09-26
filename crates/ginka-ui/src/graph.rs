@@ -121,6 +121,7 @@ mod tests {
 
     fn commit(id: &str, parents: &[&str]) -> GitCommit {
         GitCommit {
+            published: false,
             id: id.into(),
             parents: parents.iter().map(|parent| parent.to_string()).collect(),
             author: String::new(),

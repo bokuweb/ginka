@@ -3232,6 +3232,7 @@ fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
         via: ginka_protocol::model::CronVia::Chat,
         agent: Some("claude".into()),
         body: "review yesterday's changes".into(),
+        precheck: None,
         enabled: true,
     }) {
         Response::CronJob { job } => job,
@@ -3306,4 +3307,134 @@ fn default_script_for_pages() -> String {
         r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-pages"}"#,
     ]
     .join("\n")
+}
+
+#[test]
+fn a_turn_a_usage_limit_refused_resumes_itself_once_the_window_resets() {
+    let mut fixture = Fixture::new();
+    let resets_at = 1_900_000_000_i64;
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-limit"}"#.to_string(),
+            format!(
+                r#"{{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|{resets_at}","session_id":"vendor-limit"}}"#
+            ),
+        ]
+        .join("\n"),
+        "refactor the parser",
+    );
+    assert_eq!(fixture.settle(&session), SessionState::Failed);
+
+    // The hold is placed as the turn's task winds down, just after the state.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let (messages, paused, resume_at) = loop {
+        match fixture.ask(Request::QueuedMessages {
+            session: session.clone(),
+        }) {
+            Response::QueuedMessages {
+                messages,
+                paused,
+                resume_at: Some(at),
+                ..
+            } => break (messages, paused, at),
+            _ => {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the queue was never held"
+                );
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+    };
+    assert!(paused);
+    assert_eq!(resume_at, resets_at + ginka_core::agent::RESUME_MARGIN_SECS);
+    assert_eq!(
+        messages
+            .iter()
+            .map(|message| message.text.as_str())
+            .collect::<Vec<_>>(),
+        [ginka_core::agent::CONTINUE_AFTER_LIMIT],
+        "an empty queue gets something to resume with"
+    );
+
+    // Not before the reset…
+    assert_eq!(fixture.service.resume_limited_queues(resets_at), 0);
+    // …and once it is past, the continue prompt goes out as a new turn.
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-limit"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"picked up","session_id":"vendor-limit"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert_eq!(fixture.service.resume_limited_queues(resume_at), 1);
+    // The resumed turn starts on its own task, so the old Failed can still
+    // be showing: wait for the new turn to end rather than for any end.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while fixture.settle(&session) != SessionState::Finished {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the resumed turn never finished"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let transcript = fixture.transcript(&session);
+    assert!(transcript.iter().any(|entry| matches!(
+        entry,
+        TranscriptPayload::User { text } if text == ginka_core::agent::CONTINUE_AFTER_LIMIT
+    )));
+    match fixture.ask(Request::QueuedMessages { session }) {
+        Response::QueuedMessages {
+            messages,
+            paused,
+            resume_at,
+            ..
+        } => {
+            assert!(messages.is_empty() && !paused && resume_at.is_none());
+        }
+        other => panic!("expected the queue, got {other:?}"),
+    }
+}
+
+#[test]
+fn holding_a_limited_queue_by_hand_cancels_its_resume() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-hold"}"#,
+            r#"{"type":"result","subtype":"success","is_error":true,"result":"Claude AI usage limit reached|1900000000","session_id":"vendor-hold"}"#,
+        ]
+        .join("\n"),
+        "go",
+    );
+    fixture.settle(&session);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !matches!(
+        fixture.ask(Request::QueuedMessages {
+            session: session.clone()
+        }),
+        Response::QueuedMessages {
+            resume_at: Some(_),
+            ..
+        }
+    ) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the queue was never held"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    fixture.ask(Request::SetQueuePaused {
+        session: session.clone(),
+        paused: true,
+    });
+    assert_eq!(fixture.service.resume_limited_queues(i64::MAX), 0);
+    match fixture.ask(Request::QueuedMessages { session }) {
+        Response::QueuedMessages {
+            paused, resume_at, ..
+        } => assert!(paused && resume_at.is_none()),
+        other => panic!("expected the queue, got {other:?}"),
+    }
 }

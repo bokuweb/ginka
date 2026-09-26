@@ -254,6 +254,11 @@ pub struct DaemonSettings {
     /// that stops halfway; one that has finished lets the machine sleep again.
     /// macOS only (`caffeinate -i -w <pid>`); ignored elsewhere.
     pub keep_awake: bool,
+    /// When a turn is refused by a usage limit whose reset time is known,
+    /// hold the queue — with a "continue" prompt in it if it was empty — and
+    /// let it go once the window resets (MonoCode's auto-resume). The held
+    /// queue shows when it will resume, and holding it by hand cancels that.
+    pub resume_after_limit: bool,
     /// Fetch the public rate table, at most daily, to price the turns a
     /// vendor does not (§3.3 N13). Off, costs are only what vendors report.
     pub fetch_rates: bool,
@@ -370,6 +375,7 @@ impl Default for DaemonSettings {
             retention_days: 30,
             checkpoint_limit: 200,
             keep_awake: true,
+            resume_after_limit: true,
             fetch_rates: true,
             scan_vendor_logs: true,
             disabled_providers: Vec::new(),

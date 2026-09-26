@@ -380,6 +380,9 @@ pub struct SessionRow {
     pub indexed: bool,
     /// The pull request opened from the branch, drawn as its state's mark.
     pub pull_request: Option<PullRequest>,
+    /// The line of status last written on the workspace, drawn under the
+    /// title in the row's quietest colour.
+    pub status_note: Option<SharedString>,
 }
 
 /// The mark a pull request in `state` is drawn with: the same shapes GitHub
@@ -440,6 +443,10 @@ impl SessionRow {
             queued: summary.queued,
             indexed: summary.indexed,
             pull_request: summary.pull_request.clone(),
+            status_note: summary
+                .status_note
+                .as_ref()
+                .map(|note| note.text.clone().into()),
         }
     }
 
@@ -530,6 +537,7 @@ impl SessionRow {
             queued: 0,
             indexed: false,
             pull_request: None,
+            status_note: None,
         }
     }
 
@@ -1011,6 +1019,7 @@ mod tests {
             indexed: false,
             queued: 0,
             pull_request: None,
+            status_note: None,
         }
     }
 

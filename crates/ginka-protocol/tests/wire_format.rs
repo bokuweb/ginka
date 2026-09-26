@@ -527,12 +527,13 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
             via: ginka_protocol::model::CronVia::Terminal,
             agent: None,
             body: "cargo test".into(),
+            precheck: None,
             enabled: true,
         }),
         json!({
             "method": "save_cron_job", "id": null, "project": "comet", "workspace": null,
             "name": "nightly", "schedule": "@daily", "via": "terminal", "agent": null,
-            "body": "cargo test", "enabled": true
+            "body": "cargo test", "precheck": null, "enabled": true
         })
     );
 }

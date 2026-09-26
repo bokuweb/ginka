@@ -24,7 +24,7 @@ use rusqlite::Connection;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// How much of an agent's stderr is kept to explain a failure.
@@ -44,7 +44,18 @@ struct Shared {
     checkpoint_limit: u32,
     /// Hold the machine awake while each turn's process lives.
     keep_awake: bool,
+    /// Hold the queue through a usage limit and resume at its reset.
+    resume_after_limit: bool,
 }
+
+/// What a queue held by a usage limit sends when it was empty: the turn that
+/// hit the wall stopped mid-thought, and this is how a person would pick it up.
+pub const CONTINUE_AFTER_LIMIT: &str = "The usage limit has reset. Continue where you left off.";
+
+/// Seconds after a window's reported reset before a held queue lets go: the
+/// vendor's clock and ours disagree by a little, and a resume that lands a
+/// second early is refused again.
+pub const RESUME_MARGIN_SECS: i64 = 60;
 
 impl Shared {
     /// Append to the transcript and push the event to every client.
@@ -228,6 +239,9 @@ struct PendingQueue {
     /// The prompt an interrupt is making room for: when the turn it stopped
     /// has exited, this goes next and the queue keeps going.
     interrupt_with: Option<u64>,
+    /// Unix seconds at which a queue held by a usage limit lets itself go.
+    /// Any hand on the hold — holding, resuming, clearing — takes it away.
+    resume_at: Option<i64>,
 }
 
 impl PendingQueue {
@@ -295,6 +309,23 @@ impl PendingQueue {
         }
     }
 
+    /// A turn was refused by a usage limit that resets at `resets_at`: hold
+    /// what waits — or a "continue" prompt, when nothing does — and resume
+    /// a margin after the reset.
+    fn hold_for_limit(&mut self, resets_at: i64) {
+        self.interrupt_with = None;
+        if self.items.is_empty() {
+            self.push(CONTINUE_AFTER_LIMIT.to_string());
+        }
+        self.paused = true;
+        self.resume_at = Some(resets_at + RESUME_MARGIN_SECS);
+    }
+
+    /// Whether a limit hold is over at `now`.
+    fn resume_due(&self, now: i64) -> bool {
+        self.paused && self.resume_at.is_some_and(|at| at <= now)
+    }
+
     /// Current rows in dispatch order.
     fn items(&self) -> Vec<QueuedMessage> {
         self.items.iter().cloned().collect()
@@ -317,9 +348,14 @@ fn save_queue(conn: &Connection, session: &SessionId, queue: &PendingQueue) -> R
         )?;
     }
     conn.execute(
-        "INSERT INTO queue_state (session_id, next_id, paused) VALUES (?1, ?2, ?3)
-         ON CONFLICT(session_id) DO UPDATE SET next_id = ?2, paused = ?3",
-        rusqlite::params![session.0, queue.next_id as i64, queue.paused],
+        "INSERT INTO queue_state (session_id, next_id, paused, resume_at) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(session_id) DO UPDATE SET next_id = ?2, paused = ?3, resume_at = ?4",
+        rusqlite::params![
+            session.0,
+            queue.next_id as i64,
+            queue.paused,
+            queue.resume_at
+        ],
     )?;
     Ok(())
 }
@@ -331,12 +367,20 @@ fn save_queue(conn: &Connection, session: &SessionId, queue: &PendingQueue) -> R
 /// the daemon returns would be a surprise.
 fn load_queues(conn: &Connection) -> Result<HashMap<SessionId, PendingQueue>> {
     let mut queues: HashMap<SessionId, PendingQueue> = HashMap::new();
-    let mut state = conn.prepare("SELECT session_id, next_id FROM queue_state")?;
+    let mut state = conn.prepare("SELECT session_id, next_id, resume_at FROM queue_state")?;
     for row in state.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
     })? {
-        let (session, next_id) = row?;
-        queues.entry(SessionId(session)).or_default().next_id = next_id.max(0) as u64;
+        let (session, next_id, resume_at) = row?;
+        let queue = queues.entry(SessionId(session)).or_default();
+        queue.next_id = next_id.max(0) as u64;
+        // A limit hold outlives a restart: the window resets whether or not
+        // the daemon was running, and what was promised still happens.
+        queue.resume_at = resume_at;
     }
     let mut items = conn.prepare(
         "SELECT session_id, id, text FROM queued_messages ORDER BY session_id, position",
@@ -356,6 +400,9 @@ fn load_queues(conn: &Connection) -> Result<HashMap<SessionId, PendingQueue>> {
     }
     for queue in queues.values_mut() {
         queue.paused = !queue.items.is_empty();
+        if !queue.paused {
+            queue.resume_at = None;
+        }
     }
     Ok(queues)
 }
@@ -414,6 +461,7 @@ impl Supervisor {
                 blobs,
                 checkpoint_limit,
                 keep_awake: false,
+                resume_after_limit: false,
             },
             running: Arc::new(Mutex::new(HashMap::new())),
             queued: Arc::new(Mutex::new(stored)),
@@ -424,6 +472,51 @@ impl Supervisor {
     pub fn with_keep_awake(mut self, keep_awake: bool) -> Self {
         self.context.keep_awake = keep_awake;
         self
+    }
+
+    /// Hold queues through usage limits and resume them at the reset
+    /// (`DaemonSettings::resume_after_limit`).
+    pub fn with_resume_after_limit(mut self, resume: bool) -> Self {
+        self.context.resume_after_limit = resume;
+        self
+    }
+
+    /// When this session's queue will let itself go, if a usage limit is
+    /// holding it.
+    pub fn queue_resume_at(&self, session: &SessionId) -> Option<i64> {
+        self.queued
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(session)
+            .filter(|queue| queue.paused)
+            .and_then(|queue| queue.resume_at)
+    }
+
+    /// Let go of every queue whose limit hold is over at `now`, and answer
+    /// the sessions the caller should dispatch the front of — those with
+    /// nothing running.
+    pub fn resume_due_queues(&self, now: i64) -> Vec<SessionId> {
+        let due: Vec<SessionId> = {
+            let mut queues = self
+                .queued
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            queues
+                .iter_mut()
+                .filter(|(_, queue)| queue.resume_due(now))
+                .map(|(session, queue)| {
+                    queue.paused = false;
+                    queue.resume_at = None;
+                    session.clone()
+                })
+                .collect()
+        };
+        for session in &due {
+            self.queue_changed(session);
+        }
+        due.into_iter()
+            .filter(|session| !self.is_running(session) && self.queued_count(session) > 0)
+            .collect()
     }
 
     /// Whether a process is alive for this session.
@@ -608,6 +701,7 @@ impl Supervisor {
                 .unwrap_or_else(|error| error.into_inner());
             let queue = queues.entry(session.clone()).or_default();
             queue.paused = paused;
+            queue.resume_at = None;
             !paused && !queue.items.is_empty()
         };
         self.queue_changed(session);
@@ -625,6 +719,7 @@ impl Supervisor {
             queue.items.clear();
             queue.interrupt_with = None;
             queue.paused = false;
+            queue.resume_at = None;
         }
         self.queue_changed(session);
     }
@@ -1002,6 +1097,7 @@ impl Supervisor {
             let steer = steer.clone();
             let requests = requests.clone();
             async move {
+                let limit_resets_at = AtomicI64::new(0);
                 let state = pump(
                     &context,
                     driver.as_ref(),
@@ -1017,6 +1113,7 @@ impl Supervisor {
                         cancelled: &cancelled,
                         steer: &steer,
                         requests: &requests,
+                        limit_resets_at: &limit_resets_at,
                         parse,
                     },
                 )
@@ -1028,6 +1125,19 @@ impl Supervisor {
 
                 // A turn that ended cleanly hands over to whatever the user
                 // sent while it was working.
+                // A turn a usage limit refused holds its queue until the
+                // window resets, with something in it to resume with.
+                let resets_at = limit_resets_at.load(Ordering::SeqCst);
+                if state == SessionState::Failed && resets_at > 0 && context.resume_after_limit {
+                    queued
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .entry(session.clone())
+                        .or_default()
+                        .hold_for_limit(resets_at);
+                    queue_changed_in(&context, &queued, &session);
+                    return;
+                }
                 // A stopped or failed turn holds its queue — unless the stop
                 // was an interrupt, which hands over to the prompt it chose.
                 if state == SessionState::Cancelled || state == SessionState::Failed {
@@ -1145,8 +1255,23 @@ struct Turn<'a> {
     steer: &'a Mutex<Option<async_channel::Sender<String>>>,
     /// Interaction ids this turn is blocked on.
     requests: &'a Mutex<HashSet<String>>,
+    /// Set to a window's reset time (Unix seconds) when the vendor reports
+    /// that window exhausted during the turn; 0 while none is.
+    limit_resets_at: &'a AtomicI64,
     /// The reader's state as [`AgentDriver::begin`] left it.
     parse: ParseState,
+}
+
+/// When the exhausted window in `usage` resets, if one is at the wall and
+/// said when. The latest such reset, since every exhausted window has to
+/// open before a turn can run.
+pub fn exhausted_until(usage: &PlanUsage) -> Option<i64> {
+    usage
+        .windows
+        .iter()
+        .filter(|window| window.used_percent >= 100.0)
+        .filter_map(|window| window.resets_at)
+        .max()
 }
 
 async fn pump(
@@ -1166,6 +1291,7 @@ async fn pump(
         cancelled,
         steer,
         requests,
+        limit_resets_at,
         parse,
     } = turn;
     context.set_state(session, SessionState::Running, None);
@@ -1228,6 +1354,9 @@ async fn pump(
                     // A gauge, not conversation: kept per account and pushed,
                     // never written into the transcript.
                     AgentEvent::PlanUsage { usage } => {
+                        if let Some(at) = exhausted_until(usage) {
+                            limit_resets_at.fetch_max(at, Ordering::SeqCst);
+                        }
                         context.record_plan(session, usage);
                         continue;
                     }
@@ -1746,5 +1875,53 @@ mod keep_awake_tests {
             assert_eq!(program, "caffeinate");
             assert_eq!(args, vec!["-i", "-w", "4242"]);
         }
+    }
+}
+
+#[cfg(test)]
+mod limit_tests {
+    use super::*;
+    use ginka_protocol::model::PlanWindow;
+
+    fn window(used_percent: f64, resets_at: Option<i64>) -> PlanWindow {
+        PlanWindow {
+            label: "5h".into(),
+            used_percent,
+            resets_at,
+        }
+    }
+
+    #[test]
+    fn only_an_exhausted_window_with_a_reset_holds_the_queue() {
+        let usage = |windows| PlanUsage {
+            plan: None,
+            windows,
+        };
+        assert_eq!(exhausted_until(&usage(vec![window(92.0, Some(10))])), None);
+        assert_eq!(exhausted_until(&usage(vec![window(100.0, None)])), None);
+        assert_eq!(
+            exhausted_until(&usage(vec![
+                window(100.0, Some(10)),
+                window(40.0, Some(99)),
+                window(100.0, Some(50)),
+            ])),
+            Some(50),
+            "the last exhausted window to open is the one to wait for"
+        );
+    }
+
+    #[test]
+    fn a_limit_hold_keeps_what_waits_and_resumes_after_the_margin() {
+        let mut queue = PendingQueue::default();
+        queue.push("the reader's own".into());
+        queue.hold_for_limit(1_000);
+        assert_eq!(
+            queue.items().len(),
+            1,
+            "nothing is added to a queue that has work"
+        );
+        assert!(queue.paused);
+        assert!(!queue.resume_due(1_000));
+        assert!(queue.resume_due(1_000 + RESUME_MARGIN_SECS));
     }
 }

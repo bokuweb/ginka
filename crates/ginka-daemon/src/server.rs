@@ -370,18 +370,33 @@ impl Daemon {
                     // than holding the executor a request is being served on.
                     let service = service.clone();
                     smol::unblock(move || {
-                        let mut service = service.lock().unwrap_or_else(|e| e.into_inner());
-                        if sync {
-                            // A settings file edited by hand is read on the
-                            // same beat as the worktrees.
-                            service.reload_settings_if_changed();
-                            service.sync();
-                        }
-                        if status {
-                            service.poll_statuses();
-                        }
-                        if cron {
-                            service.run_due_cron_now();
+                        let due = {
+                            let mut service = service.lock().unwrap_or_else(|e| e.into_inner());
+                            if sync {
+                                // A settings file edited by hand is read on the
+                                // same beat as the worktrees.
+                                service.reload_settings_if_changed();
+                                service.sync();
+                            }
+                            if status {
+                                service.poll_statuses();
+                            }
+                            if cron {
+                                service.resume_limited_queues(chrono_now());
+                                service.take_due_cron_now()
+                            } else {
+                                Vec::new()
+                            }
+                        };
+                        // A precheck can take up to a minute; requests are
+                        // served meanwhile, and the lock is taken back only
+                        // to fire.
+                        for job in &due {
+                            let verdict = job.precheck();
+                            service
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .fire_due_cron(job, verdict);
                         }
                     })
                     .await;

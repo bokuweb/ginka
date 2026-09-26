@@ -76,6 +76,18 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_browser_history",
         include_str!("../../../db/migrations/0017_browser_history.sql"),
     ),
+    (
+        "0018_workspace_status",
+        include_str!("../../../db/migrations/0018_workspace_status.sql"),
+    ),
+    (
+        "0019_cron_precheck",
+        include_str!("../../../db/migrations/0019_cron_precheck.sql"),
+    ),
+    (
+        "0020_queue_resume_at",
+        include_str!("../../../db/migrations/0020_queue_resume_at.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

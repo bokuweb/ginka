@@ -1047,7 +1047,18 @@ impl SessionSidebar {
                                         .child(summary)
                                 })),
                         )
-                    }),
+                    })
+                    .children(row.status_note.clone().map(|note| {
+                        // What the agent says it is doing, in its own words;
+                        // the title says what it was asked.
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .italic()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(note)
+                    })),
             )
     }
 
