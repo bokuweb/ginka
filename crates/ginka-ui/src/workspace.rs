@@ -8,7 +8,8 @@
 use crate::assets::icon;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    AgentStatus, BranchStatus, Project, ProjectKind, SessionState, WorkspaceSummary,
+    AgentStatus, BranchStatus, Project, ProjectKind, PullRequest, PullRequestState, SessionState,
+    WorkspaceSummary,
 };
 use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use gpui::SharedString;
@@ -352,6 +353,19 @@ pub struct SessionRow {
     pub queued: u32,
     /// Whether semantic search is ready for agents started in this worktree.
     pub indexed: bool,
+    /// The pull request opened from the branch, drawn as its state's mark.
+    pub pull_request: Option<PullRequest>,
+}
+
+/// The mark a pull request in `state` is drawn with: the same shapes GitHub
+/// readers already know, so open, merged and closed read without a label.
+pub fn pull_request_icon(state: PullRequestState) -> &'static str {
+    match state {
+        PullRequestState::Open => icon::GIT_PULL_REQUEST,
+        PullRequestState::Draft => icon::GIT_PULL_REQUEST_DRAFT,
+        PullRequestState::Merged => icon::GIT_MERGE,
+        PullRequestState::Closed => icon::GIT_PULL_REQUEST_CLOSED,
+    }
 }
 
 impl SessionRow {
@@ -400,7 +414,15 @@ impl SessionRow {
             pinned: summary.worktree.pinned,
             queued: summary.queued,
             indexed: summary.indexed,
+            pull_request: summary.pull_request.clone(),
         }
+    }
+
+    /// The mark for the row's pull request, when it has one.
+    pub fn pull_request_icon(&self) -> Option<&'static str> {
+        self.pull_request
+            .as_ref()
+            .map(|pull_request| pull_request_icon(pull_request.state))
     }
 
     /// Whether the branch is worth a line of its own.
@@ -482,6 +504,7 @@ impl SessionRow {
             pinned: false,
             queued: 0,
             indexed: false,
+            pull_request: None,
         }
     }
 
@@ -710,6 +733,26 @@ mod tests {
         let mut summary = summary(None);
         summary.worktree.pinned = true;
         assert!(SessionRow::from_summary(&summary, 1_000_000).pinned);
+    }
+
+    #[test]
+    fn a_row_draws_its_pull_request_by_state_and_nothing_without_one() {
+        assert_eq!(
+            SessionRow::from_summary(&summary(None), 1_000_000).pull_request_icon(),
+            None
+        );
+        let mut summary = summary(None);
+        summary.pull_request = Some(PullRequest {
+            number: 12,
+            url: "https://github.com/o/r/pull/12".into(),
+            state: PullRequestState::Merged,
+        });
+        let row = SessionRow::from_summary(&summary, 1_000_000);
+        assert_eq!(row.pull_request_icon(), Some(icon::GIT_MERGE));
+        assert_eq!(
+            pull_request_icon(PullRequestState::Closed),
+            icon::GIT_PULL_REQUEST_CLOSED
+        );
     }
 
     #[test]
@@ -942,6 +985,7 @@ mod tests {
             last_commit_at: Some(900_000),
             indexed: false,
             queued: 0,
+            pull_request: None,
         }
     }
 

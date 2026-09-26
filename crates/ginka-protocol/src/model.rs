@@ -129,6 +129,32 @@ impl BranchStatus {
     }
 }
 
+/// Where a workspace's pull request stands on its host.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PullRequestState {
+    /// Open and ready for review.
+    Open,
+    /// Open, but marked as a draft.
+    Draft,
+    /// Merged into its base.
+    Merged,
+    /// Closed without being merged.
+    Closed,
+}
+
+/// The pull request opened from a workspace's branch.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PullRequest {
+    /// The host's number for it, `#12`.
+    pub number: u32,
+    /// Where it is read.
+    pub url: String,
+    pub state: PullRequestState,
+}
+
 /// One agent conversation, scoped to one workspace and one driver.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -998,6 +1024,11 @@ pub struct WorkspaceSummary {
     /// How many follow-ups wait in the latest session's queue.
     #[serde(default)]
     pub queued: u32,
+    /// The pull request opened from the worktree's branch, when the daemon
+    /// has seen one. `None` also for a project with no GitHub remote or a
+    /// machine without `gh`: the listing never waits on the network.
+    #[serde(default)]
+    pub pull_request: Option<PullRequest>,
 }
 
 impl WorkspaceSummary {
@@ -1103,6 +1134,7 @@ mod tests {
             last_commit_at: None,
             indexed: false,
             queued: 0,
+            pull_request: None,
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
@@ -1117,12 +1149,15 @@ mod tests {
             last_commit_at: None,
             indexed: false,
             queued: 0,
+            pull_request: None,
         })
         .unwrap();
         let mut object = json.as_object().unwrap().clone();
         object.remove("indexed");
+        object.remove("pull_request");
         let summary: WorkspaceSummary = serde_json::from_value(object.into()).unwrap();
         assert!(!summary.indexed);
+        assert_eq!(summary.pull_request, None);
     }
 }
 

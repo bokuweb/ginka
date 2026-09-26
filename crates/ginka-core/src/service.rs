@@ -64,6 +64,11 @@ pub struct Service {
     /// sidebar every minute because nothing happened is a worse answer than a
     /// client that is told when something did.
     statuses: std::collections::HashMap<WorkspaceId, ginka_protocol::model::BranchStatus>,
+    /// The pull request each workspace's branch was last seen with.
+    ///
+    /// Filled by the daemon's poller from `gh`, never by a listing: the
+    /// sidebar must not wait on the network to draw.
+    pull_requests: std::collections::HashMap<WorkspaceId, ginka_protocol::model::PullRequest>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -149,6 +154,7 @@ impl Service {
             events,
             drivers: Arc::new(Registry::with_defaults()),
             statuses: std::collections::HashMap::new(),
+            pull_requests: std::collections::HashMap::new(),
             agents: None,
             settings,
             accounts: None,
@@ -1022,6 +1028,21 @@ impl Service {
             Request::CreatePullRequest { workspace, draft } => {
                 let worktree = self.worktree(&workspace)?;
                 let url = git::create_pull_request(&worktree.path, draft).map_err(failed)?;
+                // Known at once rather than on the poller's next beat: the
+                // reader just asked for it and is looking at the row.
+                if let Some(number) = git::pull_request_number(&url) {
+                    let state = if draft {
+                        ginka_protocol::model::PullRequestState::Draft
+                    } else {
+                        ginka_protocol::model::PullRequestState::Open
+                    };
+                    let pull_request = ginka_protocol::model::PullRequest {
+                        number,
+                        url: url.clone(),
+                        state,
+                    };
+                    self.note_pull_request(worktree.workspace_id(), Some(pull_request));
+                }
                 // The push moved the branch's upstream, which the sidebar shows.
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: worktree.project.clone(),
@@ -2728,6 +2749,7 @@ impl Service {
             .as_ref()
             .map(|session| self.sessions.queued_count(&session.id))
             .unwrap_or(0);
+        let id = worktree.workspace_id();
         WorkspaceSummary {
             indexed: crate::tools::is_indexed(&worktree.path),
             worktree,
@@ -2735,8 +2757,18 @@ impl Service {
             session,
             last_commit_at,
             queued,
+            pull_request: self.pull_requests.get(&id).cloned(),
         }
     }
+}
+
+/// One project's worth of work for the pull request poller.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PullRequestPlan {
+    /// Where `gh` runs.
+    pub root: std::path::PathBuf,
+    /// Every workspace in the project and the branch it is on now.
+    pub branches: Vec<(WorkspaceId, String)>,
 }
 
 /// A conversation's title, from the prompt that opened it.
@@ -2887,6 +2919,64 @@ impl Service {
         }
         // A workspace that is gone is not worth remembering the status of.
         self.statuses.retain(|id, _| seen.contains(id));
+    }
+
+    /// The projects whose pull requests the poller should read: each one's
+    /// root and the branch every workspace in it is on.
+    ///
+    /// A plain folder, or a repository known to have no remote, has nothing
+    /// to ask GitHub about.
+    pub fn pull_request_plan(&self) -> Vec<PullRequestPlan> {
+        let Ok(projects) = self.projects() else {
+            return Vec::new();
+        };
+        projects
+            .into_iter()
+            .filter(|project| project.kind == ginka_protocol::ProjectKind::Git)
+            .filter(|project| project.has_origin != Some(false))
+            .filter_map(|project| {
+                let worktrees = project::list_worktrees(&self.conn(), &project.name).ok()?;
+                let branches = worktrees
+                    .iter()
+                    .map(|worktree| (worktree.workspace_id(), worktree.branch.clone()))
+                    .collect();
+                Some(PullRequestPlan {
+                    root: project.path,
+                    branches,
+                })
+            })
+            .collect()
+    }
+
+    /// Keep what a read of one project's pull requests found for each of its
+    /// workspaces, and push what changed.
+    pub fn set_pull_requests(
+        &mut self,
+        found: Vec<(WorkspaceId, Option<ginka_protocol::model::PullRequest>)>,
+    ) {
+        for (workspace, pull_request) in found {
+            self.note_pull_request(workspace, pull_request);
+        }
+    }
+
+    /// Remember one workspace's pull request, telling clients only when it is
+    /// news.
+    fn note_pull_request(
+        &mut self,
+        workspace: WorkspaceId,
+        pull_request: Option<ginka_protocol::model::PullRequest>,
+    ) {
+        if self.pull_requests.get(&workspace) == pull_request.as_ref() {
+            return;
+        }
+        match &pull_request {
+            Some(known) => self.pull_requests.insert(workspace.clone(), known.clone()),
+            None => self.pull_requests.remove(&workspace),
+        };
+        self.events.emit(DaemonEvent::WorkspacePullRequestChanged {
+            workspace,
+            pull_request,
+        });
     }
 
     /// Do what the project asked for in a new worktree.

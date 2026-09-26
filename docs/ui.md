@@ -187,8 +187,12 @@ active conversation. With nothing selected, the rail stands alone.
   available without being repeated in the empty rail.
 - **Workspace row**, indented under its project (6 px radius, selected =
   `bg.raised` fill):
-  1. Agent glyph, session title, right-aligned status: relative time (`now`,
-     `46m`, `4h`) **or** a status pill (animated dot + `Working`).
+  1. Agent glyph, session title, the pull request mark when the branch has
+     one, right-aligned status: relative time (`now`, `46m`, `4h`) **or** a
+     status pill (animated dot + `Working`). The pull request mark is its
+     state's shape and colour — open in `status.done`, draft in `text.muted`,
+     merged in `accent`, closed in `status.error` — names `#12 merged` on
+     hover and opens the pull request on click.
   2. *Only when it says something the title does not:* git-branch icon +
      branch name (truncated from the left), the dirty dot, and the divergence.
      A workspace is named after the branch it was cut on, so this line appears

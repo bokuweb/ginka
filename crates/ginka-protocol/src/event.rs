@@ -7,7 +7,8 @@
 
 use crate::ids::{ProjectName, SessionId, TerminalId, WorkspaceId};
 use crate::model::{
-    BranchStatus, ConnectorState, PlanSnapshot, PlanUsage, Session, SessionState, TranscriptEntry,
+    BranchStatus, ConnectorState, PlanSnapshot, PlanUsage, PullRequest, Session, SessionState,
+    TranscriptEntry,
 };
 use serde::{Deserialize, Serialize};
 
@@ -257,6 +258,12 @@ pub enum DaemonEvent {
     WorkspaceStatusChanged {
         workspace: WorkspaceId,
         status: BranchStatus,
+    },
+    /// The pull request opened from a workspace's branch appeared, changed
+    /// state, or went away (`None`).
+    WorkspacePullRequestChanged {
+        workspace: WorkspaceId,
+        pull_request: Option<PullRequest>,
     },
     /// A session was created; carries the whole record so a client that has
     /// never seen it does not have to ask.

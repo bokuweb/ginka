@@ -1217,6 +1217,69 @@ fn the_poller_pushes_a_status_that_changed_and_stays_quiet_otherwise() {
 }
 
 #[test]
+fn a_workspace_pull_request_reaches_the_listing_and_is_pushed_only_when_it_changes() {
+    use ginka_protocol::model::{PullRequest, PullRequestState};
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "reviewed".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let id = workspace.id();
+    // The fixture's repository has no remote, so the poller would not ask.
+    assert!(fixture.service.pull_request_plan().is_empty());
+    fixture.recorder.taken();
+
+    let pushed = |fixture: &mut Fixture| -> Vec<DaemonEvent> {
+        fixture
+            .recorder
+            .taken()
+            .into_iter()
+            .filter(|event| matches!(event, DaemonEvent::WorkspacePullRequestChanged { .. }))
+            .collect()
+    };
+    let open = PullRequest {
+        number: 7,
+        url: "https://github.com/o/r/pull/7".into(),
+        state: PullRequestState::Open,
+    };
+    fixture
+        .service
+        .set_pull_requests(vec![(id.clone(), Some(open.clone()))]);
+    assert_eq!(pushed(&mut fixture).len(), 1);
+    fixture
+        .service
+        .set_pull_requests(vec![(id.clone(), Some(open.clone()))]);
+    assert!(pushed(&mut fixture).is_empty(), "nothing changed");
+
+    let listed = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let row = listed.iter().find(|summary| summary.id() == id).unwrap();
+    assert_eq!(row.pull_request.as_ref(), Some(&open));
+
+    let merged = PullRequest {
+        state: PullRequestState::Merged,
+        ..open
+    };
+    fixture
+        .service
+        .set_pull_requests(vec![(id.clone(), Some(merged))]);
+    assert_eq!(pushed(&mut fixture).len(), 1);
+    fixture.service.set_pull_requests(vec![(id.clone(), None)]);
+    assert_eq!(
+        pushed(&mut fixture).len(),
+        1,
+        "a pull request that went away"
+    );
+}
+
+#[test]
 fn a_history_row_opens_what_that_commit_did_and_nothing_else_is_taken_as_one() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

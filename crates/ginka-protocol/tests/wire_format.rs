@@ -8,7 +8,8 @@
 use ginka_protocol::event::{ActivityItem, SubagentStep, SubagentStepKind, SubagentStepStatus};
 use ginka_protocol::event::{AgentEvent, ContextUsage, DaemonEvent, Usage};
 use ginka_protocol::model::{
-    AgentStatus, FileContent, FileImage, ProjectKind, SessionState, TranscriptPayload,
+    AgentStatus, FileContent, FileImage, ProjectKind, PullRequest, PullRequestState, SessionState,
+    TranscriptPayload,
 };
 use ginka_protocol::provider::{ProviderModel, ProviderOption};
 use ginka_protocol::rpc::{Request, Response};
@@ -271,6 +272,35 @@ fn every_push_carries_a_sequence_number_so_gaps_are_detectable() {
     assert_eq!(wired["type"], json!("event"));
     assert_eq!(wired["seq"], json!(42));
     assert_eq!(wired["payload"]["event"], json!("workspaces_changed"));
+}
+
+#[test]
+fn a_workspace_pull_request_is_pushed_with_its_state_and_its_absence() {
+    let event = DaemonEvent::WorkspacePullRequestChanged {
+        workspace: WorkspaceId("comet/bright-harbor".into()),
+        pull_request: Some(PullRequest {
+            number: 12,
+            url: "https://github.com/o/r/pull/12".into(),
+            state: PullRequestState::Merged,
+        }),
+    };
+    assert_eq!(
+        wire(&event),
+        json!({
+            "event": "workspace_pull_request_changed",
+            "workspace": "comet/bright-harbor",
+            "pull_request": {
+                "number": 12,
+                "url": "https://github.com/o/r/pull/12",
+                "state": "merged",
+            },
+        })
+    );
+    let gone = DaemonEvent::WorkspacePullRequestChanged {
+        workspace: WorkspaceId("comet/bright-harbor".into()),
+        pull_request: None,
+    };
+    assert_eq!(wire(&gone)["pull_request"], Value::Null);
 }
 
 #[test]

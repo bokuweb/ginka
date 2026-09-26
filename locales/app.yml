@@ -1338,6 +1338,18 @@ composer.queue.clear:
 sidebar.queued:
   en: "%{count} queued"
   ja: "%{count} 件待ち"
+sidebar.pull_request.open:
+  en: "#%{number} open"
+  ja: "#%{number} オープン"
+sidebar.pull_request.draft:
+  en: "#%{number} draft"
+  ja: "#%{number} ドラフト"
+sidebar.pull_request.merged:
+  en: "#%{number} merged"
+  ja: "#%{number} マージ済み"
+sidebar.pull_request.closed:
+  en: "#%{number} closed"
+  ja: "#%{number} クローズ"
 sidebar.action.move_up:
   en: Move up
   ja: 上へ
