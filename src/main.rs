@@ -46,11 +46,13 @@ fn main() -> Result<()> {
     // made its NSApplication. Outside the bundled app on macOS there is no
     // Chromium to load; the browser surface says so and the rest carries on.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
-    let browser_runtime = gpui_cef::init(gpui_cef::RuntimeOptions {
-        cache_path: Some(paths.browser()),
-        ..Default::default()
-    })
-    .map_err(|error| error.to_string());
+    let browser_runtime = browser_framework_present().and_then(|()| {
+        gpui_cef::init(gpui_cef::RuntimeOptions {
+            cache_path: Some(paths.browser()),
+            ..Default::default()
+        })
+        .map_err(|error| error.to_string())
+    });
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let started_runtime = browser_runtime.clone();
     let application = gpui_platform::application().with_assets(assets::Assets);
@@ -158,4 +160,26 @@ fn draw_text_unthickened() {
     if let Some(level) = ginka_ui::theme::font_smoothing_override(current) {
         defaults.setInteger_forKey(level as isize, &key);
     }
+}
+
+/// Whether Chromium's framework is where the engine will look for it — inside
+/// the app bundle, beside the executable. Checked first because the loader
+/// does not report a missing framework, it stops the process.
+#[cfg(target_os = "macos")]
+fn browser_framework_present() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let framework = exe
+        .parent()
+        .and_then(|macos| macos.parent())
+        .map(|contents| contents.join("Frameworks/Chromium Embedded Framework.framework"));
+    match framework {
+        Some(framework) if framework.is_dir() => Ok(()),
+        _ => Err(rust_i18n::t!("surface.browser.needs_app").to_string()),
+    }
+}
+
+/// WebView2 is part of Windows; there is nothing to look for.
+#[cfg(target_os = "windows")]
+fn browser_framework_present() -> Result<(), String> {
+    Ok(())
 }

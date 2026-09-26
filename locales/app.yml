@@ -355,6 +355,9 @@ surface.browser.inspect:
 surface.browser.feedback:
   en: What should change about this element?
   ja: この要素をどう変更しますか？
+surface.browser.needs_app:
+  en: "The browser runs in the app bundle, where Chromium is: start Ginka.app, or scripts/dev-macos from a checkout."
+  ja: "ブラウザは Chromium を含むアプリバンドルの中で動きます。Ginka.app を起動するか、チェックアウトから scripts/dev-macos を使ってください。"
 surface.browser.import:
   en: From Chrome
   ja: Chrome から
