@@ -25,8 +25,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{
-    BasePanel, DockArea, DockEvent, DockLayout, DockSkin, Panel, PanelControl, PanelEvent,
-    panel_handle,
+    BasePanel, DockArea, DockEvent, DockLayout, Panel, PanelControl, PanelEvent, panel_handle,
 };
 use gpui_component::input::{
     Editor, EditorState, InputEvent, InputState, Replace, Search, TabSize, Textarea, TextareaState,
@@ -70,6 +69,8 @@ pub struct SurfacePanel {
     dock_stale: bool,
     /// The chooser is up in place of the dock.
     choosing: bool,
+    /// The panel fills the window in place of the other columns.
+    maximized: bool,
     /// Counts arrangement changes, so only the last of a burst is saved.
     arrangement_changes: u64,
     /// The shell's terminals, drawn in the Terminal tab; the shell owns them.
@@ -200,6 +201,10 @@ pub enum SurfaceEvent {
     /// The surfaces open in the right panel, or their arrangement, changed
     /// and should be remembered.
     Arranged,
+    /// Let the panel fill the window, or give the other columns back.
+    ToggleMaximized,
+    /// Close the panel, as its toggle in the window's header does.
+    Close,
     /// A page loaded in a workspace's browser: keep it in its history.
     /// Only a platform with the browser surface sends this or the next.
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -331,7 +336,7 @@ impl SurfacePanel {
             TextareaState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.browser.feedback").to_string())
         });
-        let (dock_area, _) = DockSkin::dock_area("surfaces", Some(1), window, cx);
+        let dock_area = crate::surface_dock::dock_area("surfaces", Some(1), window, cx);
         cx.subscribe(&dock_area, |this, area, event: &DockEvent, cx| {
             if matches!(event, DockEvent::LayoutChanged) {
                 this.read_dock(&area, cx);
@@ -344,6 +349,7 @@ impl SurfacePanel {
             dock_tabs: HashMap::new(),
             dock_stale: false,
             choosing: false,
+            maximized: false,
             arrangement_changes: 0,
             terminal_view: None,
             finder,
@@ -1307,12 +1313,16 @@ impl SurfacePanel {
     /// column's own header and it is the same height as the other two — three
     /// strips at three heights would read as three windows.
     fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let tokens = Tokens::global(cx);
         h_flex()
             .w_full()
             .flex_shrink_0()
             .h(ginka_ui::layout::HEADER_HEIGHT)
             .px_3()
+            // Filling the window, the strip starts where the traffic lights
+            // are, and keeps clear of them the way the centre's does.
+            .when(self.maximized, |this| {
+                this.pl(ginka_ui::layout::TRAFFIC_LIGHT_INSET)
+            })
             .justify_between()
             .items_center()
             .child(
@@ -1326,18 +1336,45 @@ impl SurfacePanel {
             )
             .child(
                 h_flex()
-                    .gap_2()
+                    .gap_1()
                     .child(
-                        Icon::new(IconName::Maximize)
-                            .size_4()
-                            .text_color(tokens.colors().text_secondary),
+                        Button::new("maximize-surfaces")
+                            .icon(if self.maximized {
+                                IconName::Minimize
+                            } else {
+                                IconName::Maximize
+                            })
+                            .ghost()
+                            .compact()
+                            .small()
+                            .tooltip(if self.maximized {
+                                rust_i18n::t!("surface.restore").to_string()
+                            } else {
+                                rust_i18n::t!("surface.maximize").to_string()
+                            })
+                            .on_click(
+                                cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::ToggleMaximized)),
+                            ),
                     )
                     .child(
-                        Icon::new(IconName::PanelRight)
-                            .size_4()
-                            .text_color(tokens.colors().text_secondary),
+                        Button::new("close-surfaces")
+                            .icon(IconName::PanelRight)
+                            .ghost()
+                            .compact()
+                            .small()
+                            .tooltip(rust_i18n::t!("surface.close_panel").to_string())
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Close))),
                     ),
             )
+    }
+
+    /// Say whether the panel fills the window, so its control says which way
+    /// it goes and its header keeps clear of the window's own controls.
+    pub fn set_maximized(&mut self, maximized: bool, cx: &mut Context<Self>) {
+        if self.maximized != maximized {
+            self.maximized = maximized;
+            cx.notify();
+        }
     }
 
     fn chooser_button(&self, surface: Surface, cx: &mut Context<Self>) -> impl IntoElement {
@@ -4223,19 +4260,18 @@ impl Panel for SurfaceTab {
             .panel
             .upgrade()
             .is_some_and(|panel| panel.read(cx).shows(self.surface));
-        // The same tab as everywhere else; the dock's own chrome around it
-        // is left clear by the theme. Wrapped, so a group's title bar does
-        // not stretch it to its width.
-        h_flex().child(
-            ginka_ui::chrome::tab(
-                SharedString::from(format!("surface-tab:{}", self.surface.key())),
-                active,
-                cx,
-            )
-            .pr(px(8.))
+        // What the tab holds; the tab itself — the same one as everywhere
+        // else — is drawn around it by the dock's tab bar
+        // (`crate::surface_dock`), which also owns closing it.
+        h_flex()
+            .gap(px(6.))
+            .items_center()
             .child(ginka_ui::chrome::tab_icon(self.surface.icon(), active, cx))
-            .child(ginka_ui::chrome::tab_label(self.surface.label())),
-        )
+            .child(ginka_ui::chrome::tab_label(self.surface.label()))
+    }
+
+    fn tab_name(&self, _: &App) -> Option<SharedString> {
+        Some(self.surface.label().into())
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

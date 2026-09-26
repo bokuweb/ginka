@@ -19,6 +19,7 @@ mod lsp;
 mod notes;
 mod shell;
 mod sidebar;
+mod surface_dock;
 mod surfaces;
 
 use anyhow::Result;
