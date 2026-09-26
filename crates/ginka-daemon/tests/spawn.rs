@@ -275,14 +275,24 @@ fn clients_arriving_together_share_one_daemon() {
         handle.join().unwrap();
     }
     // However many clients raced to start one, only one daemon got past the
-    // lock to serve, and its log says so once.
-    let ready = std::fs::read_dir(home.paths.logs())
-        .unwrap()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("daemon"))
-        .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
-        .map(|text| text.matches("daemon ready").count())
-        .sum::<usize>();
-    assert_eq!(ready, 1, "one daemon served every client");
+    // lock to serve, and its log says so once. The log is written from a
+    // background thread, so the line can land after the clients are served:
+    // wait for it rather than reading the file once.
+    let ready = || {
+        std::fs::read_dir(home.paths.logs())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with("daemon"))
+            .map(|entry| std::fs::read_to_string(entry.path()).unwrap_or_default())
+            .map(|text| text.matches("daemon ready").count())
+            .sum::<usize>()
+    };
+    for _ in 0..200 {
+        if ready() > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+    assert_eq!(ready(), 1, "one daemon served every client");
     stop(&discovery);
 }
