@@ -323,7 +323,7 @@ impl DaemonSettings {
             .entry(provider.as_str().to_string())
             .or_default();
         entry.program = path.map(|path| path.to_string_lossy().into_owned());
-        if entry.program.is_none() && entry.env.is_empty() {
+        if entry.program.is_none() && entry.env.is_empty() && entry.transport.is_none() {
             self.agents.remove(provider.as_str());
         }
     }
@@ -337,6 +337,10 @@ pub struct AgentSettings {
     pub program: Option<String>,
     /// Environment for the agent's process, on top of the inherited one.
     pub env: BTreeMap<String, String>,
+    /// How a turn talks to the agent, where there is a choice. Codex runs
+    /// over its app server, which can ask before it acts; `"exec"` goes back
+    /// to `codex exec`, which cannot, for when the server misbehaves.
+    pub transport: Option<String>,
 }
 
 /// One login of one provider, beyond the provider's own.

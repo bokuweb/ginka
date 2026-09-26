@@ -24,6 +24,11 @@ fn main() {
     if std::env::args().any(|argument| argument == "--experimental-acp" || argument == "acp") {
         return acp_agent();
     }
+    if std::env::args().nth(1).as_deref() == Some("app-server")
+        && std::env::var_os("GINKA_FAKE_AGENT_SCRIPT").is_none()
+    {
+        return codex_app_server();
+    }
     // Two ways to script this, because two suites do. A script file exercises
     // the daemon's supervisor with directives it can pause and block on; the
     // flags exercise the driver's own reading of a stream. Neither knows about
@@ -32,6 +37,70 @@ fn main() {
         return scripted();
     }
     flags();
+}
+
+/// Minimal Codex app server: one thread, one turn per process. A prompt that
+/// mentions "permission" asks to run a command first and says which
+/// decision came back; any other prompt is echoed.
+fn codex_app_server() {
+    use serde_json::{Value, json};
+    let mut output = std::io::stdout().lock();
+    let mut send = |message: Value| {
+        writeln!(output, "{message}").ok();
+        output.flush().ok();
+    };
+    let said = |text: String| json!({"method": "item/completed", "params": {"item": {"type": "agentMessage", "id": "m1", "text": text}}});
+    let done = json!({"method": "turn/completed", "params": {"threadId": "th-fake", "turn": {"id": "tu-1", "status": "completed"}}});
+    let mut lines = std::io::stdin().lock().lines();
+    while let Some(Ok(line)) = lines.next() {
+        let Ok(message) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        let id = message["id"].clone();
+        match message["method"].as_str() {
+            Some("initialize") => send(json!({"id": id, "result": {"userAgent": "fake"}})),
+            Some("thread/start") => send(
+                json!({"id": id, "result": {"thread": {"id": "th-fake"}, "model": "fake-model"}}),
+            ),
+            Some("thread/resume") => send(json!({"id": id, "result": {
+                "thread": {"id": message["params"]["threadId"]}, "model": "fake-model"}})),
+            Some("turn/start") => {
+                send(json!({"id": id, "result": {"turn": {"id": "tu-1", "status": "inProgress"}}}));
+                let prompt = message["params"]["input"][0]["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
+                if !prompt.contains("permission") {
+                    send(said(format!("[codex:{prompt}]")));
+                    send(done.clone());
+                    continue;
+                }
+                send(
+                    json!({"method": "item/commandExecution/requestApproval", "id": 0, "params": {
+                    "threadId": "th-fake", "turnId": "tu-1", "itemId": "exec-1", "startedAtMs": 0,
+                    "command": "/bin/zsh -lc 'cargo test'",
+                    "commandActions": [{"type": "unknown", "command": "cargo test"}]}}),
+                );
+                // The answer to the approval, whatever else arrives first.
+                for line in lines.by_ref() {
+                    let Ok(answer) = serde_json::from_str::<Value>(&line.unwrap_or_default())
+                    else {
+                        continue;
+                    };
+                    if answer["id"] == 0 && answer.get("method").is_none() {
+                        let decision = answer["result"]["decision"]
+                            .as_str()
+                            .unwrap_or("none")
+                            .to_string();
+                        send(said(format!("[decision:{decision}]")));
+                        send(done.clone());
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Minimal ACP agent: one session, reloadable, that echoes the prompt back.

@@ -136,6 +136,7 @@ impl RestartDriver {
     fn new(program: &str, script: &std::path::Path) -> Self {
         Self {
             inner: CodexDriver::with_program(program)
+                .with_exec()
                 .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
         }
     }
@@ -264,6 +265,18 @@ impl Fixture {
         self.service = service;
     }
 
+    /// Run `codex` over the fake app server instead of scripted `exec`.
+    fn use_codex_app_server(&mut self) {
+        let mut drivers = Self::drivers(&self.script);
+        drivers.insert(Arc::new(CodexDriver::with_program(FAKE_AGENT)));
+        self.service = Service::new(
+            self.paths.clone(),
+            db::open(&self.db_path).unwrap(),
+            self.recorder.clone(),
+        )
+        .with_drivers(drivers);
+    }
+
     /// The drivers every fixture daemon runs: the fake agent behind each.
     fn drivers(script: &std::path::Path) -> Registry {
         let mut drivers = Registry::with_defaults();
@@ -275,6 +288,7 @@ impl Fixture {
         // fallback — queue the follow-up, resume afterwards — stays covered.
         drivers.insert(Arc::new(
             ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
+                .with_exec()
                 .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
         ));
         drivers.insert(Arc::new(RestartDriver::new(FAKE_AGENT, script)));
@@ -1837,6 +1851,7 @@ fn every_agent_is_handed_ginkas_bridge_and_the_servers_the_user_listed() {
     let mut drivers = Registry::empty();
     drivers.insert(Arc::new(
         ginka_core::driver::codex::CodexDriver::with_program(FAKE_AGENT)
+            .with_exec()
             .with_env("GINKA_FAKE_AGENT_SCRIPT", script.to_string_lossy()),
     ));
     let mut service = Service::new(
@@ -3149,6 +3164,49 @@ fn claude_asks_before_a_command_and_the_readers_choice_goes_back_on_its_input() 
     let said = spoken(&transcript);
     assert!(said.contains(r#""request_id":"req-1""#), "{said}");
     assert!(said.contains(r#""command":"cargo test""#), "{said}");
+}
+
+#[test]
+fn codex_asks_before_a_command_over_its_app_server_and_carries_on_in_the_thread() {
+    let mut fixture = Fixture::new();
+    fixture.use_codex_app_server();
+    let session = fixture.start_with("codex", "", "needs permission");
+    fixture.wait_for_state(&session, SessionState::AwaitingInput);
+    let (id, question, options) = fixture
+        .transcript(&session)
+        .into_iter()
+        .find_map(|entry| match entry {
+            TranscriptPayload::Agent {
+                event:
+                    AgentEvent::AskUser {
+                        id,
+                        question,
+                        options,
+                    },
+            } => Some((id, question, options)),
+            _ => None,
+        })
+        .expect("the approval is recorded as a card");
+    assert!(question.contains("cargo test"), "{question}");
+    assert_eq!(options, vec!["Allow", "Allow for this session", "Deny"]);
+
+    fixture.ask(Request::RespondToAgent {
+        session: session.clone(),
+        request_id: id,
+        response: "Allow for this session".into(),
+    });
+    fixture.wait_for_said(&session, "[decision:acceptForSession]");
+    assert_eq!(
+        fixture.stored(&session).vendor_session_id.as_deref(),
+        Some("th-fake")
+    );
+
+    // The next turn continues the same thread.
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "again".into(),
+    });
+    fixture.wait_for_said(&session, "[codex:again]");
 }
 
 #[test]

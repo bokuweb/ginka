@@ -1,6 +1,9 @@
 //! The Codex driver.
 //!
-//! Runs `codex exec --json`, which writes one JSON object per line. Two
+//! Turns run over `codex app-server` by default (`codex_app`), where Codex
+//! can ask before it acts. With `agents.codex.transport = "exec"` they run
+//! `codex exec --json` instead, which is what the rest of this module reads:
+//! one JSON object per line. Two
 //! generations of that format are in the wild — a `thread`/`item`/`turn`
 //! vocabulary, and an older envelope with the payload under `msg` — and both
 //! are handled, because crate::driver::ActivityItem;
@@ -22,6 +25,9 @@ use serde_json::Value;
 pub struct CodexDriver {
     program: String,
     env: Vec<(String, String)>,
+    /// Run turns with `codex exec` rather than over the app server
+    /// (`codex_app`): no approvals, but no experimental protocol either.
+    exec: bool,
 }
 
 impl Default for CodexDriver {
@@ -36,7 +42,14 @@ impl CodexDriver {
         Self {
             program: program.into(),
             env: Vec::new(),
+            exec: false,
         }
+    }
+
+    /// Run turns with `codex exec`, which never asks before it acts.
+    pub fn with_exec(mut self) -> Self {
+        self.exec = true;
+        self
     }
 
     /// Set an environment variable for every process this driver starts.
@@ -232,6 +245,18 @@ impl AgentDriver for CodexDriver {
     }
 
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
+        if !self.exec {
+            // One process for the turn; the prompt and the thread are said
+            // over the protocol (`begin`). MCP servers ride `-c` overrides,
+            // which the server reads as `exec` does.
+            let mut command = CommandSpec::new(&self.program)
+                .arg("app-server")
+                .args(Self::mcp_args(spec));
+            for (key, value) in self.env.iter().chain(spec.env.iter()) {
+                command = command.env(key, value);
+            }
+            return command;
+        }
         let mut command = CommandSpec::new(&self.program)
             .arg("exec")
             .arg("--json")
@@ -245,6 +270,10 @@ impl AgentDriver for CodexDriver {
     }
 
     fn resume_command(&self, spec: &SessionSpec, vendor_session_id: &str) -> CommandSpec {
+        if !self.exec {
+            // Which thread to continue is said in `begin`.
+            return self.start_command(spec);
+        }
         let mut command = CommandSpec::new(&self.program)
             .arg("exec")
             .arg("resume")
@@ -296,6 +325,27 @@ impl AgentDriver for CodexDriver {
         plan_usage_from(value.get("result")?.get("rateLimits")?)
     }
 
+    fn begin(
+        &self,
+        spec: &SessionSpec,
+        vendor_session_id: Option<&str>,
+        state: &mut ParseState,
+    ) -> Vec<String> {
+        if self.exec {
+            return Vec::new();
+        }
+        crate::driver::codex_app::begin(spec, vendor_session_id, state)
+    }
+
+    fn supports_responses(&self) -> bool {
+        !self.exec
+    }
+
+    /// `request_id` is the card `codex_app` made for the server's request.
+    fn encode_response(&self, request_id: &str, response: &str) -> Option<String> {
+        crate::driver::codex_app::response(request_id, response)
+    }
+
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent> {
         let line = line.trim();
         if line.is_empty() {
@@ -305,6 +355,9 @@ impl AgentDriver for CodexDriver {
             state.unrecognized += 1;
             return Vec::new();
         };
+        if state.codex.active {
+            return crate::driver::codex_app::parse(&value, state);
+        }
 
         // The app-server spells the same lifecycle as JSON-RPC notifications.
         // Normalize its standard turn/item events; request responses are
@@ -648,7 +701,7 @@ fn parse_legacy(msg: &Value, state: &mut ParseState) -> Vec<AgentEvent> {
 /// a `secondary` window, each with a used percentage, a length in minutes and
 /// a reset time — snake_case on the event stream, camelCase from the app
 /// server. `None` when there is no window in it, which is not a reading.
-fn plan_usage_from(limits: &Value) -> Option<PlanUsage> {
+pub(super) fn plan_usage_from(limits: &Value) -> Option<PlanUsage> {
     let number = |value: &Value, keys: &[&str]| -> Option<f64> {
         keys.iter()
             .find_map(|key| value.get(*key))
@@ -720,7 +773,7 @@ fn usage_from(usage: &Value) -> Usage {
 /// Read current context occupancy only when the vendor supplied a capacity and
 /// a last-request total together. Session totals are not context occupancy:
 /// they continue increasing after the provider compacts a thread.
-fn context_usage_from(value: &Value) -> Option<ContextUsage> {
+pub(super) fn context_usage_from(value: &Value) -> Option<ContextUsage> {
     let usage = value
         .get("tokenUsage")
         .or_else(|| value.get("usage"))
@@ -772,8 +825,44 @@ mod tests {
     }
 
     #[test]
-    fn the_start_command_asks_for_jsonl() {
+    fn a_turn_runs_over_the_app_server_unless_exec_is_asked_for() {
         let driver = CodexDriver::default();
+        let spec =
+            SessionSpec::new("/w", "hello").with_mcp_servers(vec![crate::tools::McpServer {
+                name: "ginka".into(),
+                command: "ginka".into(),
+                args: vec!["mcp".into()],
+                env: Vec::new(),
+            }]);
+        let command = driver.start_command(&spec);
+        assert_eq!(command.args[0], "app-server");
+        assert!(
+            !command.args.iter().any(|arg| arg == "hello"),
+            "the prompt goes over the protocol, not the command line"
+        );
+        assert!(
+            command
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("mcp_servers.ginka"))
+        );
+        assert_eq!(driver.resume_command(&spec, "th-1").args, command.args);
+        assert!(driver.supports_responses());
+        let mut state = ParseState::default();
+        assert_eq!(driver.begin(&spec, Some("th-1"), &mut state).len(), 3);
+
+        let exec = CodexDriver::default().with_exec();
+        assert_eq!(exec.start_command(&spec).args[0], "exec");
+        assert!(!exec.supports_responses());
+        assert!(
+            exec.begin(&spec, None, &mut ParseState::default())
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_start_command_asks_for_jsonl() {
+        let driver = CodexDriver::default().with_exec();
         let command = driver.start_command(&SessionSpec::new("/tmp/wt", "do the thing"));
         assert_eq!(command.program, "codex");
         assert_eq!(command.args[0], "exec");
@@ -846,7 +935,7 @@ mod tests {
 
     #[test]
     fn each_access_mode_is_a_sandbox_the_vendor_names() {
-        let driver = CodexDriver::default();
+        let driver = CodexDriver::default().with_exec();
         let args_for = |access| {
             driver
                 .start_command(&SessionSpec::new("/tmp/wt", "go").with_access_mode(access))
@@ -883,7 +972,7 @@ mod tests {
 
     #[test]
     fn mcp_servers_become_config_overrides_before_the_prompt() {
-        let driver = CodexDriver::default();
+        let driver = CodexDriver::default().with_exec();
         let spec =
             SessionSpec::new("/tmp/wt", "hello").with_mcp_servers(vec![crate::tools::McpServer {
                 name: "ginka".into(),
@@ -918,7 +1007,7 @@ mod tests {
 
     #[test]
     fn a_preamble_is_sent_in_front_of_the_prompt_and_nowhere_else() {
-        let driver = CodexDriver::default();
+        let driver = CodexDriver::default().with_exec();
         let spec = SessionSpec::new("/tmp/wt", "carry on")
             .with_preamble(Some("what came before".to_string()));
         let command = driver.start_command(&spec);
@@ -939,7 +1028,7 @@ mod tests {
 
     #[test]
     fn a_resume_names_the_session_before_the_prompt() {
-        let driver = CodexDriver::default();
+        let driver = CodexDriver::default().with_exec();
         let command = driver.resume_command(&SessionSpec::new("/tmp/wt", "carry on"), "01H");
         assert_eq!(&command.args[..3], &["exec", "resume", "01H"]);
         assert_eq!(command.args.last().map(String::as_str), Some("carry on"));

@@ -649,8 +649,9 @@ enum SessionCommand {
         /// Which login to run on, by id. The provider's active account otherwise.
         #[arg(long)]
         account: Option<String>,
-        /// What the agent may touch: read-only, ask (edit freely, commands
-        /// sandboxed or refused) or auto (edit and run). Defaults to ask.
+        /// What the agent may touch: read-only, ask (edit freely, and be
+        /// asked before a command runs) or auto (edit and run). Defaults to
+        /// ask.
         #[arg(long, value_parser = parse_access)]
         access: Option<ginka_protocol::AccessMode>,
     },
