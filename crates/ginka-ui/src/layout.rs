@@ -27,6 +27,12 @@ pub const TRAFFIC_LIGHT_INSET: Pixels = px(78.);
 /// Width of the always-present project navigation rail.
 pub const PROJECT_RAIL_WIDTH: Pixels = px(188.);
 
+/// Width of a place's own list column — the Inbox's items, the Notes list —
+/// and of any fixed pane a place opens beside its content.
+///
+/// One value so moving between places does not shift the content edge.
+pub const PLACE_PANE_WIDTH: Pixels = px(360.);
+
 /// Width of the navigator for its current selection state.
 ///
 /// The session column is contextual: before a project is selected the rail

@@ -390,7 +390,7 @@ The diff list separates worktree-only changes from staged changes. The same path
 ### 3.5 Inbox
 
 Built with `--features github`: the e1 GitHub client, mounted as pieces rather
-than as its window. A 380 px list column — the place's header, the
+than as its window. A 360 px list column — the place's header, the
 connections (GitHub, and *Add connection*, which says GitHub is the one there
 is), section chips (Inbox, My PRs, Reviews, Assigned) and e1's list — then e1's
 detail in the centre and its *Ask* pane at the far right while open. e1's own
@@ -404,7 +404,7 @@ every theme change, so a system appearance switch reaches both.
 
 ### 3.6 Notes
 
-A 300 px list of the notes — the chosen project's, or every one — most
+A 360 px list of the notes — the chosen project's, or every one — most
 recently touched first, with a new-note action, and the note being written in
 the centre at 720 px: its title, then its markdown, with *Edit / Preview*
 segments and a two-step delete. Typing saves after a 600 ms pause; there is no

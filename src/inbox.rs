@@ -250,7 +250,7 @@ mod mounted {
                     .size_full()
                     .child(
                         v_flex()
-                            .w(px(380.))
+                            .w(ginka_ui::layout::PLACE_PANE_WIDTH)
                             .h_full()
                             .flex_shrink_0()
                             .bg(tokens.colors().bg_sidebar)
@@ -274,7 +274,7 @@ mod mounted {
                 .size_full()
                 .child(
                     div()
-                        .w(px(380.))
+                        .w(ginka_ui::layout::PLACE_PANE_WIDTH)
                         .h_full()
                         .flex_shrink_0()
                         .child(self.list_column(cx)),
@@ -283,7 +283,7 @@ mod mounted {
                 .when(self.asking, |this| {
                     this.child(
                         div()
-                            .w(px(380.))
+                            .w(ginka_ui::layout::PLACE_PANE_WIDTH)
                             .h_full()
                             .flex_shrink_0()
                             .border_l_1()
@@ -403,7 +403,7 @@ pub fn unavailable(cx: &App) -> impl IntoElement + use<> {
         .size_full()
         .child(
             v_flex()
-                .w(px(380.))
+                .w(ginka_ui::layout::PLACE_PANE_WIDTH)
                 .h_full()
                 .flex_shrink_0()
                 .bg(tokens.colors().bg_sidebar)
