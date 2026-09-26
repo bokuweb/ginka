@@ -38,6 +38,15 @@ impl Mode {
     }
 }
 
+/// The choice the dark-mode toggle makes: the opposite of what is on screen,
+/// made explicit, so one press always visibly switches — even from System.
+pub fn toggled(current: Appearance, system: WindowAppearance) -> Appearance {
+    match Mode::resolve(current, system) {
+        Mode::Dark => Appearance::Light,
+        Mode::Light => Appearance::Dark,
+    }
+}
+
 /// The complete token set.
 ///
 /// Fields are deliberately exhaustive rather than added on demand: the palette
@@ -246,7 +255,10 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.caret = tokens.accent;
 
     theme.colors.secondary = tokens.bg_surface;
-    theme.colors.secondary_foreground = tokens.text_primary;
+    // Ghost buttons — the Git and terminal toolbars, the file tabs — read in
+    // the secondary colour, like the sidebar's rows: they are controls around
+    // the content, not the content.
+    theme.colors.secondary_foreground = tokens.text_secondary;
     theme.colors.secondary_hover = tokens.surface_hover();
     theme.colors.secondary_active = tokens.surface_hover();
 
@@ -278,7 +290,9 @@ pub fn apply(mode: Mode, cx: &mut App) {
 
     theme.colors.tab_bar = tokens.transparent_surface();
     theme.colors.tab = tokens.transparent_surface();
-    theme.colors.tab_active = tokens.bg_raised;
+    // Clear: a dock tab draws the shared tab shape inside itself
+    // (`chrome::tab`), and a filled square around it would be a second tab.
+    theme.colors.tab_active = tokens.transparent_surface();
     theme.colors.tab_foreground = tokens.text_secondary;
     theme.colors.tab_active_foreground = tokens.text_primary;
 
@@ -315,7 +329,8 @@ impl Tokens {
 }
 
 impl Colors {
-    fn light(&self) -> bool {
+    /// Whether these are the light theme's colours.
+    pub fn light(&self) -> bool {
         self.appearance == ThemeAppearance::Light
     }
 
@@ -468,6 +483,27 @@ mod tests {
         assert_eq!(
             Mode::resolve(Appearance::Dark, WindowAppearance::Light),
             Mode::Dark
+        );
+    }
+
+    #[test]
+    fn the_toggle_switches_to_the_other_mode_from_whatever_is_on_screen() {
+        assert_eq!(
+            toggled(Appearance::Dark, WindowAppearance::Light),
+            Appearance::Light
+        );
+        assert_eq!(
+            toggled(Appearance::Light, WindowAppearance::Dark),
+            Appearance::Dark
+        );
+        // From System, it leaves what the OS shows, and says so explicitly.
+        assert_eq!(
+            toggled(Appearance::System, WindowAppearance::Dark),
+            Appearance::Light
+        );
+        assert_eq!(
+            toggled(Appearance::System, WindowAppearance::VibrantLight),
+            Appearance::Dark
         );
     }
 

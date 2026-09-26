@@ -14,6 +14,7 @@ pub mod accounts;
 pub mod assets;
 pub mod branches;
 pub mod browser;
+pub mod chrome;
 pub mod composer;
 pub mod dock;
 pub mod editor;

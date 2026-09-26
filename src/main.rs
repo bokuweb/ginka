@@ -41,9 +41,39 @@ fn main() -> Result<()> {
 
     #[cfg(target_os = "macos")]
     draw_text_unthickened();
+    // The browser engine is loaded before the app starts (it re-enters this
+    // process's startup for its own helpers) and brought up once the app has
+    // made its NSApplication. Outside the bundled app on macOS there is no
+    // Chromium to load; the browser surface says so and the rest carries on.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let browser_runtime = gpui_cef::init(gpui_cef::RuntimeOptions {
+        cache_path: Some(paths.browser()),
+        ..Default::default()
+    })
+    .map_err(|error| error.to_string());
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let started_runtime = browser_runtime.clone();
     let application = gpui_platform::application().with_assets(assets::Assets);
 
     application.run(move |cx: &mut App| {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let engine = started_runtime
+                .as_ref()
+                .map_err(Clone::clone)
+                .and_then(|runtime| runtime.start(cx).map_err(|error| error.to_string()));
+            if let Err(reason) = &engine {
+                tracing::warn!(%reason, "the browser engine is not available");
+            }
+            cx.set_global(browser::BrowserEngine {
+                runtime: started_runtime
+                    .as_ref()
+                    .ok()
+                    .filter(|_| engine.is_ok())
+                    .cloned(),
+                status: engine,
+            });
+        }
         gpui_component::init(cx);
         shell::init(cx);
         ginka_ui::theme::apply(ginka_ui::Mode::Dark, cx);
@@ -100,6 +130,12 @@ fn main() -> Result<()> {
         .detach();
     });
 
+    // The message loop is over: the last handle going is what shuts the
+    // browser engine down.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    if let Ok(runtime) = browser_runtime {
+        runtime.shutdown();
+    }
     Ok(())
 }
 

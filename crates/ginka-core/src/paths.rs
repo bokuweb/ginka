@@ -96,6 +96,13 @@ impl Paths {
     /// Chat connectors' secrets, one `<connector>.env` per connector, each
     /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
     /// environment, and nowhere else.
+    /// The embedded browser's profile: its cache, and the cookies it keeps
+    /// or was given from Chrome. Private to the user, like the connectors'
+    /// secrets.
+    pub fn browser(&self) -> PathBuf {
+        self.root.join("browser")
+    }
+
     pub fn connectors(&self) -> PathBuf {
         self.root.join("connectors")
     }
@@ -119,6 +126,15 @@ impl Paths {
         ] {
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
         }
+        let browser = self.browser();
+        std::fs::create_dir_all(&browser)
+            .with_context(|| format!("creating {}", browser.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&browser, std::fs::Permissions::from_mode(0o700))
+                .with_context(|| format!("making {} private", browser.display()))?;
+        }
         Ok(())
     }
 }
@@ -136,6 +152,20 @@ mod tests {
         assert!(paths.worktrees().is_dir());
         // Idempotent: a second call on an existing tree must not fail.
         paths.ensure().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_browser_profile_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = Paths::with_root(tmp.path().join("state"));
+        paths.ensure().unwrap();
+        let mode = std::fs::metadata(paths.browser())
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700, "cookies live here");
     }
 
     #[test]

@@ -125,7 +125,7 @@ pub fn attach<T: 'static>(
             text,
             show_definition,
         } = document;
-        let search_path = std::env::var_os("PATH");
+        let search_path = Some(ginka_core::tool_path::joined());
         let server_worktree = worktree.clone();
         let started = cx
             .background_spawn(async move {

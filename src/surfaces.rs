@@ -32,7 +32,7 @@ use gpui_component::input::{
     Editor, EditorState, InputEvent, InputState, Replace, Search, TabSize, Textarea, TextareaState,
 };
 use gpui_component::text::TextView;
-use gpui_component::{Disableable as _, Icon, IconName, h_flex, v_flex};
+use gpui_component::{Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
@@ -72,6 +72,8 @@ pub struct SurfacePanel {
     choosing: bool,
     /// Counts arrangement changes, so only the last of a burst is saved.
     arrangement_changes: u64,
+    /// The shell's terminals, drawn in the Terminal tab; the shell owns them.
+    terminal_view: Option<AnyView>,
     /// Native browser view on platforms supported by the toolkit.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     browser_tabs: HashMap<WorkspaceId, Result<Entity<crate::browser::BrowserPane>, SharedString>>,
@@ -341,6 +343,7 @@ impl SurfacePanel {
             dock_stale: false,
             choosing: false,
             arrangement_changes: 0,
+            terminal_view: None,
             finder,
             files: Vec::new(),
             tree_files: Vec::new(),
@@ -1040,6 +1043,11 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Hand the panel the view that draws the shell's terminals.
+    pub fn set_terminal_view(&mut self, view: AnyView) {
+        self.terminal_view = Some(view);
+    }
+
     /// The arrangement as it is saved for the workspace on screen.
     pub fn arrangement(&self) -> Option<ginka_core::settings::SurfaceArrangement> {
         self.dock.save()
@@ -1158,7 +1166,10 @@ impl SurfacePanel {
             Surface::Browser => self.browser(cx),
             Surface::Reports => self.reports(cx).into_any_element(),
             Surface::Skills => self.skills(cx).into_any_element(),
-            Surface::Terminal => self.placeholder(surface, cx).into_any_element(),
+            Surface::Terminal => match &self.terminal_view {
+                Some(view) => view.clone().into_any_element(),
+                None => self.placeholder(surface, cx).into_any_element(),
+            },
         }
     }
 
@@ -1307,6 +1318,7 @@ impl SurfacePanel {
                     .icon(IconName::Plus)
                     .ghost()
                     .compact()
+                    .small()
                     .tooltip(rust_i18n::t!("surface.choose").to_string())
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_chooser(cx))),
             )
@@ -1568,6 +1580,7 @@ impl SurfacePanel {
                 Button::new("git-pull")
                     .ghost()
                     .compact()
+                    .small()
                     .label(rust_i18n::t!("surface.git.pull").to_string())
                     .tooltip(rust_i18n::t!("surface.git.pull_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Pull))),
@@ -1576,6 +1589,7 @@ impl SurfacePanel {
                 Button::new("git-push")
                     .ghost()
                     .compact()
+                    .small()
                     .label(rust_i18n::t!("surface.git.push").to_string())
                     .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
@@ -1584,6 +1598,7 @@ impl SurfacePanel {
                 Button::new("git-create-pr")
                     .ghost()
                     .compact()
+                    .small()
                     .label(if self.opening_pull_request {
                         rust_i18n::t!("surface.git.create_pr.working").to_string()
                     } else {
@@ -1602,6 +1617,7 @@ impl SurfacePanel {
                 Button::new("git-history")
                     .ghost()
                     .compact()
+                    .small()
                     .label(rust_i18n::t!("surface.git.history").to_string())
                     .tooltip(rust_i18n::t!("surface.git.history_tooltip").to_string())
                     .on_click(cx.listener(move |this, _, _, cx| {
@@ -1759,6 +1775,7 @@ impl SurfacePanel {
                         Button::new("commit-back")
                             .ghost()
                             .compact()
+                            .small()
                             .icon(IconName::ArrowLeft)
                             .tooltip(rust_i18n::t!("surface.git.commit_back").to_string())
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -2504,6 +2521,7 @@ impl SurfacePanel {
                                     ))
                                     .ghost()
                                     .compact()
+                                    .small()
                                     .label(if staged {
                                         rust_i18n::t!("surface.git.hunk.unstage").to_string()
                                     } else {
@@ -2528,6 +2546,7 @@ impl SurfacePanel {
                                         ))
                                         .ghost()
                                         .compact()
+                                        .small()
                                         .label(if discard_armed {
                                             rust_i18n::t!("surface.git.hunk.discard_confirm")
                                                 .to_string()
@@ -2695,6 +2714,7 @@ impl SurfacePanel {
                             Button::new("browser-capture-dismiss")
                                 .ghost()
                                 .compact()
+                                .small()
                                 .icon(IconName::Close)
                                 .tooltip(rust_i18n::t!("surface.browser.dismiss").to_string())
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -3295,6 +3315,10 @@ impl SurfacePanel {
             .w_full()
             .flex_shrink_0()
             .overflow_x_scroll()
+            .px_2()
+            .py_1()
+            .gap_1()
+            .items_center()
             .border_b_1()
             .border_color(tokens.colors().border_subtle)
             .child(
@@ -3302,6 +3326,7 @@ impl SurfacePanel {
                     .label(rust_i18n::t!("surface.files.history.back").to_string())
                     .ghost()
                     .compact()
+                    .small()
                     .disabled(!self.file_tabs.can_go_back())
                     .on_click(cx.listener(|this, _, _, cx| this.go_back(cx))),
             )
@@ -3310,6 +3335,7 @@ impl SurfacePanel {
                     .label(rust_i18n::t!("surface.files.history.forward").to_string())
                     .ghost()
                     .compact()
+                    .small()
                     .disabled(!self.file_tabs.can_go_forward())
                     .on_click(cx.listener(|this, _, _, cx| this.go_forward(cx))),
             )
@@ -3318,6 +3344,7 @@ impl SurfacePanel {
                     .label(rust_i18n::t!("surface.files.browse").to_string())
                     .ghost()
                     .compact()
+                    .small()
                     .on_click(cx.listener(|this, _, _, cx| this.browse_files(cx))),
             )
             .children(self.file_tabs.paths().iter().map(|path| {
@@ -3328,16 +3355,13 @@ impl SurfacePanel {
                     .and_then(|name| name.to_str())
                     .unwrap_or(path)
                     .to_string();
-                h_flex()
-                    .id(SharedString::from(format!("file-tab:{path}")))
-                    .gap_1()
-                    .when(active.as_deref() == Some(path), |this| {
-                        this.bg(tokens.colors().row_active())
-                    })
+                let showing = active.as_deref() == Some(path);
+                ginka_ui::chrome::tab(SharedString::from(format!("file-tab:{path}")), showing, cx)
+                    .gap_0p5()
                     .child(
                         Button::new(SharedString::from(format!("focus-file-tab:{path}")))
-                            .ghost()
-                            .compact()
+                            .text()
+                            .xsmall()
                             .max_w(px(150.))
                             .label(label)
                             .on_click(
@@ -3347,7 +3371,7 @@ impl SurfacePanel {
                     .child(
                         Button::new(SharedString::from(format!("close-file-tab:{path}")))
                             .ghost()
-                            .compact()
+                            .xsmall()
                             .accessibility_label(
                                 rust_i18n::t!("surface.files.close", path = path.clone())
                                     .to_string(),
@@ -3357,7 +3381,7 @@ impl SurfacePanel {
                             }))
                             .child(
                                 Icon::new(IconName::Close)
-                                    .size_3()
+                                    .size(px(11.))
                                     .text_color(tokens.colors().text_muted),
                             ),
                     )
@@ -3807,6 +3831,7 @@ impl SurfacePanel {
                             .label(rust_i18n::t!("surface.files.save").to_string())
                             .ghost()
                             .compact()
+                            .small()
                             .disabled(state != SaveState::Dirty)
                             .when_some(save, |this, save| this.on_click(save)),
                     )
@@ -3816,6 +3841,7 @@ impl SurfacePanel {
                             .label(label)
                             .ghost()
                             .compact()
+                            .small()
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 this.toggle_file_preview(&path, cx)
                             }))
@@ -3825,6 +3851,7 @@ impl SurfacePanel {
                             .label(rust_i18n::t!("surface.files.find").to_string())
                             .ghost()
                             .compact()
+                            .small()
                             .on_click(find)
                     }))
                     .children(
@@ -3836,6 +3863,7 @@ impl SurfacePanel {
                                     .label(rust_i18n::t!("surface.files.replace").to_string())
                                     .ghost()
                                     .compact()
+                                    .small()
                                     .on_click(replace)
                             }),
                     )
@@ -3845,6 +3873,7 @@ impl SurfacePanel {
                                 .label(rust_i18n::t!("surface.files.add_selection").to_string())
                                 .ghost()
                                 .compact()
+                                .small()
                                 .disabled(disabled)
                                 .on_click(selection)
                         },
@@ -3860,6 +3889,7 @@ impl SurfacePanel {
                                 Button::new("send-file-selection-to-terminal")
                                     .ghost()
                                     .compact()
+                                    .small()
                                     .disabled(disabled)
                                     .tooltip(label.clone())
                                     .accessibility_label(label)
@@ -4174,16 +4204,26 @@ impl BasePanel for SurfaceTab {
 }
 
 impl Panel for SurfaceTab {
-    fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.surface.label().into())
-    }
-
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
-            .gap_1p5()
-            .items_center()
-            .child(self.surface.icon().size_4())
-            .child(self.surface.label())
+    fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // In front when the panel's own arrangement says so, which is what
+        // the dock was built from and read back into.
+        let active = self
+            .panel
+            .upgrade()
+            .is_some_and(|panel| panel.read(cx).shows(self.surface));
+        // The same tab as everywhere else; the dock's own chrome around it
+        // is left clear by the theme. Wrapped, so a group's title bar does
+        // not stretch it to its width.
+        h_flex().child(
+            ginka_ui::chrome::tab(
+                SharedString::from(format!("surface-tab:{}", self.surface.key())),
+                active,
+                cx,
+            )
+            .pr(px(8.))
+            .child(ginka_ui::chrome::tab_icon(self.surface.icon(), active, cx))
+            .child(ginka_ui::chrome::tab_label(self.surface.label())),
+        )
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

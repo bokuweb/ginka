@@ -1380,6 +1380,9 @@ pub(crate) fn is_inherited_session_state(name: &str) -> bool {
 /// Shared with the probe, so what an agent is asked about itself is asked in
 /// the environment it would actually run in.
 pub(crate) fn sanitize(process: &mut std::process::Command) {
+    // The user's full search path, so a CLI that is a script finds its
+    // interpreter however the daemon was started (`tool_path`).
+    crate::tool_path::apply(process);
     for (name, _) in std::env::vars() {
         if is_inherited_session_state(&name) {
             process.env_remove(&name);

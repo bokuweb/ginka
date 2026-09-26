@@ -32,6 +32,8 @@ use gpui_component::{
 /// the sidebar is drawn.
 pub enum SidebarEvent {
     Selected,
+    /// Switch between the dark and the light theme.
+    ToggleAppearance,
     /// A project was picked, and no workspace under it. The centre column has
     /// no conversation to show for that, which is exactly the point: it shows
     /// the home screen, aimed at this project.
@@ -1462,6 +1464,30 @@ impl Render for SessionSidebar {
             cx,
         );
 
+        // The theme is changed often enough, and seen at once, that it has a
+        // button of its own beside Settings: a moon while it is light, a sun
+        // while it is dark, the way the switch it makes reads.
+        let light = tokens.colors().light();
+        let appearance_toggle = div()
+            .id("appearance-toggle")
+            .flex_shrink_0()
+            .p_1p5()
+            .rounded(px(tokens.radius.control()))
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new(
+                    rust_i18n::t!("palette.appearance.toggle").to_string(),
+                )
+                .build(window, cx)
+            })
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(SidebarEvent::ToggleAppearance)))
+            .child(
+                Icon::new(if light { IconName::Moon } else { IconName::Sun })
+                    .size_3p5()
+                    .text_color(tokens.colors().text_muted),
+            );
+
         h_flex()
             .size_full()
             .border_r_1()
@@ -1508,7 +1534,15 @@ impl Render for SessionSidebar {
                                     .collect::<Vec<_>>()
                             }),
                     )
-                    .child(div().px_1p5().py_1p5().child(settings)),
+                    .child(
+                        h_flex()
+                            .px_1p5()
+                            .py_1p5()
+                            .gap_1()
+                            .items_center()
+                            .child(div().flex_1().min_w_0().child(settings))
+                            .child(appearance_toggle),
+                    ),
             )
             .when(selected_project, |this| {
                 this.child(

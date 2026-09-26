@@ -35,7 +35,7 @@ use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
     ActiveTheme as _, Disableable as _, ElementExt as _, Icon, IconName,
-    InteractiveElementExt as _, StyledExt as _,
+    InteractiveElementExt as _, Sizable as _, StyledExt as _,
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputEvent, InputState, Paste, Textarea, TextareaState},
@@ -271,22 +271,30 @@ const RECONNECT_DELAY: Duration = Duration::from_secs(2);
 /// the body size. Reading is what this column is for.
 const TRANSCRIPT_MEASURE: f32 = 720.;
 
-/// The size conversation text is set in: e1's reading size, so the two
-/// surfaces read as one app.
-const PROSE_SIZE: f32 = 14.;
+/// The size conversation text is set in: the sidebar's row titles, set in the
+/// secondary colour the same way, so the conversation reads at the density
+/// and weight of the rest of the window.
+const PROSE_SIZE: f32 = 11.5;
 
 /// The line height conversation text is set on, 1.6 of its size.
-const PROSE_LINE: f32 = 22.5;
+const PROSE_LINE: f32 = 18.5;
 
 /// How narrow the centre column may get before the panels beside it give
 /// way.
 const CENTRE_MIN_WIDTH: f32 = 380.;
 
-/// The line height the terminal's grid is drawn at, in pixels.
-const TERMINAL_LINE_HEIGHT: f32 = 17.;
+/// How much of a terminal area the tab strip above the grid takes.
+const TERMINAL_CHROME: f32 = 40.;
 
-/// Width of one 12.5 px monospace cell in the terminal grid.
-const TERMINAL_CELL_WIDTH: f32 = 7.5;
+/// The size the terminal's grid is set in.
+const TERMINAL_TEXT: f32 = 11.5;
+
+/// The line height the terminal's grid is drawn at, in pixels.
+const TERMINAL_LINE_HEIGHT: f32 = 15.5;
+
+/// Width of one monospace cell in the terminal grid: 0.6 of the text size,
+/// the advance of the system monospace faces.
+const TERMINAL_CELL_WIDTH: f32 = TERMINAL_TEXT * 0.6;
 
 /// How wide a terminal is told it is.
 ///
@@ -689,6 +697,11 @@ pub struct Shell {
     index_error: Option<String>,
     sidebar: Entity<SessionSidebar>,
     surfaces: Entity<SurfacePanel>,
+    /// The terminals are drawn in the right panel's Terminal tab rather than
+    /// the dock; noted each frame.
+    terminal_in_panel: bool,
+    /// The size the right panel's terminal area was last laid out at.
+    terminal_area: Option<(f32, f32)>,
     /// The conversations open across the top of the centre column.
     tabs: ginka_ui::tabs::Tabs,
     /// Saved commands and prompts for the project on screen (Orca's Quick
@@ -803,7 +816,10 @@ impl Shell {
             &surfaces,
             window,
             |this, _, event, window, cx| match event {
-                crate::surfaces::SurfaceEvent::Arranged => this.persist_surfaces(cx),
+                crate::surfaces::SurfaceEvent::Arranged => {
+                    this.persist_surfaces(cx);
+                    this.follow_terminal_placement(cx);
+                }
                 crate::surfaces::SurfaceEvent::BrowserVisited {
                     workspace,
                     url,
@@ -970,6 +986,7 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::ToggleAppearance => this.toggle_appearance(window, cx),
                     SidebarEvent::NewChatRequested => {
                         sidebar.update(cx, |sidebar, cx| {
                             sidebar.set_place(crate::sidebar::Place::Workspace, cx)
@@ -1044,7 +1061,7 @@ impl Shell {
                         // window: a different workspace is a different strip.
                         this.terminal_search = None;
                         this.terminals = ginka_ui::terminal::TerminalTabs::new();
-                        if this.layout.is_open(Panel::TerminalDock) {
+                        if this.terminal_on_screen(cx) {
                             this.adopt_terminals(cx);
                         }
                         this.mentions.clear();
@@ -1373,6 +1390,12 @@ impl Shell {
         // for it: the daemon kept them running, and finding them is what makes
         // the process split visible rather than theoretical.
         cx.defer_in(window, |this, _, cx| {
+            // The right panel's Terminal tab draws the same terminals as the
+            // dock, so it is handed a view onto this shell once one exists.
+            let shell = cx.entity();
+            let host = cx.new(|cx| TerminalHost::new(&shell, cx));
+            this.surfaces
+                .update(cx, |surfaces, _| surfaces.set_terminal_view(host.into()));
             if this.layout.is_open(Panel::TerminalDock) {
                 this.adopt_terminals(cx);
             }
@@ -1459,6 +1482,8 @@ impl Shell {
             session,
             sidebar,
             surfaces,
+            terminal_in_panel: false,
+            terminal_area: None,
             notes,
             tabs: restored_tabs,
             quick_commands: Vec::new(),
@@ -2042,9 +2067,7 @@ impl Shell {
                 let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
                     return;
                 };
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 let (rows, cols) = self.dock_size();
                 let link = self.link.clone();
                 let title = command.name.clone();
@@ -2371,63 +2394,29 @@ impl Shell {
                     Some(row) => row.agent.glyph(),
                     None => Icon::new(IconName::Plus),
                 };
-                h_flex()
-                    .id(("centre-tab", index))
-                    .h(px(28.))
+                ginka_ui::chrome::tab(("centre-tab", index), on, cx)
                     .min_w(px(90.))
                     .max_w(px(240.))
-                    .pl_2p5()
-                    .pr_1()
-                    .gap_1p5()
-                    .items_center()
-                    .rounded(px(tokens.radius.row))
-                    .cursor_pointer()
-                    .when(on, |this| {
-                        this.bg(tokens.colors().bg_surface)
-                            .border_1()
-                            .border_color(tokens.colors().border_subtle)
-                    })
-                    .hover(|this| this.bg(tokens.colors().row_hover()))
                     .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(tab) = this.tabs.select_number(index + 1).cloned() {
                             this.show_tab(Some(tab), window, cx);
                         }
                     }))
-                    .child(glyph.size_3p5().text_color(if working {
-                        tokens.colors().status_working
-                    } else if on {
-                        tokens.colors().text_secondary
+                    .child(if working {
+                        glyph
+                            .size(px(13.))
+                            .text_color(tokens.colors().status_working)
                     } else {
-                        tokens.colors().text_muted
-                    }))
+                        ginka_ui::chrome::tab_icon(glyph, on, cx)
+                    })
+                    .child(ginka_ui::chrome::tab_label(title).flex_1())
                     .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_sm()
-                            .text_color(if on {
-                                tokens.colors().text_primary
-                            } else {
-                                tokens.colors().text_secondary
-                            })
-                            .truncate()
-                            .child(title),
-                    )
-                    .child(
-                        div()
-                            .id(("close-tab", index))
-                            .p_0p5()
-                            .rounded(px(tokens.radius.control()))
-                            .hover(|this| this.bg(tokens.colors().bg_raised))
-                            .on_click(cx.listener(move |this, _, window, cx| {
+                        ginka_ui::chrome::tab_close(("close-tab", index), cx).on_click(
+                            cx.listener(move |this, _, window, cx| {
                                 cx.stop_propagation();
                                 this.close_tab(index, window, cx);
-                            }))
-                            .child(
-                                Icon::new(IconName::Close)
-                                    .size_3()
-                                    .text_color(tokens.colors().text_muted),
-                            ),
+                            }),
+                        ),
                     )
                     .into_any_element()
             })
@@ -3324,9 +3313,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.layout.is_open(Panel::TerminalDock) {
-            self.toggle(Panel::TerminalDock, cx);
-        }
+        self.bring_terminals_on_screen(cx);
         self.terminal_focus.focus(window, cx);
         let Some(terminal) = self.terminals.active_id() else {
             self.open_terminal_with_input(Some(selection), false, window, cx);
@@ -3345,9 +3332,7 @@ impl Shell {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
-        if !self.layout.is_open(Panel::TerminalDock) {
-            self.toggle(Panel::TerminalDock, cx);
-        }
+        self.bring_terminals_on_screen(cx);
         let (rows, cols) = self.dock_size();
         self.index_starting = true;
         self.index_error = None;
@@ -3623,8 +3608,20 @@ impl Shell {
     /// know roughly how much room it has, and being a column out is better
     /// than measuring the grid every frame.
     fn dock_size(&self) -> (u16, u16) {
+        if self.terminal_in_panel
+            && let Some((width, height)) = self.terminal_area
+        {
+            return ginka_ui::terminal::grid_for_area(
+                width,
+                height,
+                TERMINAL_CELL_WIDTH,
+                TERMINAL_LINE_HEIGHT,
+                TERMINAL_CHROME,
+                self.terminals.split_ids().is_some(),
+            );
+        }
         let height = f32::from(self.layout.size(Panel::TerminalDock));
-        let rows = ((height - 40.) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
+        let rows = ((height - TERMINAL_CHROME) / TERMINAL_LINE_HEIGHT).max(4.) as u16;
         let columns = if self.terminals.split_ids().is_some() {
             (TERMINAL_COLUMNS / 2).max(1)
         } else {
@@ -3802,13 +3799,14 @@ impl Shell {
         event: &ScrollWheelEvent,
         cx: &mut Context<Self>,
     ) {
-        let pixels = f32::from(event.delta.pixel_delta(px(17.)).y);
+        let pixels = f32::from(event.delta.pixel_delta(px(TERMINAL_LINE_HEIGHT)).y);
         if pixels == 0.0 {
             return;
         }
         self.terminal_selection = None;
         cx.stop_propagation();
-        let lines = (pixels.abs() / 17.0).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
+        let lines =
+            (pixels.abs() / TERMINAL_LINE_HEIGHT).ceil() as i32 * if pixels > 0.0 { 1 } else { -1 };
         if let Some(screen) = self
             .terminals
             .tabs_mut()
@@ -4713,10 +4711,7 @@ impl Shell {
                     appearance == mode,
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
-                    this.settings.appearance = mode;
-                    this.save_settings();
-                    apply_theme(ginka_ui::Mode::resolve(mode, window.appearance()), cx);
-                    window.refresh();
+                    this.set_appearance(mode, window, cx);
                 }))
             }))
             .into_any_element();
@@ -5339,6 +5334,7 @@ impl Shell {
         );
         self.surfaces
             .update(cx, |surfaces, cx| surfaces.restore_dock(dock, cx));
+        self.follow_terminal_placement(cx);
     }
 
     /// Remember which surfaces are open and how they are arranged.
@@ -5830,28 +5826,21 @@ impl Shell {
                     .update(cx, |surfaces, cx| surfaces.show(surface, cx));
             }
             Command::RunQuick(command) => self.run_quick(command, window, cx),
+            Command::ToggleAppearance => self.toggle_appearance(window, cx),
             Command::NewTerminal => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.open_terminal(window, cx);
             }
             Command::ToggleTerminalSplit => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.toggle_terminal_split(window, cx);
             }
             Command::FocusOtherTerminalPane => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.focus_other_terminal_pane(window, cx);
             }
             Command::FindTerminal => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.open_terminal_search(window, cx);
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
@@ -5862,30 +5851,22 @@ impl Shell {
                 }
             }
             Command::NextTerminal => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.cycle_terminal_tab(false, cx);
                 self.terminal_focus.focus(window, cx);
             }
             Command::PreviousTerminal => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.cycle_terminal_tab(true, cx);
                 self.terminal_focus.focus(window, cx);
             }
             Command::TerminalToLive => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 self.terminal_to_live(cx);
                 self.terminal_focus.focus(window, cx);
             }
             Command::CloseTerminal => {
-                if !self.layout.is_open(Panel::TerminalDock) {
-                    self.toggle(Panel::TerminalDock, cx);
-                }
+                self.bring_terminals_on_screen(cx);
                 if let Some(terminal) = self.terminals.active_id() {
                     self.request_terminal_close(terminal, cx);
                 }
@@ -6717,7 +6698,7 @@ impl Shell {
             .child(
                 div()
                     .text_size(px(PROSE_SIZE))
-                    .text_color(tokens.colors().text_primary)
+                    .text_color(tokens.colors().text_secondary)
                     .child(question.to_string()),
             )
             .child(
@@ -6783,7 +6764,7 @@ impl Shell {
                 div()
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
-                    .text_color(tokens.colors().text_primary)
+                    .text_color(tokens.colors().text_secondary)
                     .child(plan.to_string()),
             )
             .children((!answered).then(|| {
@@ -6994,7 +6975,7 @@ impl Shell {
                             .bg(tokens.colors().row_active())
                             .text_size(px(PROSE_SIZE))
                             .line_height(px(PROSE_LINE))
-                            .text_color(tokens.colors().text_primary)
+                            .text_color(tokens.colors().text_secondary)
                             .child(text.clone()),
                     )
                     .child(self.message_actions(index, "user", text, cx))
@@ -7025,7 +7006,7 @@ impl Shell {
                     .gap_1()
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
-                    .text_color(tokens.colors().text_primary)
+                    .text_color(tokens.colors().text_secondary)
                     .children((!formatted.is_empty()).then(|| {
                         TextView::markdown(("assistant", index), linked.markdown.clone())
                             .selectable(true)
@@ -11709,79 +11690,74 @@ impl Shell {
                                     } else {
                                         rust_i18n::t!("terminal.close").to_string()
                                     };
-                                    h_flex()
-                                        .id(SharedString::from(format!("terminal-tab:{}", tab.id)))
-                                        .px_2()
-                                        .py_1()
-                                        .gap_2()
-                                        .items_center()
-                                        .rounded(px(tokens.radius.row))
-                                        .when(showing, |this| this.bg(tokens.colors().row_active()))
-                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                    // Buttons inside, so the title and the
+                                    // close are each reachable by keyboard;
+                                    // the tab around them is the shared shape.
+                                    ginka_ui::chrome::tab(
+                                        SharedString::from(format!("terminal-tab:{}", tab.id)),
+                                        showing,
+                                        cx,
+                                    )
+                                    .gap_0p5()
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "show-terminal:{id}"
+                                        )))
+                                        .text()
+                                        .xsmall()
+                                        .accessibility_label(show_label)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.show_terminal(index, window, cx)
+                                        }))
                                         .child(
-                                            Button::new(SharedString::from(format!(
-                                                "show-terminal:{id}"
-                                            )))
-                                            .ghost()
-                                            .compact()
-                                            .accessibility_label(show_label)
-                                            .on_click(cx.listener(move |this, _, window, cx| {
-                                                this.show_terminal(index, window, cx)
-                                            }))
-                                            .child(
-                                                h_flex()
-                                                    .gap_2()
-                                                    .items_center()
+                                            h_flex()
+                                                .gap(px(6.))
+                                                .items_center()
+                                                .child(ginka_ui::chrome::tab_icon(
+                                                    Icon::new(IconName::SquareTerminal),
+                                                    showing,
+                                                    cx,
+                                                ))
+                                                .child(
+                                                    ginka_ui::chrome::tab_label(tab.title.clone())
+                                                        .text_size(px(12.5))
+                                                        .text_color(if showing {
+                                                            tokens.colors().text_primary
+                                                        } else {
+                                                            tokens.colors().text_secondary
+                                                        }),
+                                                ),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "close-terminal:{id}"
+                                        )))
+                                        .ghost()
+                                        .xsmall()
+                                        .tooltip(close_label.clone())
+                                        .accessibility_label(close_label)
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.request_terminal_close(closing.clone(), cx)
+                                        }))
+                                        .child(
+                                            if confirming {
+                                                div()
+                                                    .text_xs()
+                                                    .text_color(tokens.colors().status_attention)
                                                     .child(
-                                                        Icon::new(IconName::SquareTerminal)
-                                                            .size_3()
-                                                            .text_color(
-                                                                tokens.colors().text_secondary,
-                                                            ),
+                                                        rust_i18n::t!("terminal.close.short")
+                                                            .to_string(),
                                                     )
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .text_color(if showing {
-                                                                tokens.colors().text_primary
-                                                            } else {
-                                                                tokens.colors().text_secondary
-                                                            })
-                                                            .child(tab.title.clone()),
-                                                    ),
-                                            ),
-                                        )
-                                        .child(
-                                            Button::new(SharedString::from(format!(
-                                                "close-terminal:{id}"
-                                            )))
-                                            .ghost()
-                                            .compact()
-                                            .tooltip(close_label.clone())
-                                            .accessibility_label(close_label)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.request_terminal_close(closing.clone(), cx)
-                                            }))
-                                            .child(
-                                                if confirming {
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(
-                                                            tokens.colors().status_attention,
-                                                        )
-                                                        .child(
-                                                            rust_i18n::t!("terminal.close.short")
-                                                                .to_string(),
-                                                        )
-                                                        .into_any_element()
-                                                } else {
-                                                    Icon::new(IconName::Close)
-                                                        .size_3()
-                                                        .text_color(tokens.colors().text_muted)
-                                                        .into_any_element()
-                                                },
-                                            ),
-                                        )
+                                                    .into_any_element()
+                                            } else {
+                                                Icon::new(IconName::Close)
+                                                    .size(px(11.))
+                                                    .text_color(tokens.colors().text_muted)
+                                                    .into_any_element()
+                                            },
+                                        ),
+                                    )
                                 },
                             )),
                     )
@@ -11795,6 +11771,7 @@ impl Shell {
                             Button::new("quick-commands")
                                 .ghost()
                                 .compact()
+                                .small()
                                 .tooltip(label.clone())
                                 .accessibility_label(label)
                                 .child(
@@ -11813,6 +11790,7 @@ impl Shell {
                         Button::new("new-terminal")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(label.clone())
                             .accessibility_label(label)
                             .child(
@@ -11829,6 +11807,7 @@ impl Shell {
                         Button::new("focus-other-terminal-pane")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(label.clone())
                             .accessibility_label(label.clone())
                             .label(label)
@@ -11845,6 +11824,7 @@ impl Shell {
                         Button::new("split-terminal")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(label.clone())
                             .accessibility_label(label)
                             .label(if split.is_some() {
@@ -11860,6 +11840,7 @@ impl Shell {
                         Button::new("find-terminal")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(rust_i18n::t!("terminal.search.open").to_string())
                             .child(Icon::new(IconName::Search).size_3())
                             .on_click(cx.listener(|this, _, window, cx| {
@@ -11871,6 +11852,7 @@ impl Shell {
                         Button::new("copy-terminal-output")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(label.clone())
                             .accessibility_label(label)
                             .child(Icon::new(IconName::Copy).size_3())
@@ -11881,6 +11863,7 @@ impl Shell {
                         Button::new("quote-terminal-selection")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(label.clone())
                             .accessibility_label(label.clone())
                             .label(rust_i18n::t!("terminal.quote_selection.short").to_string())
@@ -11892,6 +11875,7 @@ impl Shell {
                         Button::new("terminal-live")
                             .ghost()
                             .compact()
+                            .small()
                             .tooltip(rust_i18n::t!("terminal.history.live.tooltip").to_string())
                             .on_click(cx.listener(|this, _, _, cx| this.terminal_to_live(cx)))
                             .child(
@@ -12071,8 +12055,8 @@ impl Shell {
             .py_1()
             .overflow_hidden()
             .font_family(mono)
-            .text_size(px(12.5))
-            .line_height(px(17.))
+            .text_size(px(TERMINAL_TEXT))
+            .line_height(px(TERMINAL_LINE_HEIGHT))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
@@ -12126,7 +12110,7 @@ impl Shell {
                                 "terminal-file:{terminal_key}:{row_index}:{column}"
                             )))
                             .text()
-                            .h(px(17.))
+                            .h(px(TERMINAL_LINE_HEIGHT))
                             .p_0()
                             .accessibility_label(label)
                             .child(h_flex().children(
@@ -12188,7 +12172,9 @@ impl Shell {
     }
 
     fn center(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
-        let dock_open = self.layout.is_open(Panel::TerminalDock);
+        // The terminals are drawn in one place at a time: in the right panel
+        // while its Terminal tab is on screen, in the dock otherwise.
+        let dock_open = self.layout.is_open(Panel::TerminalDock) && !self.terminal_in_panel;
         let dock_height = self.layout.size(Panel::TerminalDock);
 
         v_flex().size_full().child(
@@ -12541,6 +12527,11 @@ impl MonoFont for App {
 
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.terminal_in_panel = self
+            .surfaces
+            .read(cx)
+            .shows(ginka_ui::surface::Surface::Terminal)
+            && self.layout.is_open(Panel::RightPanel);
         // Before anything is measured: the tail on screen is whatever the
         // reveal has walked out so far.
         self.write_a_little_more(window);
@@ -12895,6 +12886,75 @@ fn access_note(mode: ginka_protocol::AccessMode) -> String {
 /// both read the same palette (`docs/ui.md` §2), from two globals of two
 /// types, and one following the system while the other did not would be two
 /// windows in one.
+impl Shell {
+    /// Whether the terminals are drawn anywhere: in the dock, or in the right
+    /// panel's Terminal tab.
+    fn terminal_on_screen(&self, cx: &App) -> bool {
+        self.layout.is_open(Panel::TerminalDock)
+            || (self.layout.is_open(Panel::RightPanel)
+                && self
+                    .surfaces
+                    .read(cx)
+                    .shows(ginka_ui::surface::Surface::Terminal))
+    }
+
+    /// Bring the terminals on screen: they already are when the right panel
+    /// shows them, and otherwise the dock opens.
+    fn bring_terminals_on_screen(&mut self, cx: &mut Context<Self>) {
+        if !self.terminal_on_screen(cx) {
+            self.toggle(Panel::TerminalDock, cx);
+        }
+    }
+
+    /// The Terminal tab came on screen or left it: find the workspace's
+    /// shells for it, and lay them out for wherever they are drawn now.
+    fn follow_terminal_placement(&mut self, cx: &mut Context<Self>) {
+        let in_panel = self.layout.is_open(Panel::RightPanel)
+            && self
+                .surfaces
+                .read(cx)
+                .shows(ginka_ui::surface::Surface::Terminal);
+        if in_panel != self.terminal_in_panel {
+            self.terminal_in_panel = in_panel;
+            self.resize_terminal(cx);
+        }
+        if in_panel && self.terminals.is_empty() {
+            self.adopt_terminals(cx);
+        }
+        cx.notify();
+    }
+
+    /// The right panel's terminal area was laid out at this size.
+    fn terminal_area_measured(&mut self, size: Size<Pixels>, cx: &mut Context<Self>) {
+        let area = (f32::from(size.width), f32::from(size.height));
+        if self.terminal_area != Some(area) {
+            self.terminal_area = Some(area);
+            if self.terminal_in_panel {
+                self.resize_terminal(cx);
+            }
+        }
+    }
+
+    /// Choose the theme, remember the choice, and repaint with it.
+    fn set_appearance(
+        &mut self,
+        appearance: settings::Appearance,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.settings.appearance = appearance;
+        self.save_settings();
+        apply_theme(ginka_ui::Mode::resolve(appearance, window.appearance()), cx);
+        window.refresh();
+    }
+
+    /// Switch to the other theme from the one on screen.
+    fn toggle_appearance(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let next = ginka_ui::theme::toggled(self.settings.appearance, window.appearance());
+        self.set_appearance(next, window, cx);
+    }
+}
+
 fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
     ginka_ui::theme::apply(mode, cx);
     #[cfg(feature = "github")]
@@ -12905,4 +12965,53 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// The workspace's terminals, drawn in the right panel's Terminal tab.
+///
+/// The shell owns the terminals, as it does for the dock; this only draws
+/// them where the tab is, and reports how much room the tab gives them so
+/// the shells are laid out for it.
+pub struct TerminalHost {
+    shell: WeakEntity<Shell>,
+}
+
+impl TerminalHost {
+    fn new(shell: &Entity<Shell>, cx: &mut Context<Self>) -> Self {
+        cx.observe(shell, |_, _, cx| cx.notify()).detach();
+        Self {
+            shell: shell.downgrade(),
+        }
+    }
+}
+
+impl Render for TerminalHost {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let Some(shell) = self.shell.upgrade() else {
+            return div().into_any_element();
+        };
+        let terminals = shell.update(cx, |shell, cx| shell.terminal_dock(cx).into_any_element());
+        let measured = shell.downgrade();
+        div()
+            .relative()
+            .size_full()
+            .child(terminals)
+            .child(
+                canvas(
+                    move |bounds, _, cx| {
+                        measured
+                            .update(cx, |shell, cx| {
+                                shell.terminal_area_measured(bounds.size, cx)
+                            })
+                            .ok();
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full(),
+            )
+            .into_any_element()
+    }
 }
