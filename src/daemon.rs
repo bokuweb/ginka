@@ -1374,6 +1374,17 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Hand a workspace's conflicts to its latest conversation's agent, or
+    /// a new conversation when it has none.
+    pub async fn resolve_conflicts(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::ResolveConflicts {
+            workspace: workspace.clone(),
+            agent: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Give a conversation a title; an empty one clears it back to none.
     /// Show a project under another name; blank goes back to its own.
     pub async fn set_project_label(

@@ -205,6 +205,12 @@ Throw away a file's uncommitted work
 
 `ginka revert <WORKSPACE> <PATH>`
 
+## `ginka resolve`
+
+Hand a stopped merge, rebase or cherry-pick's conflicts to an agent to resolve and finish
+
+`ginka resolve <WORKSPACE>`
+
 ## `ginka commit`
 
 Commit a workspace's work. `--amend` folds it into the last commit instead — keeping that commit's message when none is given — and is refused once the commit has been pushed.

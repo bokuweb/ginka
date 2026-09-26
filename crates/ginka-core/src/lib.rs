@@ -17,6 +17,7 @@ pub mod commands;
 pub mod comments;
 pub mod commit;
 pub mod composer;
+pub mod conflicts;
 pub mod connector;
 pub mod crash;
 pub mod cron;

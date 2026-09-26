@@ -220,6 +220,16 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Hand a stopped merge, rebase or cherry-pick's conflicts to an agent
+    /// to resolve and finish.
+    Resolve {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Start a new conversation on this agent instead of following up in
+        /// the workspace's latest one.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Commit a workspace's work.
     Commit {
         /// The workspace id, as shown by `workspace list`.
@@ -1300,6 +1310,10 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             path,
             header,
+        },
+        Command::Resolve { workspace, agent } => Request::ResolveConflicts {
+            workspace: WorkspaceId(workspace),
+            agent,
         },
         Command::Revert { workspace, path } => Request::RevertFile {
             workspace: WorkspaceId(workspace),

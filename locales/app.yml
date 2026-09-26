@@ -1386,6 +1386,9 @@ sidebar.action.pin:
 sidebar.action.unpin:
   en: Unpin
   ja: ピンを外す
+sidebar.action.resolve:
+  en: Resolve conflicts with the agent
+  ja: コンフリクトをエージェントに解決させる
 sidebar.action.archive:
   en: Archive
   ja: アーカイブ

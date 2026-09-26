@@ -996,6 +996,13 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::ResolveConflicts { workspace } => {
+                        let (link, workspace) = (this.link.clone(), workspace.clone());
+                        this.after_row_change(
+                            async move { link.resolve_conflicts(&workspace).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::LabelProject { project, label } => {
                         let (link, project, label) =
                             (this.link.clone(), project.clone(), label.clone());

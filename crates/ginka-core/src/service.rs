@@ -1501,6 +1501,44 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
+            Request::ResolveConflicts { workspace, agent } => {
+                let worktree = self.worktree(&workspace)?;
+                let conflicts = crate::conflicts::read(&worktree.path).map_err(failed)?;
+                if conflicts.paths.is_empty() {
+                    return Err(RpcError::failed(format!(
+                        "nothing is conflicted in {workspace}"
+                    )));
+                }
+                let prompt = crate::conflicts::prompt(&conflicts);
+                let latest =
+                    session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+                match latest
+                    .filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent))
+                {
+                    // The conversation that did the work knows why it did it,
+                    // which is most of resolving a conflict well.
+                    Some(latest) => {
+                        self.handle(Request::QueueMessage {
+                            session: latest.id.clone(),
+                            text: prompt,
+                        })?;
+                        Ok(Response::Session {
+                            session: self.session(&latest.id)?,
+                        })
+                    }
+                    None => self.handle(Request::StartSession {
+                        workspace,
+                        agent: agent.unwrap_or_else(|| "claude".to_string()),
+                        prompt,
+                        model: None,
+                        reasoning_effort: None,
+                        service_tier: None,
+                        account: None,
+                        access_mode: None,
+                        origin: None,
+                    }),
+                }
+            }
             Request::SendReviewComments { workspace, session } => {
                 let comments = crate::comments::list(&self.conn(), &workspace).map_err(failed)?;
                 if comments.is_empty() {

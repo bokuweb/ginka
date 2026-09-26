@@ -545,6 +545,18 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// Hand a worktree's conflicts — a merge, rebase or cherry-pick that
+    /// stopped on them — to an agent to resolve and finish: Orca's "Resolve
+    /// with AI". Refused when nothing is conflicted. Answers with the
+    /// conversation the request went to.
+    ResolveConflicts {
+        workspace: WorkspaceId,
+        /// Which agent resolves them. Omitted, the workspace's latest
+        /// conversation takes them as a follow-up (queued if it is working);
+        /// named, or with no conversation yet, a new one starts on it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// Leave a comment on a line of the diff.
     ///
     /// Orca's loop: marking the three places that are wrong is a better way to

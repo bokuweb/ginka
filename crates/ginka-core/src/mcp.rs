@@ -433,6 +433,18 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_resolve_conflicts",
+            description: "Hand a workspace's conflicts — a merge, rebase or cherry-pick that stopped on them — to an agent to resolve and finish. Without `agent`, the workspace's latest conversation takes it as a follow-up.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "agent": {"type": "string"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_commit",
             description: "Commit a workspace's work. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
             schema: json!({
@@ -897,6 +909,10 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
             header: text("header")?,
+        },
+        "ginka_resolve_conflicts" => Request::ResolveConflicts {
+            workspace: WorkspaceId(text("workspace")?),
+            agent: maybe("agent"),
         },
         "ginka_history" => Request::WorkspaceHistory {
             workspace: WorkspaceId(text("workspace")?),

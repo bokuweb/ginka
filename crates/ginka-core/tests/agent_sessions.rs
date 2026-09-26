@@ -3438,3 +3438,89 @@ fn holding_a_limited_queue_by_hand_cancels_its_resume() {
         other => panic!("expected the queue, got {other:?}"),
     }
 }
+
+#[test]
+fn conflicts_go_to_the_conversation_that_made_the_branch() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-merge"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-merge"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "change shared.txt");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    // Nothing conflicted yet: the request is refused rather than sent.
+    let refused = fixture
+        .service
+        .handle(Request::ResolveConflicts {
+            workspace: fixture.workspace.clone(),
+            agent: None,
+        })
+        .unwrap_err();
+    assert!(
+        refused.message.contains("nothing is conflicted"),
+        "{refused:?}"
+    );
+
+    let path = fixture.workspace_path();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(&path)
+            .args([
+                "-c",
+                "user.email=t@ginka.invalid",
+                "-c",
+                "user.name=T",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .status()
+            .unwrap()
+            .success()
+    };
+    let base = support::git(&path, &["rev-parse", "HEAD"]);
+    std::fs::write(path.join("shared.txt"), "ours\n").unwrap();
+    assert!(git(&["add", "-A"]) && git(&["commit", "-qm", "ours"]));
+    assert!(git(&["checkout", "-q", "-b", "theirs", &base]));
+    std::fs::write(path.join("shared.txt"), "theirs\n").unwrap();
+    assert!(git(&["add", "-A"]) && git(&["commit", "-qm", "theirs"]));
+    assert!(git(&["checkout", "-q", "-"]));
+    assert!(
+        !git(&["merge", "-q", "theirs"]),
+        "the merge stops on the conflict"
+    );
+
+    match fixture
+        .service
+        .handle(Request::ResolveConflicts {
+            workspace: fixture.workspace.clone(),
+            agent: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session: answered } => assert_eq!(answered.id, session),
+        other => panic!("expected the session, got {other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let asked = fixture.transcript(&session).iter().any(|entry| {
+            matches!(
+                entry,
+                TranscriptPayload::User { text }
+                    if text.starts_with("A merge in this worktree stopped on conflicts in 1 file")
+                        && text.contains("- shared.txt")
+            )
+        });
+        if asked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was never asked"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
