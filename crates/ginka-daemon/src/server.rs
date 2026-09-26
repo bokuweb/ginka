@@ -120,6 +120,44 @@ async fn refresh_rates(service: &Arc<Mutex<Service>>) {
     .await;
 }
 
+/// Read each project's pull requests with `gh` and keep what each workspace's
+/// branch has. The service is held only to plan and to keep the answer —
+/// never across the network, which would stall every request behind it.
+///
+/// A machine without `gh`, or one not signed in, reads nothing and says so
+/// only in the debug log: pull requests are an extra, not a requirement.
+async fn poll_pull_requests(service: &Arc<Mutex<Service>>) {
+    let service = service.clone();
+    smol::unblock(move || {
+        let plans = service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pull_request_plan();
+        for plan in plans {
+            let listed = match ginka_core::git::pull_requests(&plan.root) {
+                Ok(listed) => listed,
+                Err(error) => {
+                    tracing::debug!(%error, root = %plan.root.display(), "could not read pull requests");
+                    continue;
+                }
+            };
+            let found = plan
+                .branches
+                .into_iter()
+                .map(|(workspace, branch)| {
+                    let pull_request = ginka_core::git::pull_request_for(&listed, &branch);
+                    (workspace, pull_request)
+                })
+                .collect();
+            service
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .set_pull_requests(found);
+        }
+    })
+    .await;
+}
+
 /// Read what agents run outside Ginka spent from their vendors' logs, holding
 /// the service only to plan and to keep what was read — never while files are
 /// read, which on a first scan is every session on the machine.
@@ -288,13 +326,19 @@ impl Daemon {
                 // minutes is soon enough for a report.
                 let scan_every = std::time::Duration::from_secs(300);
                 let mut next_scan = std::time::Instant::now() + std::time::Duration::from_secs(90);
+                // One `gh` call per project. A pull request is opened, merged
+                // or closed on a scale of minutes; asking more often only
+                // spends the reader's API allowance.
+                let pulls_every = std::time::Duration::from_secs(120);
+                let mut next_pulls = std::time::Instant::now() + std::time::Duration::from_secs(5);
                 loop {
                     let now = std::time::Instant::now();
                     let wake = next_sync
                         .min(next_status)
                         .min(next_cron)
                         .min(next_rates)
-                        .min(next_scan);
+                        .min(next_scan)
+                        .min(next_pulls);
                     if wake > now {
                         smol::Timer::at(wake).await;
                     }
@@ -308,6 +352,10 @@ impl Daemon {
                     if now >= next_scan {
                         next_scan = now + scan_every;
                         scan_vendor_logs(&service).await;
+                    }
+                    if now >= next_pulls {
+                        next_pulls = now + pulls_every;
+                        poll_pull_requests(&service).await;
                     }
                     if cron {
                         next_cron = now + cron_every;

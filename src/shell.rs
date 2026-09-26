@@ -1315,6 +1315,7 @@ impl Shell {
                         DaemonEvent::ProjectsChanged
                         | DaemonEvent::WorkspacesChanged { .. }
                         | DaemonEvent::WorkspaceStatusChanged { .. }
+                        | DaemonEvent::WorkspacePullRequestChanged { .. }
                         | DaemonEvent::SessionStarted { .. }
                         | DaemonEvent::SessionOptionsChanged { .. } => {
                             pull_rows(&this, &link, cx).await.map(|_| ())

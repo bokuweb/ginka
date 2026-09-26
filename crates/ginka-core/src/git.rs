@@ -16,7 +16,7 @@ use std::io::Write as _;
 /// it is a wire type because the daemon pushes it to every client.
 pub use ginka_protocol::model::BranchStatus;
 pub use ginka_protocol::model::MergeOutcome;
-use ginka_protocol::model::{ChangeSource, FileChange, GitCommit};
+use ginka_protocol::model::{ChangeSource, FileChange, GitCommit, PullRequest, PullRequestState};
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -966,6 +966,100 @@ pub fn pull_request_url(said: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// The number at the end of a pull request's address, `…/pull/12`.
+pub fn pull_request_number(url: &str) -> Option<u32> {
+    let (_, tail) = url.rsplit_once("/pull/")?;
+    tail.split(['/', '#', '?']).next()?.parse().ok()
+}
+
+/// The repository's pull requests, newest first, each with the branch it was
+/// opened from.
+///
+/// Read with the GitHub CLI, which is already signed in wherever someone
+/// reviews on GitHub, so Ginka holds no token. Pull requests from forks are
+/// left out: their branch names are someone else's, and a fork's `main` is not
+/// the workspace on `main`.
+pub fn pull_requests(repo: &Path) -> Result<Vec<(String, PullRequest)>> {
+    let mut command = Command::new("gh");
+    crate::tool_path::apply(&mut command);
+    let output = command
+        .current_dir(repo)
+        .args([
+            "pr",
+            "list",
+            "--state",
+            "all",
+            "--limit",
+            "200",
+            "--json",
+            "number,url,state,isDraft,headRefName,isCrossRepository",
+        ])
+        .stdin(Stdio::null())
+        .output()
+        .context("running gh: the GitHub CLI is what reads pull requests")?;
+    if !output.status.success() {
+        bail!("gh pr list failed: {}", complaint(&output));
+    }
+    parse_pull_requests(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// What `gh pr list --json` printed, as branch and pull request pairs.
+pub fn parse_pull_requests(json: &str) -> Result<Vec<(String, PullRequest)>> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Listed {
+        number: u32,
+        url: String,
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        head_ref_name: String,
+        #[serde(default)]
+        is_cross_repository: bool,
+    }
+    let listed: Vec<Listed> = serde_json::from_str(json).context("reading gh's pull requests")?;
+    Ok(listed
+        .into_iter()
+        .filter(|listed| !listed.is_cross_repository)
+        .filter_map(|listed| {
+            let state = match listed.state.as_str() {
+                "OPEN" if listed.is_draft => PullRequestState::Draft,
+                "OPEN" => PullRequestState::Open,
+                "MERGED" => PullRequestState::Merged,
+                "CLOSED" => PullRequestState::Closed,
+                _ => return None,
+            };
+            let pull_request = PullRequest {
+                number: listed.number,
+                url: listed.url,
+                state,
+            };
+            Some((listed.head_ref_name, pull_request))
+        })
+        .collect())
+}
+
+/// The pull request that speaks for `branch`: an open one when there is one,
+/// otherwise the newest.
+///
+/// A branch closed once and opened again has both, and the open one is the
+/// one being worked on.
+pub fn pull_request_for(listed: &[(String, PullRequest)], branch: &str) -> Option<PullRequest> {
+    let mut mine = listed
+        .iter()
+        .filter(|(head, _)| head == branch)
+        .map(|(_, pull_request)| pull_request);
+    let newest = mine.clone().next()?;
+    mine.find(|pull_request| {
+        matches!(
+            pull_request.state,
+            PullRequestState::Open | PullRequestState::Draft
+        )
+    })
+    .or(Some(newest))
+    .cloned()
+}
+
 /// Update a clean tracked branch without creating a merge commit or rebasing.
 ///
 /// Dirty work is refused before contacting the remote. A missing upstream or
@@ -1123,6 +1217,51 @@ pub mod tests {
         assert!(!is_object_name("HEAD~3"));
         assert!(!is_object_name("main"));
         assert!(!is_object_name("abc"));
+    }
+
+    #[test]
+    fn a_pull_request_number_is_read_from_its_address() {
+        assert_eq!(
+            pull_request_number("https://github.com/o/r/pull/67"),
+            Some(67)
+        );
+        assert_eq!(
+            pull_request_number("https://github.com/o/r/pull/67/files"),
+            Some(67)
+        );
+        assert_eq!(pull_request_number("https://github.com/o/r"), None);
+    }
+
+    #[test]
+    fn gh_pull_requests_are_read_and_forks_left_out() {
+        let json = r#"[
+            {"number":3,"url":"u3","state":"OPEN","isDraft":true,"headRefName":"b","isCrossRepository":false},
+            {"number":2,"url":"u2","state":"MERGED","isDraft":false,"headRefName":"a","isCrossRepository":false},
+            {"number":1,"url":"u1","state":"OPEN","isDraft":false,"headRefName":"main","isCrossRepository":true}
+        ]"#;
+        let listed = parse_pull_requests(json).unwrap();
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].0, "b");
+        assert_eq!(listed[0].1.state, PullRequestState::Draft);
+        assert_eq!(listed[1].1.state, PullRequestState::Merged);
+        assert_eq!(pull_request_for(&listed, "main"), None);
+    }
+
+    #[test]
+    fn an_open_pull_request_speaks_for_its_branch_over_a_newer_closed_one() {
+        let pr = |number, state| PullRequest {
+            number,
+            url: format!("u{number}"),
+            state,
+        };
+        let listed = vec![
+            ("x".to_string(), pr(9, PullRequestState::Closed)),
+            ("x".to_string(), pr(5, PullRequestState::Open)),
+            ("y".to_string(), pr(4, PullRequestState::Closed)),
+            ("y".to_string(), pr(2, PullRequestState::Merged)),
+        ];
+        assert_eq!(pull_request_for(&listed, "x").unwrap().number, 5);
+        assert_eq!(pull_request_for(&listed, "y").unwrap().number, 4);
     }
 
     #[test]

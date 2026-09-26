@@ -81,6 +81,22 @@ const ICONS: &[(&str, &str)] = &[
         "icons/quote.svg",
         include_str!("../../../assets/icons/quote.svg"),
     ),
+    (
+        "icons/git-pull-request.svg",
+        include_str!("../../../assets/icons/git-pull-request.svg"),
+    ),
+    (
+        "icons/git-pull-request-draft.svg",
+        include_str!("../../../assets/icons/git-pull-request-draft.svg"),
+    ),
+    (
+        "icons/git-merge.svg",
+        include_str!("../../../assets/icons/git-merge.svg"),
+    ),
+    (
+        "icons/git-pull-request-closed.svg",
+        include_str!("../../../assets/icons/git-pull-request-closed.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -111,6 +127,12 @@ pub mod icon {
     pub const LOCK_OPEN: &str = "icons/lock-open.svg";
     /// Quoting a message into the composer: a bar beside the lines it quotes.
     pub const QUOTE: &str = "icons/quote.svg";
+    /// A workspace's pull request, one mark per state: open, draft, merged
+    /// and closed.
+    pub const GIT_PULL_REQUEST: &str = "icons/git-pull-request.svg";
+    pub const GIT_PULL_REQUEST_DRAFT: &str = "icons/git-pull-request-draft.svg";
+    pub const GIT_MERGE: &str = "icons/git-merge.svg";
+    pub const GIT_PULL_REQUEST_CLOSED: &str = "icons/git-pull-request-closed.svg";
 }
 
 impl AssetSource for Assets {

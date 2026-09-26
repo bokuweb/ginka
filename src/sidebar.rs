@@ -14,7 +14,7 @@
 //! chat" is how a chat is started in it, and a heading that could only be read
 //! would leave that flow with no way in.
 
-use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
+use ginka_protocol::{ProjectName, PullRequestState, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
@@ -821,6 +821,56 @@ impl SessionSidebar {
             })
     }
 
+    /// The row's pull request as its state's mark: green while open, muted
+    /// as a draft, the accent once merged, red when closed. It opens the pull
+    /// request, and says which one it is on hover.
+    fn pull_request_mark(
+        &self,
+        index: usize,
+        row: &SessionRow,
+        cx: &App,
+    ) -> Option<impl IntoElement + use<>> {
+        let pull_request = row.pull_request.clone()?;
+        let path = row.pull_request_icon()?;
+        let tokens = Tokens::global(cx);
+        let (color, label) = match pull_request.state {
+            PullRequestState::Open => (
+                tokens.colors().status_done,
+                rust_i18n::t!("sidebar.pull_request.open", number = pull_request.number),
+            ),
+            PullRequestState::Draft => (
+                tokens.colors().text_muted,
+                rust_i18n::t!("sidebar.pull_request.draft", number = pull_request.number),
+            ),
+            PullRequestState::Merged => (
+                tokens.colors().accent,
+                rust_i18n::t!("sidebar.pull_request.merged", number = pull_request.number),
+            ),
+            PullRequestState::Closed => (
+                tokens.colors().status_error,
+                rust_i18n::t!("sidebar.pull_request.closed", number = pull_request.number),
+            ),
+        };
+        let label = SharedString::from(label.to_string());
+        let url = pull_request.url;
+        Some(
+            div()
+                .id(("session-pull-request", index))
+                .flex_shrink_0()
+                .rounded(px(tokens.radius.control()))
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_active()))
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                })
+                .on_click(move |_, _, cx| {
+                    cx.stop_propagation();
+                    cx.open_url(&url);
+                })
+                .child(Icon::empty().path(path).size_3p5().text_color(color)),
+        )
+    }
+
     fn session_row(
         &self,
         index: usize,
@@ -890,6 +940,7 @@ impl SessionSidebar {
                                     .child(row.title.clone())
                                     .into_any_element(),
                             })
+                            .children(self.pull_request_mark(index, row, cx))
                             .when(row.pinned, |this| {
                                 this.child(
                                     Icon::new(IconName::StarFill)
