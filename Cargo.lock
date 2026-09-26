@@ -3246,7 +3246,7 @@ dependencies = [
 [[package]]
 name = "gpui-cef"
 version = "0.1.0"
-source = "git+https://github.com/bokuweb/gpui-cef?rev=9185b93f7651f99a12d3da99a4741a8ad9860778#9185b93f7651f99a12d3da99a4741a8ad9860778"
+source = "git+https://github.com/bokuweb/gpui-cef?tag=v0.1.0#051f95f4115cb5dea3b7526e70cc73fec697fd42"
 dependencies = [
  "cef",
  "core-foundation 0.10.1",
