@@ -50,7 +50,7 @@ fn main() -> Result<()> {
         cache_path: Some(paths.browser()),
         ..Default::default()
     })
-    .map_err(|error| error.to_string());
+    .map_err(browser_unavailable);
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     let started_runtime = browser_runtime.clone();
     let application = gpui_platform::application().with_assets(assets::Assets);
@@ -157,5 +157,17 @@ fn draw_text_unthickened() {
         .map(|_| defaults.integerForKey(&key) as i64);
     if let Some(level) = ginka_ui::theme::font_smoothing_override(current) {
         defaults.setInteger_forKey(level as isize, &key);
+    }
+}
+
+/// What the browser surface says when the engine did not load. On macOS a
+/// missing framework means the app was not started from its bundle, which is
+/// worth saying in the user's language rather than as the loader's path.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn browser_unavailable(error: gpui_cef::Error) -> String {
+    match error {
+        #[cfg(target_os = "macos")]
+        gpui_cef::Error::LibraryLoad(_) => rust_i18n::t!("surface.browser.needs_app").to_string(),
+        error => error.to_string(),
     }
 }

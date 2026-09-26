@@ -355,6 +355,9 @@ surface.browser.inspect:
 surface.browser.feedback:
   en: What should change about this element?
   ja: この要素をどう変更しますか？
+surface.browser.needs_app:
+  en: "The browser runs in the app bundle, where Chromium is: start Ginka.app, or scripts/dev-macos from a checkout."
+  ja: "ブラウザは Chromium を含むアプリバンドルの中で動きます。Ginka.app を起動するか、チェックアウトから scripts/dev-macos を使ってください。"
 surface.browser.import:
   en: From Chrome
   ja: Chrome から
@@ -511,6 +514,9 @@ palette.transcript.find.hint:
 palette.transcript.outline:
   en: Toggle prompt outline
   ja: プロンプト一覧を切り替え
+palette.search.everywhere:
+  en: Search everywhere
+  ja: すべてを検索
 palette.appearance.toggle:
   en: Switch between dark and light
   ja: ダーク／ライトを切り替える
@@ -615,6 +621,33 @@ transcript.quote:
 transcript.quote.tooltip:
   en: Quote selected text or this message in chat
   ja: 選択したテキストまたはこのメッセージをチャットに引用
+everywhere.placeholder:
+  en: Search conversations and files…
+  ja: 会話とファイルを検索…
+everywhere.conversations:
+  en: Conversations
+  ja: 会話
+everywhere.files:
+  en: Files
+  ja: ファイル
+everywhere.lines:
+  en: In files
+  ja: ファイルの中
+everywhere.searching:
+  en: Searching…
+  ja: 検索中…
+everywhere.nothing:
+  en: Nothing found
+  ja: 見つかりませんでした
+transcript.note_selection:
+  en: Save as note
+  ja: ノートに保存
+transcript.note_saved:
+  en: Saved to Notes
+  ja: ノートに保存しました
+transcript.note_failed:
+  en: Could not save the note
+  ja: ノートを保存できませんでした
 transcript.quote_selection:
   en: Quote selected text in chat
   ja: 選択したテキストをチャットに引用
@@ -826,6 +859,12 @@ surface.git.reading:
 surface.git.clean:
   en: Nothing has changed
   ja: 変更はありません
+surface.git.sync:
+  en: Sync
+  ja: 同期
+surface.git.sync_tooltip:
+  en: Pull what came in, then push what is ahead — or publish a branch never pushed
+  ja: リモートの更新を取り込み、先行分をプッシュする（未プッシュのブランチは公開する）
 surface.git.pull:
   en: Pull
   ja: Pull

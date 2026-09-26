@@ -40,7 +40,7 @@ pub fn navigator_width(project_selected: bool, expanded: Pixels) -> Pixels {
 }
 
 /// The panels the user can open and close.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Panel {
     /// The session list on the left.
     Sidebar,

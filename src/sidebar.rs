@@ -1666,7 +1666,8 @@ fn floating_menu(
         anchored()
             .anchor(Anchor::TopRight)
             .snap_to_window_with_margin(px(8.))
-            .child(
+            .child(ginka_ui::motion::rise_in(
+                "row-menu",
                 v_flex()
                     .mt_1()
                     .min_w(px(168.))
@@ -1679,7 +1680,7 @@ fn floating_menu(
                     .shadow_lg()
                     .on_mouse_down_out(dismiss)
                     .children(items),
-            ),
+            )),
     )
     .with_priority(1)
 }

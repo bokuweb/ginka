@@ -57,6 +57,7 @@ actions!(
         ToggleTerminalDock,
         TogglePalette,
         FindTranscript,
+        SearchEverywhere,
         NextSurface,
         PreviousSurface,
         NextTerminalTab,
@@ -159,6 +160,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-f", SearchEverywhere, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-f", SearchEverywhere, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-f", FindTranscript, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -529,6 +534,11 @@ pub struct Shell {
     target_project: Option<ProjectName>,
     /// A project-search hit to open after the sidebar finishes switching workspaces.
     pending_file_open: Option<(WorkspaceId, String)>,
+    /// A conversation to search once its workspace is on screen, from
+    /// searching everywhere.
+    pending_transcript_query: Option<(WorkspaceId, String)>,
+    /// Searching conversations and files at once, while its dialog is open.
+    everywhere: Option<Everywhere>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -700,6 +710,10 @@ pub struct Shell {
     /// The terminals are drawn in the right panel's Terminal tab rather than
     /// the dock; noted each frame.
     terminal_in_panel: bool,
+    /// Panels on their way in or out (`docs/ui.md` §6).
+    panel_motion: ginka_ui::motion::Transitions<Panel>,
+    /// A short confirmation at the foot of the window, and which one it is.
+    notice: Option<(SharedString, u64)>,
     /// The size the right panel's terminal area was last laid out at.
     terminal_area: Option<(f32, f32)>,
     /// The conversations open across the top of the centre column.
@@ -867,8 +881,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
-                crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
-                crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
+                crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
+                crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
+                crate::surfaces::SurfaceEvent::Sync => this.sync_git(RemoteAction::Sync, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
                     this.open_commit(commit.clone(), cx)
@@ -1095,6 +1110,13 @@ impl Shell {
                                 this.open_file(path, false, window, cx);
                             } else {
                                 this.pending_file_open = Some((workspace, path));
+                            }
+                        }
+                        if let Some((workspace, query)) = this.pending_transcript_query.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.find_in_conversation(query, window, cx);
+                            } else {
+                                this.pending_transcript_query = Some((workspace, query));
                             }
                         }
                         cx.notify();
@@ -1451,6 +1473,8 @@ impl Shell {
             projects: Vec::new(),
             target_project: None,
             pending_file_open: None,
+            pending_transcript_query: None,
+            everywhere: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -1483,6 +1507,8 @@ impl Shell {
             sidebar,
             surfaces,
             terminal_in_panel: false,
+            panel_motion: Default::default(),
+            notice: None,
             terminal_area: None,
             notes,
             tabs: restored_tabs,
@@ -2722,7 +2748,7 @@ impl Shell {
     }
 
     /// Synchronize the selected branch through the daemon-owned git path.
-    fn sync_git(&mut self, push: bool, cx: &mut Context<Self>) {
+    fn sync_git(&mut self, action: RemoteAction, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
@@ -2731,10 +2757,10 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let outcome = cx
                 .background_spawn(async move {
-                    if push {
-                        link.push(&workspace).await
-                    } else {
-                        link.pull(&workspace).await
+                    match action {
+                        RemoteAction::Push => link.push(&workspace).await,
+                        RemoteAction::Pull => link.pull(&workspace).await,
+                        RemoteAction::Sync => link.sync(&workspace).await,
                     }
                 })
                 .await;
@@ -3184,9 +3210,10 @@ impl Shell {
         Some(
             Button::new(SharedString::from(format!("edit-prompt-{index}")))
                 .ghost()
-                .compact()
+                .small()
+                .icon(Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN))
+                .label(rust_i18n::t!("transcript.edit").to_string())
                 .tooltip(rust_i18n::t!("transcript.edit.tooltip").to_string())
-                .child(rust_i18n::t!("transcript.edit").to_string())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.edit_prompt(seq, text.clone(), window, cx)
                 }))
@@ -3194,23 +3221,29 @@ impl Shell {
         )
     }
 
+    /// A message's actions: one quiet row under it, brought up to full
+    /// strength while the pointer is over the message (`message_group`).
     fn message_actions(
         &self,
         index: usize,
         role: &'static str,
         message: &str,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Stateful<Div> {
         let copied = message.to_string();
         let quoted = message.to_string();
         h_flex()
-            .gap_1()
+            .id(SharedString::from(format!("actions-{role}-{index}")))
+            .gap_0p5()
+            .opacity(0.5)
+            .group_hover(message_group(index), |this| this.opacity(1.))
             .child(
                 Button::new(SharedString::from(format!("copy-{role}-{index}")))
                     .ghost()
-                    .compact()
+                    .small()
+                    .icon(IconName::Copy)
+                    .label(rust_i18n::t!("transcript.copy").to_string())
                     .tooltip(rust_i18n::t!("transcript.copy.tooltip").to_string())
-                    .child(rust_i18n::t!("transcript.copy").to_string())
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                     }),
@@ -3218,16 +3251,16 @@ impl Shell {
             .child(
                 Button::new(SharedString::from(format!("quote-{role}-{index}")))
                     .ghost()
-                    .compact()
+                    .small()
+                    .icon(Icon::empty().path(ginka_ui::assets::icon::QUOTE))
+                    .label(rust_i18n::t!("transcript.quote").to_string())
                     .tooltip(rust_i18n::t!("transcript.quote.tooltip").to_string())
-                    .child(rust_i18n::t!("transcript.quote").to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let selection = TextSelection::selected_text(window, cx);
                         let target = ginka_ui::transcript::quote_target(&quoted, &selection);
                         this.quote_in_composer(target, window, cx)
                     })),
             )
-            .into_any_element()
     }
 
     /// Start a shell in the workspace on screen.
@@ -4510,6 +4543,20 @@ impl Shell {
 
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.layout.toggle(panel);
+        let opening = self.layout.is_open(panel);
+        self.panel_motion
+            .start(panel, opening, std::time::Instant::now());
+        if !opening {
+            // Drawn while it fades; one more frame once it has gone takes it
+            // out of the columns.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(ginka_ui::motion::PANEL + Duration::from_millis(16))
+                    .await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
         self.persist();
         // A dock that has just opened is one that has to find the shells the
         // daemon kept running while it was closed.
@@ -5827,6 +5874,7 @@ impl Shell {
             }
             Command::RunQuick(command) => self.run_quick(command, window, cx),
             Command::ToggleAppearance => self.toggle_appearance(window, cx),
+            Command::SearchEverywhere => self.on_search_everywhere(&SearchEverywhere, window, cx),
             Command::NewTerminal => {
                 self.bring_terminals_on_screen(cx);
                 self.open_terminal(window, cx);
@@ -6258,12 +6306,34 @@ impl Shell {
         let mouse_text = selected_text.clone();
         let click_text = selected_text;
         let label = rust_i18n::t!("transcript.quote_selection").to_string();
+        let note_label = rust_i18n::t!("transcript.note_selection").to_string();
+        let note_mouse = mouse_text.clone();
+        let note_click = click_text.clone();
 
         Some(
-            div()
+            h_flex()
                 .absolute()
                 .top_2()
                 .right_3()
+                .gap_1()
+                .child(
+                    Button::new("note-transcript-selection")
+                        .compact()
+                        .tooltip(note_label.clone())
+                        .accessibility_label(note_label.clone())
+                        .label(note_label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.save_selection_as_note(&note_mouse, cx)
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            if !matches!(event, ClickEvent::Mouse(_)) {
+                                this.save_selection_as_note(&note_click, cx);
+                            }
+                        })),
+                )
                 .child(
                     Button::new("quote-transcript-selection")
                         .compact()
@@ -6961,6 +7031,7 @@ impl Shell {
                     .w_full()
                     .items_end()
                     .gap_1()
+                    .group(message_group(index))
                     .child(
                         div()
                             // Never the full measure: a message that fills the
@@ -6978,8 +7049,10 @@ impl Shell {
                             .text_color(tokens.colors().text_secondary)
                             .child(text.clone()),
                     )
-                    .child(self.message_actions(index, "user", text, cx))
-                    .children(self.edit_prompt_button(index, text, cx))
+                    .child(
+                        self.message_actions(index, "user", text, cx)
+                            .children(self.edit_prompt_button(index, text, cx)),
+                    )
                     .into_any_element()
             }
             TranscriptBlock::Assistant { text } => {
@@ -7004,6 +7077,7 @@ impl Shell {
                 v_flex()
                     .w_full()
                     .gap_1()
+                    .group(message_group(index))
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
                     .text_color(tokens.colors().text_secondary)
@@ -12174,7 +12248,11 @@ impl Shell {
     fn center(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         // The terminals are drawn in one place at a time: in the right panel
         // while its Terminal tab is on screen, in the dock otherwise.
-        let dock_open = self.layout.is_open(Panel::TerminalDock) && !self.terminal_in_panel;
+        let now = std::time::Instant::now();
+        let dock_open = (self.layout.is_open(Panel::TerminalDock)
+            || self.panel_motion.closing(&Panel::TerminalDock, now))
+            && !self.terminal_in_panel;
+        let dock_motion = self.panel_motion.current(&Panel::TerminalDock, now);
         let dock_height = self.layout.size(Panel::TerminalDock);
 
         v_flex().size_full().child(
@@ -12203,7 +12281,11 @@ impl Shell {
                         resizable_panel()
                             .size(dock_height)
                             .size_range(px(120.)..px(560.))
-                            .child(self.terminal_dock(cx).into_any_element()),
+                            .child(panel_entrance(
+                                div().size_full().child(self.terminal_dock(cx)),
+                                dock_motion,
+                                0.0,
+                            )),
                     )
                 }),
         )
@@ -12548,8 +12630,14 @@ impl Render for Shell {
         let in_workspace = place == crate::sidebar::Place::Workspace;
         // Only a project can do without the rail: the other places have
         // nothing else on screen to get back from.
-        let sidebar_open = self.layout.is_open(Panel::Sidebar) || !in_workspace;
-        let right_open = self.layout.is_open(Panel::RightPanel) && in_workspace;
+        let now = std::time::Instant::now();
+        self.panel_motion.prune(now);
+        let shown =
+            |panel: Panel| self.layout.is_open(panel) || self.panel_motion.closing(&panel, now);
+        let sidebar_open = shown(Panel::Sidebar) || !in_workspace;
+        let right_open = shown(Panel::RightPanel) && in_workspace;
+        let sidebar_motion = self.panel_motion.current(&Panel::Sidebar, now);
+        let right_motion = self.panel_motion.current(&Panel::RightPanel, now);
         let project_selected = self.sidebar.read(cx).has_project_selection();
         let sidebar_width = navigator_width(project_selected, self.layout.size(Panel::Sidebar));
         let sidebar_range = if project_selected {
@@ -12606,6 +12694,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_search_everywhere))
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
@@ -12645,12 +12734,15 @@ impl Render for Shell {
                                         // window and carries the window's own
                                         // controls in the rail's top strip,
                                         // over the rail's own background.
-                                        div()
-                                            .relative()
-                                            .size_full()
-                                            .child(self.sidebar.clone())
-                                            .children(window_controls)
-                                            .into_any_element(),
+                                        panel_entrance(
+                                            div()
+                                                .relative()
+                                                .size_full()
+                                                .child(self.sidebar.clone())
+                                                .children(window_controls),
+                                            sidebar_motion,
+                                            -1.0,
+                                        ),
                                     ),
                             )
                         })
@@ -12679,15 +12771,36 @@ impl Render for Shell {
                                 resizable_panel()
                                     .size(right_width)
                                     .size_range(px(280.)..px(720.))
-                                    .child(self.surfaces.clone()),
+                                    .child(panel_entrance(
+                                        div().size_full().child(self.surfaces.clone()),
+                                        right_motion,
+                                        1.0,
+                                    )),
                             )
                         }),
                 ),
             )
-            .children(self.palette_view(cx))
-            .children(self.image_markup_view(cx))
-            .children(self.add_project_view(window, cx))
-            .children(self.add_account_view(cx))
+            .children(self.notice_view(cx))
+            .children(
+                self.everywhere_view(cx)
+                    .map(|view| overlay_fade("everywhere", view)),
+            )
+            .children(
+                self.palette_view(cx)
+                    .map(|view| overlay_fade("palette", view)),
+            )
+            .children(
+                self.image_markup_view(cx)
+                    .map(|view| overlay_fade("image-markup", view)),
+            )
+            .children(
+                self.add_project_view(window, cx)
+                    .map(|view| overlay_fade("add-project", view)),
+            )
+            .children(
+                self.add_account_view(cx)
+                    .map(|view| overlay_fade("add-account", view)),
+            )
     }
 }
 
@@ -12847,7 +12960,7 @@ fn chip_flyout(card: AnyElement) -> Div {
                 .anchor(Anchor::BottomLeft)
                 .offset(point(px(0.), px(-6.)))
                 .snap_to_window_with_margin(px(8.))
-                .child(card),
+                .child(ginka_ui::motion::fade_in("chip-flyout", div().child(card))),
         )
         .with_priority(1),
     )
@@ -12965,6 +13078,473 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// What the Git surface asks of the workspace's remote.
+#[derive(Clone, Copy)]
+enum RemoteAction {
+    Pull,
+    Push,
+    Sync,
+}
+
+impl Shell {
+    /// Keep a transcript selection as a note in the project it came from.
+    fn save_selection_as_note(&mut self, text: &str, cx: &mut Context<Self>) {
+        let source = self.session.as_ref().map(|row| row.title.to_string());
+        let (title, body) = ginka_ui::notes::from_selection(text, source.as_deref());
+        let project = self
+            .session
+            .as_ref()
+            .map(|row| ProjectName(row.origin.to_string()))
+            .or_else(|| self.target_project.clone());
+        let link = self.link.clone();
+        let notes = self.notes.clone();
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move { link.save_note(None, project, title, body).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if saved.is_some() {
+                    notes.update(cx, |notes, cx| notes.reload(cx));
+                    this.show_notice(rust_i18n::t!("transcript.note_saved").to_string(), cx);
+                } else {
+                    this.show_notice(rust_i18n::t!("transcript.note_failed").to_string(), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Say something short at the foot of the window, for a moment.
+    fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        let id = self.notice.as_ref().map_or(1, |(_, id)| id + 1);
+        self.notice = Some((text.into(), id));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.notice.as_ref().is_some_and(|(_, shown)| *shown == id) {
+                    this.notice = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The notice, as a small card floating over the foot of the window.
+    fn notice_view(&self, cx: &App) -> Option<AnyElement> {
+        let (text, id) = self.notice.clone()?;
+        let tokens = Tokens::global(cx);
+        Some(
+            div()
+                .absolute()
+                .bottom(px(24.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(ginka_ui::motion::rise_in(
+                    ("notice", id as usize),
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .rounded(px(tokens.radius.panel))
+                        .bg(tokens.colors().popover())
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .text_sm()
+                        .text_color(tokens.colors().text_primary)
+                        .child(text),
+                ))
+                .into_any_element(),
+        )
+    }
+}
+
+/// Searching conversations and files at once (⌘⇧F), while it is open.
+struct Everywhere {
+    query: Entity<InputState>,
+    /// What was last searched for.
+    typed: String,
+    found: Vec<ginka_ui::search::Found>,
+    /// Which result Return opens.
+    chosen: usize,
+    loading: bool,
+    /// Counts searches, so a slow answer to an older query is dropped.
+    asked: u64,
+}
+
+impl Shell {
+    fn on_search_everywhere(
+        &mut self,
+        _: &SearchEverywhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.everywhere.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("everywhere.placeholder").to_string())
+        });
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let typed = query.read(cx).value().to_string();
+                this.search_everywhere(typed, cx);
+            }
+        })
+        .detach();
+        self.everywhere = Some(Everywhere {
+            query,
+            typed: String::new(),
+            found: Vec::new(),
+            chosen: 0,
+            loading: false,
+            asked: 0,
+        });
+        cx.notify();
+    }
+
+    /// Ask for conversation lines everywhere and for files in the project on
+    /// screen, together; an answer to a query already typed past is dropped.
+    fn search_everywhere(&mut self, typed: String, cx: &mut Context<Self>) {
+        let project = self
+            .session
+            .as_ref()
+            .map(|row| ProjectName(row.origin.to_string()))
+            .or_else(|| self.target_project.clone());
+        let Some(everywhere) = self.everywhere.as_mut() else {
+            return;
+        };
+        everywhere.typed = typed.clone();
+        everywhere.asked += 1;
+        everywhere.chosen = 0;
+        let asked = everywhere.asked;
+        if typed.trim().chars().count() < 2 {
+            everywhere.found.clear();
+            everywhere.loading = false;
+            cx.notify();
+            return;
+        }
+        everywhere.loading = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let (conversations, (files, lines)) = cx
+                .background_spawn(async move {
+                    let conversations = link
+                        .search_all_sessions(typed.clone())
+                        .await
+                        .unwrap_or_default();
+                    let files = match project {
+                        Some(project) => link.search_project(&project, &typed).await,
+                        None => (Vec::new(), Vec::new()),
+                    };
+                    (conversations, files)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(everywhere) = this.everywhere.as_mut()
+                    && everywhere.asked == asked
+                {
+                    everywhere.found = ginka_ui::search::everywhere(
+                        conversations,
+                        files,
+                        lines,
+                        ginka_ui::search::PER_GROUP,
+                    );
+                    everywhere.loading = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn everywhere_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(everywhere) = self.everywhere.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.everywhere = None;
+                cx.notify();
+            }
+            "down" => {
+                everywhere.chosen =
+                    (everywhere.chosen + 1).min(everywhere.found.len().saturating_sub(1));
+                cx.notify();
+            }
+            "up" => {
+                everywhere.chosen = everywhere.chosen.saturating_sub(1);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(found) = everywhere.found.get(everywhere.chosen).cloned() {
+                    self.open_found(found, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Go to a result: a conversation opens searched for the same words, a
+    /// file opens in the Files editor.
+    fn open_found(
+        &mut self,
+        found: ginka_ui::search::Found,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::search::Found;
+        let typed = self
+            .everywhere
+            .take()
+            .map(|everywhere| everywhere.typed)
+            .unwrap_or_default();
+        match found {
+            Found::Conversation(hit) => {
+                if self.session.as_ref().map(|row| &row.workspace) == Some(&hit.workspace) {
+                    self.find_in_conversation(typed, window, cx);
+                } else {
+                    self.pending_transcript_query = Some((hit.workspace.clone(), typed));
+                    self.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.select_workspace(&hit.workspace, cx)
+                    });
+                }
+            }
+            Found::File(file) => self.open_workspace_file(file.workspace, file.path, window, cx),
+            Found::Line(line) => self.open_workspace_file(line.workspace, line.path, window, cx),
+        }
+        cx.notify();
+    }
+
+    /// Open the conversation's own search with `query` already in it.
+    fn find_in_conversation(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_find_transcript(&FindTranscript, window, cx);
+        if let Some(search) = self.transcript_search.as_ref() {
+            search
+                .query
+                .update(cx, |field, cx| field.set_value(query, window, cx));
+        }
+    }
+
+    /// The dialog: a field, and what was found in groups.
+    fn everywhere_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use ginka_ui::search::Found;
+        let everywhere = self.everywhere.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let chosen = everywhere.chosen;
+        let heading = |key: &str| {
+            div()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!(key).to_string())
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut last_kind = "";
+        for (index, found) in everywhere.found.iter().enumerate() {
+            let (kind, icon, primary, secondary) = match found {
+                Found::Conversation(hit) => (
+                    "everywhere.conversations",
+                    Icon::new(IconName::Inbox),
+                    hit.excerpt.clone(),
+                    hit.title.clone().unwrap_or_else(|| hit.workspace.0.clone()),
+                ),
+                Found::File(file) => (
+                    "everywhere.files",
+                    Icon::new(IconName::File),
+                    file.path.clone(),
+                    file.workspace.0.clone(),
+                ),
+                Found::Line(line) => (
+                    "everywhere.lines",
+                    Icon::new(IconName::Search),
+                    line.text.trim().to_string(),
+                    format!("{}:{} · {}", line.path, line.line, line.workspace.0),
+                ),
+            };
+            if kind != last_kind {
+                rows.push(heading(kind).into_any_element());
+                last_kind = kind;
+            }
+            let open = found.clone();
+            rows.push(
+                h_flex()
+                    .id(("everywhere-result", index))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .when(index == chosen, |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_found(open.clone(), window, cx)
+                    }))
+                    .child(icon.size_3p5().text_color(tokens.colors().text_muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(primary),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(secondary),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let status = if everywhere.loading {
+            Some(rust_i18n::t!("everywhere.searching").to_string())
+        } else if everywhere.found.is_empty() && everywhere.typed.trim().chars().count() >= 2 {
+            Some(rust_i18n::t!("everywhere.nothing").to_string())
+        } else {
+            None
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .child(
+                    v_flex()
+                        .id("everywhere")
+                        .mt(px(110.))
+                        .w(px(640.))
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().popover())
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.everywhere_key(event, window, cx)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(ginka_ui::field::input(&everywhere.query)),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .id("everywhere-results")
+                                .max_h(px(420.))
+                                .overflow_y_scroll()
+                                .p_1()
+                                .children(rows)
+                                .children(status.map(|status| {
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(status)
+                                })),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// How long a notice stays.
+const NOTICE_FOR: Duration = Duration::from_millis(2600);
+
+/// The hover group a transcript message and its actions share.
+fn message_group(index: usize) -> SharedString {
+    SharedString::from(format!("message-{index}"))
+}
+
+/// A window-covering overlay — a dialog and the scrim under it — faded in.
+fn overlay_fade(id: &'static str, overlay: AnyElement) -> AnyElement {
+    ginka_ui::motion::fade_in(
+        id,
+        div().absolute().top_0().left_0().size_full().child(overlay),
+    )
+    .into_any_element()
+}
+
+/// A panel's content as it comes in or goes: a fade, and a short slide from
+/// the edge it lives on (`side`: -1 left, 1 right, 0 from below).
+fn panel_entrance(
+    content: Div,
+    motion: Option<ginka_ui::motion::Transition>,
+    side: f32,
+) -> AnyElement {
+    let Some(motion) = motion else {
+        return content.into_any_element();
+    };
+    const TRAVEL: f32 = 14.;
+    let opening = motion.opening;
+    content
+        .relative()
+        .with_animation(
+            ("panel-motion", motion.id as usize),
+            Animation::new(ginka_ui::motion::PANEL).with_easing(ginka_ui::motion::ease_out),
+            move |content, delta| {
+                // How far in the panel is: 0 is gone, 1 is settled.
+                let shown = if opening { delta } else { 1.0 - delta };
+                let offset = px(TRAVEL * (1.0 - shown));
+                let content = content.opacity(shown);
+                if side < 0.0 {
+                    content.left(-offset)
+                } else if side > 0.0 {
+                    content.left(offset)
+                } else {
+                    content.top(offset)
+                }
+            },
+        )
+        .into_any_element()
 }
 
 /// The workspace's terminals, drawn in the right panel's Terminal tab.

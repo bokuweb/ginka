@@ -140,7 +140,7 @@ objc2-foundation = { version = "0.3", default-features = false, features = ["std
 
 # The workspace browser: Chromium off-screen on macOS, WebView2 on Windows.
 [target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
-gpui-cef = { git = "https://github.com/bokuweb/gpui-cef", tag = "v0.1.0" }
+gpui-cef = { git = "https://github.com/bokuweb/gpui-cef", tag = "v0.1.1" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

@@ -374,6 +374,10 @@ pub enum Request {
     Push { workspace: WorkspaceId },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull { workspace: WorkspaceId },
+    /// Bring a workspace branch level with its remote in one action: publish
+    /// it if it was never pushed, otherwise fast-forward, then push what is
+    /// ahead. Answers with [`Response::Synced`].
+    Sync { workspace: WorkspaceId },
     /// Push the workspace's branch and open a pull request for it with the
     /// GitHub CLI, titled and described from its commits. Answers with the
     /// pull request's address — the existing one's, when the branch already
@@ -873,6 +877,13 @@ pub enum Response {
     PullRequest {
         url: String,
     },
+    /// What [`Request::Sync`] did.
+    Synced {
+        /// Commits came in from the remote.
+        pulled: bool,
+        /// Commits went out, or the branch was published.
+        pushed: bool,
+    },
     Notes {
         notes: Vec<Note>,
     },
@@ -1010,6 +1021,9 @@ mod tests {
                 id: 7,
             },
             Request::Pull {
+                workspace: WorkspaceId("comet/harbor".into()),
+            },
+            Request::Sync {
                 workspace: WorkspaceId("comet/harbor".into()),
             },
             Request::WorkspaceHistory {

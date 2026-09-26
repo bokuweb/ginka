@@ -195,6 +195,21 @@ impl DaemonLink {
         }
     }
 
+    /// Find stored transcript entries in every conversation.
+    pub async fn search_all_sessions(&self, query: String) -> Result<Vec<SessionMatch>, String> {
+        match self
+            .ask_result(Request::SearchSessions {
+                workspace: None,
+                query,
+                limit: Some(60),
+            })
+            .await?
+        {
+            Response::SessionMatches { matches } => Ok(matches),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Upload bytes selected by this client to the daemon-owned attachment store.
     pub async fn upload_attachment(
         &self,
@@ -508,6 +523,14 @@ impl DaemonLink {
     /// Fetch and fast-forward a clean workspace branch through the daemon.
     pub async fn pull(&self, workspace: &WorkspaceId) -> Result<(), String> {
         self.git_sync(Request::Pull {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
+    /// Pull then push a workspace branch, or publish it, through the daemon.
+    pub async fn sync(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Sync {
             workspace: workspace.clone(),
         })
         .await

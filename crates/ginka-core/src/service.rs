@@ -1237,6 +1237,17 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
+            Request::Sync { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                let synced = git::sync(&worktree.path).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Synced {
+                    pulled: synced.pulled,
+                    pushed: synced.pushed,
+                })
+            }
             Request::WorkspaceFiles {
                 workspace,
                 query,

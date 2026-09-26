@@ -248,6 +248,12 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Bring a workspace branch level with its remote: publish it if it was
+    /// never pushed, otherwise fast-forward, then push what is ahead.
+    Sync {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Push a workspace's branch and open a pull request for it with `gh`,
     /// titled from its commits. Prints the pull request's address.
     Pr {
@@ -1274,6 +1280,9 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Pull { workspace } => Request::Pull {
             workspace: WorkspaceId(workspace),
         },
+        Command::Sync { workspace } => Request::Sync {
+            workspace: WorkspaceId(workspace),
+        },
         Command::Changes {
             workspace,
             staged,
@@ -1770,6 +1779,12 @@ fn print(response: Response, patch: bool) {
         Response::Accounts { accounts } => print_accounts(&accounts, &[]),
         Response::Connectors { connectors } => print_connectors(&connectors),
         Response::PullRequest { url } => println!("{url}"),
+        Response::Synced { pulled, pushed } => match (pulled, pushed) {
+            (false, false) => println!("already in step with the remote"),
+            (true, false) => println!("pulled"),
+            (false, true) => println!("pushed"),
+            (true, true) => println!("pulled and pushed"),
+        },
         Response::Notes { notes } => {
             if notes.is_empty() {
                 println!("{}", rust_i18n::t!("cli.notes.empty"));

@@ -220,6 +220,12 @@ Fetch and fast-forward a clean workspace branch from its upstream
 
 `ginka pull <WORKSPACE>`
 
+## `ginka sync`
+
+Bring a workspace branch level with its remote: publish it if it was never pushed, otherwise fast-forward, then push what is ahead
+
+`ginka sync <WORKSPACE>`
+
 ## `ginka pr`
 
 Push a workspace's branch and open a pull request for it with `gh`, titled from its commits. Prints the pull request's address
