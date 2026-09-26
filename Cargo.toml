@@ -155,3 +155,9 @@ workspace = true
 gpui-component = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-component-assets = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
 gpui-base = { git = "https://github.com/longbridge//gpui-component", rev = "5a564d4e798f18b66e9c0d85b651e96d3450b0a7" }
+
+# Dependencies (GPUI, gpui-component, text shaping, SQLite, …) are unusably
+# slow at opt-level 0. Optimise them in dev builds while the workspace's own
+# crates stay at opt-level 0 so incremental rebuilds stay fast and debuggable.
+[profile.dev.package."*"]
+opt-level = 2
