@@ -3187,9 +3187,10 @@ impl Shell {
         Some(
             Button::new(SharedString::from(format!("edit-prompt-{index}")))
                 .ghost()
-                .compact()
+                .small()
+                .icon(Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN))
+                .label(rust_i18n::t!("transcript.edit").to_string())
                 .tooltip(rust_i18n::t!("transcript.edit.tooltip").to_string())
-                .child(rust_i18n::t!("transcript.edit").to_string())
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.edit_prompt(seq, text.clone(), window, cx)
                 }))
@@ -3197,23 +3198,29 @@ impl Shell {
         )
     }
 
+    /// A message's actions: one quiet row under it, brought up to full
+    /// strength while the pointer is over the message (`message_group`).
     fn message_actions(
         &self,
         index: usize,
         role: &'static str,
         message: &str,
         cx: &mut Context<Self>,
-    ) -> AnyElement {
+    ) -> Stateful<Div> {
         let copied = message.to_string();
         let quoted = message.to_string();
         h_flex()
-            .gap_1()
+            .id(SharedString::from(format!("actions-{role}-{index}")))
+            .gap_0p5()
+            .opacity(0.5)
+            .group_hover(message_group(index), |this| this.opacity(1.))
             .child(
                 Button::new(SharedString::from(format!("copy-{role}-{index}")))
                     .ghost()
-                    .compact()
+                    .small()
+                    .icon(IconName::Copy)
+                    .label(rust_i18n::t!("transcript.copy").to_string())
                     .tooltip(rust_i18n::t!("transcript.copy.tooltip").to_string())
-                    .child(rust_i18n::t!("transcript.copy").to_string())
                     .on_click(move |_, _, cx| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copied.clone()))
                     }),
@@ -3221,16 +3228,16 @@ impl Shell {
             .child(
                 Button::new(SharedString::from(format!("quote-{role}-{index}")))
                     .ghost()
-                    .compact()
+                    .small()
+                    .icon(Icon::empty().path(ginka_ui::assets::icon::QUOTE))
+                    .label(rust_i18n::t!("transcript.quote").to_string())
                     .tooltip(rust_i18n::t!("transcript.quote.tooltip").to_string())
-                    .child(rust_i18n::t!("transcript.quote").to_string())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         let selection = TextSelection::selected_text(window, cx);
                         let target = ginka_ui::transcript::quote_target(&quoted, &selection);
                         this.quote_in_composer(target, window, cx)
                     })),
             )
-            .into_any_element()
     }
 
     /// Start a shell in the workspace on screen.
@@ -6978,6 +6985,7 @@ impl Shell {
                     .w_full()
                     .items_end()
                     .gap_1()
+                    .group(message_group(index))
                     .child(
                         div()
                             // Never the full measure: a message that fills the
@@ -6995,8 +7003,10 @@ impl Shell {
                             .text_color(tokens.colors().text_secondary)
                             .child(text.clone()),
                     )
-                    .child(self.message_actions(index, "user", text, cx))
-                    .children(self.edit_prompt_button(index, text, cx))
+                    .child(
+                        self.message_actions(index, "user", text, cx)
+                            .children(self.edit_prompt_button(index, text, cx)),
+                    )
                     .into_any_element()
             }
             TranscriptBlock::Assistant { text } => {
@@ -7021,6 +7031,7 @@ impl Shell {
                 v_flex()
                     .w_full()
                     .gap_1()
+                    .group(message_group(index))
                     .text_size(px(PROSE_SIZE))
                     .line_height(px(PROSE_LINE))
                     .text_color(tokens.colors().text_secondary)
@@ -13015,6 +13026,11 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// The hover group a transcript message and its actions share.
+fn message_group(index: usize) -> SharedString {
+    SharedString::from(format!("message-{index}"))
 }
 
 /// A window-covering overlay — a dialog and the scrim under it — faded in.
