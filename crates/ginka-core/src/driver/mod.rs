@@ -15,6 +15,7 @@ pub mod acp;
 pub mod activity;
 pub mod claude;
 pub mod codex;
+pub mod codex_app;
 pub mod event;
 pub mod probe;
 pub mod process;
@@ -245,6 +246,8 @@ pub struct ParseState {
     pub outbox: Vec<String>,
     /// The ACP driver's half of the exchange.
     pub acp: acp::AcpState,
+    /// The Codex app server's half of the exchange.
+    pub codex: codex_app::AppState,
 }
 
 impl ParseState {
@@ -466,6 +469,9 @@ impl Registry {
         for (key, value) in codex.iter().flat_map(|agent| agent.env.iter()) {
             driver = driver.with_env(key, value);
         }
+        if codex.and_then(|agent| agent.transport.as_deref()) == Some("exec") {
+            driver = driver.with_exec();
+        }
         registry.insert(Arc::new(driver));
 
         // Every agent reached over ACP, in the same shape.
@@ -557,6 +563,7 @@ mod tests {
         settings.agents.insert(
             "claude".to_string(),
             crate::settings::AgentSettings {
+                transport: None,
                 program: Some("/opt/ginka/claude".to_string()),
                 env: [(
                     "ANTHROPIC_BASE_URL".to_string(),

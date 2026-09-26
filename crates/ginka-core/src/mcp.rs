@@ -119,7 +119,7 @@ pub fn tools() -> Vec<Tool> {
                     "model": {"type": "string"},
                     "reasoning_effort": {"type": "string", "description": "A value advertised for the selected model"},
                     "service_tier": {"type": "string", "description": "A value advertised for the selected model"},
-                    "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands sandboxed or refused) otherwise"},
+                    "access": {"type": "string", "enum": ["read-only", "ask", "auto"], "description": "What the agent may touch; ask (edit freely, commands asked about) otherwise"},
                     "account": {"type": "string", "description": "An account id from ginka_accounts; the provider's active account otherwise"},
                 },
                 "required": ["workspace", "agent", "prompt"],
