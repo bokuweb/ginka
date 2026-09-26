@@ -166,6 +166,27 @@ pub fn update_state(
     Ok(())
 }
 
+/// Mark a session active now, whatever its transcript's dates say — an
+/// imported transcript carries the vendor's older times.
+pub fn touch(conn: &Connection, id: &SessionId, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET updated_at = ?1 WHERE id = ?2",
+        rusqlite::params![now, id.0],
+    )?;
+    Ok(())
+}
+
+/// Every vendor session id a session holds: the conversations Ginka already
+/// has, whether it started them or adopted them from a CLI.
+pub fn vendor_ids(conn: &Connection) -> Result<std::collections::HashSet<String>> {
+    let mut statement =
+        conn.prepare("SELECT vendor_session_id FROM sessions WHERE vendor_session_id IS NOT NULL")?;
+    let ids = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
 /// Record the vendor's own session id, which is what a resume is built from.
 pub fn set_vendor_session_id(conn: &Connection, id: &SessionId, vendor: &str) -> Result<()> {
     // A thread of its own is what a handoff was for: once the agent has one,

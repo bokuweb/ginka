@@ -1220,6 +1220,43 @@ impl DaemonLink {
         }
     }
 
+    /// The conversations the agents' own CLIs started in a workspace's
+    /// directory, newest first.
+    pub async fn cli_sessions(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<Vec<ginka_protocol::model::CliSession>, String> {
+        match self
+            .ask_result(Request::CliSessions {
+                workspace: workspace.clone(),
+            })
+            .await?
+        {
+            Response::CliSessions { sessions } => Ok(sessions),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Bring one of those conversations in as a session of the workspace.
+    pub async fn adopt_cli_session(
+        &self,
+        workspace: &WorkspaceId,
+        agent: String,
+        vendor_session_id: String,
+    ) -> Result<Session, String> {
+        match self
+            .ask_result(Request::AdoptCliSession {
+                workspace: workspace.clone(),
+                agent,
+                vendor_session_id,
+            })
+            .await?
+        {
+            Response::Session { session } => Ok(session),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Read local branches and which worktree, if any, currently holds each.
     pub async fn branches(&self, workspace: &WorkspaceId) -> Result<Vec<BranchInfo>, String> {
         match self

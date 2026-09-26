@@ -34,6 +34,7 @@ pub mod notes;
 pub mod notify;
 pub mod palette;
 pub mod reports;
+pub mod resume;
 pub mod search;
 pub mod session_list;
 pub mod skills;

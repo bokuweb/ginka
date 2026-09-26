@@ -576,6 +576,34 @@ home.starter.fix.prompt:
   en: "Fix this error: "
   ja: "次のエラーを直して: "
 
+resume.detail:
+  en: "%{agent} · %{prompts} prompts · %{age}"
+  ja: "%{agent} · プロンプト %{prompts} 件 · %{age}"
+resume.title:
+  en: Resume a conversation from a CLI
+  ja: CLI の会話を再開
+resume.subtitle:
+  en: "Started with claude or codex in %{workspace}. It carries on in the same thread."
+  ja: "%{workspace} で claude / codex を使って始めた会話です。同じスレッドのまま続けられます。"
+resume.placeholder:
+  en: Filter conversations
+  ja: 会話を絞り込む
+resume.loading:
+  en: Looking for conversations…
+  ja: 会話を探しています…
+resume.empty:
+  en: No conversation from claude or codex in this folder yet
+  ja: このフォルダで claude / codex を使って始めた会話はまだありません
+resume.failed:
+  en: "Could not resume it: %{error}"
+  ja: "再開できませんでした: %{error}"
+resume.home:
+  en: Resume a conversation started in claude or codex
+  ja: claude / codex で始めた会話を再開
+palette.resume:
+  en: Resume a conversation from a CLI
+  ja: CLI の会話を再開
+
 transcript.earlier:
   en: Show earlier messages
   ja: 以前のメッセージを表示
@@ -1073,6 +1101,9 @@ cli.merged:
 cli.merged.fast_forward:
   en: "fast-forwarded %{into} to %{commit}"
   ja: "%{into} を %{commit} まで早送りしました"
+cli.session.cli.empty:
+  en: no conversations from the agents' CLIs here
+  ja: エージェントの CLI で始めた会話はありません
 cli.search.empty:
   en: nothing said that
   ja: 一致するものはありません

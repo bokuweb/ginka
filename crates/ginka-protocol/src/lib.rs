@@ -33,7 +33,7 @@ pub use event::{
 pub use handshake::Handshake;
 pub use ids::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 pub use model::{
-    Account, AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint,
+    Account, AgentStatus, BranchStatus, ChangeKind, ChangeSource, Changes, Checkpoint, CliSession,
     CommandScope, DiffLine, DiffSide, FileChange, FileEntry, Hunk, LineKind, LoginCommand,
     PlanSnapshot, PlanSource, PlanUsage, PlanWindow, Project, ProjectKind, ReviewComment, Session,
     SessionMatch, SessionState, SlashCommand, TranscriptEntry, TranscriptPayload, UsageRow,

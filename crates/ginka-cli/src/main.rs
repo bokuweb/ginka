@@ -739,6 +739,22 @@ enum SessionCommand {
         #[arg(long)]
         account: Option<String>,
     },
+    /// List conversations an agent's own CLI started in a workspace's
+    /// directory, which Ginka can adopt.
+    Cli {
+        /// The workspace, by id.
+        workspace: String,
+    },
+    /// Bring a conversation started in an agent's CLI into Ginka and carry
+    /// on from it: the next turn resumes the same thread.
+    Adopt {
+        /// The workspace it was started in, by id.
+        workspace: String,
+        /// The agent whose CLI started it: claude, codex.
+        agent: String,
+        /// The vendor's id for it, as `ginka session cli` lists it.
+        id: String,
+    },
     /// Find what was said, across conversations.
     Search {
         query: String,
@@ -1543,6 +1559,18 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Session(SessionCommand::Remove { session }) => Request::RemoveSession {
             session: SessionId(session),
         },
+        Command::Session(SessionCommand::Cli { workspace }) => Request::CliSessions {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Session(SessionCommand::Adopt {
+            workspace,
+            agent,
+            id,
+        }) => Request::AdoptCliSession {
+            workspace: WorkspaceId(workspace),
+            agent,
+            vendor_session_id: id,
+        },
         Command::Session(SessionCommand::Fork {
             session,
             after,
@@ -1854,6 +1882,7 @@ fn print(response: Response, patch: bool) {
         },
         Response::Sessions { sessions } => print_sessions(&sessions),
         Response::SessionMatches { matches } => print_matches(&matches),
+        Response::CliSessions { sessions } => print_cli_sessions(&sessions),
         Response::Session { session } => print_sessions(std::slice::from_ref(&session)),
         Response::SessionOptionsApplied { session, outcome } => {
             print_sessions(std::slice::from_ref(&session));
@@ -2202,6 +2231,20 @@ fn print_matches(matches: &[SessionMatch]) {
             found.seq,
             found.title.clone().unwrap_or_default(),
             found.excerpt
+        );
+    }
+}
+
+/// Conversations the CLIs started, one per line: what `adopt` takes first.
+fn print_cli_sessions(sessions: &[ginka_protocol::model::CliSession]) {
+    if sessions.is_empty() {
+        println!("{}", rust_i18n::t!("cli.session.cli.empty"));
+        return;
+    }
+    for session in sessions {
+        println!(
+            "{:<7} {:<38} {:>4}  {}",
+            session.agent, session.vendor_session_id, session.prompts, session.title
         );
     }
 }

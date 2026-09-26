@@ -217,6 +217,12 @@ active conversation. With nothing selected, the rail stands alone.
   prompt that sent itself would start an agent on a question nobody asked. The
   scrolling transcript takes over the moment a prompt is away, before the first
   word arrives, because that is where the activity line lives.
+  With a workspace chosen, a quiet line under the cards offers to **resume a
+  conversation started in claude or codex**: a dialog lists what the agents'
+  own CLIs kept for that directory (newest first, filtered as the reader
+  types, each row saying which CLI, how many prompts and how long ago), and
+  choosing one makes a session that continues that same vendor thread with
+  its recent turns in the transcript. The palette offers the same dialog.
 - **Transcript** — one centred column at the measure (720 px), with the composer
   under it at the same width: a conversation stranded against one edge of a wide
   window reads as a mistake rather than as a measure. Virtualized markdown:

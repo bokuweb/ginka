@@ -279,6 +279,21 @@ pub enum Request {
         seq: u64,
         text: String,
     },
+    /// The conversations the agents' own CLIs keep for a workspace's
+    /// directory — `claude` or `codex` run in a terminal, outside Ginka —
+    /// newest first, leaving out the ones Ginka's sessions already hold.
+    /// Answers with [`Response::CliSessions`].
+    CliSessions { workspace: WorkspaceId },
+    /// Bring one of those conversations in: a new session in `workspace`
+    /// holding the vendor's id, so its next turn resumes that same thread,
+    /// with the conversation's recent turns as its transcript. On the
+    /// provider's system login, which is where the CLI keeps it. Answers
+    /// with the new session.
+    AdoptCliSession {
+        workspace: WorkspaceId,
+        agent: String,
+        vendor_session_id: String,
+    },
     /// Find transcript entries containing `query`.
     SearchSessions {
         workspace: Option<WorkspaceId>,
@@ -877,6 +892,10 @@ pub enum Response {
     PullRequest {
         url: String,
     },
+    /// The conversations [`Request::CliSessions`] found.
+    CliSessions {
+        sessions: Vec<crate::model::CliSession>,
+    },
     /// What [`Request::Sync`] did.
     Synced {
         /// Commits came in from the remote.
@@ -1025,6 +1044,14 @@ mod tests {
             },
             Request::Sync {
                 workspace: WorkspaceId("comet/harbor".into()),
+            },
+            Request::CliSessions {
+                workspace: WorkspaceId("comet/harbor".into()),
+            },
+            Request::AdoptCliSession {
+                workspace: WorkspaceId("comet/harbor".into()),
+                agent: "claude".into(),
+                vendor_session_id: "c-1".into(),
             },
             Request::WorkspaceHistory {
                 workspace: WorkspaceId("comet/harbor".into()),

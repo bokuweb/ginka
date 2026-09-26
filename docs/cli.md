@@ -88,6 +88,8 @@ Start and steer agent sessions
 - `ginka session rename` — Rename a conversation (`ginka session rename <SESSION> <TITLE>`)
 - `ginka session remove` — Forget a session, its transcript and its checkpoints (`ginka session remove <SESSION>`)
 - `ginka session fork` — Take a copy of a conversation as it was, and carry on from there (`ginka session fork <SESSION>`)
+- `ginka session cli` — List conversations an agent's own CLI started in a workspace's directory, which Ginka can adopt (`ginka session cli <WORKSPACE>`)
+- `ginka session adopt` — Bring a conversation started in an agent's CLI into Ginka and carry on from it: the next turn resumes the same thread (`ginka session adopt <WORKSPACE> <AGENT> <ID>`)
 - `ginka session search` — Find what was said, across conversations (`ginka session search <QUERY>`)
 - `ginka session log` — Print a session's transcript (`ginka session log <SESSION>`)
 

@@ -65,6 +65,8 @@ pub enum Command {
     ToggleAppearance,
     /// Search conversations and files at once.
     SearchEverywhere,
+    /// Bring in a conversation started in an agent's own CLI.
+    ResumeFromCli,
 }
 
 /// The saved commands the palette offers, where there is a workspace to run
@@ -327,6 +329,15 @@ pub fn entries(
         ),
         command: Command::SearchEverywhere,
     });
+    // Only where there is a workspace: its directory is what is looked in.
+    if workspace_indexed.is_some() {
+        all.push(Entry {
+            id: "session:resume-cli".into(),
+            label: rust_i18n::t!("palette.resume").to_string(),
+            hint: None,
+            command: Command::ResumeFromCli,
+        });
+    }
     all.push(Entry {
         id: "appearance:toggle".into(),
         label: rust_i18n::t!("palette.appearance.toggle").to_string(),
@@ -603,6 +614,17 @@ mod tests {
                 .map(|entry| entry.command.clone()),
             Some(Command::SearchEverywhere)
         );
+    }
+
+    #[test]
+    fn resuming_a_cli_conversation_is_offered_only_in_a_workspace() {
+        let offered = |indexed: Option<bool>| {
+            entries(&layout(), &[], indexed, false, false, false)
+                .iter()
+                .any(|entry| entry.command == Command::ResumeFromCli)
+        };
+        assert!(offered(Some(false)));
+        assert!(!offered(None));
     }
 
     #[test]
