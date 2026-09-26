@@ -287,6 +287,12 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.list_hover = tokens.row_hover();
     theme.colors.list_active = tokens.row_active();
     theme.colors.list_active_border = tokens.accent;
+    // A placeholder bar (e1's loading skeletons): fainter than a hovered row,
+    // so the ghost of a list never reads heavier than the list itself. Left
+    // unset it falls back to the stock theme's opaque `secondary`.
+    theme.colors.skeleton = tokens
+        .accent
+        .opacity(if tokens.light() { 0.05 } else { 0.07 });
 
     theme.colors.tab_bar = tokens.transparent_surface();
     theme.colors.tab = tokens.transparent_surface();
