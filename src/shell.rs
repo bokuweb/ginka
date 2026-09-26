@@ -1644,6 +1644,67 @@ impl Shell {
         .detach();
     }
 
+    /// Whether the composer can take another attachment right now.
+    fn accepts_attachments(&self) -> bool {
+        self.editing_queued_message.is_none()
+            && ginka_ui::composer::can_accept_attachments(
+                self.attachment_busy,
+                self.session_state == Some(SessionState::AwaitingInput),
+            )
+    }
+
+    /// Make the conversation column a target for files dragged from the OS.
+    ///
+    /// The whole column takes the drop rather than only the composer card, so
+    /// an image let go over the transcript still lands as an attachment. An
+    /// overlay names what will happen while the drag is over the column; it
+    /// only paints then and never blocks the pointer otherwise.
+    fn attachment_drop_target(&self, content: AnyElement, cx: &mut Context<Self>) -> AnyElement {
+        if !self.accepts_attachments() {
+            return content;
+        }
+        let tokens = Tokens::global(cx).clone();
+        div()
+            .relative()
+            .size_full()
+            .child(content)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .opacity(0.)
+                    .drag_over::<ExternalPaths>(|this, _, _, _| this.opacity(1.))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        this.attach_paths(paths.paths().to_vec(), cx);
+                    }))
+                    .p_3()
+                    .child(
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .rounded(px(tokens.radius.card))
+                            .border_2()
+                            .border_color(tokens.colors().accent)
+                            .bg(tokens.colors().bg_surface.opacity(0.85))
+                            .child(
+                                Icon::empty()
+                                    .path(ginka_ui::assets::icon::PAPERCLIP)
+                                    .size_6()
+                                    .text_color(tokens.colors().accent),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_primary)
+                                    .child(rust_i18n::t!("composer.attachment.drop").to_string()),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
     /// Read local files and copy them into the daemon-owned attachment store.
     ///
     /// The picker and OS drag-and-drop converge here, so both paths get the
@@ -8613,8 +8674,7 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let working = self.is_working();
         let awaiting_input = self.session_state == Some(SessionState::AwaitingInput);
-        let accepts_attachments = self.editing_queued_message.is_none()
-            && ginka_ui::composer::can_accept_attachments(self.attachment_busy, awaiting_input);
+        let accepts_attachments = self.accepts_attachments();
         let primary_action = ginka_ui::composer::primary_action(
             working,
             self.composer.read(cx).value().as_ref(),
@@ -8761,16 +8821,12 @@ impl Shell {
                     } else {
                         tokens.colors().border_subtle
                     })
+                    // The drop itself is taken by the whole conversation
+                    // column (see `center`); the card only lights up.
                     .when(accepts_attachments, |this| {
                         this.drag_over::<ExternalPaths>(|this, _, _, cx| {
                             this.border_color(Tokens::global(cx).colors().accent)
-                                .bg(Tokens::global(cx).colors().row_hover())
                         })
-                        .on_drop(cx.listener(
-                            |this, paths: &ExternalPaths, _, cx| {
-                                this.attach_paths(paths.paths().to_vec(), cx);
-                            },
-                        ))
                     })
                     .on_action(cx.listener(Self::paste_attachments))
                     .children((!attachment_chips.is_empty()).then(|| {
@@ -12337,16 +12393,17 @@ impl Shell {
                         this.update(cx, |this, cx| this.record_resize(slots, &state, cx));
                     }
                 })
-                .child(
-                    resizable_panel().child(match self.compare_view(cx) {
-                        Some(compare) => compare,
-                        None => v_flex()
+                .child(resizable_panel().child(match self.compare_view(cx) {
+                    Some(compare) => compare,
+                    None => {
+                        let conversation = v_flex()
                             .size_full()
                             .child(self.transcript(selected_text, cx))
                             .child(self.composer(cx))
-                            .into_any_element(),
-                    }),
-                )
+                            .into_any_element();
+                        self.attachment_drop_target(conversation, cx)
+                    }
+                }))
                 .when(dock_open, |this| {
                     this.child(
                         resizable_panel()
