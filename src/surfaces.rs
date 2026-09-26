@@ -4245,12 +4245,16 @@ impl Render for SurfaceTab {
         // Bounded by the tab rather than by what is in it: a long line in one
         // surface would otherwise widen the whole split, and every surface
         // beside it would run out under the window's edge.
-        v_flex()
-            .size_full()
-            .min_w_0()
-            .overflow_hidden()
-            .track_focus(&self.focus)
-            .child(body)
+        // Faded in as the tab comes to the front, the way panels arrive.
+        ginka_ui::motion::fade_in(
+            SharedString::from(format!("surface-body:{}", surface.key())),
+            v_flex()
+                .size_full()
+                .min_w_0()
+                .overflow_hidden()
+                .track_focus(&self.focus)
+                .child(body),
+        )
     }
 }
 

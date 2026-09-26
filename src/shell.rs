@@ -700,6 +700,8 @@ pub struct Shell {
     /// The terminals are drawn in the right panel's Terminal tab rather than
     /// the dock; noted each frame.
     terminal_in_panel: bool,
+    /// Panels on their way in or out (`docs/ui.md` §6).
+    panel_motion: ginka_ui::motion::Transitions<Panel>,
     /// The size the right panel's terminal area was last laid out at.
     terminal_area: Option<(f32, f32)>,
     /// The conversations open across the top of the centre column.
@@ -1483,6 +1485,7 @@ impl Shell {
             sidebar,
             surfaces,
             terminal_in_panel: false,
+            panel_motion: Default::default(),
             terminal_area: None,
             notes,
             tabs: restored_tabs,
@@ -4510,6 +4513,20 @@ impl Shell {
 
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.layout.toggle(panel);
+        let opening = self.layout.is_open(panel);
+        self.panel_motion
+            .start(panel, opening, std::time::Instant::now());
+        if !opening {
+            // Drawn while it fades; one more frame once it has gone takes it
+            // out of the columns.
+            cx.spawn(async move |this, cx| {
+                cx.background_executor()
+                    .timer(ginka_ui::motion::PANEL + Duration::from_millis(16))
+                    .await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
         self.persist();
         // A dock that has just opened is one that has to find the shells the
         // daemon kept running while it was closed.
@@ -12174,7 +12191,11 @@ impl Shell {
     fn center(&self, selected_text: Option<String>, cx: &mut Context<Self>) -> impl IntoElement {
         // The terminals are drawn in one place at a time: in the right panel
         // while its Terminal tab is on screen, in the dock otherwise.
-        let dock_open = self.layout.is_open(Panel::TerminalDock) && !self.terminal_in_panel;
+        let now = std::time::Instant::now();
+        let dock_open = (self.layout.is_open(Panel::TerminalDock)
+            || self.panel_motion.closing(&Panel::TerminalDock, now))
+            && !self.terminal_in_panel;
+        let dock_motion = self.panel_motion.current(&Panel::TerminalDock, now);
         let dock_height = self.layout.size(Panel::TerminalDock);
 
         v_flex().size_full().child(
@@ -12203,7 +12224,11 @@ impl Shell {
                         resizable_panel()
                             .size(dock_height)
                             .size_range(px(120.)..px(560.))
-                            .child(self.terminal_dock(cx).into_any_element()),
+                            .child(panel_entrance(
+                                div().size_full().child(self.terminal_dock(cx)),
+                                dock_motion,
+                                0.0,
+                            )),
                     )
                 }),
         )
@@ -12548,8 +12573,14 @@ impl Render for Shell {
         let in_workspace = place == crate::sidebar::Place::Workspace;
         // Only a project can do without the rail: the other places have
         // nothing else on screen to get back from.
-        let sidebar_open = self.layout.is_open(Panel::Sidebar) || !in_workspace;
-        let right_open = self.layout.is_open(Panel::RightPanel) && in_workspace;
+        let now = std::time::Instant::now();
+        self.panel_motion.prune(now);
+        let shown =
+            |panel: Panel| self.layout.is_open(panel) || self.panel_motion.closing(&panel, now);
+        let sidebar_open = shown(Panel::Sidebar) || !in_workspace;
+        let right_open = shown(Panel::RightPanel) && in_workspace;
+        let sidebar_motion = self.panel_motion.current(&Panel::Sidebar, now);
+        let right_motion = self.panel_motion.current(&Panel::RightPanel, now);
         let project_selected = self.sidebar.read(cx).has_project_selection();
         let sidebar_width = navigator_width(project_selected, self.layout.size(Panel::Sidebar));
         let sidebar_range = if project_selected {
@@ -12645,12 +12676,15 @@ impl Render for Shell {
                                         // window and carries the window's own
                                         // controls in the rail's top strip,
                                         // over the rail's own background.
-                                        div()
-                                            .relative()
-                                            .size_full()
-                                            .child(self.sidebar.clone())
-                                            .children(window_controls)
-                                            .into_any_element(),
+                                        panel_entrance(
+                                            div()
+                                                .relative()
+                                                .size_full()
+                                                .child(self.sidebar.clone())
+                                                .children(window_controls),
+                                            sidebar_motion,
+                                            -1.0,
+                                        ),
                                     ),
                             )
                         })
@@ -12679,15 +12713,31 @@ impl Render for Shell {
                                 resizable_panel()
                                     .size(right_width)
                                     .size_range(px(280.)..px(720.))
-                                    .child(self.surfaces.clone()),
+                                    .child(panel_entrance(
+                                        div().size_full().child(self.surfaces.clone()),
+                                        right_motion,
+                                        1.0,
+                                    )),
                             )
                         }),
                 ),
             )
-            .children(self.palette_view(cx))
-            .children(self.image_markup_view(cx))
-            .children(self.add_project_view(window, cx))
-            .children(self.add_account_view(cx))
+            .children(
+                self.palette_view(cx)
+                    .map(|view| overlay_fade("palette", view)),
+            )
+            .children(
+                self.image_markup_view(cx)
+                    .map(|view| overlay_fade("image-markup", view)),
+            )
+            .children(
+                self.add_project_view(window, cx)
+                    .map(|view| overlay_fade("add-project", view)),
+            )
+            .children(
+                self.add_account_view(cx)
+                    .map(|view| overlay_fade("add-account", view)),
+            )
     }
 }
 
@@ -12847,7 +12897,7 @@ fn chip_flyout(card: AnyElement) -> Div {
                 .anchor(Anchor::BottomLeft)
                 .offset(point(px(0.), px(-6.)))
                 .snap_to_window_with_margin(px(8.))
-                .child(card),
+                .child(ginka_ui::motion::fade_in("chip-flyout", div().child(card))),
         )
         .with_priority(1),
     )
@@ -12965,6 +13015,49 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// A window-covering overlay — a dialog and the scrim under it — faded in.
+fn overlay_fade(id: &'static str, overlay: AnyElement) -> AnyElement {
+    ginka_ui::motion::fade_in(
+        id,
+        div().absolute().top_0().left_0().size_full().child(overlay),
+    )
+    .into_any_element()
+}
+
+/// A panel's content as it comes in or goes: a fade, and a short slide from
+/// the edge it lives on (`side`: -1 left, 1 right, 0 from below).
+fn panel_entrance(
+    content: Div,
+    motion: Option<ginka_ui::motion::Transition>,
+    side: f32,
+) -> AnyElement {
+    let Some(motion) = motion else {
+        return content.into_any_element();
+    };
+    const TRAVEL: f32 = 14.;
+    let opening = motion.opening;
+    content
+        .relative()
+        .with_animation(
+            ("panel-motion", motion.id as usize),
+            Animation::new(ginka_ui::motion::PANEL).with_easing(ginka_ui::motion::ease_out),
+            move |content, delta| {
+                // How far in the panel is: 0 is gone, 1 is settled.
+                let shown = if opening { delta } else { 1.0 - delta };
+                let offset = px(TRAVEL * (1.0 - shown));
+                let content = content.opacity(shown);
+                if side < 0.0 {
+                    content.left(-offset)
+                } else if side > 0.0 {
+                    content.left(offset)
+                } else {
+                    content.top(offset)
+                }
+            },
+        )
+        .into_any_element()
 }
 
 /// The workspace's terminals, drawn in the right panel's Terminal tab.

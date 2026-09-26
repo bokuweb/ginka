@@ -32,7 +32,7 @@ Five properties define the look:
 2. **Chromeless.** Borders are 6–8 % white hairlines, never solid lines. Panels are separated by tone, not by rules.
 3. **Density with air.** The sidebar is dense (three lines per row), the transcript is generous (1.65 line-height, ~72ch measure).
 4. **Status is ambient.** Agent state appears as a small animated glyph and a coloured word, never as a modal or a toast.
-5. **Motion is short and consistent.** ~260 ms ease-out for list reordering and panel transitions; ~120 ms for hover/press. Nothing bounces.
+5. **Motion is short and consistent.** ~260 ms ease-out for list reordering; 200 ms for a panel coming in (fade, and a 14 px slide from its own edge) or going (the reverse, drawn until it has gone); 140 ms for a dialog to fade in and for a menu or picker card to fade and rise into place; a right-panel tab fades in as it comes to the front; ~120 ms for hover/press. Nothing bounces (`ginka_ui::motion`).
 
 ## 2. Design tokens
 
