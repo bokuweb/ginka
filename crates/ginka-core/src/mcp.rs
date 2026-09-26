@@ -520,6 +520,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_sync",
+            description: "Bring a workspace branch level with its remote in one action: publish it if it was never pushed, otherwise fast-forward it, then push what is ahead. Refuses dirty or diverged work.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_pull",
             description: "Fetch and fast-forward a clean workspace branch. Refuses dirty or diverged work instead of merging or rebasing it.",
             schema: json!({
@@ -919,6 +928,9 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             workspace: WorkspaceId(text("workspace")?),
         },
         "ginka_pull" => Request::Pull {
+            workspace: WorkspaceId(text("workspace")?),
+        },
+        "ginka_sync" => Request::Sync {
             workspace: WorkspaceId(text("workspace")?),
         },
         "ginka_files" => Request::WorkspaceFiles {

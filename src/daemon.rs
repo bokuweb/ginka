@@ -513,6 +513,14 @@ impl DaemonLink {
         .await
     }
 
+    /// Pull then push a workspace branch, or publish it, through the daemon.
+    pub async fn sync(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.git_sync(Request::Sync {
+            workspace: workspace.clone(),
+        })
+        .await
+    }
+
     async fn git_sync(&self, request: Request) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         client

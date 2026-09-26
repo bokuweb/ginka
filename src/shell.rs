@@ -869,8 +869,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
-                crate::surfaces::SurfaceEvent::Pull => this.sync_git(false, cx),
-                crate::surfaces::SurfaceEvent::Push => this.sync_git(true, cx),
+                crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
+                crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
+                crate::surfaces::SurfaceEvent::Sync => this.sync_git(RemoteAction::Sync, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
                     this.open_commit(commit.clone(), cx)
@@ -2725,7 +2726,7 @@ impl Shell {
     }
 
     /// Synchronize the selected branch through the daemon-owned git path.
-    fn sync_git(&mut self, push: bool, cx: &mut Context<Self>) {
+    fn sync_git(&mut self, action: RemoteAction, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
@@ -2734,10 +2735,10 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let outcome = cx
                 .background_spawn(async move {
-                    if push {
-                        link.push(&workspace).await
-                    } else {
-                        link.pull(&workspace).await
+                    match action {
+                        RemoteAction::Push => link.push(&workspace).await,
+                        RemoteAction::Pull => link.pull(&workspace).await,
+                        RemoteAction::Sync => link.sync(&workspace).await,
                     }
                 })
                 .await;
@@ -13026,6 +13027,14 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
         },
         cx,
     );
+}
+
+/// What the Git surface asks of the workspace's remote.
+#[derive(Clone, Copy)]
+enum RemoteAction {
+    Pull,
+    Push,
+    Sync,
 }
 
 /// The hover group a transcript message and its actions share.

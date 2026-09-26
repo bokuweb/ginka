@@ -230,6 +230,8 @@ pub enum SurfaceEvent {
     GenerateCommitMessage { only_staged: bool },
     /// Fast-forward the workspace from its configured upstream.
     Pull,
+    /// Pull then push in one action, or publish a branch never pushed.
+    Sync,
     /// Push the workspace branch, creating its upstream when needed.
     Push,
     /// Refresh recent commits after the reader expands history.
@@ -1576,6 +1578,16 @@ impl SurfacePanel {
             .gap_2()
             .border_b_1()
             .border_color(tokens.colors().border_subtle)
+            .child(
+                Button::new("git-sync")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .icon(IconName::Redo2)
+                    .label(rust_i18n::t!("surface.git.sync").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.sync_tooltip").to_string())
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Sync))),
+            )
             .child(
                 Button::new("git-pull")
                     .ghost()

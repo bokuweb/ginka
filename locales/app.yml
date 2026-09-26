@@ -829,6 +829,12 @@ surface.git.reading:
 surface.git.clean:
   en: Nothing has changed
   ja: 変更はありません
+surface.git.sync:
+  en: Sync
+  ja: 同期
+surface.git.sync_tooltip:
+  en: Pull what came in, then push what is ahead — or publish a branch never pushed
+  ja: リモートの更新を取り込み、先行分をプッシュする（未プッシュのブランチは公開する）
 surface.git.pull:
   en: Pull
   ja: Pull

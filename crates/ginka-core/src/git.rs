@@ -993,6 +993,42 @@ pub fn pull_fast_forward(worktree: &Path) -> Result<String> {
     git(worktree, &["merge", "--ff-only", upstream.trim()])
 }
 
+/// What syncing did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Synced {
+    /// Commits came in from the remote.
+    pub pulled: bool,
+    /// Commits went out to it, or the branch was published.
+    pub pushed: bool,
+}
+
+/// Bring the branch level with its remote in one action: publish a branch
+/// that has never been pushed; otherwise fast-forward from the remote, then
+/// push what is ahead. Refuses what `pull_fast_forward` refuses.
+pub fn sync(worktree: &Path) -> Result<Synced> {
+    if branch_status(worktree)?.untracked_branch {
+        push(worktree)?;
+        return Ok(Synced {
+            pulled: false,
+            pushed: true,
+        });
+    }
+    let before = git(worktree, &["rev-parse", "HEAD"])?;
+    pull_fast_forward(worktree)?;
+    let pulled = git(worktree, &["rev-parse", "HEAD"])? != before;
+    let ahead: u32 = git(worktree, &["rev-list", "--count", "@{upstream}..HEAD"])?
+        .trim()
+        .parse()
+        .unwrap_or(0);
+    if ahead > 0 {
+        push(worktree)?;
+    }
+    Ok(Synced {
+        pulled,
+        pushed: ahead > 0,
+    })
+}
+
 /// Merge `branch` into `into` — fan-out's "merge the winner".
 ///
 /// The merge happens in the worktree that has `into` checked out, so the
@@ -1648,6 +1684,103 @@ prunable
         assert_eq!(
             git(&local, &["rev-parse", "HEAD"]).unwrap(),
             git(&local, &["rev-parse", "@{upstream}"]).unwrap()
+        );
+    }
+
+    /// A repository with a bare `origin` it has pushed `main` to, and a
+    /// second clone of that remote to move it with.
+    fn with_remote(dir: &Path) -> (PathBuf, PathBuf) {
+        let remote = dir.join("remote.git");
+        git(
+            dir,
+            &[
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let local = dir.join("local");
+        repository(&local);
+        git(
+            &local,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&local, &["push", "--set-upstream", "origin", "main"]).unwrap();
+        let peer = dir.join("peer");
+        git(
+            dir,
+            &["clone", remote.to_str().unwrap(), peer.to_str().unwrap()],
+        )
+        .unwrap();
+        git(&peer, &["config", "user.email", "peer@example.com"]).unwrap();
+        git(&peer, &["config", "user.name", "Peer"]).unwrap();
+        (local, peer)
+    }
+
+    fn commit_file(repo: &Path, name: &str) {
+        std::fs::write(repo.join(name), format!("{name}\n")).unwrap();
+        git(repo, &["add", name]).unwrap();
+        git(repo, &["commit", "-m", name]).unwrap();
+    }
+
+    #[test]
+    fn syncing_pulls_what_came_in_and_pushes_what_went_ahead() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, peer) = with_remote(dir.path());
+
+        commit_file(&peer, "theirs.txt");
+        git(&peer, &["push"]).unwrap();
+        assert_eq!(
+            sync(&local).unwrap(),
+            Synced {
+                pulled: true,
+                pushed: false
+            }
+        );
+        assert!(local.join("theirs.txt").exists());
+
+        commit_file(&local, "mine.txt");
+        assert_eq!(
+            sync(&local).unwrap(),
+            Synced {
+                pulled: false,
+                pushed: true
+            }
+        );
+        git(&peer, &["pull", "--ff-only"]).unwrap();
+        assert!(peer.join("mine.txt").exists());
+
+        assert_eq!(
+            sync(&local).unwrap(),
+            Synced {
+                pulled: false,
+                pushed: false
+            }
+        );
+    }
+
+    #[test]
+    fn syncing_a_branch_never_pushed_publishes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (local, _) = with_remote(dir.path());
+        git(&local, &["checkout", "-b", "feature"]).unwrap();
+        commit_file(&local, "feature.txt");
+
+        assert_eq!(
+            sync(&local).unwrap(),
+            Synced {
+                pulled: false,
+                pushed: true
+            }
+        );
+        assert_eq!(
+            git(&local, &["rev-parse", "--abbrev-ref", "@{upstream}"])
+                .unwrap()
+                .trim(),
+            "origin/feature"
         );
     }
 
