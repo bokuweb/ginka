@@ -432,30 +432,36 @@ impl SessionSidebar {
     /// to find inside the last conversation is a control they do not find.
     fn new_chat(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
-        h_flex()
-            .id("new-chat")
-            .w_full()
-            .px_3()
-            .py_1p5()
-            .gap_2()
-            .items_center()
-            .cursor_pointer()
-            .hover(|this| this.bg(tokens.colors().row_hover()))
-            .child(
-                Icon::empty()
-                    .path(ginka_ui::assets::icon::SQUARE_PEN)
-                    .size_4()
-                    .text_color(tokens.colors().text_secondary),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(tokens.colors().text_primary)
-                    .child(rust_i18n::t!("sidebar.new_chat").to_string()),
-            )
-            .on_click(cx.listener(|_, _, _, cx| {
-                cx.emit(SidebarEvent::NewChatRequested);
-            }))
+        // Inset by the search field's own margin and set a step below it, so
+        // the row's hover reads as a row of the list and not as a band welded
+        // to the field above; the icon lines up with the search glyph.
+        div().w_full().px_2().pt_1p5().child(
+            h_flex()
+                .id("new-chat")
+                .w_full()
+                .px_2()
+                .py_1p5()
+                .gap_2()
+                .items_center()
+                .rounded(px(tokens.radius.row))
+                .cursor_pointer()
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .child(
+                    Icon::empty()
+                        .path(ginka_ui::assets::icon::SQUARE_PEN)
+                        .size_4()
+                        .text_color(tokens.colors().text_secondary),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(tokens.colors().text_primary)
+                        .child(rust_i18n::t!("sidebar.new_chat").to_string()),
+                )
+                .on_click(cx.listener(|_, _, _, cx| {
+                    cx.emit(SidebarEvent::NewChatRequested);
+                })),
+        )
     }
 
     fn header(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {

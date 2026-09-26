@@ -712,6 +712,10 @@ pub struct Shell {
     /// The terminals are drawn in the right panel's Terminal tab rather than
     /// the dock; noted each frame.
     terminal_in_panel: bool,
+    /// The right panel fills the window in place of the other columns, for
+    /// reading a diff or a page at full width. Not remembered: a window that
+    /// opens with its conversation hidden looks like one that lost it.
+    surfaces_maximized: bool,
     /// Panels on their way in or out (`docs/ui.md` §6).
     panel_motion: ginka_ui::motion::Transitions<Panel>,
     /// A short confirmation at the foot of the window, and which one it is.
@@ -835,6 +839,15 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::Arranged => {
                     this.persist_surfaces(cx);
                     this.follow_terminal_placement(cx);
+                }
+                crate::surfaces::SurfaceEvent::ToggleMaximized => {
+                    let maximized = !this.surfaces_maximized;
+                    this.set_surfaces_maximized(maximized, cx);
+                }
+                crate::surfaces::SurfaceEvent::Close => {
+                    if this.layout.is_open(Panel::RightPanel) {
+                        this.toggle(Panel::RightPanel, cx);
+                    }
                 }
                 crate::surfaces::SurfaceEvent::BrowserVisited {
                     workspace,
@@ -1511,6 +1524,7 @@ impl Shell {
             sidebar,
             surfaces,
             terminal_in_panel: false,
+            surfaces_maximized: false,
             panel_motion: Default::default(),
             notice: None,
             terminal_area: None,
@@ -4548,6 +4562,11 @@ impl Shell {
     fn toggle(&mut self, panel: Panel, cx: &mut Context<Self>) {
         self.layout.toggle(panel);
         let opening = self.layout.is_open(panel);
+        // A panel that fills the window and then closes leaves the window
+        // empty; it gives the columns back as it goes.
+        if panel == Panel::RightPanel && !opening {
+            self.set_surfaces_maximized(false, cx);
+        }
         self.panel_motion
             .start(panel, opening, std::time::Instant::now());
         if !opening {
@@ -4567,6 +4586,18 @@ impl Shell {
         if panel == Panel::TerminalDock && self.layout.is_open(panel) {
             self.adopt_terminals(cx);
         }
+        cx.notify();
+    }
+
+    /// Let the right panel fill the window, or hand the other columns back.
+    fn set_surfaces_maximized(&mut self, maximized: bool, cx: &mut Context<Self>) {
+        let maximized = maximized && self.layout.is_open(Panel::RightPanel);
+        if self.surfaces_maximized == maximized {
+            return;
+        }
+        self.surfaces_maximized = maximized;
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.set_maximized(maximized, cx));
         cx.notify();
     }
 
@@ -12717,6 +12748,8 @@ impl Render for Shell {
             PROJECT_RAIL_WIDTH..PROJECT_RAIL_WIDTH
         };
         let right_width = self.layout.size(Panel::RightPanel);
+        // Only a workspace has a right panel to fill the window with.
+        let maximized = self.surfaces_maximized && right_open;
         // Built before the column chain: both headers bind listeners, and the
         // chain's own closures hold `self` while they run.
         // Over the rail only: the rail keeps a header's height free for it,
@@ -12783,74 +12816,87 @@ impl Render for Shell {
             // No background here: `Root` already paints the translucent window
             // and painting it again composites the alpha away.
             .text_color(tokens.colors().text_primary)
-            .child(
-                div().flex_1().w_full().overflow_hidden().child(
-                    h_resizable(SharedString::from(format!("shell-columns:{}", slots.len())))
-                        .on_resize({
-                            let this = cx.entity();
-                            let slots = slots.clone();
-                            move |state, _, cx| {
+            .when(maximized, |this| {
+                this.child(
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .overflow_hidden()
+                        .child(self.surfaces.clone()),
+                )
+            })
+            .when(!maximized, |this| {
+                this.child(
+                    div().flex_1().w_full().overflow_hidden().child(
+                        h_resizable(SharedString::from(format!("shell-columns:{}", slots.len())))
+                            .on_resize({
+                                let this = cx.entity();
                                 let slots = slots.clone();
-                                let state = state.clone();
-                                this.update(cx, |this, cx| this.record_resize(slots, &state, cx));
-                            }
-                        })
-                        .when(sidebar_open, |this| {
-                            this.child(
-                                resizable_panel()
-                                    .size(sidebar_width)
-                                    .size_range(sidebar_range)
-                                    .child(
-                                        // The column runs to the top of the
-                                        // window and carries the window's own
-                                        // controls in the rail's top strip,
-                                        // over the rail's own background.
-                                        panel_entrance(
-                                            div()
-                                                .relative()
-                                                .size_full()
-                                                .child(self.sidebar.clone())
-                                                .children(window_controls),
-                                            sidebar_motion,
-                                            -1.0,
+                                move |state, _, cx| {
+                                    let slots = slots.clone();
+                                    let state = state.clone();
+                                    this.update(cx, |this, cx| {
+                                        this.record_resize(slots, &state, cx)
+                                    });
+                                }
+                            })
+                            .when(sidebar_open, |this| {
+                                this.child(
+                                    resizable_panel()
+                                        .size(sidebar_width)
+                                        .size_range(sidebar_range)
+                                        .child(
+                                            // The column runs to the top of the
+                                            // window and carries the window's own
+                                            // controls in the rail's top strip,
+                                            // over the rail's own background.
+                                            panel_entrance(
+                                                div()
+                                                    .relative()
+                                                    .size_full()
+                                                    .child(self.sidebar.clone())
+                                                    .children(window_controls),
+                                                sidebar_motion,
+                                                -1.0,
+                                            ),
                                         ),
+                                )
+                            })
+                            // The conversation keeps a readable measure: the
+                            // panels either side give way before it does, and
+                            // what is left over is clipped rather than drawn
+                            // under them.
+                            .child(
+                                resizable_panel()
+                                    .size_range(px(CENTRE_MIN_WIDTH)..Pixels::MAX)
+                                    .child(
+                                        div()
+                                            .size_full()
+                                            .overflow_hidden()
+                                            // A second coat of the window's
+                                            // colour, the way e1 paints its
+                                            // conversation column: text is read
+                                            // here, and the desktop through the
+                                            // glass is noise under it.
+                                            .bg(tokens.colors().bg_window)
+                                            .child(main),
                                     ),
                             )
-                        })
-                        // The conversation keeps a readable measure: the
-                        // panels either side give way before it does, and
-                        // what is left over is clipped rather than drawn
-                        // under them.
-                        .child(
-                            resizable_panel()
-                                .size_range(px(CENTRE_MIN_WIDTH)..Pixels::MAX)
-                                .child(
-                                    div()
-                                        .size_full()
-                                        .overflow_hidden()
-                                        // A second coat of the window's
-                                        // colour, the way e1 paints its
-                                        // conversation column: text is read
-                                        // here, and the desktop through the
-                                        // glass is noise under it.
-                                        .bg(tokens.colors().bg_window)
-                                        .child(main),
-                                ),
-                        )
-                        .when(right_open, |this| {
-                            this.child(
-                                resizable_panel()
-                                    .size(right_width)
-                                    .size_range(px(280.)..px(720.))
-                                    .child(panel_entrance(
-                                        div().size_full().child(self.surfaces.clone()),
-                                        right_motion,
-                                        1.0,
-                                    )),
-                            )
-                        }),
-                ),
-            )
+                            .when(right_open, |this| {
+                                this.child(
+                                    resizable_panel()
+                                        .size(right_width)
+                                        .size_range(px(280.)..px(720.))
+                                        .child(panel_entrance(
+                                            div().size_full().child(self.surfaces.clone()),
+                                            right_motion,
+                                            1.0,
+                                        )),
+                                )
+                            }),
+                    ),
+                )
+            })
             .children(self.notice_view(cx))
             .children(
                 self.everywhere_view(cx)

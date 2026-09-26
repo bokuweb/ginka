@@ -1001,6 +1001,15 @@ surface.empty.hint:
 surface.choose:
   en: Choose another surface
   ja: 別のサーフェスを選ぶ
+surface.maximize:
+  en: Fill the window
+  ja: ウィンドウいっぱいに広げる
+surface.restore:
+  en: Restore the other columns
+  ja: 他の列を元に戻す
+surface.close_panel:
+  en: Close the right panel
+  ja: 右パネルを閉じる
 
 cli.agent.ready:
   en: ready
