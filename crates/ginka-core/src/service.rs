@@ -102,9 +102,6 @@ pub struct Service {
     /// Where the agents' own CLIs keep their conversations, when a test
     /// says; otherwise the system login's directories (`cli_sessions`).
     cli_roots: Option<crate::cli_sessions::Roots>,
-    /// What was last read from the CLIs' files, so reopening the list does
-    /// not read them all again.
-    cli_index: crate::cli_sessions::Index,
 }
 
 /// How long a probe of the agent CLIs is trusted for.
@@ -159,7 +156,6 @@ impl Service {
             accounts_stale: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connectors: Vec::new(),
             cli_roots: None,
-            cli_index: crate::cli_sessions::Index::default(),
         }
     }
 
@@ -828,7 +824,7 @@ impl Service {
                 let roots = self.cli_roots();
                 Ok(Response::CliSessions {
                     sessions: crate::cli_sessions::list(
-                        &mut self.cli_index,
+                        &mut crate::cli_sessions::Index::new(&self.conn),
                         &roots,
                         &worktree.path,
                         &known,
@@ -2147,7 +2143,7 @@ impl Service {
         }
         let roots = self.cli_roots();
         let found = crate::cli_sessions::find(
-            &mut self.cli_index,
+            &mut crate::cli_sessions::Index::new(&self.conn),
             &roots,
             &worktree.path,
             agent,

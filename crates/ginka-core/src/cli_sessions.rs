@@ -19,9 +19,11 @@
 use chrono::DateTime;
 use ginka_protocol::event::AgentEvent;
 use ginka_protocol::model::{CliSession, TranscriptPayload};
-use std::collections::{HashMap, HashSet};
+use rusqlite::{Connection, OptionalExtension as _};
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// How many conversations a list offers, newest first.
 pub const LIST_LIMIT: usize = 50;
@@ -78,20 +80,33 @@ pub struct Found {
     pub path: PathBuf,
 }
 
-/// What was read from each file, kept while the file is unchanged.
+/// What was read from each file, kept in the daemon's database while the
+/// file is unchanged (`cli_session_files`).
 ///
 /// A project's Claude store runs to hundreds of megabytes; reading it every
-/// time the dialog opens would hold the daemon up for each open. A file the
-/// CLI is still writing changes size, and is read again.
-#[derive(Debug, Default)]
-pub struct Index {
-    seen: HashMap<(PathBuf, PathBuf), (Stamp, Option<Found>)>,
+/// time the dialog opens would hold the daemon up for each open, and so would
+/// the first open after every restart. A file the CLI is still writing
+/// changes size, and is read again. The lock is taken per row, never across
+/// a file read, so turns appending to transcripts are not held up.
+pub struct Index<'a> {
+    conn: &'a Mutex<Connection>,
 }
 
-/// A file's modification time and length: what says it changed.
-type Stamp = (Option<std::time::SystemTime>, u64);
+/// A file's modification time (nanoseconds) and length: what says it changed.
+type Stamp = (Option<i64>, i64);
 
-impl Index {
+impl<'a> Index<'a> {
+    /// An index kept in this database.
+    pub fn new(conn: &'a Mutex<Connection>) -> Self {
+        Self { conn }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'a, Connection> {
+        self.conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// The conversation in `path`, if it was started in `cwd`, from the last
     /// read when the file has not changed since.
     fn read(
@@ -101,16 +116,94 @@ impl Index {
         read: impl FnOnce() -> Option<Found>,
     ) -> Option<Found> {
         let meta = std::fs::metadata(path).ok()?;
-        let stamp = (meta.modified().ok(), meta.len());
-        let key = (path.to_path_buf(), cwd.to_path_buf());
-        if let Some((seen, found)) = self.seen.get(&key)
-            && *seen == stamp
+        let stamp: Stamp = (
+            meta.modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .and_then(|since| i64::try_from(since.as_nanos()).ok()),
+            i64::try_from(meta.len()).unwrap_or(i64::MAX),
+        );
+        let key = (path.to_string_lossy(), cwd.to_string_lossy());
+        if let Some((seen, session)) = self.remembered(&key.0, &key.1)
+            && seen == stamp
         {
-            return found.clone();
+            return session.map(|session| Found {
+                session,
+                path: path.to_path_buf(),
+            });
         }
         let found = read();
-        self.seen.insert(key, (stamp, found.clone()));
+        let session = found.as_ref().map(|found| &found.session);
+        let written = self.lock().execute(
+            "INSERT OR REPLACE INTO cli_session_files
+                (path, cwd, modified_ns, len, agent, vendor_session_id, title, prompts, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                key.0,
+                key.1,
+                stamp.0,
+                stamp.1,
+                session.map(|s| &s.agent),
+                session.map(|s| &s.vendor_session_id),
+                session.map(|s| &s.title),
+                session.map(|s| s.prompts),
+                session.map(|s| s.updated_at),
+            ],
+        );
+        if let Err(error) = written {
+            tracing::warn!(%error, "could not remember a CLI conversation file");
+        }
         found
+    }
+
+    /// What was stored for a file, if anything.
+    fn remembered(&self, path: &str, cwd: &str) -> Option<(Stamp, Option<CliSession>)> {
+        self.lock()
+            .query_row(
+                "SELECT modified_ns, len, agent, vendor_session_id, title, prompts, updated_at
+                   FROM cli_session_files WHERE path = ?1 AND cwd = ?2",
+                [path, cwd],
+                |row| {
+                    let stamp = (row.get::<_, Option<i64>>(0)?, row.get::<_, i64>(1)?);
+                    let session = match row.get::<_, Option<String>>(2)? {
+                        Some(agent) => Some(CliSession {
+                            agent,
+                            vendor_session_id: row.get(3)?,
+                            title: row.get(4)?,
+                            prompts: row.get(5)?,
+                            updated_at: row.get(6)?,
+                        }),
+                        None => None,
+                    };
+                    Ok((stamp, session))
+                },
+            )
+            .optional()
+            .ok()
+            .flatten()
+    }
+
+    /// Forget the files a scan of `cwd` no longer came across: deleted, or
+    /// grown too old to be among the rollouts looked at.
+    fn keep_only(&mut self, cwd: &Path, scanned: &HashSet<PathBuf>) {
+        let conn = self.lock();
+        let cwd = cwd.to_string_lossy();
+        let stored: Vec<String> = conn
+            .prepare("SELECT path FROM cli_session_files WHERE cwd = ?1")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([&cwd], |row| row.get(0))?
+                    .collect::<rusqlite::Result<_>>()
+            })
+            .unwrap_or_default();
+        for path in stored {
+            if !scanned.contains(Path::new(&path)) {
+                let _ = conn.execute(
+                    "DELETE FROM cli_session_files WHERE path = ?1 AND cwd = ?2",
+                    [&path, cwd.as_ref()],
+                );
+            }
+        }
     }
 }
 
@@ -118,14 +211,21 @@ impl Index {
 ///
 /// `known` holds the vendor ids Ginka's own sessions already hold: those are
 /// Ginka's, or were adopted, and are not offered again.
-pub fn list(index: &mut Index, roots: &Roots, cwd: &Path, known: &HashSet<String>) -> Vec<Found> {
+pub fn list(
+    index: &mut Index<'_>,
+    roots: &Roots,
+    cwd: &Path,
+    known: &HashSet<String>,
+) -> Vec<Found> {
     let mut found: Vec<Found> = Vec::new();
+    let mut scanned = HashSet::new();
     if let Some(root) = &roots.claude {
-        found.extend(claude_sessions(index, root, cwd));
+        found.extend(claude_sessions(index, root, cwd, &mut scanned));
     }
     if let Some(root) = &roots.codex {
-        found.extend(codex_sessions(index, root, cwd));
+        found.extend(codex_sessions(index, root, cwd, &mut scanned));
     }
+    index.keep_only(cwd, &scanned);
     found.retain(|found| {
         found.session.prompts > 0 && !known.contains(&found.session.vendor_session_id)
     });
@@ -139,7 +239,7 @@ pub fn list(index: &mut Index, roots: &Roots, cwd: &Path, known: &HashSet<String
 /// The client names a conversation by id, never by path: the file is found
 /// again here, so a request cannot point the daemon at anything else.
 pub fn find(
-    index: &mut Index,
+    index: &mut Index<'_>,
     roots: &Roots,
     cwd: &Path,
     agent: &str,
@@ -149,8 +249,8 @@ pub fn find(
         return None;
     }
     let found = match agent {
-        "claude" => claude_sessions(index, roots.claude.as_ref()?, cwd),
-        "codex" => codex_sessions(index, roots.codex.as_ref()?, cwd),
+        "claude" => claude_sessions(index, roots.claude.as_ref()?, cwd, &mut HashSet::new()),
+        "codex" => codex_sessions(index, roots.codex.as_ref()?, cwd, &mut HashSet::new()),
         _ => return None,
     };
     found
@@ -291,7 +391,12 @@ impl Read {
     }
 }
 
-fn claude_sessions(index: &mut Index, root: &Path, cwd: &Path) -> Vec<Found> {
+fn claude_sessions(
+    index: &mut Index<'_>,
+    root: &Path,
+    cwd: &Path,
+    scanned: &mut HashSet<PathBuf>,
+) -> Vec<Found> {
     let dir = root.join("projects").join(claude_project_dir(cwd));
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -301,6 +406,7 @@ fn claude_sessions(index: &mut Index, root: &Path, cwd: &Path) -> Vec<Found> {
         .map(|entry| entry.path())
         .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
         .filter_map(|path| {
+            scanned.insert(path.clone());
             index.read(&path, cwd, || {
                 read_claude(&path, Replies::Skip)
                     .ok()?
@@ -392,7 +498,12 @@ fn read_claude(path: &Path, replies: Replies) -> std::io::Result<Read> {
     Ok(read)
 }
 
-fn codex_sessions(index: &mut Index, root: &Path, cwd: &Path) -> Vec<Found> {
+fn codex_sessions(
+    index: &mut Index<'_>,
+    root: &Path,
+    cwd: &Path,
+    scanned: &mut HashSet<PathBuf>,
+) -> Vec<Found> {
     let mut files = Vec::new();
     collect_rollouts(&root.join("sessions"), 0, &mut files);
     // Paths sort by date, and the file name carries the time.
@@ -404,6 +515,7 @@ fn codex_sessions(index: &mut Index, root: &Path, cwd: &Path) -> Vec<Found> {
     files
         .into_iter()
         .filter_map(|path| {
+            scanned.insert(path.clone());
             index.read(&path, cwd, || {
                 if codex_cwd(&path, &needle).as_deref().map(Path::new) != Some(cwd) {
                     return None;
@@ -555,6 +667,10 @@ mod tests {
 
     const CWD: &str = "/work/my.app";
 
+    fn database() -> Mutex<Connection> {
+        Mutex::new(crate::db::open_in_memory().unwrap())
+    }
+
     fn write(path: &Path, lines: &[serde_json::Value]) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let body: Vec<String> = lines.iter().map(|line| line.to_string()).collect();
@@ -651,7 +767,7 @@ mod tests {
             codex: None,
         };
         let found = list(
-            &mut Index::default(),
+            &mut Index::new(&database()),
             &roots,
             Path::new(CWD),
             &HashSet::new(),
@@ -677,7 +793,7 @@ mod tests {
             codex: Some(dir.path().to_path_buf()),
         };
         let found = list(
-            &mut Index::default(),
+            &mut Index::new(&database()),
             &roots,
             Path::new(CWD),
             &HashSet::new(),
@@ -704,7 +820,7 @@ mod tests {
             codex: Some(dir.path().to_path_buf()),
         };
         let known: HashSet<String> = ["c-1".to_string()].into();
-        let found = list(&mut Index::default(), &roots, Path::new(CWD), &known);
+        let found = list(&mut Index::new(&database()), &roots, Path::new(CWD), &known);
         assert_eq!(
             found
                 .iter()
@@ -732,7 +848,7 @@ mod tests {
         };
         assert!(
             list(
-                &mut Index::default(),
+                &mut Index::new(&database()),
                 &roots,
                 Path::new(CWD),
                 &HashSet::new()
@@ -741,7 +857,7 @@ mod tests {
         );
         assert!(
             find(
-                &mut Index::default(),
+                &mut Index::new(&database()),
                 &roots,
                 Path::new(CWD),
                 "claude",
@@ -759,8 +875,9 @@ mod tests {
             claude: Some(dir.path().to_path_buf()),
             codex: None,
         };
-        let mut index = Index::default();
-        let prompts = |index: &mut Index| {
+        let db = database();
+        let mut index = Index::new(&db);
+        let prompts = |index: &mut Index<'_>| {
             list(index, &roots, Path::new(CWD), &HashSet::new())[0]
                 .session
                 .prompts
@@ -774,7 +891,70 @@ mod tests {
         more.push('\n');
         std::fs::write(&path, more).unwrap();
         assert_eq!(prompts(&mut index), 2);
-        assert_eq!(index.seen.len(), 1);
+        let rows: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM cli_session_files", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn the_index_outlives_the_service_that_filled_it_and_forgets_deleted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = claude_fixture(dir.path());
+        let roots = Roots {
+            claude: Some(dir.path().to_path_buf()),
+            codex: None,
+        };
+        let db = database();
+        assert_eq!(
+            list(
+                &mut Index::new(&db),
+                &roots,
+                Path::new(CWD),
+                &HashSet::new()
+            )
+            .len(),
+            1
+        );
+        // What a restarted daemon finds stored is what it answers from: an
+        // unchanged file is not opened, so a row altered behind its back shows.
+        db.lock()
+            .unwrap()
+            .execute("UPDATE cli_session_files SET title = 'remembered'", [])
+            .unwrap();
+        assert_eq!(
+            list(
+                &mut Index::new(&db),
+                &roots,
+                Path::new(CWD),
+                &HashSet::new()
+            )[0]
+            .session
+            .title,
+            "remembered"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(
+            list(
+                &mut Index::new(&db),
+                &roots,
+                Path::new(CWD),
+                &HashSet::new()
+            )
+            .is_empty()
+        );
+        let rows: i64 = db
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM cli_session_files", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 0);
     }
 
     #[test]
@@ -787,7 +967,7 @@ mod tests {
         };
         assert!(
             find(
-                &mut Index::default(),
+                &mut Index::new(&database()),
                 &roots,
                 Path::new(CWD),
                 "claude",
@@ -797,7 +977,7 @@ mod tests {
         );
         assert!(
             find(
-                &mut Index::default(),
+                &mut Index::new(&database()),
                 &roots,
                 Path::new(CWD),
                 "claude",
@@ -807,7 +987,7 @@ mod tests {
         );
         assert!(
             find(
-                &mut Index::default(),
+                &mut Index::new(&database()),
                 &roots,
                 Path::new(CWD),
                 "gemini",
@@ -826,7 +1006,7 @@ mod tests {
             codex: None,
         };
         let found = find(
-            &mut Index::default(),
+            &mut Index::new(&database()),
             &roots,
             Path::new(CWD),
             "claude",
@@ -870,7 +1050,7 @@ mod tests {
             codex: Some(dir.path().to_path_buf()),
         };
         let found = find(
-            &mut Index::default(),
+            &mut Index::new(&database()),
             &roots,
             Path::new(CWD),
             "codex",
@@ -913,7 +1093,7 @@ mod tests {
             codex: None,
         };
         let found = find(
-            &mut Index::default(),
+            &mut Index::new(&database()),
             &roots,
             Path::new(CWD),
             "claude",
