@@ -288,6 +288,38 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.list_active = tokens.row_active();
     theme.colors.list_active_border = tokens.accent;
 
+    // A markdown table's header row: the accent at a fraction of itself, like
+    // a row. Left unset these keep the toolkit's stock light values, which in
+    // the dark theme paint a near-white band across an agent's answer.
+    theme.colors.table = tokens.transparent_surface();
+    theme.colors.table_head = tokens
+        .accent
+        .opacity(if tokens.light() { 0.06 } else { 0.10 });
+    theme.colors.table_head_foreground = tokens.text_primary;
+    theme.colors.table_even = tokens
+        .accent
+        .opacity(if tokens.light() { 0.02 } else { 0.03 });
+    theme.colors.table_hover = tokens.row_hover();
+    theme.colors.table_active = tokens.row_active();
+    theme.colors.table_active_border = tokens.accent;
+    theme.colors.table_row_border = tokens.border_subtle;
+
+    // Buttons, for the same reason: unset, a plain button is the stock light
+    // theme's white slab. A plain button is a raised surface like a chip, and
+    // a primary one is the accent fill our own primary actions use.
+    theme.colors.button = tokens.bg_raised;
+    theme.colors.button_foreground = tokens.text_primary;
+    theme.colors.button_hover = tokens.surface_hover();
+    theme.colors.button_active = tokens.row_active();
+    theme.colors.button_primary = tokens.primary_fill();
+    theme.colors.button_primary_foreground = tokens.bg_window_opaque();
+    theme.colors.button_primary_hover = tokens.accent;
+    theme.colors.button_primary_active = tokens.accent.opacity(0.8);
+    theme.colors.button_secondary = tokens.bg_surface;
+    theme.colors.button_secondary_foreground = tokens.text_primary;
+    theme.colors.button_secondary_hover = tokens.surface_hover();
+    theme.colors.button_secondary_active = tokens.row_active();
+
     theme.colors.tab_bar = tokens.transparent_surface();
     theme.colors.tab = tokens.transparent_surface();
     // Clear: a dock tab draws the shared tab shape inside itself
@@ -297,13 +329,16 @@ pub fn apply(mode: Mode, cx: &mut App) {
     theme.colors.tab_active_foreground = tokens.text_primary;
 
     theme.colors.primary = tokens.accent;
-    theme.colors.primary_foreground = tokens.bg_window;
+    theme.colors.primary_foreground = tokens.bg_window_opaque();
     theme.colors.primary_hover = tokens.accent.opacity(0.85);
     theme.colors.primary_active = tokens.accent.opacity(0.7);
     theme.colors.danger = tokens.status_error;
     theme.colors.success = tokens.status_done;
 
-    theme.radius = gpui::px(radii.control());
+    // A toolkit button or field is a chip-sized object and takes a row's
+    // corner, so it matches the chips and hand-drawn buttons beside it.
+    // `docs/ui.md` § Geometry.
+    theme.radius = gpui::px(radii.row);
     theme.radius_lg = gpui::px(radii.panel);
     theme.font_size = gpui::px(13.);
     theme.mono_font_size = gpui::px(12.);
@@ -340,6 +375,20 @@ impl Colors {
         color.a = 1.0;
         color
     }
+    /// The fill of a primary action — Send, Commit, Approve: the accent, just
+    /// short of full strength so hovering it has somewhere to go.
+    pub fn primary_fill(&self) -> Hsla {
+        self.accent.opacity(0.9)
+    }
+
+    /// The window colour without its translucency, for text and icons drawn
+    /// on a [`Self::primary_fill`].
+    pub fn bg_window_opaque(&self) -> Hsla {
+        let mut color = self.bg_window;
+        color.a = 1.0;
+        color
+    }
+
     /// A fully transparent fill, for surfaces that should show the window's
     /// glass rather than paint over it.
     fn transparent_surface(&self) -> Hsla {

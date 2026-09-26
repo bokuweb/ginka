@@ -104,7 +104,12 @@ crate later without rewriting their views.
 and anything else holding a group of controls — a card is an object on the
 surface and the corner is what says so), panel 7, row 6, control 3. Tight on
 purpose: softer corners at this density read as a toy rather than a tool.
-Chips are rows, not pills: 28 px tall, 6 px radius, 12 px type. Navigator default 520 px (resizable 420–720), with a fixed
+Chips are rows, not pills: 28 px tall, 6 px radius, 12 px type. Buttons follow
+the chips: toolkit buttons and fields take the row radius (control 3 is for
+marks inside a row), the composer's Send/Stop are 28 px row-radius squares
+rather than circles, and a primary action (Send, Commit, Approve) is the accent
+at 90 % with the opaque window colour on it — never a white slab. Markdown
+table headers are an accent tint, like a row, not the toolkit's stock grey. Navigator default 520 px (resizable 420–720), with a fixed
 188 px project rail and a flexible session list shown only for the selected
 project. Right panel
 default 420 px (resizable, collapsible). Terminal dock default 30 % of the centre

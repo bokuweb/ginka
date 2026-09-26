@@ -6863,9 +6863,9 @@ impl Shell {
                             .px_2p5()
                             .py_1()
                             .rounded(px(tokens.radius.row))
-                            .bg(tokens.colors().accent.opacity(0.9))
+                            .bg(tokens.colors().primary_fill())
                             .text_sm()
-                            .text_color(tokens.colors().bg_window)
+                            .text_color(tokens.colors().bg_window_opaque())
                             .cursor_pointer()
                             .hover(|this| this.bg(tokens.colors().accent))
                             .on_click(cx.listener(move |this, _, _, cx| {
@@ -8866,8 +8866,8 @@ impl Shell {
                                             // back into Send for steer-or-queue.
                                             div()
                                                 .id("stop")
-                                                .size(px(30.))
-                                                .rounded_full()
+                                                .size(px(28.))
+                                                .rounded(px(tokens.radius.row))
                                                 .bg(tokens.colors().bg_raised)
                                                 .border_1()
                                                 .border_color(tokens.colors().border_strong)
@@ -8895,9 +8895,9 @@ impl Shell {
                                         } else {
                                             div()
                                                 .id("send")
-                                                .size(px(30.))
-                                                .rounded_full()
-                                                .bg(tokens.colors().text_primary)
+                                                .size(px(28.))
+                                                .rounded(px(tokens.radius.row))
+                                                .bg(tokens.colors().primary_fill())
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
@@ -8909,7 +8909,9 @@ impl Shell {
                                                 .child(
                                                     Icon::new(IconName::ArrowUp)
                                                         .size_4()
-                                                        .text_color(tokens.colors().bg_window),
+                                                        .text_color(
+                                                            tokens.colors().bg_window_opaque(),
+                                                        ),
                                                 )
                                                 .into_any_element()
                                         },
