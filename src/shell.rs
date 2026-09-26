@@ -57,6 +57,7 @@ actions!(
         ToggleTerminalDock,
         TogglePalette,
         FindTranscript,
+        SearchEverywhere,
         NextSurface,
         PreviousSurface,
         NextTerminalTab,
@@ -159,6 +160,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-k", TogglePalette, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-k", TogglePalette, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-shift-f", SearchEverywhere, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("ctrl-shift-f", SearchEverywhere, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-f", FindTranscript, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -529,6 +534,11 @@ pub struct Shell {
     target_project: Option<ProjectName>,
     /// A project-search hit to open after the sidebar finishes switching workspaces.
     pending_file_open: Option<(WorkspaceId, String)>,
+    /// A conversation to search once its workspace is on screen, from
+    /// searching everywhere.
+    pending_transcript_query: Option<(WorkspaceId, String)>,
+    /// Searching conversations and files at once, while its dialog is open.
+    everywhere: Option<Everywhere>,
     /// Everything the app knows is behind this.
     link: Arc<crate::daemon::DaemonLink>,
     /// The selected session's transcript, folded from the daemon's events.
@@ -1102,6 +1112,13 @@ impl Shell {
                                 this.pending_file_open = Some((workspace, path));
                             }
                         }
+                        if let Some((workspace, query)) = this.pending_transcript_query.take() {
+                            if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+                                this.find_in_conversation(query, window, cx);
+                            } else {
+                                this.pending_transcript_query = Some((workspace, query));
+                            }
+                        }
                         cx.notify();
                     }
                 },
@@ -1456,6 +1473,8 @@ impl Shell {
             projects: Vec::new(),
             target_project: None,
             pending_file_open: None,
+            pending_transcript_query: None,
+            everywhere: None,
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
@@ -5855,6 +5874,7 @@ impl Shell {
             }
             Command::RunQuick(command) => self.run_quick(command, window, cx),
             Command::ToggleAppearance => self.toggle_appearance(window, cx),
+            Command::SearchEverywhere => self.on_search_everywhere(&SearchEverywhere, window, cx),
             Command::NewTerminal => {
                 self.bring_terminals_on_screen(cx);
                 self.open_terminal(window, cx);
@@ -12674,6 +12694,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_toggle_right_panel))
             .on_action(cx.listener(Self::on_toggle_terminal_dock))
             .on_action(cx.listener(Self::on_toggle_palette))
+            .on_action(cx.listener(Self::on_search_everywhere))
             .on_action(cx.listener(Self::on_find_transcript))
             .on_action(cx.listener(Self::on_next_surface))
             .on_action(cx.listener(Self::on_previous_surface))
@@ -12760,6 +12781,10 @@ impl Render for Shell {
                 ),
             )
             .children(self.notice_view(cx))
+            .children(
+                self.everywhere_view(cx)
+                    .map(|view| overlay_fade("everywhere", view)),
+            )
             .children(
                 self.palette_view(cx)
                     .map(|view| overlay_fade("palette", view)),
@@ -13136,6 +13161,336 @@ impl Shell {
                         .text_color(tokens.colors().text_primary)
                         .child(text),
                 ))
+                .into_any_element(),
+        )
+    }
+}
+
+/// Searching conversations and files at once (⌘⇧F), while it is open.
+struct Everywhere {
+    query: Entity<InputState>,
+    /// What was last searched for.
+    typed: String,
+    found: Vec<ginka_ui::search::Found>,
+    /// Which result Return opens.
+    chosen: usize,
+    loading: bool,
+    /// Counts searches, so a slow answer to an older query is dropped.
+    asked: u64,
+}
+
+impl Shell {
+    fn on_search_everywhere(
+        &mut self,
+        _: &SearchEverywhere,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.everywhere.take().is_some() {
+            cx.notify();
+            return;
+        }
+        let query = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("everywhere.placeholder").to_string())
+        });
+        query.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&query, |this, query, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let typed = query.read(cx).value().to_string();
+                this.search_everywhere(typed, cx);
+            }
+        })
+        .detach();
+        self.everywhere = Some(Everywhere {
+            query,
+            typed: String::new(),
+            found: Vec::new(),
+            chosen: 0,
+            loading: false,
+            asked: 0,
+        });
+        cx.notify();
+    }
+
+    /// Ask for conversation lines everywhere and for files in the project on
+    /// screen, together; an answer to a query already typed past is dropped.
+    fn search_everywhere(&mut self, typed: String, cx: &mut Context<Self>) {
+        let project = self
+            .session
+            .as_ref()
+            .map(|row| ProjectName(row.origin.to_string()))
+            .or_else(|| self.target_project.clone());
+        let Some(everywhere) = self.everywhere.as_mut() else {
+            return;
+        };
+        everywhere.typed = typed.clone();
+        everywhere.asked += 1;
+        everywhere.chosen = 0;
+        let asked = everywhere.asked;
+        if typed.trim().chars().count() < 2 {
+            everywhere.found.clear();
+            everywhere.loading = false;
+            cx.notify();
+            return;
+        }
+        everywhere.loading = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let (conversations, (files, lines)) = cx
+                .background_spawn(async move {
+                    let conversations = link
+                        .search_all_sessions(typed.clone())
+                        .await
+                        .unwrap_or_default();
+                    let files = match project {
+                        Some(project) => link.search_project(&project, &typed).await,
+                        None => (Vec::new(), Vec::new()),
+                    };
+                    (conversations, files)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Some(everywhere) = this.everywhere.as_mut()
+                    && everywhere.asked == asked
+                {
+                    everywhere.found = ginka_ui::search::everywhere(
+                        conversations,
+                        files,
+                        lines,
+                        ginka_ui::search::PER_GROUP,
+                    );
+                    everywhere.loading = false;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn everywhere_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(everywhere) = self.everywhere.as_mut() else {
+            return;
+        };
+        match event.keystroke.key.as_str() {
+            "escape" => {
+                self.everywhere = None;
+                cx.notify();
+            }
+            "down" => {
+                everywhere.chosen =
+                    (everywhere.chosen + 1).min(everywhere.found.len().saturating_sub(1));
+                cx.notify();
+            }
+            "up" => {
+                everywhere.chosen = everywhere.chosen.saturating_sub(1);
+                cx.notify();
+            }
+            "enter" => {
+                if let Some(found) = everywhere.found.get(everywhere.chosen).cloned() {
+                    self.open_found(found, window, cx);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Go to a result: a conversation opens searched for the same words, a
+    /// file opens in the Files editor.
+    fn open_found(
+        &mut self,
+        found: ginka_ui::search::Found,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::search::Found;
+        let typed = self
+            .everywhere
+            .take()
+            .map(|everywhere| everywhere.typed)
+            .unwrap_or_default();
+        match found {
+            Found::Conversation(hit) => {
+                if self.session.as_ref().map(|row| &row.workspace) == Some(&hit.workspace) {
+                    self.find_in_conversation(typed, window, cx);
+                } else {
+                    self.pending_transcript_query = Some((hit.workspace.clone(), typed));
+                    self.sidebar.update(cx, |sidebar, cx| {
+                        sidebar.select_workspace(&hit.workspace, cx)
+                    });
+                }
+            }
+            Found::File(file) => self.open_workspace_file(file.workspace, file.path, window, cx),
+            Found::Line(line) => self.open_workspace_file(line.workspace, line.path, window, cx),
+        }
+        cx.notify();
+    }
+
+    /// Open the conversation's own search with `query` already in it.
+    fn find_in_conversation(&mut self, query: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.on_find_transcript(&FindTranscript, window, cx);
+        if let Some(search) = self.transcript_search.as_ref() {
+            search
+                .query
+                .update(cx, |field, cx| field.set_value(query, window, cx));
+        }
+    }
+
+    /// The dialog: a field, and what was found in groups.
+    fn everywhere_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        use ginka_ui::search::Found;
+        let everywhere = self.everywhere.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let chosen = everywhere.chosen;
+        let heading = |key: &str| {
+            div()
+                .px_3()
+                .pt_2()
+                .pb_1()
+                .text_xs()
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!(key).to_string())
+        };
+        let mut rows: Vec<AnyElement> = Vec::new();
+        let mut last_kind = "";
+        for (index, found) in everywhere.found.iter().enumerate() {
+            let (kind, icon, primary, secondary) = match found {
+                Found::Conversation(hit) => (
+                    "everywhere.conversations",
+                    Icon::new(IconName::Inbox),
+                    hit.excerpt.clone(),
+                    hit.title.clone().unwrap_or_else(|| hit.workspace.0.clone()),
+                ),
+                Found::File(file) => (
+                    "everywhere.files",
+                    Icon::new(IconName::File),
+                    file.path.clone(),
+                    file.workspace.0.clone(),
+                ),
+                Found::Line(line) => (
+                    "everywhere.lines",
+                    Icon::new(IconName::Search),
+                    line.text.trim().to_string(),
+                    format!("{}:{} · {}", line.path, line.line, line.workspace.0),
+                ),
+            };
+            if kind != last_kind {
+                rows.push(heading(kind).into_any_element());
+                last_kind = kind;
+            }
+            let open = found.clone();
+            rows.push(
+                h_flex()
+                    .id(("everywhere-result", index))
+                    .w_full()
+                    .px_3()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .when(index == chosen, |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_found(open.clone(), window, cx)
+                    }))
+                    .child(icon.size_3p5().text_color(tokens.colors().text_muted))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(primary),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(220.))
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(secondary),
+                    )
+                    .into_any_element(),
+            );
+        }
+        let status = if everywhere.loading {
+            Some(rust_i18n::t!("everywhere.searching").to_string())
+        } else if everywhere.found.is_empty() && everywhere.typed.trim().chars().count() >= 2 {
+            Some(rust_i18n::t!("everywhere.nothing").to_string())
+        } else {
+            None
+        };
+        Some(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .justify_center()
+                .items_start()
+                .child(
+                    v_flex()
+                        .id("everywhere")
+                        .mt(px(110.))
+                        .w(px(640.))
+                        .rounded(px(tokens.radius.card))
+                        .bg(tokens.colors().popover())
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                            this.everywhere_key(event, window, cx)
+                        }))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .items_center()
+                                .border_b_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .child(
+                                    Icon::new(IconName::Search)
+                                        .size_3p5()
+                                        .text_color(tokens.colors().text_muted),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .child(ginka_ui::field::input(&everywhere.query)),
+                                ),
+                        )
+                        .child(
+                            v_flex()
+                                .id("everywhere-results")
+                                .max_h(px(420.))
+                                .overflow_y_scroll()
+                                .p_1()
+                                .children(rows)
+                                .children(status.map(|status| {
+                                    div()
+                                        .px_3()
+                                        .py_2()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(status)
+                                })),
+                        ),
+                )
                 .into_any_element(),
         )
     }

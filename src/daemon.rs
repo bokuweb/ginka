@@ -195,6 +195,21 @@ impl DaemonLink {
         }
     }
 
+    /// Find stored transcript entries in every conversation.
+    pub async fn search_all_sessions(&self, query: String) -> Result<Vec<SessionMatch>, String> {
+        match self
+            .ask_result(Request::SearchSessions {
+                workspace: None,
+                query,
+                limit: Some(60),
+            })
+            .await?
+        {
+            Response::SessionMatches { matches } => Ok(matches),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Upload bytes selected by this client to the daemon-owned attachment store.
     pub async fn upload_attachment(
         &self,

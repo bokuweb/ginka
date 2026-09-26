@@ -514,6 +514,9 @@ palette.transcript.find.hint:
 palette.transcript.outline:
   en: Toggle prompt outline
   ja: プロンプト一覧を切り替え
+palette.search.everywhere:
+  en: Search everywhere
+  ja: すべてを検索
 palette.appearance.toggle:
   en: Switch between dark and light
   ja: ダーク／ライトを切り替える
@@ -618,6 +621,24 @@ transcript.quote:
 transcript.quote.tooltip:
   en: Quote selected text or this message in chat
   ja: 選択したテキストまたはこのメッセージをチャットに引用
+everywhere.placeholder:
+  en: Search conversations and files…
+  ja: 会話とファイルを検索…
+everywhere.conversations:
+  en: Conversations
+  ja: 会話
+everywhere.files:
+  en: Files
+  ja: ファイル
+everywhere.lines:
+  en: In files
+  ja: ファイルの中
+everywhere.searching:
+  en: Searching…
+  ja: 検索中…
+everywhere.nothing:
+  en: Nothing found
+  ja: 見つかりませんでした
 transcript.note_selection:
   en: Save as note
   ja: ノートに保存

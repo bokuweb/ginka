@@ -63,6 +63,8 @@ pub enum Command {
     RunQuick(ginka_protocol::model::QuickCommand),
     /// Switch between the dark and the light theme.
     ToggleAppearance,
+    /// Search conversations and files at once.
+    SearchEverywhere,
 }
 
 /// The saved commands the palette offers, where there is a workspace to run
@@ -312,6 +314,19 @@ pub fn entries(
             command: Command::NewTerminal,
         });
     }
+    all.push(Entry {
+        id: "search:everywhere".into(),
+        label: rust_i18n::t!("palette.search.everywhere").to_string(),
+        hint: Some(
+            if cfg!(target_os = "macos") {
+                "⌘⇧F"
+            } else {
+                "Ctrl+Shift+F"
+            }
+            .into(),
+        ),
+        command: Command::SearchEverywhere,
+    });
     all.push(Entry {
         id: "appearance:toggle".into(),
         label: rust_i18n::t!("palette.appearance.toggle").to_string(),
@@ -576,6 +591,17 @@ mod tests {
                 .map(|entry| entry.command)
                 .collect::<Vec<_>>(),
             vec![Command::QuoteTranscriptSelection]
+        );
+    }
+
+    #[test]
+    fn searching_everywhere_is_always_offered() {
+        let all = entries(&layout(), &[], None, false, false, false);
+        assert_eq!(
+            filter(all, "search every")
+                .first()
+                .map(|entry| entry.command.clone()),
+            Some(Command::SearchEverywhere)
         );
     }
 
