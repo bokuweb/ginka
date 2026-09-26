@@ -3104,6 +3104,54 @@ fn an_acp_permission_request_waits_for_the_reader_and_carries_the_choice_back() 
 }
 
 #[test]
+fn claude_asks_before_a_command_and_the_readers_choice_goes_back_on_its_input() {
+    let mut fixture = Fixture::new();
+    let script = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-ask"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[args:{args}]"}]}}"#,
+        r#"{"type":"control_request","request_id":"req-1","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"cargo test"}}}"#,
+        "#read",
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":{stdin_json}}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-ask"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start_with("claude", &script, "run the tests");
+    fixture.wait_for_state(&session, SessionState::AwaitingInput);
+    let transcript = fixture.transcript(&session);
+    assert!(
+        spoken(&transcript).contains("--permission-prompt-tool stdio"),
+        "asked over the pipes rather than refused: {}",
+        spoken(&transcript)
+    );
+    let (id, question, options) = transcript
+        .into_iter()
+        .find_map(|entry| match entry {
+            TranscriptPayload::Agent {
+                event:
+                    AgentEvent::AskUser {
+                        id,
+                        question,
+                        options,
+                    },
+            } => Some((id, question, options)),
+            _ => None,
+        })
+        .expect("the ask is recorded as a card");
+    assert!(question.contains("cargo test"), "{question}");
+    assert_eq!(options, vec!["Allow", "Deny"]);
+
+    fixture.ask(Request::RespondToAgent {
+        session: session.clone(),
+        request_id: id,
+        response: "Allow".into(),
+    });
+    let transcript = fixture.wait_for_said(&session, r#""behavior":"allow""#);
+    let said = spoken(&transcript);
+    assert!(said.contains(r#""request_id":"req-1""#), "{said}");
+    assert!(said.contains(r#""command":"cargo test""#), "{said}");
+}
+
+#[test]
 fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
     let mut fixture = Fixture::new();
     std::fs::write(

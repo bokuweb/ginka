@@ -6,6 +6,7 @@
 //! makes steering possible (`docs/roadmap.md` §3.3 N1). Both read the vendor's
 //! `stream-json` through the same `stream` module: one parser for one vendor.
 
+mod control;
 mod stream;
 
 use anyhow::Result;
@@ -78,12 +79,14 @@ impl ClaudeDriver {
             args.push("--model".to_string());
             args.push(model.clone());
         }
-        // Headless, a tool the mode would ask about is refused rather than
-        // asked about, so the mode is the whole of what the agent may do
+        // The mode is the whole of what the agent may do without asking
         // (§3.3 N2) — passed always, because the vendor's own default is
-        // not ours.
+        // not ours. What it would ask about is asked over the same pipes
+        // (`control`) rather than refused, so the reader answers a card.
         args.push("--permission-mode".to_string());
         args.push(permission_mode(spec.access_mode).to_string());
+        args.push("--permission-prompt-tool".to_string());
+        args.push("stdio".to_string());
         if !spec.mcp_servers.is_empty() {
             // As a JSON string rather than a file: nothing is written into
             // the user's home for one session. The user's own servers still
@@ -199,7 +202,37 @@ impl AgentDriver for ClaudeDriver {
         Some(PromptMessage::user(text).to_line())
     }
 
+    fn supports_responses(&self) -> bool {
+        true
+    }
+
+    /// `request_id` is the card [`control::request`] made.
+    fn encode_response(&self, request_id: &str, response: &str) -> Option<String> {
+        control::response(request_id, response)
+    }
+
     fn parse_line(&self, line: &str, state: &mut ParseState) -> Vec<AgentEvent> {
+        // Asking before acting is the CLI talking to this client, not part of
+        // the conversation `stream` reads.
+        if line.contains("\"control_")
+            && let Ok(message) = serde_json::from_str::<Value>(line.trim())
+        {
+            match message.get("type").and_then(Value::as_str) {
+                Some("control_request") => {
+                    state.recognized += 1;
+                    let (events, reply) = control::request(&message);
+                    state.outbox.extend(reply);
+                    return events;
+                }
+                // A request withdrawn, or an answer to one of ours: the card
+                // stays as history, and nothing needs saying.
+                Some("control_cancel_request" | "control_response") => {
+                    state.recognized += 1;
+                    return Vec::new();
+                }
+                _ => {}
+            }
+        }
         // The reading itself lives in `stream`, so the fixtures that pin this
         // vendor's shapes have one implementation to pin.
         match state.stream.push_line(line) {

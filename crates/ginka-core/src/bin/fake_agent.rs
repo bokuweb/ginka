@@ -327,6 +327,7 @@ fn scripted() {
         // it through a JSONL line intact.
         let line = line
             .replace("{prompt_json}", &json_string(&prompt))
+            .replace("{stdin_json}", &json_string(&last_read))
             .replace("{args_json}", &json_string(&joined))
             .replace("{prompt}", &prompt)
             .replace("{session}", &session)
