@@ -618,6 +618,15 @@ transcript.quote:
 transcript.quote.tooltip:
   en: Quote selected text or this message in chat
   ja: 選択したテキストまたはこのメッセージをチャットに引用
+transcript.note_selection:
+  en: Save as note
+  ja: ノートに保存
+transcript.note_saved:
+  en: Saved to Notes
+  ja: ノートに保存しました
+transcript.note_failed:
+  en: Could not save the note
+  ja: ノートを保存できませんでした
 transcript.quote_selection:
   en: Quote selected text in chat
   ja: 選択したテキストをチャットに引用

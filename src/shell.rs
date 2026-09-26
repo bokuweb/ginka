@@ -702,6 +702,8 @@ pub struct Shell {
     terminal_in_panel: bool,
     /// Panels on their way in or out (`docs/ui.md` §6).
     panel_motion: ginka_ui::motion::Transitions<Panel>,
+    /// A short confirmation at the foot of the window, and which one it is.
+    notice: Option<(SharedString, u64)>,
     /// The size the right panel's terminal area was last laid out at.
     terminal_area: Option<(f32, f32)>,
     /// The conversations open across the top of the centre column.
@@ -1487,6 +1489,7 @@ impl Shell {
             surfaces,
             terminal_in_panel: false,
             panel_motion: Default::default(),
+            notice: None,
             terminal_area: None,
             notes,
             tabs: restored_tabs,
@@ -6283,12 +6286,34 @@ impl Shell {
         let mouse_text = selected_text.clone();
         let click_text = selected_text;
         let label = rust_i18n::t!("transcript.quote_selection").to_string();
+        let note_label = rust_i18n::t!("transcript.note_selection").to_string();
+        let note_mouse = mouse_text.clone();
+        let note_click = click_text.clone();
 
         Some(
-            div()
+            h_flex()
                 .absolute()
                 .top_2()
                 .right_3()
+                .gap_1()
+                .child(
+                    Button::new("note-transcript-selection")
+                        .compact()
+                        .tooltip(note_label.clone())
+                        .accessibility_label(note_label.clone())
+                        .label(note_label)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, _, cx| {
+                                this.save_selection_as_note(&note_mouse, cx)
+                            }),
+                        )
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            if !matches!(event, ClickEvent::Mouse(_)) {
+                                this.save_selection_as_note(&note_click, cx);
+                            }
+                        })),
+                )
                 .child(
                     Button::new("quote-transcript-selection")
                         .compact()
@@ -12734,6 +12759,7 @@ impl Render for Shell {
                         }),
                 ),
             )
+            .children(self.notice_view(cx))
             .children(
                 self.palette_view(cx)
                     .map(|view| overlay_fade("palette", view)),
@@ -13036,6 +13062,87 @@ enum RemoteAction {
     Push,
     Sync,
 }
+
+impl Shell {
+    /// Keep a transcript selection as a note in the project it came from.
+    fn save_selection_as_note(&mut self, text: &str, cx: &mut Context<Self>) {
+        let source = self.session.as_ref().map(|row| row.title.to_string());
+        let (title, body) = ginka_ui::notes::from_selection(text, source.as_deref());
+        let project = self
+            .session
+            .as_ref()
+            .map(|row| ProjectName(row.origin.to_string()))
+            .or_else(|| self.target_project.clone());
+        let link = self.link.clone();
+        let notes = self.notes.clone();
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_spawn(async move { link.save_note(None, project, title, body).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if saved.is_some() {
+                    notes.update(cx, |notes, cx| notes.reload(cx));
+                    this.show_notice(rust_i18n::t!("transcript.note_saved").to_string(), cx);
+                } else {
+                    this.show_notice(rust_i18n::t!("transcript.note_failed").to_string(), cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Say something short at the foot of the window, for a moment.
+    fn show_notice(&mut self, text: String, cx: &mut Context<Self>) {
+        let id = self.notice.as_ref().map_or(1, |(_, id)| id + 1);
+        self.notice = Some((text.into(), id));
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(NOTICE_FOR).await;
+            this.update(cx, |this, cx| {
+                if this.notice.as_ref().is_some_and(|(_, shown)| *shown == id) {
+                    this.notice = None;
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// The notice, as a small card floating over the foot of the window.
+    fn notice_view(&self, cx: &App) -> Option<AnyElement> {
+        let (text, id) = self.notice.clone()?;
+        let tokens = Tokens::global(cx);
+        Some(
+            div()
+                .absolute()
+                .bottom(px(24.))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(ginka_ui::motion::rise_in(
+                    ("notice", id as usize),
+                    div()
+                        .px_3()
+                        .py_1p5()
+                        .rounded(px(tokens.radius.panel))
+                        .bg(tokens.colors().popover())
+                        .border_1()
+                        .border_color(tokens.colors().border_strong)
+                        .shadow_lg()
+                        .text_sm()
+                        .text_color(tokens.colors().text_primary)
+                        .child(text),
+                ))
+                .into_any_element(),
+        )
+    }
+}
+
+/// How long a notice stays.
+const NOTICE_FOR: Duration = Duration::from_millis(2600);
 
 /// The hover group a transcript message and its actions share.
 fn message_group(index: usize) -> SharedString {

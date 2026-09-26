@@ -30,6 +30,7 @@ pub mod markup;
 pub mod models;
 pub mod motion;
 pub mod navigation;
+pub mod notes;
 pub mod notify;
 pub mod palette;
 pub mod reports;

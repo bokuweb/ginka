@@ -93,7 +93,8 @@ impl NotesView {
         self.reload(cx);
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    /// Read the list again, after a note was made somewhere else.
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
         let link = self.link.clone();
         let project = self.project.clone();
         cx.spawn(async move |this, cx| {
