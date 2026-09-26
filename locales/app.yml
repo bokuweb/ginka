@@ -211,6 +211,9 @@ composer.attachment.uploading:
 composer.attachment.remove:
   en: Remove attachment
   ja: 添付を削除
+composer.attachment.drop:
+  en: Drop files to attach
+  ja: ドロップして添付
 composer.attachment.failed:
   en: "Could not attach file: %{error}"
   ja: "ファイルを添付できませんでした: %{error}"
