@@ -454,35 +454,47 @@ impl Registry {
     /// daemon that will not start because of a stale key is worse than one
     /// that starts without it.
     pub fn from_settings(settings: &crate::settings::DaemonSettings) -> Self {
+        use ginka_protocol::provider::ProviderKind;
+
         let mut registry = Self::empty();
 
-        let claude = settings.agents.get("claude");
-        let mut driver = claude::ClaudeDriver::with_program(
-            claude
-                .and_then(|agent| agent.program.clone())
-                .unwrap_or_else(|| "claude".to_string()),
-        );
-        for (key, value) in claude.iter().flat_map(|agent| agent.env.iter()) {
-            driver = driver.with_env(key, value);
+        if settings.is_enabled(ProviderKind::Claude) {
+            let claude = settings.agents.get("claude");
+            let mut driver = claude::ClaudeDriver::with_program(
+                claude
+                    .and_then(|agent| agent.program.clone())
+                    .unwrap_or_else(|| "claude".to_string()),
+            );
+            for (key, value) in claude.iter().flat_map(|agent| agent.env.iter()) {
+                driver = driver.with_env(key, value);
+            }
+            registry.insert(Arc::new(driver));
         }
-        registry.insert(Arc::new(driver));
 
-        let codex = settings.agents.get("codex");
-        let mut driver = codex::CodexDriver::with_program(
-            codex
-                .and_then(|agent| agent.program.clone())
-                .unwrap_or_else(|| "codex".to_string()),
-        );
-        for (key, value) in codex.iter().flat_map(|agent| agent.env.iter()) {
-            driver = driver.with_env(key, value);
+        if settings.is_enabled(ProviderKind::Codex) {
+            let codex = settings.agents.get("codex");
+            let mut driver = codex::CodexDriver::with_program(
+                codex
+                    .and_then(|agent| agent.program.clone())
+                    .unwrap_or_else(|| "codex".to_string()),
+            );
+            for (key, value) in codex.iter().flat_map(|agent| agent.env.iter()) {
+                driver = driver.with_env(key, value);
+            }
+            if codex.and_then(|agent| agent.transport.as_deref()) == Some("exec") {
+                driver = driver.with_exec();
+            }
+            registry.insert(Arc::new(driver));
         }
-        if codex.and_then(|agent| agent.transport.as_deref()) == Some("exec") {
-            driver = driver.with_exec();
-        }
-        registry.insert(Arc::new(driver));
 
         // Every agent reached over ACP, in the same shape.
         for base in [acp::AcpDriver::gemini(), acp::AcpDriver::opencode()] {
+            let Some(provider) = ProviderKind::parse(base.id()) else {
+                continue;
+            };
+            if !settings.is_enabled(provider) {
+                continue;
+            }
             let configured = settings.agents.get(base.id());
             let mut driver = match configured.and_then(|agent| agent.program.clone()) {
                 Some(program) => base.with_program(program),
@@ -537,6 +549,7 @@ impl Default for Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ginka_protocol::provider::ProviderKind;
 
     #[test]
     fn the_default_registry_offers_claude_first() {
@@ -545,6 +558,23 @@ mod tests {
         assert!(registry.get("claude").is_some());
         assert!(registry.get("codex").is_some());
         assert!(registry.get("nonesuch").is_none());
+    }
+
+    #[test]
+    fn disabled_providers_are_absent_from_the_registry() {
+        let mut settings = crate::settings::DaemonSettings::default();
+        settings.set_enabled(ProviderKind::Codex, false);
+        settings.set_enabled(ProviderKind::Gemini, false);
+        let registry = Registry::from_settings(&settings);
+        assert_eq!(registry.ids(), vec!["claude", "opencode"]);
+        assert!(registry.get("codex").is_none());
+        assert!(registry.get("gemini").is_none());
+
+        settings.set_enabled(ProviderKind::Codex, true);
+        assert_eq!(
+            Registry::from_settings(&settings).ids(),
+            vec!["claude", "codex", "opencode"]
+        );
     }
 
     #[test]

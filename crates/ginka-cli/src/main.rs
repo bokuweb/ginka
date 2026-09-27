@@ -520,6 +520,20 @@ enum QuickCommand {
 enum SettingsCommand {
     /// Print the daemon's settings as JSON, environment values hidden.
     Show,
+    /// List the shipped providers and their enabled state and executable override.
+    Providers,
+    /// Configure a shipped provider for future turns.
+    Provider {
+        provider: String,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long, conflicts_with = "clear_program")]
+        program: Option<String>,
+        #[arg(long)]
+        clear_program: bool,
+    },
     /// Change one top-level setting. The value is JSON — `false`, `7`,
     /// `["codex"]` — and anything that is not is taken as a string.
     Set { key: String, value: String },
@@ -1482,6 +1496,26 @@ fn request_for(command: Command) -> Result<Request> {
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
         Command::Settings(SettingsCommand::Show) => Request::DaemonSettings,
+        Command::Settings(SettingsCommand::Providers) => Request::ListProviderSettings,
+        Command::Settings(SettingsCommand::Provider {
+            provider,
+            enable,
+            disable,
+            program,
+            clear_program,
+        }) => Request::UpdateProviderSettings {
+            provider: ProviderKind::parse(&provider)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {provider}"))?,
+            enabled: if enable {
+                Some(true)
+            } else if disable {
+                Some(false)
+            } else {
+                None
+            },
+            program,
+            clear_program,
+        },
         Command::Settings(SettingsCommand::Set { key, value }) => Request::UpdateDaemonSettings {
             key,
             value: if serde_json::from_str::<serde_json::Value>(&value).is_ok() {
@@ -2040,6 +2074,20 @@ fn print(response: Response, patch: bool) {
         }
         Response::QuickCommand { command } => println!("{}", command.id),
         Response::DaemonSettings { json } => println!("{json}"),
+        Response::ProviderSettings { providers } => {
+            for provider in providers {
+                println!(
+                    "{:<10} {:<8} {}",
+                    provider.provider.as_str(),
+                    if provider.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    provider.program.unwrap_or_default()
+                );
+            }
+        }
         Response::BrowserSuggestions { pages } => {
             for page in pages {
                 println!(

@@ -719,6 +719,55 @@ fn an_agent_that_is_missing_is_reported_before_a_prompt_is_sent() {
 }
 
 #[test]
+fn provider_settings_apply_to_new_sessions_and_preserve_other_overrides() {
+    let mut fixture = Fixture::configured(Service::with_settings_drivers);
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: Some(false),
+        program: Some("/opt/agents/codex".into()),
+        clear_program: false,
+    });
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(!codex.enabled);
+    assert_eq!(codex.program.as_deref(), Some("/opt/agents/codex"));
+    assert!(
+        providers
+            .iter()
+            .find(|row| row.provider.as_str() == "claude")
+            .unwrap()
+            .enabled
+    );
+    let Response::Agents { agents } = fixture.ask(Request::ListAgents) else {
+        panic!("expected agents");
+    };
+    assert!(!agents.iter().any(|agent| agent.id == "codex"));
+
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: Some(true),
+        program: None,
+        clear_program: true,
+    });
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(codex.enabled);
+    assert_eq!(codex.program, None);
+}
+
+#[test]
 fn the_agent_probe_is_not_re_run_on_every_ask() {
     // Probing shells out twice per agent and the sidebar asks on every tick;
     // an installed CLI does not come and go between them.

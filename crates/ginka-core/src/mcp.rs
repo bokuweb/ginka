@@ -97,6 +97,25 @@ pub fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
+            name: "ginka_provider_settings",
+            description: "List shipped providers, whether each is enabled, and any executable override.",
+            schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: "ginka_provider_configure",
+            description: "Enable or disable a provider or override its executable for future turns.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "enum": ["claude", "codex", "gemini", "opencode"]},
+                    "enabled": {"type": "boolean"},
+                    "program": {"type": "string"},
+                    "clear_program": {"type": "boolean"}
+                },
+                "required": ["provider"]
+            }),
+        },
+        Tool {
             name: "ginka_accounts",
             description: "Every login of every provider, with whether each is signed in. A session can be started on one by id.",
             schema: json!({"type": "object", "properties": {}}),
@@ -795,6 +814,14 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             }
         }
         "ginka_agents" => Request::ListAgents,
+        "ginka_provider_settings" => Request::ListProviderSettings,
+        "ginka_provider_configure" => Request::UpdateProviderSettings {
+            provider: ginka_protocol::ProviderKind::parse(&text("provider")?)
+                .ok_or_else(|| anyhow!("unknown provider"))?,
+            enabled: arguments.get("enabled").and_then(Value::as_bool),
+            program: maybe("program"),
+            clear_program: flag("clear_program"),
+        },
         "ginka_accounts" => Request::Accounts,
         "ginka_account_select" => Request::SelectAccount {
             id: ginka_protocol::AccountId(text("account")?),
@@ -1236,6 +1263,7 @@ mod tests {
                 "index": 0,
                 "response": "yes",
                 "agent": "claude",
+                "provider": "codex",
                 "account": "claude-work",
                 "prompt": "go",
                 "text": "more",
@@ -1496,6 +1524,27 @@ mod tests {
             assert!(!tool["description"].as_str().unwrap().is_empty());
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn provider_settings_tools_map_to_the_shared_protocol() {
+        assert_eq!(
+            request_for("ginka_provider_settings", &json!({})).unwrap(),
+            Request::ListProviderSettings
+        );
+        assert_eq!(
+            request_for(
+                "ginka_provider_configure",
+                &json!({"provider": "codex", "enabled": false, "program": "/tmp/codex"})
+            )
+            .unwrap(),
+            Request::UpdateProviderSettings {
+                provider: ginka_protocol::ProviderKind::Codex,
+                enabled: Some(false),
+                program: Some("/tmp/codex".into()),
+                clear_program: false,
+            }
+        );
     }
 
     #[test]

@@ -23,8 +23,8 @@ use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
 };
-use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::provider::{AccessMode, OptionOutcome, ProviderKind, SessionOptions};
+use ginka_protocol::rpc::{ProviderSetting, Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -1192,6 +1192,55 @@ impl Service {
                 Ok(Response::DaemonSettings {
                     json: serde_json::to_string_pretty(&value).map_err(failed)?,
                 })
+            }
+            Request::ListProviderSettings => Ok(Response::ProviderSettings {
+                providers: Registry::with_defaults()
+                    .ids()
+                    .into_iter()
+                    .filter_map(ProviderKind::parse)
+                    .map(|provider| ProviderSetting {
+                        provider,
+                        enabled: self.settings.is_enabled(provider),
+                        program: self
+                            .settings
+                            .binary_override(provider)
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    })
+                    .collect(),
+            }),
+            Request::UpdateProviderSettings {
+                provider,
+                enabled,
+                program,
+                clear_program,
+            } => {
+                if program.is_some() && clear_program {
+                    return Err(RpcError::failed("program and clear_program conflict"));
+                }
+                if program
+                    .as_ref()
+                    .is_some_and(|program| program.trim().is_empty())
+                {
+                    return Err(RpcError::failed("program must not be empty"));
+                }
+                if !Registry::with_defaults().ids().contains(&provider.as_str()) {
+                    return Err(RpcError::failed(format!(
+                        "{} is not a shipped provider",
+                        provider.as_str()
+                    )));
+                }
+                let mut settings = self.settings.clone();
+                if let Some(enabled) = enabled {
+                    settings.set_enabled(provider, enabled);
+                }
+                if clear_program {
+                    settings.set_binary_override(provider, None);
+                } else if let Some(program) = program {
+                    settings.set_binary_override(provider, Some(std::path::PathBuf::from(program)));
+                }
+                crate::settings::save(&self.paths.daemon_settings(), &settings).map_err(failed)?;
+                self.take_settings(settings);
+                Ok(Response::Ack)
             }
             Request::UpdateDaemonSettings { key, value } => {
                 let value: serde_json::Value = serde_json::from_str(&value).map_err(|error| {

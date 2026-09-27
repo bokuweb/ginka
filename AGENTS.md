@@ -110,6 +110,8 @@ cargo run -p ginka-cli -- account add codex-work --provider codex --label Work
 cargo run -p ginka-cli -- account login codex-work   # the vendor's sign-in, here
 cargo run -p ginka-cli -- account select codex-work  # future Codex sessions use it
 cargo run -p ginka-cli -- account list               # signed in, and headroom
+cargo run -p ginka-cli -- settings providers          # provider availability and executable overrides
+cargo run -p ginka-cli -- settings provider codex --disable  # disable future Codex turns
 cargo run -p ginka-cli -- session log <session>
 cargo run -p ginka-cli -- session queue <session>     # list pending follow-ups
 cargo run -p ginka-cli -- session queue-edit <session> <id> "replacement"

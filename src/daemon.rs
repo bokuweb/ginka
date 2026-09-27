@@ -19,7 +19,7 @@ use ginka_protocol::model::{
     FileContent, FileEntry, Note, PlanSnapshot, Project, ReviewComment, Session, SessionMatch,
     Skill, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::rpc::{ProviderSetting, Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,34 @@ impl DaemonLink {
         match self.ask(Request::ListAgents).await {
             Some(Response::Agents { agents }) => agents,
             _ => Vec::new(),
+        }
+    }
+
+    /// Provider availability and executable overrides held by the daemon.
+    pub async fn provider_settings(&self) -> Vec<ProviderSetting> {
+        match self.ask(Request::ListProviderSettings).await {
+            Some(Response::ProviderSettings { providers }) => providers,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Change the availability of one provider for future turns.
+    pub async fn set_provider_enabled(
+        &self,
+        provider: ginka_protocol::ProviderKind,
+        enabled: bool,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::UpdateProviderSettings {
+                provider,
+                enabled: Some(enabled),
+                program: None,
+                clear_program: false,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
         }
     }
 

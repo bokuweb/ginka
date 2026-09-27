@@ -758,6 +758,18 @@ pub enum Request {
     /// Change one top-level setting to a JSON value, checked against the
     /// settings' shape before it is written and taken at once.
     UpdateDaemonSettings { key: String, value: String },
+    /// The providers shipped by this build and their daemon-owned settings.
+    ListProviderSettings,
+    /// Change one provider without replacing other providers' settings.
+    UpdateProviderSettings {
+        provider: ProviderKind,
+        /// Leave the enabled state unchanged when absent.
+        enabled: Option<bool>,
+        /// Set a CLI path, or leave it unchanged when absent.
+        program: Option<String>,
+        /// Remove a CLI path override and use the driver's default binary.
+        clear_program: bool,
+    },
 
     /// A page the browser surface finished loading in a workspace, for the
     /// address bar to complete from. Credentials, fragments and
@@ -816,6 +828,18 @@ pub struct Attempt {
     /// Which login to run on; the provider's active account when absent.
     #[serde(default)]
     pub account: Option<AccountId>,
+}
+
+/// One shipped provider's runtime configuration, excluding environment secrets.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderSetting {
+    /// The provider whose driver this build ships.
+    pub provider: ProviderKind,
+    /// Whether new turns may use it.
+    pub enabled: bool,
+    /// CLI path override, or the driver's default command when absent.
+    pub program: Option<String>,
 }
 
 /// What the daemon answers with.
@@ -1007,6 +1031,10 @@ pub enum Response {
     /// The daemon's settings, secrets left out.
     DaemonSettings {
         json: String,
+    },
+    /// Runtime provider choices, including disabled providers.
+    ProviderSettings {
+        providers: Vec<ProviderSetting>,
     },
     /// Pages the address bar can offer.
     BrowserSuggestions {

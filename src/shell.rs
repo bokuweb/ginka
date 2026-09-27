@@ -557,6 +557,8 @@ pub struct Shell {
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
+    /// Provider settings from the daemon, shown in Settings.
+    provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
     /// Every login of every provider, as the daemon lists them.
     accounts: Vec<ginka_protocol::model::Account>,
     /// The latest reading of each login's rate-limit windows, followed from
@@ -1487,6 +1489,7 @@ impl Shell {
             transcript_search: None,
             prompt_outline_open: false,
             agents: Vec::new(),
+            provider_settings: Vec::new(),
             accounts: Vec::new(),
             plans: Vec::new(),
             reveal: Reveal::new(),
@@ -3577,6 +3580,33 @@ impl Shell {
         .detach();
     }
 
+    /// Persist a provider toggle and refresh the daemon's visible catalogue.
+    fn set_provider_enabled(
+        &mut self,
+        provider: ginka_protocol::ProviderKind,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.set_provider_enabled(provider, enabled).await?;
+                    Ok::<_, String>((link.provider_settings().await, link.agents().await))
+                })
+                .await;
+            if let Ok((providers, agents)) = result {
+                this.update(cx, |this, cx| {
+                    this.provider_settings = providers;
+                    this.agents = agents;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// Run the vendor's sign-in for a login in the dock, pointed at the
     /// login's directory (`docs/accounts.md` §4).
     ///
@@ -4986,6 +5016,49 @@ impl Shell {
             .into_any_element();
         let quick_section = self.quick_settings(cx);
         let cron_section = self.cron_settings(cx);
+        let provider_section = v_flex()
+            .w_full()
+            .pt_5()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.providers").to_string()),
+            )
+            .children(self.provider_settings.iter().map(|setting| {
+                let provider = setting.provider;
+                let control = h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().bg_surface)
+                    .children(
+                        [(true, "settings.on"), (false, "settings.off")]
+                            .into_iter()
+                            .map(|(enabled, key)| {
+                                choice(
+                                    format!("provider:{}:{enabled}", provider.as_str()),
+                                    rust_i18n::t!(key).to_string(),
+                                    setting.enabled == enabled,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.set_provider_enabled(provider, enabled, cx);
+                                    },
+                                ))
+                            }),
+                    )
+                    .into_any_element();
+                row(
+                    provider.as_str().to_string(),
+                    setting
+                        .program
+                        .clone()
+                        .unwrap_or_else(|| rust_i18n::t!("settings.providers.auto").to_string()),
+                    control,
+                )
+            }));
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -5124,6 +5197,7 @@ impl Shell {
                                     .into_any_element(),
                             ))
                             .child(quick_section)
+                            .child(provider_section)
                             .child(cron_section),
                     ),
             )
@@ -13040,6 +13114,7 @@ async fn pull_rows(
         rows,
         projects,
         agents,
+        provider_settings,
         accounts,
         plans,
         usage,
@@ -13057,6 +13132,7 @@ async fn pull_rows(
             // Cached by the daemon, so this is a request rather than two
             // subprocesses per agent every tick.
             let agents = listing.agents().await;
+            let provider_settings = listing.provider_settings().await;
             // The logins and their gauges: cached and pushed by the daemon
             // respectively, so both are a request rather than a probe.
             let accounts = listing.accounts().await;
@@ -13090,6 +13166,7 @@ async fn pull_rows(
                 rows,
                 projects,
                 agents,
+                provider_settings,
                 accounts,
                 plans,
                 usage,
@@ -13108,6 +13185,7 @@ async fn pull_rows(
     );
     this.update(cx, |this, cx| {
         this.agents = agents;
+        this.provider_settings = provider_settings;
         this.accounts = accounts;
         this.plans = plans;
         this.checkpoints = checkpoints;

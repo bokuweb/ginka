@@ -274,6 +274,8 @@ Saved shell commands and prompts, run in a workspace
 The daemon's settings: show them, or change one
 
 - `ginka settings show` — Print the daemon's settings as JSON, environment values hidden
+- `ginka settings providers` — List shipped providers, their enabled state and executable overrides
+- `ginka settings provider` — Configure a provider for future turns (`ginka settings provider <PROVIDER> [--enable | --disable] [--program <PATH> | --clear-program]`)
 - `ginka settings set` — Change one top-level setting. The value is JSON — `false`, `7`, `["codex"]` — and anything that is not is taken as a string (`ginka settings set <KEY> <VALUE>`)
 
 ## `ginka terminal`

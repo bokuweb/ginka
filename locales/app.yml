@@ -1332,6 +1332,12 @@ settings.appearance.system:
 settings.general:
   en: General
   ja: 一般
+settings.providers:
+  en: Providers
+  ja: プロバイダー
+settings.providers.auto:
+  en: Automatically detected executable
+  ja: 実行ファイルを自動検出
 settings.language:
   en: Language
   ja: 言語

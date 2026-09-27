@@ -450,6 +450,9 @@ Appearance (System, Dark, Light), language (System, English, 日本語) and
 notifications (on, off), each
 a segmented control that applies at once and persists to `app.json`, and the
 version with the state directory. Opened from the rail or `⌘,`.
+The Providers section lists each shipped driver with its executable override and
+an immediate enable/disable control. The daemon owns these settings; the CLI
+and MCP can also set or clear an executable override.
 
 ## 4. Component mapping
 
