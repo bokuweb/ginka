@@ -131,7 +131,7 @@ pub fn write(
 }
 
 /// Resolve an existing file without allowing a symlink to leave the worktree.
-fn resolve_file(worktree: &Path, path: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn resolve_file(worktree: &Path, path: &str) -> Result<std::path::PathBuf> {
     let inside = worktree
         .join(path)
         .canonicalize()

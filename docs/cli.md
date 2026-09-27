@@ -131,6 +131,15 @@ Print one of a workspace's files
 
 `ginka show <WORKSPACE> <PATH>`
 
+## `ginka open-editor`
+
+Open an existing workspace file in an external editor on the daemon host.
+`--line` is one-based. Set `GINKA_EDITOR`, `VISUAL`, or `EDITOR` to choose an
+editor; otherwise Ginka looks for Zed, VS Code, or Cursor before the platform
+default.
+
+`ginka open-editor <WORKSPACE> <PATH> [--line <LINE>]`
+
 ## `ginka save`
 
 Save an existing UTF-8 workspace file without overwriting a newer edit

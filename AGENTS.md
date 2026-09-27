@@ -149,6 +149,7 @@ cargo run -p ginka-cli -- workspace index <workspace>            # zg index, so 
 cargo run -p ginka-cli -- project search <project> <query>       # search every active worktree
 cargo run -p ginka-cli -- --json show <workspace> <path>         # includes the revision required to save
 cargo run -p ginka-cli -- save <workspace> <path> --expected-revision <revision> < replacement
+cargo run -p ginka-cli -- open-editor <workspace> <path> [--line <one-based>] # on the daemon host
 
 cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```

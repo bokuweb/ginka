@@ -1784,6 +1784,15 @@ impl Service {
                     file: crate::files::read(&worktree.path, &path).map_err(failed)?,
                 })
             }
+            Request::OpenExternalEditor {
+                workspace,
+                path,
+                line,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                crate::external_editor::open(&worktree.path, &path, line).map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::WriteFile {
                 workspace,
                 path,

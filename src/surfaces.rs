@@ -289,6 +289,12 @@ pub enum SurfaceEvent {
         text: String,
         expected_revision: String,
     },
+    /// Open a saved file at the active editor line on the daemon host.
+    OpenExternalEditor {
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+    },
     /// Add an editor selection's exact source location to the chat draft.
     AddFileReference(String),
     /// Paste an editor selection into the active terminal.
@@ -3950,6 +3956,22 @@ impl SurfacePanel {
                 });
             })
         });
+        let external_editor = self.local_paths.then(|| {
+            let workspace = buffer.workspace.clone();
+            let path = file.path.clone();
+            let editor = buffer.editor.clone();
+            cx.listener(move |_, _: &ClickEvent, _, cx| {
+                let line = editor.as_ref().map(|editor| {
+                    let editor = editor.read(cx);
+                    ginka_ui::editor::cursor_line(&editor.value(), editor.selected_range().start)
+                });
+                cx.emit(SurfaceEvent::OpenExternalEditor {
+                    workspace: workspace.clone(),
+                    path: path.clone(),
+                    line,
+                });
+            })
+        });
         let selection = buffer.editor.as_ref().map(|editor| {
             let disabled = {
                 let editor = editor.read(cx);
@@ -4054,6 +4076,15 @@ impl SurfacePanel {
                             .disabled(state != SaveState::Dirty)
                             .when_some(save, |this, save| this.on_click(save)),
                     )
+                    .children(external_editor.map(|open| {
+                        Button::new("open-external-editor")
+                            .label(rust_i18n::t!("surface.files.open_external").to_string())
+                            .ghost()
+                            .compact()
+                            .small()
+                            .disabled(state == SaveState::Dirty)
+                            .on_click(open)
+                    }))
                     .children(preview_toggle.map(|label| {
                         let path = file.path.clone();
                         Button::new("toggle-file-preview")

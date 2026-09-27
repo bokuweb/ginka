@@ -771,6 +771,26 @@ impl DaemonLink {
         }
     }
 
+    /// Open a validated workspace file in an editor on the daemon's host.
+    pub async fn open_external_editor(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        line: Option<u32>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::OpenExternalEditor {
+                workspace: workspace.clone(),
+                path: path.to_string(),
+                line,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            response => Err(format!("unexpected response: {response:?}")),
+        }
+    }
+
     /// Save a file only if it still has the revision the editor opened.
     pub async fn write_file(
         &self,

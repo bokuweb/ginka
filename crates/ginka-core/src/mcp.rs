@@ -699,6 +699,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_open_external_editor",
+            description: "Open an existing workspace file in an external editor on the daemon host. The optional line is one-based.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "line": {"type": "integer", "minimum": 1},
+                },
+                "required": ["workspace", "path"],
+            }),
+        },
+        Tool {
             name: "ginka_write_file",
             description: "Save an existing UTF-8 workspace file. Pass the revision returned by ginka_read_file so a newer edit is never overwritten silently.",
             schema: json!({
@@ -1169,6 +1182,20 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
         },
+        "ginka_open_external_editor" => Request::OpenExternalEditor {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            line: arguments
+                .get("line")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|line| u32::try_from(line).ok())
+                        .filter(|line| *line > 0)
+                        .ok_or_else(|| anyhow!("{tool}: line must be a one-based 32-bit integer"))
+                })
+                .transpose()?,
+        },
         "ginka_write_file" => Request::WriteFile {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
@@ -1294,6 +1321,27 @@ pub const PARSE_ERROR: i64 = -32700;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_editor_tool_preserves_the_line_and_rejects_invalid_numbers() {
+        assert!(matches!(
+            request_for(
+                "ginka_open_external_editor",
+                &json!({"workspace": "w", "path": "src/a.rs", "line": 42})
+            )
+            .unwrap(),
+            Request::OpenExternalEditor { line: Some(42), .. }
+        ));
+        for line in [json!(0), json!(-1), json!(4_294_967_296_u64), json!("42")] {
+            assert!(
+                request_for(
+                    "ginka_open_external_editor",
+                    &json!({"workspace": "w", "path": "src/a.rs", "line": line})
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn every_tool_names_the_request_it_stands_for() {

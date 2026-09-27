@@ -698,6 +698,17 @@ pub enum Request {
         workspace: WorkspaceId,
         path: String,
     },
+    /// Launch a daemon-host editor on an existing file inside the worktree.
+    /// `line` is one-based; an external client must expect the editor to open
+    /// on the daemon's machine, not on its own.
+    OpenExternalEditor {
+        /// Workspace whose worktree contains the file.
+        workspace: WorkspaceId,
+        /// Path relative to the worktree root.
+        path: String,
+        /// Optional one-based line to focus.
+        line: Option<u32>,
+    },
     /// Save an existing text file if it still matches the revision read.
     WriteFile {
         /// Workspace whose worktree contains the file.

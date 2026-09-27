@@ -967,6 +967,11 @@ impl Shell {
                     expected_revision.clone(),
                     cx,
                 ),
+                crate::surfaces::SurfaceEvent::OpenExternalEditor {
+                    workspace,
+                    path,
+                    line,
+                } => this.open_external_editor(workspace.clone(), path.clone(), *line, cx),
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
@@ -3316,6 +3321,33 @@ impl Shell {
                     surfaces.set_file_save_error(&saved_workspace, &saved_path, error, cx)
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Ask the daemon to open the selected saved file in a host editor.
+    fn open_external_editor(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let shown_workspace = workspace.clone();
+        let shown_path = path.clone();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.open_external_editor(&workspace, &path, line).await
+                })
+                .await;
+            if let Err(error) = result {
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_save_error(&shown_workspace, &shown_path, error, cx)
+                });
+            }
         })
         .detach();
     }

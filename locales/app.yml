@@ -827,6 +827,9 @@ surface.files.close:
 surface.files.save:
   en: Save
   ja: 保存
+surface.files.open_external:
+  en: Open in editor
+  ja: 外部エディタで開く
 surface.files.preview:
   en: Preview
   ja: プレビュー

@@ -121,6 +121,16 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Open a workspace file in an editor on the daemon host.
+    OpenEditor {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// One-based line to focus when the editor supports it.
+        #[arg(long)]
+        line: Option<u32>,
+    },
     /// Save an existing UTF-8 workspace file without overwriting a newer edit.
     Save {
         /// The workspace id, as shown by `workspace list`.
@@ -1322,6 +1332,15 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Show { workspace, path } => Request::ReadFile {
             workspace: WorkspaceId(workspace),
             path,
+        },
+        Command::OpenEditor {
+            workspace,
+            path,
+            line,
+        } => Request::OpenExternalEditor {
+            workspace: WorkspaceId(workspace),
+            path,
+            line,
         },
         Command::Save {
             workspace,

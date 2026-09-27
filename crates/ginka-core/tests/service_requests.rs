@@ -308,6 +308,28 @@ fn a_file_save_crosses_the_service_and_refuses_a_stale_editor() {
 }
 
 #[test]
+fn external_editor_rejects_invalid_lines_and_paths_before_launch() {
+    let mut fixture = Fixture::new();
+    fixture.with_project();
+    let workspace = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces[0].id(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    for (path, line) in [
+        ("README.md", Some(0)),
+        ("missing.txt", Some(1)),
+        ("../../missing.txt", None),
+    ] {
+        let result = fixture.service.handle(Request::OpenExternalEditor {
+            workspace: workspace.clone(),
+            path: path.into(),
+            line,
+        });
+        assert!(result.is_err(), "{path} at {line:?} must be refused");
+    }
+}
+
+#[test]
 fn project_search_tags_active_workspaces_and_shares_one_limit() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
