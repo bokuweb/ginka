@@ -1931,10 +1931,11 @@ fn every_agent_is_handed_ginkas_bridge_and_the_servers_the_user_listed() {
     assert!(told.contains("mcp_servers.ginka.args=[\"mcp\"]"), "{told}");
     assert!(
         told.contains(&format!(
-            "mcp_servers.ginka.env={{GINKA_HOME=\"{}\"}}",
-            paths.root().display()
+            "mcp_servers.ginka.env={{GINKA_HOME=\"{}\",GINKA_SESSION=\"{}\"}}",
+            paths.root().display(),
+            session
         )),
-        "the bridge is pointed at this daemon's state: {told}"
+        "the bridge is pointed at this daemon's state and told its session: {told}"
     );
     assert!(told.contains(r#"mcp_servers.docs.command="npx""#), "{told}");
 }
