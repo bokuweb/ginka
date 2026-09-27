@@ -1,5 +1,5 @@
 #!/bin/sh
-# Build Ginka.app and a .dmg holding it (RELEASING.md step 5).
+# Build Ginka.app, a ZIP, and a .dmg holding it (RELEASING.md step 5).
 #
 #   scripts/package-macos                   # cargo build --release, then pack
 #   scripts/package-macos --universal       # arm64 + x86_64, joined with lipo
@@ -20,8 +20,8 @@
 # Signing: GINKA_SIGN_IDENTITY names a Developer ID certificate in the
 # keychain; without it the bundle is signed ad hoc, which runs on this Mac
 # and nowhere Gatekeeper is asked. GINKA_NOTARY_PROFILE names a
-# `notarytool store-credentials` profile; with it the .dmg is notarized and
-# stapled. GINKA_BUNDLE_ID overrides the bundle identifier.
+# `notarytool store-credentials` profile; with it the app and .dmg are
+# notarized and stapled. GINKA_BUNDLE_ID overrides the bundle identifier.
 set -eu
 
 # Where Chromium's distribution lives; the first build downloads it there.
@@ -120,6 +120,15 @@ done
 sign "$app"
 codesign --verify --strict "$app"
 
+if $dmg && [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
+    ditto -c -k --sequesterRsrc --keepParent "$app" "$work/Ginka-notarization.zip"
+    xcrun notarytool submit "$work/Ginka-notarization.zip" \
+        --keychain-profile "$GINKA_NOTARY_PROFILE" --wait
+    xcrun stapler staple "$app"
+    xcrun stapler validate "$app"
+    codesign --verify --strict "$app"
+fi
+
 if ! $dmg; then
     rm -rf "$out_dir/Ginka.app"
     ditto --norsrc --noextattr "$app" "$out_dir/Ginka.app"
@@ -127,6 +136,9 @@ if ! $dmg; then
     exit 0
 fi
 
+archive="$out_dir/Ginka-$version.zip"
+rm -f "$archive"
+ditto -c -k --sequesterRsrc --keepParent "$app" "$archive"
 image="$out_dir/Ginka-$version.dmg"
 ln -s /Applications "$stage/Applications"
 rm -f "$image"
@@ -139,4 +151,5 @@ if [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$image" --keychain-profile "$GINKA_NOTARY_PROFILE" --wait
     xcrun stapler staple "$image"
 fi
+(cd "$out_dir" && shasum -a 256 "$(basename "$archive")" "$(basename "$image")" > SHA256SUMS)
 echo "$image"
