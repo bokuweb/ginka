@@ -27,6 +27,7 @@ ginka-client = { path = "crates/ginka-client" }
 ginka-core = { path = "crates/ginka-core" }
 ginka-protocol = { path = "crates/ginka-protocol" }
 ginka-ui = { path = "crates/ginka-ui" }
+bgpui-kit = { git = "https://github.com/bokuweb/bgpui-kit", rev = "4b1d692e3eccb092937b7176ce5dc56a53b6bb92" }
 
 # GPUI arrives transitively through gpui-component: the component library owns
 # the rev, and pinning it independently guarantees a conflict on the next
@@ -105,6 +106,7 @@ default = []
 github = ["dep:e1-github", "dep:e1-ui", "dep:e1-views"]
 
 [dependencies]
+bgpui-kit.workspace = true
 e1-github = { workspace = true, optional = true }
 e1-ui = { workspace = true, optional = true }
 e1-views = { workspace = true, optional = true }
