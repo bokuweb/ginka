@@ -451,8 +451,10 @@ notifications (on, off), each
 a segmented control that applies at once and persists to `app.json`, and the
 version with the state directory. Opened from the rail or `⌘,`.
 The Providers section lists each shipped driver with its executable override and
-an immediate enable/disable control. The daemon owns these settings; the CLI
-and MCP can also set or clear an executable override.
+an immediate enable/disable control. Edit path opens a focused executable field;
+Save applies the trimmed path, Use automatic clears the override, and errors stay
+beside the field. The daemon owns these settings; the window, CLI and MCP use the
+same request to set or clear an executable override.
 
 ## 4. Component mapping
 

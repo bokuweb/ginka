@@ -765,6 +765,28 @@ fn provider_settings_apply_to_new_sessions_and_preserve_other_overrides() {
         .unwrap();
     assert!(codex.enabled);
     assert_eq!(codex.program, None);
+
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: None,
+        program: Some("/opt/alternate/codex".into()),
+        clear_program: false,
+    });
+    let Response::Agents { agents } = fixture.ask(Request::ListAgents) else {
+        panic!("expected agents");
+    };
+    let codex = agents.iter().find(|agent| agent.id == "codex").unwrap();
+    assert_eq!(codex.program, "/opt/alternate/codex");
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(codex.enabled);
+    assert_eq!(codex.program.as_deref(), Some("/opt/alternate/codex"));
 }
 
 #[test]

@@ -124,6 +124,14 @@ struct QuickForm {
     error: Option<String>,
 }
 
+/// Executable override being edited for one provider.
+struct ProviderProgramForm {
+    provider: ginka_protocol::ProviderKind,
+    path: Entity<InputState>,
+    error: Option<String>,
+    busy: bool,
+}
+
 /// The settings page's form for a new scheduled job.
 struct CronForm {
     name: Entity<InputState>,
@@ -559,6 +567,8 @@ pub struct Shell {
     agents: Vec<AgentStatus>,
     /// Provider settings from the daemon, shown in Settings.
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
+    /// The provider executable editor, when open in Settings.
+    provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
     accounts: Vec<ginka_protocol::model::Account>,
     /// The latest reading of each login's rate-limit windows, followed from
@@ -1490,6 +1500,7 @@ impl Shell {
             prompt_outline_open: false,
             agents: Vec::new(),
             provider_settings: Vec::new(),
+            provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
             reveal: Reveal::new(),
@@ -3607,6 +3618,93 @@ impl Shell {
         .detach();
     }
 
+    /// Open an executable editor with the daemon's latest value.
+    fn edit_provider_program(
+        &mut self,
+        provider: ginka_protocol::ProviderKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self
+            .provider_settings
+            .iter()
+            .find(|setting| setting.provider == provider)
+            .and_then(|setting| setting.program.clone())
+            .unwrap_or_default();
+        let path = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.providers.path").to_string())
+        });
+        path.update(cx, |state, cx| state.set_value(value, window, cx));
+        cx.subscribe(&path, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_provider_program(cx);
+            }
+        })
+        .detach();
+        path.read(cx).focus_handle(cx).focus(window, cx);
+        self.provider_program = Some(ProviderProgramForm {
+            provider,
+            path,
+            error: None,
+            busy: false,
+        });
+        cx.notify();
+    }
+
+    /// Save or clear an executable override through the daemon's shared RPC.
+    fn save_provider_program(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.provider_program.as_mut() else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        let provider = form.provider;
+        let request = ginka_ui::provider_settings::program_request(
+            provider,
+            form.path.read(cx).value().as_ref(),
+        );
+        form.busy = true;
+        form.error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.update_provider_settings(request).await?;
+                    Ok::<_, String>((link.provider_settings().await, link.agents().await))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((providers, agents)) => {
+                        this.provider_settings = providers;
+                        this.agents = agents;
+                        if this.provider_program.as_ref().map(|form| form.provider)
+                            == Some(provider)
+                        {
+                            this.provider_program = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(form) = this
+                            .provider_program
+                            .as_mut()
+                            .filter(|form| form.provider == provider)
+                        {
+                            form.error = Some(error);
+                            form.busy = false;
+                        }
+                    }
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Run the vendor's sign-in for a login in the dock, pointed at the
     /// login's directory (`docs/accounts.md` §4).
     ///
@@ -5050,6 +5148,25 @@ impl Shell {
                             }),
                     )
                     .into_any_element();
+                let control = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(control)
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "provider-edit-{}",
+                            provider.as_str()
+                        )))
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("settings.providers.edit").to_string())
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.edit_provider_program(provider, window, cx);
+                            },
+                        )),
+                    )
+                    .into_any_element();
                 row(
                     provider.as_str().to_string(),
                     setting
@@ -5058,6 +5175,69 @@ impl Shell {
                         .unwrap_or_else(|| rust_i18n::t!("settings.providers.auto").to_string()),
                     control,
                 )
+            }))
+            .children(self.provider_program.as_ref().map(|form| {
+                let provider = form.provider;
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .py_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!(
+                                "{} · {}",
+                                provider.as_str(),
+                                rust_i18n::t!("settings.providers.path")
+                            )),
+                    )
+                    .child(ginka_ui::field::input(&form.path))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("provider-program-save")
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.save").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_provider_program(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("provider-program-auto")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.clear").to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(form) = &this.provider_program {
+                                            form.path.update(cx, |state, cx| {
+                                                state.set_value("", window, cx)
+                                            });
+                                        }
+                                        this.save_provider_program(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("provider-program-cancel")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.cancel").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.provider_program = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .children(form.error.clone().map(|error| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(error)
+                    }))
             }));
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()

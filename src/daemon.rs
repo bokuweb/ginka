@@ -150,6 +150,14 @@ impl DaemonLink {
         }
     }
 
+    /// Persist an executable edit using the same provider settings request as CLI and MCP.
+    pub async fn update_provider_settings(&self, request: Request) -> Result<(), String> {
+        match self.ask_result(request).await? {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// The next thing the daemon announced.
     ///
     /// `None` means the stream ended — the daemon stopped, or the connection

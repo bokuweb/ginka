@@ -1338,6 +1338,21 @@ settings.providers:
 settings.providers.auto:
   en: Automatically detected executable
   ja: 実行ファイルを自動検出
+settings.providers.edit:
+  en: Edit path
+  ja: パスを編集
+settings.providers.path:
+  en: Executable path
+  ja: 実行ファイルのパス
+settings.providers.save:
+  en: Save
+  ja: 保存
+settings.providers.clear:
+  en: Use automatic
+  ja: 自動検出に戻す
+settings.providers.cancel:
+  en: Cancel
+  ja: キャンセル
 settings.language:
   en: Language
   ja: 言語

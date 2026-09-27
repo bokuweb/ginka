@@ -34,6 +34,7 @@ pub mod navigation;
 pub mod notes;
 pub mod notify;
 pub mod palette;
+pub mod provider_settings;
 pub mod reports;
 pub mod resume;
 pub mod search;

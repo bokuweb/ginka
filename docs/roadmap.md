@@ -72,7 +72,7 @@ waku is a shipping Rust/GPUI agent client with the same client–daemon shape as
 | Background-work panel: detached processes, monitors, subagents that outlive a turn | Claude delegated-agent work is nested in its parent transcript row and settles at the turn boundary | Long-lived work still needs a reporting driver and panel (M5) |
 | Usage page by day / month / project, from the vendors' own on-disk transcripts, priced from LiteLLM | Reports by day, agent and account, from Ginka's own turns | M5: the scanner and N13 |
 | A percentage for Claude's headroom, read with the CLI's OAuth token | The wall and when it opens | Q9, open on purpose |
-| Settings pages: providers, appearance, daemon exposure, skills, usage | Provider toggles and executable status in Settings; CLI/MCP executable override; appearance and Reports surface | M4 surfaces |
+| Settings pages: providers, appearance, daemon exposure, skills, usage | Provider toggles and executable override editing in Settings, CLI and MCP; appearance and Reports surface | M4 surfaces |
 | OS notifications when a turn ends and no window is active | Nothing | M5 |
 | Drag, drop and paste into the composer; image preview | `ginka attach` and a reference in the text | M2 leftover |
 | Ctrl-Tab task switcher; sidebar grouping, sorting and search | Sidebar grouping, attention sort and fuzzy metadata search; ⌘K reaches workspaces by name | M4 for Ctrl-Tab |
