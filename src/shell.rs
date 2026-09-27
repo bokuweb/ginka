@@ -613,6 +613,13 @@ pub struct Shell {
     queue_edit_draft: Option<String>,
     /// Why the most recent queue mutation was refused.
     queue_error: Option<String>,
+    /// The shown workspace's open tickets: work an agent handed over, drawn
+    /// as cards above the composer.
+    tickets: Vec<ginka_protocol::model::Ticket>,
+    /// The ticket being started, so its button cannot be pressed twice.
+    ticket_busy: Option<String>,
+    /// Why the most recent ticket action was refused.
+    ticket_error: Option<String>,
     /// Files already copied into the daemon store for the next ordinary prompt.
     attachments: Vec<ComposerAttachment>,
     /// Full-size annotation dialog for one image attachment.
@@ -1117,6 +1124,11 @@ impl Shell {
                             .update(cx, |state, cx| state.set_value("", window, cx));
                         this.load_draft(window, cx);
                         this.refresh_queue(cx);
+                        if changed_workspace {
+                            this.tickets.clear();
+                            this.ticket_error = None;
+                        }
+                        this.refresh_tickets(cx);
                         if this
                             .surfaces
                             .read(cx)
@@ -1336,6 +1348,21 @@ impl Shell {
                                 Ok(())
                             }
                         }
+                        // A card came or went: re-read them if they are
+                        // the shown workspace's.
+                        DaemonEvent::TicketsChanged { workspace } => {
+                            let is_showing = this
+                                .update(cx, |this, _| {
+                                    this.session.as_ref().map(|row| &row.workspace)
+                                        == Some(&workspace)
+                                })
+                                .unwrap_or(false);
+                            if is_showing {
+                                pull_tickets(&this, &link, workspace, cx).await
+                            } else {
+                                Ok(())
+                            }
+                        }
                         // Anything that changes what the sidebar says.
                         DaemonEvent::ProjectsChanged
                         | DaemonEvent::WorkspacesChanged { .. }
@@ -1450,6 +1477,7 @@ impl Shell {
                 this.adopt_terminals(cx);
             }
             this.refresh_queue(cx);
+            this.refresh_tickets(cx);
         });
         Self {
             layout: Layout::from_settings(&settings),
@@ -1486,6 +1514,9 @@ impl Shell {
             editing_prompt: None,
             queue_edit_draft: None,
             queue_error: None,
+            tickets: Vec::new(),
+            ticket_busy: None,
+            ticket_error: None,
             attachments: Vec::new(),
             image_markup: None,
             attachment_busy: false,
@@ -2083,6 +2114,8 @@ impl Shell {
         self.editing_queued_message = None;
         self.queue_edit_draft = None;
         self.queue_error = None;
+        self.tickets.clear();
+        self.ticket_error = None;
         self.attachments.clear();
         self.image_markup = None;
         self.surfaces
@@ -4184,6 +4217,82 @@ impl Shell {
         let link = self.link.clone();
         cx.spawn(async move |this, cx| {
             let _ = pull_queue(&this, &link, session, cx).await;
+        })
+        .detach();
+    }
+
+    /// Re-read the shown workspace's open tickets.
+    fn refresh_tickets(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            self.tickets.clear();
+            return;
+        };
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let _ = pull_tickets(&this, &link, workspace, cx).await;
+        })
+        .detach();
+    }
+
+    /// Start a ticket in a new session and show it, the way a fork is shown.
+    fn start_ticket(&mut self, ticket: String, cx: &mut Context<Self>) {
+        if self.ticket_busy.is_some() {
+            return;
+        }
+        self.ticket_busy = Some(ticket.clone());
+        self.ticket_error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requesting = link.clone();
+            let result = cx
+                .background_spawn(async move { requesting.start_ticket(ticket).await })
+                .await;
+            match result {
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.ticket_busy = None;
+                        this.ticket_error = Some(error);
+                        cx.notify();
+                    })
+                    .ok();
+                }
+                Ok(session) => {
+                    this.update(cx, |this, cx| {
+                        this.ticket_busy = None;
+                        this.transcript = Transcript::new();
+                        this.transcript_of = None;
+                        this.transcript_search = None;
+                        this.session_state = Some(session.state);
+                        this.checkpoints.clear();
+                        this.rewinding = None;
+                        this.forking = None;
+                        cx.notify();
+                    })
+                    .ok();
+                    if let Ok(Some(showing)) = pull_rows(&this, &link, cx).await
+                        && showing == session.id
+                    {
+                        let _ = pull_transcript(&this, &link, showing, cx).await;
+                    }
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Decide against a ticket; the push that follows takes its card away.
+    fn dismiss_ticket(&mut self, ticket: String, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { link.dismiss_ticket(ticket).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.ticket_error = result.err();
+                cx.notify();
+            })
+            .ok();
         })
         .detach();
     }
@@ -8748,6 +8857,108 @@ impl Shell {
             .into_any_element()
     }
 
+    /// The tickets agents raised in this workspace, as cards: what each is,
+    /// why it was raised, and one click to start it in its own session.
+    fn ticket_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.tickets.is_empty() && self.ticket_error.is_none() {
+            return None;
+        }
+        let tokens = Tokens::global(cx).clone();
+        let busy = self.ticket_busy.clone();
+        let cards = self
+            .tickets
+            .iter()
+            .map(|ticket| {
+                let start_id = ticket.id.clone();
+                let dismiss_id = ticket.id.clone();
+                let starting = busy.as_deref() == Some(ticket.id.as_str());
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    .child(
+                        div().pt(px(2.)).child(
+                            Icon::new(IconName::SquareTerminal)
+                                .size_3p5()
+                                .text_color(tokens.colors().text_secondary),
+                        ),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(tokens.colors().text_primary)
+                                    .child(ticket.title.clone()),
+                            )
+                            .when(!ticket.summary.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(ticket.summary.clone()),
+                                )
+                            }),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("ticket-start-{start_id}")))
+                            .primary()
+                            .compact()
+                            .loading(starting)
+                            .disabled(busy.is_some())
+                            .label(rust_i18n::t!("composer.tickets.start").to_string())
+                            .tooltip(rust_i18n::t!("composer.tickets.start_tooltip").to_string())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.start_ticket(start_id.clone(), cx)
+                            })),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("ticket-dismiss-{dismiss_id}")))
+                            .ghost()
+                            .compact()
+                            .disabled(starting)
+                            .tooltip(rust_i18n::t!("composer.tickets.dismiss").to_string())
+                            .child(Icon::new(IconName::Close).size_3())
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.dismiss_ticket(dismiss_id.clone(), cx)
+                            })),
+                    )
+            })
+            .collect::<Vec<_>>();
+        Some(
+            v_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_2()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().border_subtle)
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(
+                            rust_i18n::t!("composer.tickets.title", count = self.tickets.len())
+                                .to_string(),
+                        ),
+                )
+                .children(cards)
+                .children(self.ticket_error.clone().map(|error| {
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().status_error)
+                        .child(error)
+                }))
+                .into_any_element(),
+        )
+    }
+
     /// The editable FIFO shown above the composer while a turn is active.
     fn queue_panel(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.queued_messages.is_empty() && self.queue_error.is_none() {
@@ -8988,6 +9199,7 @@ impl Shell {
         let compact_chip = self.compact_context_button(cx);
         let new_session = self.new_session_button(cx);
         let queue_panel = self.queue_panel(cx);
+        let ticket_panel = self.ticket_panel(cx);
         let fan_out_panel = self.fan_out_panel(cx);
         let prompt_editing = self.editing_prompt.map(|_| {
             h_flex()
@@ -9101,6 +9313,7 @@ impl Shell {
             .gap_2()
             .children(picker)
             .children(fan_out_panel)
+            .children(ticket_panel)
             .children(queue_panel)
             .child(
                 v_flex()
@@ -13004,6 +13217,27 @@ async fn pull_transcript(
         .await;
     this.update(cx, |this, cx| this.fold(&session, &entries, cx))
         .map_err(|_| ())
+}
+
+/// Re-read one workspace's open tickets after a push or navigation.
+async fn pull_tickets(
+    this: &WeakEntity<Shell>,
+    link: &Arc<DaemonLink>,
+    workspace: WorkspaceId,
+    cx: &mut AsyncApp,
+) -> Result<(), ()> {
+    let listing = link.clone();
+    let requested = workspace.clone();
+    let tickets = cx
+        .background_spawn(async move { listing.tickets(&requested).await })
+        .await;
+    this.update(cx, |this, cx| {
+        if this.session.as_ref().map(|row| &row.workspace) == Some(&workspace) {
+            this.tickets = tickets;
+            cx.notify();
+        }
+    })
+    .map_err(|_| ())
 }
 
 /// Re-read one session's ordered follow-up queue after a push or navigation.

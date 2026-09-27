@@ -281,6 +281,9 @@ enum Command {
     /// Markdown notes, kept by the daemon.
     #[command(subcommand)]
     Notes(NotesCommand),
+    /// Tickets: work an agent handed over, to start in its own session.
+    #[command(subcommand)]
+    Tickets(TicketsCommand),
     /// Saved shell commands and prompts, run in a workspace.
     #[command(subcommand)]
     Quick(QuickCommand),
@@ -620,6 +623,44 @@ enum NotesCommand {
 }
 
 #[derive(Subcommand)]
+enum TicketsCommand {
+    /// List tickets, newest first: open ones unless `--all`.
+    List {
+        /// Only this workspace's tickets.
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Raise a ticket. The prompt is read from stdin when `--prompt` is
+    /// absent.
+    Raise {
+        workspace: String,
+        #[arg(long, default_value = "")]
+        title: String,
+        #[arg(long, default_value = "")]
+        summary: String,
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Raise it as this session.
+        #[arg(long)]
+        from: Option<String>,
+    },
+    /// Start an open ticket in a new session.
+    Start {
+        ticket: String,
+        /// A driver id; the raising session's agent otherwise.
+        #[arg(long)]
+        agent: Option<String>,
+        /// Cut a new worktree on this branch for it.
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Decide against an open ticket.
+    Dismiss { ticket: String },
+}
+
+#[derive(Subcommand)]
 enum SkillsCommand {
     /// List every skill, grouped across the places it was installed.
     List {
@@ -683,7 +724,14 @@ enum SessionCommand {
         access: Option<ginka_protocol::AccessMode>,
     },
     /// Send a follow-up. Queued if the agent is still working.
-    Send { session: String, text: String },
+    Send {
+        session: String,
+        text: String,
+        /// Send it as this session, which the receiver is told, with how to
+        /// answer.
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// List follow-ups waiting behind the active turn.
     Queue { session: String },
     /// Replace one queued follow-up without moving it.
@@ -909,6 +957,12 @@ fn mcp(paths: &Paths) -> Result<()> {
     let input = std::io::stdin();
     let mut output = std::io::stdout();
     let mut client: Option<Client> = None;
+    // Set by the daemon when it started this bridge for a session: what signs
+    // this agent's tickets and messages.
+    let caller = std::env::var(ginka_core::tools::SESSION_ENV)
+        .ok()
+        .filter(|id| !id.trim().is_empty())
+        .map(ginka_protocol::SessionId);
 
     for line in input.lock().lines() {
         let line = line.context("reading the agent's message")?;
@@ -940,7 +994,7 @@ fn mcp(paths: &Paths) -> Result<()> {
         };
 
         let reply = match method.as_str() {
-            "initialize" => mcp::reply(id, mcp::server_info()),
+            "initialize" => mcp::reply(id, mcp::server_info_as(caller.as_ref())),
             "tools/list" => mcp::reply(id, mcp::tool_list()),
             "ping" => mcp::reply(id, serde_json::json!({})),
             "tools/call" => {
@@ -954,7 +1008,7 @@ fn mcp(paths: &Paths) -> Result<()> {
                     .get("arguments")
                     .cloned()
                     .unwrap_or_else(|| serde_json::json!({}));
-                match mcp::request_for(name, &arguments) {
+                match mcp::request_as(name, &arguments, caller.as_ref()) {
                     Err(error) => mcp::reply(id, mcp::tool_failure(error.to_string())),
                     Ok(request) => {
                         let answered = smol::block_on(async {
@@ -1459,6 +1513,33 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Cron(CronCommand::Remove { id }) => Request::RemoveCronJob { id },
         Command::Cron(CronCommand::Run { id }) => Request::RunCronJob { id },
         Command::Cron(CronCommand::Runs { id, limit }) => Request::CronRuns { id, limit },
+        Command::Tickets(TicketsCommand::List { workspace, all }) => Request::ListTickets {
+            workspace: workspace.map(WorkspaceId),
+            all,
+        },
+        Command::Tickets(TicketsCommand::Raise {
+            workspace,
+            title,
+            summary,
+            prompt,
+            from,
+        }) => Request::RaiseTicket {
+            workspace: Some(WorkspaceId(workspace)),
+            from_session: from.map(SessionId),
+            title,
+            summary,
+            prompt: body_or_stdin(prompt)?,
+        },
+        Command::Tickets(TicketsCommand::Start {
+            ticket,
+            agent,
+            branch,
+        }) => Request::StartTicket {
+            ticket,
+            agent,
+            branch,
+        },
+        Command::Tickets(TicketsCommand::Dismiss { ticket }) => Request::DismissTicket { ticket },
         Command::Quick(QuickCommand::List { project }) => Request::ListQuickCommands {
             project: project.map(ProjectName),
         },
@@ -1516,8 +1597,21 @@ fn request_for(command: Command) -> Result<Request> {
             access_mode: access,
             origin: None,
         },
-        Command::Session(SessionCommand::Send { session, text }) => Request::SendMessage {
+        Command::Session(SessionCommand::Send {
+            session,
+            text,
+            from: None,
+        }) => Request::SendMessage {
             session: SessionId(session),
+            text,
+        },
+        Command::Session(SessionCommand::Send {
+            session,
+            text,
+            from: Some(from),
+        }) => Request::MessageSession {
+            from: SessionId(from),
+            to: SessionId(session),
             text,
         },
         Command::Session(SessionCommand::Queue { session }) => Request::QueuedMessages {
@@ -1875,6 +1969,21 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::Note { note } => println!("{}", note.id),
+        Response::Tickets { tickets } => {
+            if tickets.is_empty() {
+                println!("{}", rust_i18n::t!("cli.tickets.empty"));
+            }
+            for ticket in tickets {
+                println!(
+                    "{}  {:<9} {:<24} {}",
+                    ticket.id,
+                    ticket.state.as_str(),
+                    ticket.workspace.0,
+                    ticket.title
+                );
+            }
+        }
+        Response::Ticket { ticket } => println!("{}", ticket.id),
         Response::QuickCommands { commands } => {
             for command in commands {
                 println!(

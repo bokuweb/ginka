@@ -1350,6 +1350,40 @@ impl DaemonLink {
         self.ask(Request::RemoveNote { id }).await;
     }
 
+    /// A workspace's open tickets, newest first.
+    pub async fn tickets(&self, workspace: &WorkspaceId) -> Vec<ginka_protocol::model::Ticket> {
+        match self
+            .ask(Request::ListTickets {
+                workspace: Some(workspace.clone()),
+                all: false,
+            })
+            .await
+        {
+            Some(Response::Tickets { tickets }) => tickets,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Start a ticket in a new session; the session, or the daemon's refusal.
+    pub async fn start_ticket(&self, ticket: String) -> Result<Session, String> {
+        match self
+            .ask_result(Request::StartTicket {
+                ticket,
+                agent: None,
+                branch: None,
+            })
+            .await?
+        {
+            Response::Session { session } => Ok(session),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Decide against a ticket.
+    pub async fn dismiss_ticket(&self, ticket: String) -> Result<(), String> {
+        self.git_sync(Request::DismissTicket { ticket }).await
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

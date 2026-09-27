@@ -71,7 +71,7 @@ Start and steer agent sessions
 
 - `ginka session list` — List sessions, most recently active first
 - `ginka session start` — Start an agent in a workspace (`ginka session start <WORKSPACE> <PROMPT>`)
-- `ginka session send` — Send a follow-up. Queued if the agent is still working (`ginka session send <SESSION> <TEXT>`)
+- `ginka session send` — Send a follow-up. Queued if the agent is still working. With `--from <SESSION>` it is sent as that session, and the receiver is told who sent it and how to answer (`ginka session send <SESSION> <TEXT>`)
 - `ginka session queue` — List follow-ups waiting behind the active turn (`ginka session queue <SESSION>`)
 - `ginka session queue-edit` — Replace one queued follow-up without moving it (`ginka session queue-edit <SESSION> <ID> <TEXT>`)
 - `ginka session queue-remove` — Remove one queued follow-up (`ginka session queue-remove <SESSION> <ID>`)
@@ -250,6 +250,15 @@ Markdown notes, kept by the daemon
 - `ginka notes add` — Write a new note. The body is read from stdin when `--body` is absent
 - `ginka notes edit` — Replace a note's title and body. The body is read from stdin when `--body` is absent (`ginka notes edit <ID>`)
 - `ginka notes remove` — Forget a note (`ginka notes remove <ID>`)
+
+## `ginka tickets`
+
+Tickets: work an agent handed over, to start in its own session
+
+- `ginka tickets list` — List tickets, newest first: open ones unless `--all`
+- `ginka tickets raise` — Raise a ticket. The prompt is read from stdin when `--prompt` is absent (`ginka tickets raise <WORKSPACE>`)
+- `ginka tickets start` — Start an open ticket in a new session (`ginka tickets start <TICKET>`)
+- `ginka tickets dismiss` — Decide against an open ticket (`ginka tickets dismiss <TICKET>`)
 
 ## `ginka quick`
 

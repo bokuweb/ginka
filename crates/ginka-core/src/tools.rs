@@ -28,6 +28,10 @@ use std::path::{Path, PathBuf};
 /// daemon that cannot find it beside itself.
 pub const CLI_ENV: &str = "GINKA_CLI";
 
+/// The environment variable that tells the bridge which session it serves,
+/// so a ticket it raises or a message it sends says where it came from.
+pub const SESSION_ENV: &str = "GINKA_SESSION";
+
 /// The name zvec-grep registers its server under in every agent it installs
 /// into; kept so a user who ran `zg install` themselves is not given the same
 /// server twice under two names.
@@ -133,7 +137,9 @@ fn is_executable(path: &Path) -> bool {
 
 /// The servers an agent starting in `worktree` is given.
 ///
-/// `cli` is where `ginka` is, if anywhere; `zg` is where zvec-grep is. Both
+/// `session` is the session the agent runs as, handed to the bridge so its
+/// tickets and messages are signed. `cli` is where `ginka` is, if anywhere;
+/// `zg` is where zvec-grep is. Both
 /// are looked up once by the caller rather than here, so a test can say
 /// what is installed without touching `PATH`. The bridge is only offered
 /// when it exists, and `zg` only when the worktree has an index: a server
@@ -143,6 +149,7 @@ pub fn servers_for(
     settings: &ToolSettings,
     paths: &Paths,
     worktree: &Path,
+    session: Option<&str>,
     cli: Option<&Path>,
     zg: Option<&Path>,
 ) -> Vec<McpServer> {
@@ -155,11 +162,13 @@ pub fn servers_for(
             command: cli.to_string_lossy().into_owned(),
             args: vec!["mcp".to_string()],
             // So the bridge finds *this* daemon, whichever state directory
-            // it runs against.
-            env: vec![(
+            // it runs against, and knows which session it speaks for.
+            env: std::iter::once((
                 "GINKA_HOME".to_string(),
                 paths.root().to_string_lossy().into_owned(),
-            )],
+            ))
+            .chain(session.map(|session| (SESSION_ENV.to_string(), session.to_string())))
+            .collect(),
         });
     }
     if settings.zvec_grep
@@ -268,6 +277,7 @@ mod tests {
             &ToolSettings::default(),
             &paths,
             dir.path(),
+            None,
             Some(Path::new("/opt/ginka")),
             None,
         );
@@ -287,7 +297,17 @@ mod tests {
     #[test]
     fn no_cli_means_no_bridge_rather_than_a_broken_one() {
         let (dir, paths) = paths();
-        assert!(servers_for(&ToolSettings::default(), &paths, dir.path(), None, None).is_empty());
+        assert!(
+            servers_for(
+                &ToolSettings::default(),
+                &paths,
+                dir.path(),
+                None,
+                None,
+                None
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -295,10 +315,10 @@ mod tests {
         let (dir, paths) = paths();
         let zg = Path::new("/usr/local/bin/zg");
         let settings = ToolSettings::default();
-        assert!(servers_for(&settings, &paths, dir.path(), None, Some(zg)).is_empty());
+        assert!(servers_for(&settings, &paths, dir.path(), None, None, Some(zg)).is_empty());
 
         std::fs::create_dir(dir.path().join(ZVEC_GREP_INDEX_DIR)).unwrap();
-        let servers = servers_for(&settings, &paths, dir.path(), None, Some(zg));
+        let servers = servers_for(&settings, &paths, dir.path(), None, None, Some(zg));
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].name, ZVEC_GREP_SERVER);
         assert_eq!(servers[0].args, ["server", "--stdio"]);
@@ -318,6 +338,7 @@ mod tests {
             &settings,
             &paths,
             dir.path(),
+            None,
             Some(Path::new("/opt/ginka")),
             Some(Path::new("/usr/local/bin/zg")),
         );
@@ -342,6 +363,7 @@ mod tests {
             &settings,
             &paths,
             dir.path(),
+            None,
             None,
             Some(Path::new("/usr/bin/zg")),
         );

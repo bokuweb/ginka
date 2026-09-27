@@ -319,6 +319,13 @@ active conversation. With nothing selected, the rail stands alone.
   emptying it, and a restarted daemon brings it back held.
   Focus is carried by the card's border at the accent's 55%, never by a hard
   ring: an outline at full strength reads as an error state.
+- **Tickets** — work an agent raised with `ginka_ticket_raise` for the shown
+  workspace sits in one card above the queue: per ticket its title, its one-
+  or two-sentence summary, a primary *Start* that runs the ticket's prompt in
+  a new session (on the raising session's agent) and shows it, and a close
+  button that dismisses it. The card follows `tickets_changed` pushes, so a
+  ticket appears while the agent that raised it is still working, and a
+  ticket started or dismissed from another window or `ginka tickets` leaves.
 - **Context bar** — a hairline strip under the composer: the project chip on
   the left, branch chip on the right. The project is a chip rather than a label
   because it is a choice — it opens the same list the sidebar offers, plus

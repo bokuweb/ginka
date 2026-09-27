@@ -88,6 +88,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0020_queue_resume_at",
         include_str!("../../../db/migrations/0020_queue_resume_at.sql"),
     ),
+    (
+        "0021_tickets",
+        include_str!("../../../db/migrations/0021_tickets.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.
