@@ -1299,6 +1299,15 @@ notes.remove:
 notes.remove.confirm:
   en: Delete for good?
   ja: 本当に削除しますか？
+notes.search:
+  en: Search notes…
+  ja: ノートを検索…
+notes.no_matches:
+  en: No matching notes
+  ja: 一致するノートがありません
+notes.tags:
+  en: Tags, separated by commas
+  ja: タグ（カンマ区切り）
 notes.title:
   en: Title
   ja: タイトル

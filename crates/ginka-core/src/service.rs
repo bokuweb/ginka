@@ -1097,14 +1097,25 @@ impl Service {
                 });
                 Ok(Response::PullRequest { url })
             }
-            Request::ListNotes { project } => Ok(Response::Notes {
-                notes: crate::notes::list(&self.conn(), project.as_ref()).map_err(failed)?,
+            Request::ListNotes {
+                project,
+                query,
+                tag,
+            } => Ok(Response::Notes {
+                notes: crate::notes::list(
+                    &self.conn(),
+                    project.as_ref(),
+                    query.as_deref(),
+                    tag.as_deref(),
+                )
+                .map_err(failed)?,
             }),
             Request::SaveNote {
                 id,
                 project,
                 title,
                 body,
+                tags,
             } => Ok(Response::Note {
                 note: crate::notes::save(
                     &self.conn(),
@@ -1112,6 +1123,7 @@ impl Service {
                     project.as_ref(),
                     &title,
                     &body,
+                    tags.as_deref(),
                     now(),
                 )
                 .map_err(failed)?,

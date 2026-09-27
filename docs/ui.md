@@ -437,10 +437,12 @@ A card opens its conversation. The grouping is `ginka_ui::board`.
 ### 3.6 Notes
 
 A 360 px list of the notes — the chosen project's, or every one — most
-recently touched first, with a new-note action, and the note being written in
-the centre at 720 px: its title, then its markdown, with *Edit / Preview*
+recently touched first, with a text search across title, body and tags and a
+new-note action. Each list row shows its tags. The note being written in
+the centre at 720 px has its title, comma-separated tags and markdown, with *Edit / Preview*
 segments and a two-step delete. Typing saves after a 600 ms pause; there is no
-save button. The daemon keeps them (`ginka notes`, MCP).
+save button. The daemon keeps them (`ginka notes`, MCP); each tag edit saves
+with the note and an omitted tag list on other clients retains the existing tags.
 
 ### 3.7 Settings
 

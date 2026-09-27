@@ -595,6 +595,12 @@ enum NotesCommand {
         /// Only this project's notes.
         #[arg(long)]
         project: Option<String>,
+        /// Search titles, bodies and tags.
+        #[arg(long)]
+        query: Option<String>,
+        /// Match one tag exactly.
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Print one note's markdown.
     Show { id: String },
@@ -608,6 +614,9 @@ enum NotesCommand {
         /// The project it belongs to.
         #[arg(long)]
         project: Option<String>,
+        /// Add a tag; repeat for several tags.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Replace a note's title and body. The body is read from stdin when
     /// `--body` is absent.
@@ -617,6 +626,12 @@ enum NotesCommand {
         title: String,
         #[arg(long)]
         body: Option<String>,
+        /// Replace tags; repeat for several tags.
+        #[arg(long = "tag", conflicts_with = "clear_tags")]
+        tags: Vec<String>,
+        /// Remove every tag.
+        #[arg(long)]
+        clear_tags: bool,
     },
     /// Forget a note.
     Remove { id: String },
@@ -1424,27 +1439,46 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             draft,
         },
-        Command::Notes(NotesCommand::List { project }) => Request::ListNotes {
+        Command::Notes(NotesCommand::List {
+            project,
+            query,
+            tag,
+        }) => Request::ListNotes {
             project: project.map(ProjectName),
+            query,
+            tag,
         },
         // One note is the list read and filtered: the window never needs one
         // alone, so the daemon has no request for it.
-        Command::Notes(NotesCommand::Show { .. }) => Request::ListNotes { project: None },
+        Command::Notes(NotesCommand::Show { .. }) => Request::ListNotes {
+            project: None,
+            query: None,
+            tag: None,
+        },
         Command::Notes(NotesCommand::Add {
             title,
             body,
             project,
+            tags,
         }) => Request::SaveNote {
             id: None,
             project: project.map(ProjectName),
             title,
             body: body_or_stdin(body)?,
+            tags: Some(tags),
         },
-        Command::Notes(NotesCommand::Edit { id, title, body }) => Request::SaveNote {
+        Command::Notes(NotesCommand::Edit {
+            id,
+            title,
+            body,
+            tags,
+            clear_tags,
+        }) => Request::SaveNote {
             id: Some(id),
             project: None,
             title,
             body: body_or_stdin(body)?,
+            tags: (clear_tags || !tags.is_empty()).then_some(tags),
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
         Command::Settings(SettingsCommand::Show) => Request::DaemonSettings,
@@ -1961,10 +1995,15 @@ fn print(response: Response, patch: bool) {
             }
             for note in notes {
                 println!(
-                    "{}  {:<12} {}",
+                    "{}  {:<12} {}{}",
                     note.id,
                     note.project.map(|project| project.0).unwrap_or_default(),
-                    note.title
+                    note.title,
+                    if note.tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", note.tags.join(", "))
+                    }
                 );
             }
         }

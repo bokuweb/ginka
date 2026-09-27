@@ -1317,7 +1317,14 @@ impl DaemonLink {
 
     /// A project's notes, or every note.
     pub async fn notes(&self, project: Option<ProjectName>) -> Vec<Note> {
-        match self.ask(Request::ListNotes { project }).await {
+        match self
+            .ask(Request::ListNotes {
+                project,
+                query: None,
+                tag: None,
+            })
+            .await
+        {
             Some(Response::Notes { notes }) => notes,
             _ => Vec::new(),
         }
@@ -1330,6 +1337,7 @@ impl DaemonLink {
         project: Option<ProjectName>,
         title: String,
         body: String,
+        tags: Option<Vec<String>>,
     ) -> Option<Note> {
         match self
             .ask(Request::SaveNote {
@@ -1337,6 +1345,7 @@ impl DaemonLink {
                 project,
                 title,
                 body,
+                tags,
             })
             .await
         {

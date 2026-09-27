@@ -430,6 +430,12 @@ pub enum Request {
     ListNotes {
         #[serde(default)]
         project: Option<ProjectName>,
+        /// Case-insensitive substring in title, body or tags.
+        #[serde(default)]
+        query: Option<String>,
+        /// Exact tag, compared without case.
+        #[serde(default)]
+        tag: Option<String>,
     },
     /// Write a note. Without an `id` it is a new one; with one it replaces the
     /// title and body of the note that has it.
@@ -440,6 +446,9 @@ pub enum Request {
         project: Option<ProjectName>,
         title: String,
         body: String,
+        /// Omit to retain existing tags on edit; an empty list clears them.
+        #[serde(default)]
+        tags: Option<Vec<String>>,
     },
     /// Forget a note.
     RemoveNote { id: String },

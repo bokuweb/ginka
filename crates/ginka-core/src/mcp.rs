@@ -420,15 +420,19 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_notes",
-            description: "The reader's markdown notes, most recently touched first; one project's when project is given.",
+            description: "Search markdown notes by project, text in title/body/tags, or exact tag; newest first.",
             schema: json!({
                 "type": "object",
-                "properties": {"project": {"type": "string"}},
+                "properties": {
+                    "project": {"type": "string"},
+                    "query": {"type": "string"},
+                    "tag": {"type": "string"}
+                },
             }),
         },
         Tool {
             name: "ginka_note_save",
-            description: "Write a markdown note. Without an id it is a new one; with one, it replaces that note's title and body.",
+            description: "Write a markdown note. Optional tags replace its tags; omitting tags on edit retains them.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -436,6 +440,7 @@ pub fn tools() -> Vec<Tool> {
                     "project": {"type": "string"},
                     "title": {"type": "string"},
                     "body": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["body"],
             }),
@@ -971,12 +976,29 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         },
         "ginka_notes" => Request::ListNotes {
             project: maybe("project").map(ProjectName),
+            query: maybe("query"),
+            tag: maybe("tag"),
         },
         "ginka_note_save" => Request::SaveNote {
             id: maybe("id"),
             project: maybe("project").map(ProjectName),
             title: maybe("title").unwrap_or_default(),
             body: text("body")?,
+            tags: arguments
+                .get("tags")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("{tool}: `tags` must be an array of strings"))?
+                        .iter()
+                        .map(|tag| {
+                            tag.as_str().map(str::to_string).ok_or_else(|| {
+                                anyhow!("{tool}: `tags` must be an array of strings")
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?,
         },
         "ginka_stage_hunk" => Request::StageHunk {
             workspace: WorkspaceId(text("workspace")?),

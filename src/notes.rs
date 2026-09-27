@@ -30,7 +30,9 @@ pub struct NotesView {
     /// The note in the editor. `None` with the editor filled is a new note
     /// that has not been written yet.
     editing: Option<String>,
+    search: Entity<InputState>,
     title: Entity<InputState>,
+    tags: Entity<InputState>,
     body: Entity<TextareaState>,
     /// Markdown rendered instead of the source.
     preview: bool,
@@ -44,15 +46,21 @@ pub struct NotesView {
     loading: bool,
     /// A note to put into the fields at the next render, which is the first
     /// place with a window.
-    pending: Option<(String, String)>,
+    pending: Option<(String, String, String)>,
     /// Whether the editor is open: on a note, or on a new one.
     composing: bool,
 }
 
 impl NotesView {
     pub fn new(link: Arc<DaemonLink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("notes.search").to_string())
+        });
         let title = cx.new(|cx| {
             InputState::new(window, cx).placeholder(rust_i18n::t!("notes.title").to_string())
+        });
+        let tags = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("notes.tags").to_string())
         });
         let body = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -60,6 +68,18 @@ impl NotesView {
                 .auto_grow(12, 400)
         });
         cx.subscribe(&title, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.edited(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&tags, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.edited(cx);
             }
@@ -76,7 +96,9 @@ impl NotesView {
             project: None,
             notes: Vec::new(),
             editing: None,
+            search,
             title,
+            tags,
             body,
             preview: false,
             generation: 0,
@@ -113,8 +135,8 @@ impl NotesView {
     fn open(&mut self, note: Option<&Note>, cx: &mut Context<Self>) {
         self.editing = note.map(|note| note.id.clone());
         self.pending = Some(match note {
-            Some(note) => (note.title.clone(), note.body.clone()),
-            None => (String::new(), String::new()),
+            Some(note) => (note.title.clone(), note.body.clone(), note.tags.join(", ")),
+            None => (String::new(), String::new(), String::new()),
         });
         self.preview = note.is_some_and(|note| !note.body.is_empty());
         self.removing = false;
@@ -144,15 +166,23 @@ impl NotesView {
     fn save(&mut self, cx: &mut Context<Self>) {
         let title = self.title.read(cx).value().to_string();
         let body = self.body.read(cx).value().to_string();
-        if self.editing.is_none() && title.trim().is_empty() && body.trim().is_empty() {
+        let tags = self.tags.read(cx).value().to_string();
+        if self.editing.is_none()
+            && title.trim().is_empty()
+            && body.trim().is_empty()
+            && tags.trim().is_empty()
+        {
             return;
         }
+        let tags = tags.split(',').map(str::trim).map(str::to_string).collect();
         let link = self.link.clone();
         let id = self.editing.clone();
         let project = self.project.clone();
         cx.spawn(async move |this, cx| {
             let saved = cx
-                .background_spawn(async move { link.save_note(id, project, title, body).await })
+                .background_spawn(async move {
+                    link.save_note(id, project, title, body, Some(tags)).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if let Some(note) = saved {
@@ -175,7 +205,7 @@ impl NotesView {
         let Some(id) = self.editing.clone() else {
             // A new note nobody wrote anything in: closing it is removing it.
             self.composing = false;
-            self.pending = Some((String::new(), String::new()));
+            self.pending = Some((String::new(), String::new(), String::new()));
             cx.notify();
             return;
         };
@@ -187,7 +217,7 @@ impl NotesView {
         let link = self.link.clone();
         self.notes.retain(|note| note.id != id);
         self.editing = None;
-        self.pending = Some((String::new(), String::new()));
+        self.pending = Some((String::new(), String::new(), String::new()));
         self.removing = false;
         self.composing = false;
         cx.background_spawn(async move { link.remove_note(id).await })
@@ -198,6 +228,18 @@ impl NotesView {
     /// The list column: a heading, the way to write a new one, the notes.
     pub fn list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let query = self.search.read(cx).value().trim().to_lowercase();
+        let visible_notes: Vec<_> = self
+            .notes
+            .iter()
+            .filter(|note| {
+                query.is_empty()
+                    || note.title.to_lowercase().contains(&query)
+                    || note.body.to_lowercase().contains(&query)
+                    || note.tags.iter().any(|tag| tag.contains(&query))
+            })
+            .collect();
+        let is_empty = visible_notes.is_empty();
         let heading = self
             .project
             .as_ref()
@@ -258,6 +300,7 @@ impl NotesView {
                     .text_color(tokens.colors().text_muted)
                     .child(heading),
             )
+            .child(div().px_3().pb_2().child(Input::new(&self.search)))
             .child(
                 v_flex()
                     .id("notes-list")
@@ -266,7 +309,7 @@ impl NotesView {
                     .px_2()
                     .gap_0p5()
                     .overflow_y_scroll()
-                    .children(self.notes.iter().map(|note| {
+                    .children(visible_notes.into_iter().map(|note| {
                         let chosen = self.editing.as_deref() == Some(note.id.as_str());
                         let picked = note.clone();
                         let first_line = note
@@ -322,26 +365,41 @@ impl NotesView {
                                     .truncate()
                                     .child(first_line),
                             )
+                            .when(!note.tags.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(tokens.colors().text_secondary)
+                                        .truncate()
+                                        .child(note.tags.join(" · ")),
+                                )
+                            })
                     }))
-                    .children(self.notes.is_empty().then(|| {
+                    .children(is_empty.then(|| {
                         div()
                             .px_3()
                             .py_4()
                             .text_size(px(12.5))
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("notes.empty").to_string())
+                            .child(if query.is_empty() {
+                                rust_i18n::t!("notes.empty").to_string()
+                            } else {
+                                rust_i18n::t!("notes.no_matches").to_string()
+                            })
                     })),
             )
     }
 
     /// The editor, in the centre column.
     pub fn editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if let Some((title, body)) = self.pending.take() {
+        if let Some((title, body, tags)) = self.pending.take() {
             self.loading = true;
             self.title
                 .update(cx, |state, cx| state.set_value(title, window, cx));
             self.body
                 .update(cx, |state, cx| state.set_value(body, window, cx));
+            self.tags
+                .update(cx, |state, cx| state.set_value(tags, window, cx));
             self.loading = false;
         }
         let tokens = Tokens::global(cx).clone();
@@ -481,6 +539,7 @@ impl NotesView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(Input::new(&self.title).appearance(false)),
                             )
+                            .child(Input::new(&self.tags))
                             .child(if preview {
                                 div()
                                     .text_size(px(14.))

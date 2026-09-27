@@ -13793,7 +13793,9 @@ impl Shell {
         let notes = self.notes.clone();
         cx.spawn(async move |this, cx| {
             let saved = cx
-                .background_spawn(async move { link.save_note(None, project, title, body).await })
+                .background_spawn(
+                    async move { link.save_note(None, project, title, body, None).await },
+                )
                 .await;
             this.update(cx, |this, cx| {
                 if saved.is_some() {

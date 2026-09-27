@@ -1280,6 +1280,9 @@ pub struct Note {
     pub title: String,
     /// Markdown.
     pub body: String,
+    /// Lowercase, distinct labels used to organize and find the note.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Unix seconds.
     pub created_at: i64,
     /// Unix seconds; notes are listed most recently touched first.

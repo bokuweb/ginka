@@ -1357,6 +1357,7 @@ fn notes_are_kept_per_project_and_survive_an_edit() {
         project: Some(project.clone()),
         title: String::new(),
         body: "# Release\nrun the script".into(),
+        tags: Some(vec!["deploy".into()]),
     }) {
         Response::Note { note } => note,
         other => panic!("expected a note, got {other:?}"),
@@ -1367,19 +1368,27 @@ fn notes_are_kept_per_project_and_survive_an_edit() {
         project: None,
         title: "Release steps".into(),
         body: "changed".into(),
+        tags: None,
     });
     match fixture.ask(Request::ListNotes {
         project: Some(project),
+        query: Some("DEPLOY".into()),
+        tag: Some("deploy".into()),
     }) {
         Response::Notes { notes } => {
             assert_eq!(notes.len(), 1);
             assert_eq!(notes[0].title, "Release steps");
             assert_eq!(notes[0].body, "changed");
+            assert_eq!(notes[0].tags, vec!["deploy"]);
         }
         other => panic!("expected notes, got {other:?}"),
     }
     fixture.ask(Request::RemoveNote { id: note.id });
-    match fixture.ask(Request::ListNotes { project: None }) {
+    match fixture.ask(Request::ListNotes {
+        project: None,
+        query: None,
+        tag: None,
+    }) {
         Response::Notes { notes } => assert!(notes.is_empty()),
         other => panic!("expected notes, got {other:?}"),
     }
