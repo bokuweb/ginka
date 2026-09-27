@@ -456,6 +456,43 @@ pub struct Account {
     /// The vendor's own sign-in, to run in a terminal with the account's
     /// environment. `None` for a provider whose CLI has no such command.
     pub login: Option<LoginCommand>,
+    /// Who the login is, as the vendor's CLI reported it with the probe.
+    /// `None` when it was not asked or does not say.
+    #[serde(default)]
+    pub identity: Option<AccountIdentity>,
+}
+
+/// Who a login is: what tells two logins of one provider apart at a glance
+/// (MonoCode shows the same in its account picker).
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccountIdentity {
+    pub email: Option<String>,
+    /// The organisation the login bills to.
+    pub organization: Option<String>,
+    /// The subscription, in the vendor's own word (`max`, `pro`, `plus`).
+    pub plan: Option<String>,
+}
+
+impl AccountIdentity {
+    /// One line for a picker row or a tooltip: `email · organisation · plan`,
+    /// leaving out what the vendor did not say and an organisation that only
+    /// repeats the email (a personal login's default organisation is named
+    /// after it).
+    pub fn summary(&self) -> Option<String> {
+        let organization = self.organization.as_ref().filter(|organization| {
+            self.email
+                .as_ref()
+                .is_none_or(|email| !organization.starts_with(email.as_str()))
+        });
+        let parts: Vec<&str> = [self.email.as_ref(), organization, self.plan.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|part| !part.trim().is_empty())
+            .collect();
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
 }
 
 /// A command a client runs on the user's behalf, in a terminal.
@@ -1174,6 +1211,25 @@ mod tests {
         };
         assert!(summary.needs_attention());
         assert_eq!(summary.id().0, "comet/bright-harbor");
+    }
+
+    #[test]
+    fn an_identity_reads_as_one_line_without_repeating_the_email() {
+        let personal = AccountIdentity {
+            email: Some("me@example.com".into()),
+            organization: Some("me@example.com's Organization".into()),
+            plan: Some("max".into()),
+        };
+        assert_eq!(personal.summary().as_deref(), Some("me@example.com · max"));
+        let work = AccountIdentity {
+            organization: Some("Acme".into()),
+            ..personal
+        };
+        assert_eq!(
+            work.summary().as_deref(),
+            Some("me@example.com · Acme · max")
+        );
+        assert_eq!(AccountIdentity::default().summary(), None);
     }
 
     #[test]

@@ -164,6 +164,29 @@ impl AgentDriver for ClaudeDriver {
         Some((signed_in, detail))
     }
 
+    /// Claude Code 2.x adds `email`, `orgName` and `subscriptionType` to the
+    /// same JSON when signed in with claude.ai.
+    fn parse_identity(&self, output: &str) -> Option<ginka_protocol::model::AccountIdentity> {
+        let value: Value = serde_json::from_str(output.trim()).ok()?;
+        if value.get("loggedIn").and_then(Value::as_bool) != Some(true) {
+            return None;
+        }
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_string)
+        };
+        let identity = ginka_protocol::model::AccountIdentity {
+            email: text("email"),
+            organization: text("orgName"),
+            plan: text("subscriptionType"),
+        };
+        (identity != Default::default()).then_some(identity)
+    }
+
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec {
         let mut command = CommandSpec::new(&self.program).args(self.streaming_args(spec));
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
@@ -572,6 +595,25 @@ mod tests {
         // failure of the two.
         let driver = ClaudeDriver::default();
         assert_eq!(driver.parse_auth("some new output"), None);
+        assert_eq!(
+            driver.parse_identity(
+                r#"{"loggedIn": true, "authMethod": "claude.ai", "email": "me@example.com", "orgName": "Acme", "subscriptionType": "max"}"#
+            ),
+            Some(ginka_protocol::model::AccountIdentity {
+                email: Some("me@example.com".into()),
+                organization: Some("Acme".into()),
+                plan: Some("max".into()),
+            })
+        );
+        assert_eq!(
+            driver.parse_identity(r#"{"loggedIn": true, "authMethod": "oauth"}"#),
+            None,
+            "an older CLI that does not say is not guessed at"
+        );
+        assert_eq!(
+            driver.parse_identity(r#"{"loggedIn": false, "email": "stale@example.com"}"#),
+            None
+        );
         assert_eq!(driver.parse_auth(""), None);
     }
 

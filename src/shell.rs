@@ -532,6 +532,8 @@ pub struct Shell {
     /// Where a chat that has no workspace yet would run. `None` means no
     /// project, which is a scratch worktree rather than nowhere.
     target_project: Option<ProjectName>,
+    /// Whether the agents board shows only the project on screen.
+    board_one_project: bool,
     /// A project-search hit to open after the sidebar finishes switching workspaces.
     pending_file_open: Option<(WorkspaceId, String)>,
     /// A conversation to search once its workspace is on screen, from
@@ -1499,6 +1501,7 @@ impl Shell {
             add_project: None,
             projects: Vec::new(),
             target_project: None,
+            board_one_project: false,
             pending_file_open: None,
             pending_transcript_query: None,
             everywhere: None,
@@ -4775,7 +4778,7 @@ impl Shell {
                     self.inbox = Some(inbox);
                 }
             }
-            Place::Settings | Place::Workspace => {}
+            Place::Settings | Place::Workspace | Place::Board => {}
         }
         let _ = window;
         cx.notify();
@@ -5425,6 +5428,236 @@ impl Shell {
                     .text_color(tokens.colors().status_error)
                     .child(error)
             }))
+            .into_any_element()
+    }
+
+    /// The agents board: every workspace's agent by what it needs from the
+    /// reader, across projects (`ginka_ui::board`, Orca's dashboard). A card
+    /// opens its conversation.
+    fn agents_board(&self, cx: &mut Context<Self>) -> AnyElement {
+        use ginka_ui::board::columns;
+        let tokens = Tokens::global(cx).clone();
+        let project = self
+            .board_one_project
+            .then(|| {
+                self.target_project
+                    .as_ref()
+                    .map(|project| project.0.clone())
+            })
+            .flatten();
+        let rows = self.sidebar.read(cx).rows().to_vec();
+        let grouped = columns(&rows, project.as_deref());
+        let scope = |id: &'static str, label: String, on: bool, one: bool| {
+            div()
+                .id(id)
+                .px_2p5()
+                .py_1()
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.board_one_project = one;
+                    cx.notify();
+                }))
+                .child(label)
+        };
+        let header = h_flex()
+            .w_full()
+            .px_4()
+            .h(ginka_ui::layout::HEADER_HEIGHT)
+            .flex_shrink_0()
+            .gap_2()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_sm()
+                    .font_medium()
+                    .text_color(tokens.colors().text_primary)
+                    .child(rust_i18n::t!("nav.board").to_string()),
+            )
+            .child(scope(
+                "board-all",
+                rust_i18n::t!("board.all_projects").to_string(),
+                project.is_none(),
+                false,
+            ))
+            .children(
+                self.target_project
+                    .as_ref()
+                    .map(|target| scope("board-one", target.0.clone(), project.is_some(), true)),
+            );
+
+        let lanes = grouped.into_iter().map(|(column, members)| {
+            let count = members.len();
+            let cards: Vec<AnyElement> = members
+                .into_iter()
+                .map(|row| self.board_card(column, row, cx))
+                .collect();
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .gap_2()
+                .child(
+                    h_flex()
+                        .gap_1p5()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .font_medium()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(rust_i18n::t!(column.label_key()).to_string()),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(count.to_string()),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .id(SharedString::from(format!("board-lane:{column:?}")))
+                        .flex_1()
+                        .gap_1p5()
+                        .overflow_y_scroll()
+                        .when(cards.is_empty(), |this| {
+                            this.child(
+                                div()
+                                    .px_2()
+                                    .py_3()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("board.empty").to_string()),
+                            )
+                        })
+                        .children(cards),
+                )
+        });
+
+        v_flex()
+            .size_full()
+            .bg(tokens.colors().bg_window)
+            .child(header)
+            .child(
+                h_flex()
+                    .flex_1()
+                    .min_h_0()
+                    .px_4()
+                    .pb_4()
+                    .gap_3()
+                    .items_start()
+                    .children(lanes),
+            )
+            .into_any_element()
+    }
+
+    /// One agent on the board: who, where, and what it last said about its
+    /// work. The column already says what it needs.
+    fn board_card(
+        &self,
+        column: ginka_ui::board::Column,
+        row: &ginka_ui::workspace::SessionRow,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let workspace = row.workspace.clone();
+        let attention = column == ginka_ui::board::Column::NeedsYou;
+        let state = if row.status.conflict {
+            Some(rust_i18n::t!("board.conflicted").to_string())
+        } else {
+            row.state.label().map(|label| label.to_string())
+        };
+        v_flex()
+            .id(SharedString::from(format!(
+                "board-card:{}",
+                row.workspace.0
+            )))
+            .w_full()
+            .p_2p5()
+            .gap_1()
+            .rounded(px(tokens.radius.panel))
+            .bg(tokens.colors().bg_surface)
+            .border_1()
+            .border_color(if attention {
+                tokens.colors().status_attention.opacity(0.5)
+            } else {
+                tokens.colors().border_subtle
+            })
+            .cursor_pointer()
+            .hover(|this| this.bg(tokens.colors().row_hover()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.sidebar
+                    .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
+                cx.notify();
+            }))
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        row.agent
+                            .glyph()
+                            .size_3p5()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_sm()
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(row.title.clone()),
+                    )
+                    .when(row.queued > 0, |this| {
+                        this.child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(
+                                    rust_i18n::t!("sidebar.queued", count = row.queued).to_string(),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .truncate()
+                    .child(format!("{} · {}", row.origin, row.branch)),
+            )
+            .children(row.status_note.clone().map(|note| {
+                div()
+                    .text_xs()
+                    .italic()
+                    .text_color(tokens.colors().text_secondary)
+                    .truncate()
+                    .child(note)
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(if attention {
+                        tokens.colors().status_attention
+                    } else {
+                        tokens.colors().text_muted
+                    })
+                    // The word, not only the border colour: meaning is never
+                    // carried by colour alone (§6.4).
+                    .child(state.unwrap_or_else(|| row.age.to_string())),
+            )
             .into_any_element()
     }
 
@@ -10735,7 +10968,16 @@ impl Shell {
             .map(|account| {
                 let id = account.id.clone();
                 let signed_out = account.signed_in == Some(false);
-                let note = self.account_note(account, now);
+                // Who the login is comes first: two logins of one provider
+                // are told apart by their email, not by their headroom.
+                let who = account
+                    .identity
+                    .as_ref()
+                    .and_then(|identity| identity.summary());
+                let note = match (who, self.account_note(account, now)) {
+                    (Some(who), Some(note)) => Some(format!("{who} · {note}")),
+                    (who, note) => who.or(note),
+                };
                 self.picker_row(
                     SharedString::from(format!("account-option:{}", account.id.0)),
                     account.label.clone(),
@@ -12871,6 +13113,7 @@ impl Render for Shell {
             crate::sidebar::Place::Notes => self.notes.clone().into_any_element(),
             crate::sidebar::Place::Settings => self.settings_page(cx).into_any_element(),
             crate::sidebar::Place::Inbox => self.inbox_view(cx),
+            crate::sidebar::Place::Board => self.agents_board(cx),
         };
         let slots: Vec<Option<Panel>> = self
             .layout

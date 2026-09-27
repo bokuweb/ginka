@@ -304,6 +304,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
             env_keys: Vec::new(),
             signed_in: None,
             login: login(Vec::new()),
+            identity: None,
         });
         for (id, account) in &settings.accounts {
             if account.provider != provider {
@@ -326,6 +327,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
                 env_keys: account.env.keys().cloned().collect(),
                 signed_in: None,
                 login: login(env),
+                identity: None,
             });
         }
     }
@@ -345,6 +347,7 @@ pub fn list(settings: &DaemonSettings, paths: &Paths, drivers: &Registry) -> Vec
             env_keys: account.env.keys().cloned().collect(),
             signed_in: None,
             login: None,
+            identity: None,
         });
     }
     accounts

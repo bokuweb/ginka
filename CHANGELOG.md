@@ -23,6 +23,8 @@ far is unreleased.
   the window resets.
 - Agents write a line of status on their workspace, shown in the sidebar.
 - A merge or rebase stopped on conflicts is handed to the agent in one step.
+- An Agents board: every agent across projects, by what it needs from you.
+- The account picker names each login's email, organisation and plan.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

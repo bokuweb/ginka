@@ -1804,7 +1804,12 @@ impl Service {
                     &account.id,
                     driver.home_variable(),
                 );
-                account.signed_in = crate::driver::probe::probe_signed_in(driver.as_ref(), &env);
+                if let Some((signed_in, identity)) =
+                    crate::driver::probe::probe_login(driver.as_ref(), &env)
+                {
+                    account.signed_in = Some(signed_in);
+                    account.identity = identity;
+                }
             }
             self.accounts = Some((std::time::Instant::now(), accounts));
         }

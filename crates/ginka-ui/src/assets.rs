@@ -113,6 +113,10 @@ const ICONS: &[(&str, &str)] = &[
         "icons/git-pull-request-closed.svg",
         include_str!("../../../assets/icons/git-pull-request-closed.svg"),
     ),
+    (
+        "icons/board.svg",
+        include_str!("../../../assets/icons/board.svg"),
+    ),
 ];
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
@@ -156,6 +160,8 @@ pub mod icon {
     pub const GIT_PULL_REQUEST_DRAFT: &str = "icons/git-pull-request-draft.svg";
     pub const GIT_MERGE: &str = "icons/git-merge.svg";
     pub const GIT_PULL_REQUEST_CLOSED: &str = "icons/git-pull-request-closed.svg";
+    /// The agents board, in the project rail: three columns of cards.
+    pub const BOARD: &str = "icons/board.svg";
 }
 
 impl AssetSource for Assets {

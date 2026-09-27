@@ -88,6 +88,8 @@ pub enum SidebarEvent {
 pub enum Place {
     /// A project's sessions and conversations.
     Workspace,
+    /// Every agent across projects, by what it needs from the reader.
+    Board,
     /// Pull requests and issues, from the GitHub client.
     Inbox,
     /// The reader's markdown notes.
@@ -1535,6 +1537,13 @@ impl Render for SessionSidebar {
         } else {
             "Ctrl ,"
         };
+        let board = self.place_row(
+            Place::Board,
+            Icon::empty().path(ginka_ui::assets::icon::BOARD),
+            rust_i18n::t!("nav.board").to_string(),
+            None,
+            cx,
+        );
         let inbox = self.place_row(
             Place::Inbox,
             Icon::new(IconName::Inbox),
@@ -1597,7 +1606,15 @@ impl Render for SessionSidebar {
                     .border_r_1()
                     .border_color(border)
                     .child(self.header(cx))
-                    .child(v_flex().px_1p5().pb_1().gap_0p5().child(inbox).child(notes))
+                    .child(
+                        v_flex()
+                            .px_1p5()
+                            .pb_1()
+                            .gap_0p5()
+                            .child(board)
+                            .child(inbox)
+                            .child(notes),
+                    )
                     .child(
                         v_flex()
                             .flex_1()

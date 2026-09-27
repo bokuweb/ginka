@@ -383,6 +383,9 @@ pub struct SessionRow {
     /// The line of status last written on the workspace, drawn under the
     /// title in the row's quietest colour.
     pub status_note: Option<SharedString>,
+    /// The latest session's own state, finer than [`SessionRow::state`]:
+    /// the agents board tells a finished turn from one never started.
+    pub session_state: Option<SessionState>,
 }
 
 /// The mark a pull request in `state` is drawn with: the same shapes GitHub
@@ -447,6 +450,7 @@ impl SessionRow {
                 .status_note
                 .as_ref()
                 .map(|note| note.text.clone().into()),
+            session_state: session.map(|session| session.state),
         }
     }
 
@@ -538,6 +542,7 @@ impl SessionRow {
             indexed: false,
             pull_request: None,
             status_note: None,
+            session_state: None,
         }
     }
 
