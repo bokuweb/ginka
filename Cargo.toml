@@ -42,9 +42,9 @@ gpui-base = { git = "https://github.com/longbridge/gpui-component", rev = "5a564
 # dependency pinned by rev rather than a submodule: the rev lands in
 # `Cargo.lock` and Cargo resolves e1's graph into ours. For local work against
 # `../e1`, use `scripts/cargo-local-e1`, which does not rewrite the lock.
-e1-github = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
-e1-ui = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
-e1-views = { git = "https://github.com/bokuweb/e1", rev = "076295e" }
+e1-github = { git = "https://github.com/bokuweb/e1", rev = "ecabde4" }
+e1-ui = { git = "https://github.com/bokuweb/e1", rev = "ecabde4" }
+e1-views = { git = "https://github.com/bokuweb/e1", rev = "ecabde4" }
 
 # The terminal stack the roadmap picked (§4.3): the same one Zed and waku use.
 alacritty_terminal = "0.26"
