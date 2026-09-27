@@ -5,7 +5,7 @@ on:
     types: [published]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build:
@@ -91,6 +91,18 @@ jobs:
             ${{ runner.temp }}/ginka-release/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
+
+      - name: Attach signed artifacts to GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          gh release upload "$RELEASE_TAG" \
+            "$RUNNER_TEMP/ginka-release/Ginka-${RELEASE_TAG#v}.dmg" \
+            "$RUNNER_TEMP/ginka-release/Ginka-${RELEASE_TAG#v}.zip" \
+            "$RUNNER_TEMP/ginka-release/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Remove temporary signing keychain
         if: always()
