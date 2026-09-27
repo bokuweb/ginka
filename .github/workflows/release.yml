@@ -1,0 +1,87 @@
+name: Signed macOS release artifact
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          test "$RELEASE_TAG" = "v$version"
+
+      - name: Import Developer ID certificate
+        env:
+          CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$CERTIFICATE_P12_BASE64"
+          test -n "$CERTIFICATE_PASSWORD"
+          certificate="$RUNNER_TEMP/ginka-certificate.p12"
+          keychain="$RUNNER_TEMP/ginka-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          trap 'rm -f "$certificate"' EXIT
+          printf '%s' "$CERTIFICATE_P12_BASE64" | base64 -D > "$certificate"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -s "$keychain"
+          security import "$certificate" -k "$keychain" -P "$CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security find-identity -v -p codesigning "$keychain" | grep -F 'Developer ID Application: Satoshi Ueki (66U862VS9W)'
+
+      - name: Store notarization credentials
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_ID"
+          test -n "$APPLE_APP_SPECIFIC_PASSWORD"
+          xcrun notarytool store-credentials ginka-release \
+            --apple-id "$APPLE_ID" \
+            --password "$APPLE_APP_SPECIFIC_PASSWORD" \
+            --team-id 66U862VS9W
+
+      - name: Build, sign, notarize, and staple
+        env:
+          GINKA_SIGN_IDENTITY: 'Developer ID Application: Satoshi Ueki (66U862VS9W)'
+          GINKA_NOTARY_PROFILE: ginka-release
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          scripts/package-macos --universal --out-dir "$RUNNER_TEMP/ginka-release"
+          image="$RUNNER_TEMP/ginka-release/Ginka-$version.dmg"
+          test -s "$image"
+          xcrun stapler validate "$image"
+          codesign --verify --verbose=2 "$image"
+
+      - name: Upload signed release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ginka-${{ github.event.release.tag_name }}-macos
+          path: ${{ runner.temp }}/ginka-release/*.dmg
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove temporary signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/ginka-signing.keychain-db" || true
