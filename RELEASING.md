@@ -43,7 +43,8 @@ exist yet are marked as such.
    Publishing a release whose tag matches the root package version runs
    `.github/workflows/release.yml`. It builds the universal macOS app, signs
    it with Developer ID, notarizes and staples the app and DMG, then uploads
-   the ZIP, DMG, and SHA256SUMS as workflow artifacts. Configure Actions
+   the ZIP, DMG, and SHA256SUMS as workflow artifacts and attaches them to
+   the GitHub Release. Configure Actions
    secrets `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
    and `APPLE_APP_SPECIFIC_PASSWORD`; a local `notarytool` keychain profile
    is not available on the runner.
