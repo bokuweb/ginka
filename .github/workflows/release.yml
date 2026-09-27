@@ -70,7 +70,14 @@ jobs:
           version="${RELEASE_TAG#v}"
           scripts/package-macos --universal --out-dir "$RUNNER_TEMP/ginka-release"
           image="$RUNNER_TEMP/ginka-release/Ginka-$version.dmg"
+          archive="$RUNNER_TEMP/ginka-release/Ginka-$version.zip"
           test -s "$image"
+          test -s "$archive"
+          (cd "$RUNNER_TEMP/ginka-release" && shasum -a 256 -c SHA256SUMS)
+          mkdir -p "$RUNNER_TEMP/ginka-archive-check"
+          ditto -x -k "$archive" "$RUNNER_TEMP/ginka-archive-check"
+          xcrun stapler validate "$RUNNER_TEMP/ginka-archive-check/Ginka.app"
+          codesign --verify --strict "$RUNNER_TEMP/ginka-archive-check/Ginka.app"
           xcrun stapler validate "$image"
           codesign --verify --verbose=2 "$image"
 
@@ -78,7 +85,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ginka-${{ github.event.release.tag_name }}-macos
-          path: ${{ runner.temp }}/ginka-release/*.dmg
+          path: |
+            ${{ runner.temp }}/ginka-release/*.dmg
+            ${{ runner.temp }}/ginka-release/*.zip
+            ${{ runner.temp }}/ginka-release/SHA256SUMS
           if-no-files-found: error
           retention-days: 90
 
