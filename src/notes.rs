@@ -7,11 +7,13 @@
 //! loses the last paragraph.
 
 use crate::daemon::DaemonLink;
+use ginka_core::notes::NoteFilter;
 use ginka_protocol::ProjectName;
 use ginka_protocol::model::Note;
 use ginka_ui::Tokens;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
@@ -27,6 +29,8 @@ pub struct NotesView {
     /// The project whose notes are listed; every note when `None`.
     project: Option<ProjectName>,
     notes: Vec<Note>,
+    /// Exact tag chosen in the list; text search is applied alongside it.
+    selected_tag: Option<String>,
     /// The note in the editor. `None` with the editor filled is a new note
     /// that has not been written yet.
     editing: Option<String>,
@@ -95,6 +99,7 @@ impl NotesView {
             link,
             project: None,
             notes: Vec::new(),
+            selected_tag: None,
             editing: None,
             search,
             title,
@@ -111,6 +116,9 @@ impl NotesView {
 
     /// List a project's notes — or all of them — and read them again.
     pub fn show_project(&mut self, project: Option<ProjectName>, cx: &mut Context<Self>) {
+        if self.project != project {
+            self.selected_tag = None;
+        }
         self.project = project;
         self.reload(cx);
     }
@@ -228,17 +236,14 @@ impl NotesView {
     /// The list column: a heading, the way to write a new one, the notes.
     pub fn list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let query = self.search.read(cx).value().trim().to_lowercase();
+        let query = self.search.read(cx).value().to_string();
+        let filter = NoteFilter::new(Some(&query), self.selected_tag.as_deref());
         let visible_notes: Vec<_> = self
             .notes
             .iter()
-            .filter(|note| {
-                query.is_empty()
-                    || note.title.to_lowercase().contains(&query)
-                    || note.body.to_lowercase().contains(&query)
-                    || note.tags.iter().any(|tag| tag.contains(&query))
-            })
+            .filter(|note| filter.matches(note))
             .collect();
+        let available_tags = ginka_ui::notes::available_tags(&self.notes);
         let is_empty = visible_notes.is_empty();
         let heading = self
             .project
@@ -301,6 +306,54 @@ impl NotesView {
                     .child(heading),
             )
             .child(div().px_3().pb_2().child(Input::new(&self.search)))
+            .when(
+                !available_tags.is_empty() || self.selected_tag.is_some(),
+                |this| {
+                    this.child(
+                        h_flex()
+                            .id("note-tag-filters")
+                            .w_full()
+                            .flex_shrink_0()
+                            .px_3()
+                            .pb_2()
+                            .gap_1()
+                            .overflow_x_scroll()
+                            .child(
+                                Button::new("note-tag-all")
+                                    .ghost()
+                                    .flex_shrink_0()
+                                    .when(self.selected_tag.is_none(), |this| {
+                                        this.bg(tokens.colors().row_active())
+                                    })
+                                    .child(if self.selected_tag.is_none() {
+                                        format!("✓ {}", rust_i18n::t!("notes.filter.all_tags"))
+                                    } else {
+                                        rust_i18n::t!("notes.filter.all_tags").to_string()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.selected_tag = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .children(available_tags.into_iter().map(|tag| {
+                                let selected = self.selected_tag.as_deref() == Some(tag.as_str());
+                                Button::new(SharedString::from(format!("note-tag:{tag}")))
+                                    .ghost()
+                                    .flex_shrink_0()
+                                    .when(selected, |this| this.bg(tokens.colors().row_active()))
+                                    .child(if selected {
+                                        format!("✓ {tag}")
+                                    } else {
+                                        tag.clone()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_tag = Some(tag.clone());
+                                        cx.notify();
+                                    }))
+                            })),
+                    )
+                },
+            )
             .child(
                 v_flex()
                     .id("notes-list")
@@ -381,7 +434,7 @@ impl NotesView {
                             .py_4()
                             .text_size(px(12.5))
                             .text_color(tokens.colors().text_muted)
-                            .child(if query.is_empty() {
+                            .child(if query.trim().is_empty() && self.selected_tag.is_none() {
                                 rust_i18n::t!("notes.empty").to_string()
                             } else {
                                 rust_i18n::t!("notes.no_matches").to_string()

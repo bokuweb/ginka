@@ -1302,6 +1302,9 @@ notes.remove.confirm:
 notes.search:
   en: Search notes…
   ja: ノートを検索…
+notes.filter.all_tags:
+  en: All tags
+  ja: すべてのタグ
 notes.no_matches:
   en: No matching notes
   ja: 一致するノートがありません

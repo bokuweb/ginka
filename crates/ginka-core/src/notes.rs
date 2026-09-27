@@ -11,6 +11,40 @@ use ginka_protocol::ProjectName;
 use ginka_protocol::model::Note;
 use rusqlite::{Connection, OptionalExtension as _, types::Type};
 
+/// A note search shared by the daemon and the window.
+///
+/// Text matches title, body or any tag as a case-insensitive substring;
+/// the optional tag matches one normalized tag exactly.
+pub struct NoteFilter {
+    query: Option<String>,
+    tag: Option<String>,
+}
+
+impl NoteFilter {
+    /// Trim and case-fold both conditions; blank conditions do not filter.
+    pub fn new(query: Option<&str>, tag: Option<&str>) -> Self {
+        let normalize = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_lowercase)
+        };
+        Self {
+            query: normalize(query),
+            tag: normalize(tag),
+        }
+    }
+
+    /// Whether a note satisfies both active conditions.
+    pub fn matches(&self, note: &Note) -> bool {
+        self.query.as_ref().is_none_or(|query| {
+            note.title.to_lowercase().contains(query)
+                || note.body.to_lowercase().contains(query)
+                || note.tags.iter().any(|tag| tag.contains(query))
+        }) && self.tag.as_ref().is_none_or(|tag| note.tags.contains(tag))
+    }
+}
+
 /// What a note with no title is called: its first line, cut to this many
 /// characters. A list of untitled rows is a list nobody can find anything in.
 const TITLE_FROM_BODY: usize = 60;
@@ -107,23 +141,10 @@ pub fn list(
     let notes = statement
         .query_map([project.map(|project| project.0.clone())], row_to_note)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let query = query
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .map(str::to_lowercase);
-    let tag = tag
-        .map(str::trim)
-        .filter(|tag| !tag.is_empty())
-        .map(str::to_lowercase);
+    let filter = NoteFilter::new(query, tag);
     Ok(notes
         .into_iter()
-        .filter(|note| {
-            query.as_ref().is_none_or(|query| {
-                note.title.to_lowercase().contains(query)
-                    || note.body.to_lowercase().contains(query)
-                    || note.tags.iter().any(|tag| tag.contains(query))
-            }) && tag.as_ref().is_none_or(|tag| note.tags.contains(tag))
-        })
+        .filter(|note| filter.matches(note))
         .collect())
 }
 
@@ -256,5 +277,24 @@ mod tests {
         .unwrap();
         assert!(cleared.tags.is_empty());
         assert!(list(&conn, None, None, Some("deploy")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn note_filter_combines_text_with_an_exact_case_insensitive_tag() {
+        let note = Note {
+            id: "one".into(),
+            project: None,
+            title: "Release plan".into(),
+            body: "Run migration".into(),
+            tags: vec!["deploy".into(), "operations".into()],
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(NoteFilter::new(Some("  RELEASE  "), Some(" DEPLOY ")).matches(&note));
+        assert!(NoteFilter::new(Some("migration"), Some("deploy")).matches(&note));
+        assert!(NoteFilter::new(Some("operations"), Some("deploy")).matches(&note));
+        assert!(!NoteFilter::new(Some("missing"), Some("deploy")).matches(&note));
+        assert!(!NoteFilter::new(None, Some("operation")).matches(&note));
+        assert!(NoteFilter::new(Some("  "), Some(" ")).matches(&note));
     }
 }

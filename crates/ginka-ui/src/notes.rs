@@ -1,5 +1,18 @@
-//! Notes made from what was read: a transcript selection kept as a note
-//! (MonoCode's "selection to note").
+//! Notebook view rules: tags for the exact filter and notes made from a
+//! transcript selection (MonoCode's "selection to note").
+
+use ginka_protocol::model::Note;
+use std::collections::BTreeSet;
+
+/// Distinct note tags in display order for the notebook's exact-tag filter.
+pub fn available_tags(notes: &[Note]) -> Vec<String> {
+    notes
+        .iter()
+        .flat_map(|note| note.tags.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
 
 /// How long a note's title may be, in characters.
 pub const TITLE_LIMIT: usize = 60;
@@ -51,6 +64,25 @@ pub fn from_selection(text: &str, source: Option<&str>) -> (String, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn available_note_tags_are_unique_and_sorted() {
+        let note = |id: &str, tags: &[&str]| Note {
+            id: id.into(),
+            project: None,
+            title: String::new(),
+            body: String::new(),
+            tags: tags.iter().map(|tag| (*tag).into()).collect(),
+            created_at: 0,
+            updated_at: 0,
+        };
+        let notes = [
+            note("one", &["release", "deploy"]),
+            note("two", &["deploy", "ops"]),
+        ];
+        assert_eq!(available_tags(&notes), vec!["deploy", "ops", "release"]);
+        assert!(available_tags(&[]).is_empty());
+    }
 
     #[test]
     fn a_selection_becomes_a_quoted_note_titled_by_its_first_line() {
