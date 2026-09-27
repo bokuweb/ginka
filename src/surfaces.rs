@@ -3111,6 +3111,7 @@ impl SurfacePanel {
         let scope = self.skill_filter.scope;
         let state = self.skill_filter.state;
         let active_bg = tokens.colors().row_active();
+        let local_paths = self.local_paths;
 
         let rows = visible.into_iter().map(|skill| {
             let request = ginka_ui::skills::toggle_request(&skill);
@@ -3122,6 +3123,8 @@ impl SurfacePanel {
                 .map(|install| {
                     let path = ginka_ui::skills::install_path_text(install);
                     let copied_path = path.clone();
+                    let directory_url =
+                        ginka_ui::skills::install_directory_url(install, local_paths);
                     let scope = match install.scope {
                         SkillScope::User => rust_i18n::t!("surface.skills.scope.user").to_string(),
                         SkillScope::Project => {
@@ -3168,7 +3171,16 @@ impl SurfacePanel {
                                             ));
                                         },
                                     ),
-                                ),
+                                )
+                                .children(directory_url.map(|url| {
+                                    Button::new(SharedString::from(format!(
+                                        "open-skill-folder:{}:{}",
+                                        skill.name, install.root_label
+                                    )))
+                                    .ghost()
+                                    .child(rust_i18n::t!("surface.skills.open_folder").to_string())
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                })),
                         )
                         .into_any_element()
                 })

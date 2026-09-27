@@ -478,6 +478,9 @@ surface.skills.no_matches:
 surface.skills.copy_path:
   en: Copy path
   ja: パスをコピー
+surface.skills.open_folder:
+  en: Open folder
+  ja: フォルダを開く
 surface.skills.retry:
   en: Try again
   ja: 再試行
