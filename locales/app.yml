@@ -175,6 +175,18 @@ composer.agent.missing:
 composer.stop:
   en: Stop the agent
   ja: エージェントを停止
+composer.tickets.dismiss:
+  en: Dismiss this ticket
+  ja: このチケットを却下
+composer.tickets.start:
+  en: Start
+  ja: 開始
+composer.tickets.start_tooltip:
+  en: Start it in a new session
+  ja: 新しいセッションで開始
+composer.tickets.title:
+  en: "%{count} tickets from agents"
+  ja: "エージェントからのチケット %{count} 件"
 composer.queue.title:
   en: "%{count} queued"
   ja: "%{count} 件のキュー"
@@ -1125,6 +1137,9 @@ cli.search.empty:
 cli.notes.empty:
   en: "No notes yet."
   ja: "ノートはまだありません。"
+cli.tickets.empty:
+  en: "No open tickets."
+  ja: "未着手のチケットはありません。"
 cli.queue.paused:
   en: "(held — `ginka session queue-pause <session> --resume` lets it go)"
   ja: "（保留中 — `ginka session queue-pause <session> --resume` で再開）"

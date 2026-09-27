@@ -1353,3 +1353,67 @@ pub struct QuickCommand {
     /// The shell command line, or the prompt text.
     pub body: String,
 }
+
+/// Where a ticket is in its short life.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TicketState {
+    /// Raised and waiting for the reader to start or dismiss it.
+    Open,
+    /// A session was started from it; `Ticket::session` says which.
+    Started,
+    /// The reader, or the agent that raised it, decided against it.
+    Dismissed,
+}
+
+impl TicketState {
+    /// The value stored in SQLite and printed by the CLI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Started => "started",
+            Self::Dismissed => "dismissed",
+        }
+    }
+
+    /// Read a stored value.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim() {
+            "open" => Some(Self::Open),
+            "started" => Some(Self::Started),
+            "dismissed" => Some(Self::Dismissed),
+            _ => None,
+        }
+    }
+}
+
+/// A piece of work an agent noticed and handed to the reader rather than
+/// doing in its own session: dead code, a stale doc, a missing test.
+///
+/// The reader sees it as a card and starts it with one click, which runs
+/// `prompt` in a new session — so the work the agent was asked to do stays
+/// the size it was asked to be, and the aside is not lost either.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ticket {
+    pub id: String,
+    /// Where it was raised, and where it runs unless a branch is asked for.
+    pub workspace: WorkspaceId,
+    /// The session that raised it, when an agent did.
+    pub from_session: Option<SessionId>,
+    /// A short imperative, the card's heading.
+    pub title: String,
+    /// One or two sentences for the card: why now, and what it will do.
+    pub summary: String,
+    /// What the new session is told. Self-contained: the session that reads
+    /// it has none of the conversation that raised it.
+    pub prompt: String,
+    pub state: TicketState,
+    /// The session started from it.
+    pub session: Option<SessionId>,
+    /// Unix seconds.
+    pub created_at: i64,
+    /// Unix seconds.
+    pub updated_at: i64,
+}

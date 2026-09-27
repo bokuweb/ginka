@@ -76,6 +76,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0017_browser_history",
         include_str!("../../../db/migrations/0017_browser_history.sql"),
     ),
+    (
+        "0018_tickets",
+        include_str!("../../../db/migrations/0018_tickets.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

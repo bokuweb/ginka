@@ -3307,3 +3307,127 @@ fn default_script_for_pages() -> String {
     ]
     .join("\n")
 }
+
+#[test]
+fn a_ticket_an_agent_raised_starts_in_its_own_session_once() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-1","usage":{"input_tokens":1,"output_tokens":1}}"#,
+    ]
+    .join("\n");
+    let raiser = fixture.start(&answer, "fix the parser");
+    fixture.settle(&raiser);
+
+    let ticket = match fixture.ask(Request::RaiseTicket {
+        workspace: None,
+        from_session: Some(raiser.clone()),
+        title: "Remove the dead retry helper".into(),
+        summary: "Spotted while fixing the parser.".into(),
+        prompt: "Delete retry() in src/net.rs and its tests.".into(),
+    }) {
+        Response::Ticket { ticket } => ticket,
+        other => panic!("expected a ticket, got {other:?}"),
+    };
+    assert_eq!(
+        ticket.workspace, fixture.workspace,
+        "the raiser's workspace"
+    );
+    assert!(fixture.recorder.all().iter().any(|event| matches!(
+        event,
+        DaemonEvent::TicketsChanged { workspace } if workspace == &fixture.workspace
+    )));
+    match fixture.ask(Request::ListTickets {
+        workspace: Some(fixture.workspace.clone()),
+        all: false,
+    }) {
+        Response::Tickets { tickets } => assert_eq!(tickets, vec![ticket.clone()]),
+        other => panic!("expected tickets, got {other:?}"),
+    }
+
+    let started = match fixture.ask(Request::StartTicket {
+        ticket: ticket.id.clone(),
+        agent: None,
+        branch: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_ne!(started.id, raiser);
+    assert_eq!(started.agent, "claude", "the raiser's agent picks it up");
+    fixture.settle(&started.id);
+    assert_eq!(
+        fixture.transcript(&started.id).first(),
+        Some(&TranscriptPayload::User {
+            text: "Delete retry() in src/net.rs and its tests.".into()
+        })
+    );
+    match fixture.ask(Request::ListTickets {
+        workspace: None,
+        all: true,
+    }) {
+        Response::Tickets { tickets } => {
+            assert_eq!(tickets[0].session.as_ref(), Some(&started.id));
+        }
+        other => panic!("expected tickets, got {other:?}"),
+    }
+    let again = fixture
+        .service
+        .handle(Request::StartTicket {
+            ticket: ticket.id.clone(),
+            agent: None,
+            branch: None,
+        })
+        .unwrap_err();
+    assert!(
+        again.message.contains("already started"),
+        "{}",
+        again.message
+    );
+}
+
+#[test]
+fn a_message_between_sessions_says_who_sent_it_and_how_to_answer() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+        r#"{"type":"assistant","message":{"content":[{"type":"text","text":"ok"}]}}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-1","usage":{"input_tokens":1,"output_tokens":1}}"#,
+    ]
+    .join("\n");
+    let sender = fixture.start(&answer, "review the plan");
+    fixture.settle(&sender);
+    let receiver = fixture.start(&answer, "write the code");
+    fixture.settle(&receiver);
+
+    fixture.ask(Request::MessageSession {
+        from: sender.clone(),
+        to: receiver.clone(),
+        text: "Step 2 is missing a test.".into(),
+    });
+    fixture.settle(&receiver);
+    let transcript = fixture.transcript(&receiver);
+    let said = transcript
+        .iter()
+        .find_map(|entry| match entry {
+            TranscriptPayload::User { text } if text.contains("Step 2") => Some(text.clone()),
+            _ => None,
+        })
+        .expect("the message reached the receiver");
+    assert!(
+        said.contains(&format!("Message from Ginka session {sender}")),
+        "{said}"
+    );
+    assert!(said.contains("ginka_session_send"), "{said}");
+
+    let to_self = fixture
+        .service
+        .handle(Request::MessageSession {
+            from: sender.clone(),
+            to: sender.clone(),
+            text: "hi".into(),
+        })
+        .unwrap_err();
+    assert!(to_self.message.contains("itself"));
+}

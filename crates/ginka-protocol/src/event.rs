@@ -322,6 +322,10 @@ pub enum DaemonEvent {
         error: Option<String>,
     },
 
+    /// A ticket was raised, started or dismissed in `workspace`. Clients
+    /// re-read that workspace's tickets.
+    TicketsChanged { workspace: WorkspaceId },
+
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,
 }

@@ -161,7 +161,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_session_send",
-            description: "Send a follow-up to a session. Queued if it is mid-turn.",
+            description: "Send a message to another session. Queued if it is mid-turn. When you are yourself a Ginka session, the receiver is told it came from you and how to reply, so this is how sessions talk to each other.",
             schema: json!({
                 "type": "object",
                 "properties": {"session": {"type": "string"}, "text": {"type": "string"}},
@@ -358,6 +358,53 @@ pub fn tools() -> Vec<Tool> {
                 "type": "object",
                 "properties": {"workspace": workspace, "id": {"type": "string"}},
                 "required": ["workspace", "id"],
+            }),
+        },
+        Tool {
+            name: "ginka_ticket_raise",
+            description: "Hand the reader a ticket: something worth doing that is outside your current task (dead code, a stale doc, missing coverage, a TODO, a bug spotted in passing). It appears as a card beside the reader's composer and one click starts it in a new session. Do not use it for vague hunches or for fixes small enough to do inline. The prompt must stand alone: the new session has none of your conversation, so name the files and what to do.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Under 60 characters, an imperative: \"Remove the unused retry helper\""},
+                    "summary": {"type": "string", "description": "One or two sentences for the card: what you noticed and what the new session will do"},
+                    "prompt": {"type": "string", "description": "The new session's first message, self-contained"},
+                    "workspace": {"type": "string", "description": "Where to run it; your own workspace when omitted"},
+                },
+                "required": ["title", "prompt"],
+            }),
+        },
+        Tool {
+            name: "ginka_tickets",
+            description: "List tickets, newest first: open ones unless all is set; one workspace's when workspace is given.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "all": {"type": "boolean", "description": "Include started and dismissed ones"},
+                },
+            }),
+        },
+        Tool {
+            name: "ginka_ticket_start",
+            description: "Start an open ticket in a new session, in its workspace or in a new worktree on branch.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "ticket": {"type": "string"},
+                    "agent": {"type": "string", "description": "A driver id; the raising session's agent otherwise"},
+                    "branch": {"type": "string", "description": "Cut a new worktree on this branch for it"},
+                },
+                "required": ["ticket"],
+            }),
+        },
+        Tool {
+            name: "ginka_ticket_dismiss",
+            description: "Withdraw an open ticket that is stale, superseded or already done.",
+            schema: json!({
+                "type": "object",
+                "properties": {"ticket": {"type": "string"}},
+                "required": ["ticket"],
             }),
         },
         Tool {
@@ -665,6 +712,15 @@ pub fn tools() -> Vec<Tool> {
 /// default: a call the caller got wrong is worth saying so about, and a
 /// `ginka_commit` with no message that quietly did nothing would be worse.
 pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
+    request_as(tool, arguments, None)
+}
+
+/// [`request_for`], made by the agent running as session `caller`.
+///
+/// A bridge started for a session knows which one (`GINKA_SESSION`), and
+/// that is what signs its tickets and messages: a message from a known
+/// session becomes `MessageSession`, which tells the receiver how to reply.
+pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> Result<Request> {
     let text = |key: &str| -> Result<String> {
         arguments
             .get(key)
@@ -756,9 +812,35 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
             model: maybe("model"),
             account: maybe("account").map(ginka_protocol::AccountId),
         },
-        "ginka_session_send" => Request::SendMessage {
-            session: SessionId(text("session")?),
-            text: text("text")?,
+        "ginka_session_send" => match caller {
+            Some(from) => Request::MessageSession {
+                from: from.clone(),
+                to: SessionId(text("session")?),
+                text: text("text")?,
+            },
+            None => Request::SendMessage {
+                session: SessionId(text("session")?),
+                text: text("text")?,
+            },
+        },
+        "ginka_ticket_raise" => Request::RaiseTicket {
+            workspace: maybe("workspace").map(WorkspaceId),
+            from_session: caller.cloned(),
+            title: text("title")?,
+            summary: maybe("summary").unwrap_or_default(),
+            prompt: text("prompt")?,
+        },
+        "ginka_tickets" => Request::ListTickets {
+            workspace: maybe("workspace").map(WorkspaceId),
+            all: flag("all"),
+        },
+        "ginka_ticket_start" => Request::StartTicket {
+            ticket: text("ticket")?,
+            agent: maybe("agent"),
+            branch: maybe("branch"),
+        },
+        "ginka_ticket_dismiss" => Request::DismissTicket {
+            ticket: text("ticket")?,
         },
         "ginka_session_queue" => Request::QueuedMessages {
             session: SessionId(text("session")?),
@@ -989,11 +1071,36 @@ pub fn request_for(tool: &str, arguments: &Value) -> Result<Request> {
 
 /// What `initialize` answers with.
 pub fn server_info() -> Value {
-    json!({
+    server_info_as(None)
+}
+
+/// What `initialize` answers with, for a bridge serving session `caller`.
+///
+/// The instructions are how the agent learns who it is: the session id it
+/// signs with, and what the ticket and message tools are for. Without them
+/// an agent has the tools and no reason to reach for them.
+pub fn server_info_as(caller: Option<&SessionId>) -> Value {
+    let mut info = json!({
         "protocolVersion": PROTOCOL_VERSION,
         "capabilities": {"tools": {"listChanged": false}},
         "serverInfo": {"name": "ginka", "version": env!("CARGO_PKG_VERSION")},
-    })
+    });
+    if let Some(caller) = caller {
+        info["instructions"] = Value::String(format!(
+            "You are running inside Ginka as session {caller}. \
+             When you notice work outside your current task that is worth doing \
+             (dead code, stale docs, missing coverage, a bug spotted in passing), \
+             call ginka_ticket_raise rather than doing it or only mentioning it: \
+             the reader sees a card and starts it in a new session with one click. \
+             Withdraw a ticket that became stale with ginka_ticket_dismiss. \
+             Other sessions are listed by ginka_sessions and reached with \
+             ginka_session_send; a message from another session arrives headed \
+             \"[Message from Ginka session <id> ...]\" and is answered by \
+             ginka_session_send to that id. Ask a session to report back by \
+             telling it your id, {caller}."
+        ));
+    }
+    info
 }
 
 /// What `tools/list` answers with.
@@ -1081,6 +1188,8 @@ mod tests {
                 "label": "Work",
                 "schedule": "@daily",
                 "via": "terminal",
+                "ticket": "t-1",
+                "title": "Remove dead code",
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));
@@ -1301,5 +1410,54 @@ mod tests {
         let failure = tool_failure("no such workspace".into());
         assert_eq!(failure["isError"], true);
         assert_eq!(failure["content"][0]["text"], "no such workspace");
+    }
+
+    #[test]
+    fn a_session_signs_its_messages_and_tickets() {
+        let me = SessionId("s-me".into());
+        let message = request_as(
+            "ginka_session_send",
+            &json!({"session": "s-other", "text": "done"}),
+            Some(&me),
+        )
+        .unwrap();
+        assert_eq!(
+            message,
+            Request::MessageSession {
+                from: me.clone(),
+                to: SessionId("s-other".into()),
+                text: "done".into(),
+            }
+        );
+        let unsigned = request_for(
+            "ginka_session_send",
+            &json!({"session": "s-other", "text": "x"}),
+        )
+        .unwrap();
+        assert!(matches!(unsigned, Request::SendMessage { .. }));
+
+        let ticket = request_as(
+            "ginka_ticket_raise",
+            &json!({"title": "Fix README", "prompt": "Update README.md"}),
+            Some(&me),
+        )
+        .unwrap();
+        assert_eq!(
+            ticket,
+            Request::RaiseTicket {
+                workspace: None,
+                from_session: Some(me.clone()),
+                title: "Fix README".into(),
+                summary: String::new(),
+                prompt: "Update README.md".into(),
+            }
+        );
+        assert!(
+            server_info_as(Some(&me))["instructions"]
+                .as_str()
+                .unwrap()
+                .contains("s-me")
+        );
+        assert!(server_info().get("instructions").is_none());
     }
 }

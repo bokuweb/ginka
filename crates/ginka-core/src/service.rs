@@ -364,7 +364,11 @@ impl Service {
     }
 
     /// The MCP servers an agent starting in `worktree` is told about.
-    fn mcp_servers(&self, worktree: &std::path::Path) -> Vec<crate::tools::McpServer> {
+    fn mcp_servers(
+        &self,
+        worktree: &std::path::Path,
+        session: &SessionId,
+    ) -> Vec<crate::tools::McpServer> {
         let zg = self
             .settings
             .tools
@@ -375,6 +379,7 @@ impl Service {
             &self.settings.tools,
             &self.paths,
             worktree,
+            Some(&session.0),
             self.cli.as_deref(),
             zg.as_deref(),
         )
@@ -1286,6 +1291,37 @@ impl Service {
                 crate::notes::remove(&self.conn(), &id).map_err(failed)?;
                 Ok(Response::Ack)
             }
+            Request::RaiseTicket {
+                workspace,
+                from_session,
+                title,
+                summary,
+                prompt,
+            } => self.raise_ticket(workspace, from_session, &title, &summary, &prompt),
+            Request::ListTickets { workspace, all } => Ok(Response::Tickets {
+                tickets: crate::tickets::list(&self.conn(), workspace.as_ref(), all)
+                    .map_err(failed)?,
+            }),
+            Request::StartTicket {
+                ticket,
+                agent,
+                branch,
+            } => self.start_ticket(&ticket, agent, branch),
+            Request::DismissTicket { ticket } => {
+                let ticket = crate::tickets::close(
+                    &self.conn(),
+                    &ticket,
+                    ginka_protocol::model::TicketState::Dismissed,
+                    None,
+                    now(),
+                )
+                .map_err(failed)?;
+                self.events.emit(DaemonEvent::TicketsChanged {
+                    workspace: ticket.workspace,
+                });
+                Ok(Response::Ack)
+            }
+            Request::MessageSession { from, to, text } => self.message_session(&from, &to, &text),
             Request::Pull { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 git::pull_fast_forward(&worktree.path).map_err(failed)?;
@@ -1899,7 +1935,7 @@ impl Service {
             .with_reasoning_effort(reasoning_effort)
             .with_service_tier(service_tier)
             .with_access_mode(access_mode)
-            .with_mcp_servers(self.mcp_servers(&worktree.path));
+            .with_mcp_servers(self.mcp_servers(&worktree.path, &session.id));
         for (key, value) in crate::account::env_layer(
             &self.settings,
             &self.paths,
@@ -2300,7 +2336,7 @@ impl Service {
             // widened it would be the change N2 reserves for a new session.
             .with_access_mode(stored.access_mode)
             .with_preamble(preamble)
-            .with_mcp_servers(self.mcp_servers(&worktree.path));
+            .with_mcp_servers(self.mcp_servers(&worktree.path, id));
         // The same login the conversation started on: the vendor's thread
         // lives in its directory (`docs/accounts.md` §5).
         for (key, value) in crate::account::env_layer(
@@ -2315,6 +2351,141 @@ impl Service {
             .send(id.clone(), driver, spec, stored.vendor_session_id)
             .map_err(failed)?;
         Ok(Response::Ack)
+    }
+
+    /// Record a ticket and tell every window, so the card appears while the
+    /// agent that raised it is still working.
+    fn raise_ticket(
+        &mut self,
+        workspace: Option<WorkspaceId>,
+        from_session: Option<SessionId>,
+        title: &str,
+        summary: &str,
+        prompt: &str,
+    ) -> Result<Response, RpcError> {
+        let from = from_session
+            .as_ref()
+            .map(|id| self.session(id))
+            .transpose()?;
+        let workspace = match (workspace, &from) {
+            (Some(workspace), _) => workspace,
+            (None, Some(from)) => from.workspace.clone(),
+            (None, None) => {
+                return Err(RpcError::failed(
+                    "a ticket needs a workspace, or a session to take it from",
+                ));
+            }
+        };
+        self.worktree(&workspace)?;
+        let ticket = crate::tickets::raise(
+            &self.conn(),
+            crate::tickets::NewTicket {
+                workspace: &workspace,
+                from_session: from_session.as_ref(),
+                title,
+                summary,
+                prompt,
+            },
+            now(),
+        )
+        .map_err(failed)?;
+        self.events.emit(DaemonEvent::TicketsChanged { workspace });
+        Ok(Response::Ticket { ticket })
+    }
+
+    /// Start a session from an open ticket.
+    ///
+    /// The agent is the raising session's unless one is named, so a ticket a
+    /// Claude session raised is picked up by Claude; a ticket raised from the
+    /// command line falls back to the first agent on offer. With a branch the
+    /// work gets its own worktree, cut from the project's default branch.
+    fn start_ticket(
+        &mut self,
+        id: &str,
+        agent: Option<String>,
+        branch: Option<String>,
+    ) -> Result<Response, RpcError> {
+        let ticket = crate::tickets::get(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::not_found(format!("no ticket with id {id}")))?;
+        if ticket.state != ginka_protocol::model::TicketState::Open {
+            return Err(RpcError::failed(crate::tickets::already(&ticket)));
+        }
+        let from = ticket
+            .from_session
+            .as_ref()
+            .and_then(|from| session::get(&self.conn(), from).ok().flatten());
+        let agent = agent
+            .or_else(|| from.as_ref().map(|from| from.agent.clone()))
+            .or_else(|| self.drivers.ids().first().map(|id| id.to_string()))
+            .ok_or_else(|| RpcError::failed("no agent is available to start the ticket"))?;
+        let workspace = match branch.filter(|branch| !branch.trim().is_empty()) {
+            None => ticket.workspace.clone(),
+            Some(branch) => {
+                let project = self.worktree(&ticket.workspace)?.project;
+                match self.handle(Request::CreateWorkspace {
+                    project,
+                    branch,
+                    base: None,
+                })? {
+                    Response::Workspace { workspace } => workspace.worktree.workspace_id(),
+                    other => {
+                        return Err(RpcError::failed(format!("unexpected answer {other:?}")));
+                    }
+                }
+            }
+        };
+        let access_mode = from
+            .as_ref()
+            .map(|from| from.access_mode)
+            .unwrap_or_default();
+        let Response::Session { session } = self.start_session(
+            workspace,
+            &agent,
+            ticket.prompt.clone(),
+            None,
+            None,
+            None,
+            None,
+            access_mode,
+            None,
+        )?
+        else {
+            return Err(RpcError::failed("the session did not start"));
+        };
+        crate::tickets::close(
+            &self.conn(),
+            id,
+            ginka_protocol::model::TicketState::Started,
+            Some(&session.id),
+            now(),
+        )
+        .map_err(failed)?;
+        self.events.emit(DaemonEvent::TicketsChanged {
+            workspace: ticket.workspace,
+        });
+        Ok(Response::Session { session })
+    }
+
+    /// Send one session's words to another, saying who they are from and how
+    /// to answer: an agent that receives an unsigned prompt takes it for the
+    /// reader's and has no way to reply.
+    fn message_session(
+        &mut self,
+        from: &SessionId,
+        to: &SessionId,
+        text: &str,
+    ) -> Result<Response, RpcError> {
+        if from == to {
+            return Err(RpcError::failed("a session cannot message itself"));
+        }
+        let sender = self.session(from)?;
+        self.session(to)?;
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(RpcError::failed("the message is empty"));
+        }
+        self.send_message(to, framed_message(&sender, text))
     }
 
     /// Send the front of an idle session's queue, the way a follow-up is sent.
@@ -2350,7 +2521,7 @@ impl Service {
             .with_reasoning_effort(stored.reasoning_effort.clone())
             .with_service_tier(stored.service_tier.clone())
             .with_access_mode(stored.access_mode)
-            .with_mcp_servers(self.mcp_servers(&worktree.path));
+            .with_mcp_servers(self.mcp_servers(&worktree.path, id));
         for (key, value) in crate::account::env_layer(
             &self.settings,
             &self.paths,
@@ -2769,6 +2940,19 @@ pub struct PullRequestPlan {
     pub root: std::path::PathBuf,
     /// Every workspace in the project and the branch it is on now.
     pub branches: Vec<(WorkspaceId, String)>,
+}
+
+/// What another session's message looks like to the one receiving it: who
+/// sent it, and the tool that answers it, above the words themselves.
+pub fn framed_message(sender: &Session, text: &str) -> String {
+    let title = sender.title.as_deref().unwrap_or("untitled");
+    format!(
+        "[Message from Ginka session {id} ({agent}, \"{title}\") in workspace {workspace}. \
+         To reply, call ginka_session_send with session \"{id}\".]\n\n{text}",
+        id = sender.id,
+        agent = sender.agent,
+        workspace = sender.workspace,
+    )
 }
 
 /// A conversation's title, from the prompt that opened it.

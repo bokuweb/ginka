@@ -425,6 +425,48 @@ pub enum Request {
     /// Forget a note.
     RemoveNote { id: String },
 
+    /// Raise a ticket: work noticed in passing, handed to the reader as a
+    /// card they can start in its own session. `workspace` defaults to the
+    /// raising session's; one of the two is needed.
+    RaiseTicket {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+        #[serde(default)]
+        from_session: Option<SessionId>,
+        title: String,
+        #[serde(default)]
+        summary: String,
+        prompt: String,
+    },
+    /// Tickets, newest first: a workspace's, or every one. Open ones only
+    /// unless `all`.
+    ListTickets {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+        #[serde(default)]
+        all: bool,
+    },
+    /// Start a session from an open ticket, with its prompt. In the ticket's
+    /// workspace, or in a new worktree on `branch` in the same project.
+    /// `agent` defaults to the raising session's agent.
+    StartTicket {
+        ticket: String,
+        #[serde(default)]
+        agent: Option<String>,
+        #[serde(default)]
+        branch: Option<String>,
+    },
+    /// Decide against an open ticket.
+    DismissTicket { ticket: String },
+    /// Send a follow-up from one session to another. The receiver is told
+    /// who sent it and how to answer, which is what makes it a conversation
+    /// between agents rather than an anonymous prompt.
+    MessageSession {
+        from: SessionId,
+        to: SessionId,
+        text: String,
+    },
+
     /// Saved commands and prompts: a project's own and the global ones, or
     /// only the global ones when `project` is absent. By name.
     ListQuickCommands {
@@ -929,6 +971,12 @@ pub enum Response {
     },
     CronRuns {
         runs: Vec<crate::model::CronRun>,
+    },
+    Tickets {
+        tickets: Vec<crate::model::Ticket>,
+    },
+    Ticket {
+        ticket: crate::model::Ticket,
     },
     QuickCommands {
         commands: Vec<crate::model::QuickCommand>,
