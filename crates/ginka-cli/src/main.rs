@@ -73,6 +73,11 @@ enum Command {
         /// The file to store.
         path: PathBuf,
     },
+    /// Read a stored image as a data URL after the daemon verifies its format.
+    AttachmentImage {
+        /// The reference printed by `ginka attach`.
+        reference: String,
+    },
     /// List a workspace's files, best matches first.
     Files {
         /// The workspace id, as shown by `workspace list`.
@@ -1356,6 +1361,7 @@ fn request_for(command: Command) -> Result<Request> {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             }
         }
+        Command::AttachmentImage { reference } => Request::ReadAttachmentImage { reference },
         Command::Files {
             workspace,
             query,
@@ -2192,6 +2198,11 @@ fn print(response: Response, patch: bool) {
         // The reference and nothing else, so it can be interpolated straight
         // into the next command.
         Response::Attachment { attachment } => println!("{}", attachment.reference),
+        Response::AttachmentImage { image } => {
+            if let Some(image) = image {
+                println!("data:{};base64,{}", image.media_type, image.data_base64);
+            }
+        }
         // A terminal is opened by a window, which is where it is typed into;
         // printing the id is all a script can do with one.
         // The file as it is: a viewer prints what is in it, and anything

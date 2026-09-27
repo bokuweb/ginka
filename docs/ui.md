@@ -451,6 +451,11 @@ the centre at 720 px has its title, comma-separated tags and markdown, with *Edi
 segments and a two-step delete. Typing saves after a 600 ms pause; there is no
 save button. The daemon keeps them (`ginka notes`, MCP); each tag edit saves
 with the note and an omitted tag list on other clients retains the existing tags.
+*Insert image* chooses a local PNG, JPEG, GIF or WebP up to 4 MiB, stores it as a
+daemon attachment and inserts its reference at the cursor. Preview resolves
+those references through the daemon and renders only verified image bytes;
+other Markdown image destinations remain inert. The image is available after
+reopening the note, including from a client on another machine.
 
 ### 3.7 Settings
 

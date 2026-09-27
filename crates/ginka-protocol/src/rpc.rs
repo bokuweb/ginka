@@ -655,6 +655,9 @@ pub enum Request {
     /// writes them once and every later mention is the reference it answers
     /// with (`docs/roadmap.md` §3.3 N6).
     UploadAttachment { name: String, data_base64: String },
+    /// Read a daemon-owned attachment as a bounded, signature-checked image.
+    /// Returns no image for missing, unsafe, oversized or non-image references.
+    ReadAttachmentImage { reference: String },
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint { checkpoint: CheckpointId },
 
@@ -956,6 +959,10 @@ pub enum Response {
     },
     Attachment {
         attachment: Attachment,
+    },
+    /// A previewable attachment, or no image if it cannot be safely displayed.
+    AttachmentImage {
+        image: Option<crate::model::FileImage>,
     },
     Draft {
         text: String,

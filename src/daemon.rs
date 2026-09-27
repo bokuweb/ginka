@@ -266,6 +266,20 @@ impl DaemonLink {
         }
     }
 
+    /// Read a daemon-owned image for a note preview, without exposing its path.
+    pub async fn attachment_image(
+        &self,
+        reference: String,
+    ) -> Result<Option<ginka_protocol::model::FileImage>, String> {
+        match self
+            .ask_result(Request::ReadAttachmentImage { reference })
+            .await?
+        {
+            Response::AttachmentImage { image } => Ok(image),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Start an agent in a workspace, and return the session it created.
     pub async fn start_session(&self, launch: SessionLaunch) -> Option<Session> {
         match self

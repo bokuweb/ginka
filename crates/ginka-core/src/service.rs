@@ -1690,6 +1690,19 @@ impl Service {
                     },
                 })
             }
+            Request::ReadAttachmentImage { reference } => {
+                let store = crate::attachment::AttachmentStore::new(self.paths.attachments());
+                let image = store
+                    .path_of(&reference)
+                    .and_then(|path| std::fs::symlink_metadata(path).ok())
+                    .filter(|metadata| {
+                        metadata.file_type().is_file()
+                            && metadata.len() <= crate::files::IMAGE_PREVIEW_LIMIT as u64
+                    })
+                    .and_then(|_| store.read(&reference).ok().flatten())
+                    .and_then(|bytes| crate::files::preview_image(&bytes));
+                Ok(Response::AttachmentImage { image })
+            }
 
             Request::OpenTerminal {
                 workspace,

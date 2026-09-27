@@ -1293,6 +1293,21 @@ notes.body:
 notes.edit:
   en: Edit
   ja: 編集
+notes.image.choose:
+  en: Choose an image for this note
+  ja: ノートに挿入する画像を選択
+notes.image.insert:
+  en: Insert image
+  ja: 画像を挿入
+notes.image.error:
+  en: Could not insert image
+  ja: 画像を挿入できませんでした
+notes.image.too_large:
+  en: Image exceeds the preview limit
+  ja: 画像がプレビューの上限を超えています
+notes.image.unsupported:
+  en: Unsupported image format
+  ja: 対応していない画像形式です
 notes.empty:
   en: No notes yet.
   ja: ノートはまだありません。

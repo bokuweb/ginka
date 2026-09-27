@@ -17,7 +17,9 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, h_flex, v_flex};
+use gpui_component::{Disableable, Icon, h_flex, v_flex};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,6 +55,12 @@ pub struct NotesView {
     pending: Option<(String, String, String)>,
     /// Whether the editor is open: on a note, or on a new one.
     composing: bool,
+    /// Verified images are cached by daemon reference across note switches.
+    images: HashMap<String, String>,
+    images_loading: HashSet<String>,
+    image_busy: bool,
+    image_error: Option<String>,
+    image_context: u64,
 }
 
 impl NotesView {
@@ -111,6 +119,11 @@ impl NotesView {
             loading: false,
             pending: None,
             composing: false,
+            images: HashMap::new(),
+            images_loading: HashSet::new(),
+            image_busy: false,
+            image_error: None,
+            image_context: 0,
         }
     }
 
@@ -141,6 +154,11 @@ impl NotesView {
     }
 
     fn open(&mut self, note: Option<&Note>, cx: &mut Context<Self>) {
+        self.image_context = self.image_context.wrapping_add(1);
+        self.image_error = None;
+        if let Some(note) = note {
+            self.load_images(&note.body, cx);
+        }
         self.editing = note.map(|note| note.id.clone());
         self.pending = Some(match note {
             Some(note) => (note.title.clone(), note.body.clone(), note.tags.join(", ")),
@@ -150,6 +168,115 @@ impl NotesView {
         self.removing = false;
         self.composing = true;
         cx.notify();
+    }
+
+    fn load_images(&mut self, body: &str, cx: &mut Context<Self>) {
+        for reference in ginka_ui::notes::image_references(body) {
+            if self.images.contains_key(&reference)
+                || !self.images_loading.insert(reference.clone())
+            {
+                continue;
+            }
+            let link = self.link.clone();
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_spawn({
+                        let reference = reference.clone();
+                        async move { link.attachment_image(reference).await }
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.images_loading.remove(&reference);
+                    if let Ok(Some(image)) = loaded {
+                        this.images.insert(
+                            reference,
+                            format!("data:{};base64,{}", image.media_type, image.data_base64),
+                        );
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn choose_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_busy {
+            return;
+        }
+        let context = self.image_context;
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(rust_i18n::t!("notes.image.choose").to_string().into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(path) = paths.into_iter().next() {
+                this.update(cx, |this, cx| {
+                    if this.image_context == context {
+                        this.insert_image(path, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn insert_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.image_busy {
+            return;
+        }
+        self.image_busy = true;
+        self.image_error = None;
+        let context = self.image_context;
+        let link = self.link.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let uploaded = cx
+                .background_spawn(async move {
+                    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+                    if metadata.len() > ginka_core::files::IMAGE_PREVIEW_LIMIT as u64 {
+                        return Err(rust_i18n::t!("notes.image.too_large").to_string());
+                    }
+                    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                    if ginka_core::files::preview_image(&bytes).is_none() {
+                        return Err(rust_i18n::t!("notes.image.unsupported").to_string());
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "image".to_string());
+                    let attachment = link.upload_attachment(name.clone(), bytes).await?;
+                    Ok::<_, String>((attachment.reference, name))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.image_busy = false;
+                match uploaded {
+                    Ok((reference, name)) if this.image_context == context => {
+                        let alt = name.replace(['[', ']', '\n', '\r'], "_");
+                        this.preview = false;
+                        this.body.update(cx, |body, cx| {
+                            body.insert(format!("\n![{alt}]({reference})\n"), window, cx)
+                        });
+                        // Programmatic insertion is silent to InputEvent::Change.
+                        this.edited(cx);
+                    }
+                    Ok(_) => {}
+                    Err(error) if this.image_context == context => this.image_error = Some(error),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The reader typed: write it once they pause.
@@ -212,6 +339,8 @@ impl NotesView {
     fn remove(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.editing.clone() else {
             // A new note nobody wrote anything in: closing it is removing it.
+            self.image_context = self.image_context.wrapping_add(1);
+            self.image_error = None;
             self.composing = false;
             self.pending = Some((String::new(), String::new(), String::new()));
             cx.notify();
@@ -224,6 +353,8 @@ impl NotesView {
         }
         let link = self.link.clone();
         self.notes.retain(|note| note.id != id);
+        self.image_context = self.image_context.wrapping_add(1);
+        self.image_error = None;
         self.editing = None;
         self.pending = Some((String::new(), String::new(), String::new()));
         self.removing = false;
@@ -542,9 +673,20 @@ impl NotesView {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.preview = true;
+                                        let body = this.body.read(cx).value().to_string();
+                                        this.load_images(&body, cx);
                                         cx.notify();
                                     },
                                 )),
+                            ),
+                    )
+                    .child(
+                        Button::new("note-insert-image")
+                            .ghost()
+                            .disabled(self.image_busy)
+                            .label(rust_i18n::t!("notes.image.insert").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.choose_image(window, cx)),
                             ),
                     )
                     .child(
@@ -593,14 +735,25 @@ impl NotesView {
                                     .child(Input::new(&self.title).appearance(false)),
                             )
                             .child(Input::new(&self.tags))
+                            .when_some(self.image_error.clone(), |this, error| {
+                                this.child(div().text_color(tokens.colors().status_error).child(
+                                    format!("{}: {error}", rust_i18n::t!("notes.image.error")),
+                                ))
+                            })
                             .child(if preview {
                                 div()
                                     .text_size(px(14.))
                                     .line_height(px(22.4))
                                     .text_color(tokens.colors().text_primary)
                                     .child(
-                                        TextView::markdown("note-markdown", body_text)
-                                            .selectable(true),
+                                        TextView::markdown(
+                                            "note-markdown",
+                                            ginka_ui::notes::markdown_with_images(
+                                                &body_text,
+                                                &self.images,
+                                            ),
+                                        )
+                                        .selectable(true),
                                     )
                                     .into_any_element()
                             } else {

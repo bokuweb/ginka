@@ -140,6 +140,8 @@ cargo run -p ginka-cli -- pull <workspace>                        # clean fast-f
 cargo run -p ginka-cli -- pr <workspace> [--draft]                # push and open a PR with gh
 cargo run -p ginka-cli -- changes <workspace> --commit <id>       # what one commit did
 cargo run -p ginka-cli -- notes list [--project <p>]              # and add|show|edit|remove
+cargo run -p ginka-cli -- attach <path>                            # store an image for a note
+cargo run -p ginka-cli -- attachment-image <reference>             # read its verified data URL
 cargo run -p ginka-cli -- history <workspace>                     # bounded recent commits
 cargo run -p ginka-cli -- stage-hunk <workspace> <path> '<header>' # exact partial stage
 cargo run -p ginka-cli -- revert-hunk <workspace> <path> '<header>' # exact partial discard

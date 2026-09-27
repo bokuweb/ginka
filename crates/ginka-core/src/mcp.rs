@@ -465,6 +465,27 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_attachment_upload",
+            description: "Store an attachment on the daemon and return its reference. Notes can use image references in Markdown.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "data_base64": {"type": "string"},
+                },
+                "required": ["name", "data_base64"],
+            }),
+        },
+        Tool {
+            name: "ginka_attachment_image",
+            description: "Read a stored attachment as an image after the daemon verifies its size and format.",
+            schema: json!({
+                "type": "object",
+                "properties": {"reference": {"type": "string"}},
+                "required": ["reference"],
+            }),
+        },
+        Tool {
             name: "ginka_stage_hunk",
             description: "Stage or unstage one exact hunk from the current diff. Stale hunk headers are refused.",
             schema: json!({
@@ -1041,6 +1062,13 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 })
                 .transpose()?,
         },
+        "ginka_attachment_upload" => Request::UploadAttachment {
+            name: text("name")?,
+            data_base64: text("data_base64")?,
+        },
+        "ginka_attachment_image" => Request::ReadAttachmentImage {
+            reference: text("reference")?,
+        },
         "ginka_stage_hunk" => Request::StageHunk {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
@@ -1299,6 +1327,8 @@ mod tests {
                 "prefix": "attempt",
                 "agents": ["claude", "codex:gpt-5"],
                 "name": "release-notes",
+                "reference": "ginka-attachment:chart.png",
+                "data_base64": "aGVsbG8=",
                 "enabled": false,
                 "label": "Work",
                 "schedule": "@daily",
@@ -1309,6 +1339,28 @@ mod tests {
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));
         }
+    }
+
+    #[test]
+    fn attachment_tools_use_the_same_requests_as_the_window() {
+        assert!(matches!(
+            request_for(
+                "ginka_attachment_upload",
+                &json!({"name": "chart.png", "data_base64": "aGVsbG8="})
+            )
+            .unwrap(),
+            Request::UploadAttachment { name, data_base64 }
+                if name == "chart.png" && data_base64 == "aGVsbG8="
+        ));
+        assert!(matches!(
+            request_for(
+                "ginka_attachment_image",
+                &json!({"reference": "ginka-attachment:chart.png"})
+            )
+            .unwrap(),
+            Request::ReadAttachmentImage { reference }
+                if reference == "ginka-attachment:chart.png"
+        ));
     }
 
     #[test]

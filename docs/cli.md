@@ -100,6 +100,13 @@ Store a file the daemon keeps, and print the reference a message refers to it by
 
 `ginka attach <PATH>`
 
+## `ginka attachment-image`
+
+Read a stored image by reference as a verified data URL. An unknown reference,
+an unsupported format, or an image above the preview size limit prints nothing.
+
+`ginka attachment-image <REFERENCE>`
+
 ## `ginka files`
 
 List a workspace's files, best matches first

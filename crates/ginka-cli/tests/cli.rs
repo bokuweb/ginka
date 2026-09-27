@@ -130,6 +130,21 @@ fn doctor_reports_where_state_lives_without_starting_a_daemon() {
 }
 
 #[test]
+fn stored_images_can_be_read_through_the_cli() {
+    let home = Home::new();
+    let path = home.work.path().join("diagram.bin");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").unwrap();
+
+    let reference = home.ok(&["attach", path.to_str().unwrap()]);
+    let image = home.ok(&["attachment-image", reference.trim()]);
+    assert!(image.starts_with("data:image/png;base64,"), "{image}");
+    assert_eq!(
+        home.ok(&["attachment-image", "ginka-attachment:missing"]),
+        ""
+    );
+}
+
+#[test]
 fn the_first_command_starts_a_daemon_and_the_next_one_reuses_it() {
     let home = Home::new();
     home.ok(&["project", "list"]);
