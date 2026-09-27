@@ -20,7 +20,7 @@ exist yet are marked as such.
 3. Check the tree is green: `cargo fmt --check`, `cargo clippy` with and
    without `--features github`, `cargo test --workspace`.
 4. Tag the commit `vX.Y.Z` and push the tag.
-5. Build the artifacts *(not automated yet)*:
+5. Build the local artifacts:
    - macOS: `scripts/package-macos --universal` builds `Ginka.app` — the
      window as its executable, `ginka` and `ginka-daemon` beside it (N16) —
      and `Ginka-<version>.dmg`. Set `GINKA_SIGN_IDENTITY` to a Developer ID
@@ -39,6 +39,13 @@ exist yet are marked as such.
 6. Publish the signed appcast that every platform's updater reads (N15)
    *(not built yet)*.
 7. Publish the GitHub release with the changelog section as its notes.
+   Publishing a release whose tag matches the root package version runs
+   `.github/workflows/release.yml`. It builds the universal macOS app, signs
+   it with Developer ID, notarizes and staples the DMG, then uploads
+   `Ginka-<version>.dmg` as a workflow artifact. Configure Actions secrets
+   `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+   and `APPLE_APP_SPECIFIC_PASSWORD`; a local `notarytool` keychain profile
+   is not available on the runner.
 
 A nightly channel from `main` will use the same steps with a
 `-nightly.<date>` version and its own appcast.
