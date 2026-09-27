@@ -23,8 +23,9 @@ exist yet are marked as such.
 5. Build the local artifacts:
    - macOS: `scripts/package-macos --universal` builds `Ginka.app` — the
      window as its executable, `ginka` and `ginka-daemon` beside it (N16) —
-     and `Ginka-<version>.dmg`. Set `GINKA_SIGN_IDENTITY` to a Developer ID
-     certificate to sign with the hardened runtime (ad hoc otherwise) and
+     and `Ginka-<version>.zip`, `Ginka-<version>.dmg`, and `SHA256SUMS`.
+     Set `GINKA_SIGN_IDENTITY` to a Developer ID certificate to sign with the
+     hardened runtime (ad hoc otherwise) and
      `GINKA_NOTARY_PROFILE` to a `notarytool` keychain profile to notarize
      and staple. CI checks the bundle with stand-in binaries
      (`scripts/test-package-macos`). The app has no icon yet, and the
@@ -41,9 +42,9 @@ exist yet are marked as such.
 7. Publish the GitHub release with the changelog section as its notes.
    Publishing a release whose tag matches the root package version runs
    `.github/workflows/release.yml`. It builds the universal macOS app, signs
-   it with Developer ID, notarizes and staples the DMG, then uploads
-   `Ginka-<version>.dmg` as a workflow artifact. Configure Actions secrets
-   `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
+   it with Developer ID, notarizes and staples the app and DMG, then uploads
+   the ZIP, DMG, and SHA256SUMS as workflow artifacts. Configure Actions
+   secrets `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
    and `APPLE_APP_SPECIFIC_PASSWORD`; a local `notarytool` keychain profile
    is not available on the runner.
 

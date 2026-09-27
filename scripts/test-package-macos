@@ -1,7 +1,6 @@
 #!/bin/sh
-# Pack stand-in binaries into Ginka.app and a .dmg, and check the bundle:
-# where each binary landed, what Info.plist says, that the signature holds,
-# and that the image is one hdiutil reads. macOS only.
+# Pack stand-in binaries into Ginka.app, a ZIP, and a .dmg; check the bundle,
+# archive checksums, signatures, and that hdiutil can read the image. macOS only.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -15,6 +14,10 @@ for binary in ginka ginka-helper ginka-cli ginka-daemon; do
 done
 
 image=$(sh "$root/scripts/package-macos" --bin-dir "$work/built" --out-dir "$work/out" --version 9.9.9)
+mkdir -p "$work/unzipped"
+ditto -x -k "$work/out/Ginka-9.9.9.zip" "$work/unzipped"
+codesign --verify --strict "$work/unzipped/Ginka.app"
+(cd "$work/out" && shasum -a 256 -c SHA256SUMS) >/dev/null
 # The .app as it is inside the image.
 mount=$(mktemp -d)
 hdiutil attach -quiet -nobrowse -readonly -mountpoint "$mount" "$image"
