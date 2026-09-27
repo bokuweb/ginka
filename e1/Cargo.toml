@@ -1,0 +1,23 @@
+[package]
+name = "e1"
+version.workspace = true
+edition.workspace = true
+description = "A native GitHub client, built to stand alone and to be embedded in Ginka"
+publish.workspace = true
+
+[dependencies]
+e1-github.workspace = true
+e1-ui.workspace = true
+e1-views.workspace = true
+anyhow.workspace = true
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-component.workspace = true
+rust-i18n.workspace = true
+tracing.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+e1-updater-macos.workspace = true
+
+[lints]
+workspace = true

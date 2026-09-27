@@ -407,10 +407,11 @@ The diff list separates worktree-only changes from staged changes. The same path
 
 ### 3.5 Inbox
 
-Built with `--features github`: the e1 GitHub client, mounted as pieces rather
-than as its window. A 360 px list column — the place's header, the
-connections (GitHub, and *Add connection*, which says GitHub is the one there
-is), section chips (Inbox, My PRs, Reviews, Assigned) and e1's list — then e1's
+Built with `--features github` from the local `e1-views` workspace crate:
+the e1 GitHub client is mounted as pieces rather than as its window. A 360 px
+list column — the place's header, the connections (GitHub, and *Add
+connection*, which says GitHub is the one there is), section chips (Inbox,
+My PRs, Reviews, Assigned) and e1's list — then e1's
 detail in the centre and its *Ask* pane at the far right while open. e1's own
 navigation, window controls and palette stay behind. The rail shows a dot
 beside *Inbox* while anything is unread, known only once the client has been

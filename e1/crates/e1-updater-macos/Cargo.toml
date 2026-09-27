@@ -1,0 +1,16 @@
+[package]
+name = "e1-updater-macos"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "The standalone macOS application's narrow bridge to Sparkle"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+objc2 = "0.6"
+
+# Sparkle exposes Objective-C APIs and is loaded dynamically from the app
+# bundle. Keep the exception here so every crate embeddable by Ginka remains
+# under the workspace-wide unsafe-code denial.
+[lints.rust]
+unsafe_code = "allow"

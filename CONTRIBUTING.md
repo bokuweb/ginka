@@ -13,9 +13,8 @@ where the work is, and [`docs/ui.md`](docs/ui.md) for anything that renders.
 - `cargo run` starts the window, which starts a daemon when there is none.
   `cargo run -p ginka-cli -- <command>` is the CLI; `GINKA_HOME=<dir>` points
   both at a throwaway state directory instead of `~/.ginka`.
-- To build against a local checkout of the e1 GitHub client, use
-  `scripts/cargo-local-e1`, which passes the path patch on the command line
-  and leaves `Cargo.lock` as it was.
+- The e1 GitHub client lives in this workspace. `cargo run -p e1` starts its
+  standalone app; `cargo run --features github` mounts its views in Ginka.
 - On an external disk that is not APFS, macOS writes `._*` AppleDouble
   sidecars beside files. Delete them before building; `locales/._app.yml`
   alone breaks the translation macro.

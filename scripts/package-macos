@@ -52,7 +52,7 @@ if [ -z "$bin_dir" ]; then
     if $universal; then
         for target in aarch64-apple-darwin x86_64-apple-darwin; do
             # shellcheck disable=SC2086
-            (cd "$root" && cargo build --release --target "$target" $packages)
+            (cd "$root" && cargo build --release --features ginka/github --target "$target" $packages)
         done
         bin_dir="$root/target/universal-release"
         mkdir -p "$bin_dir"
@@ -64,7 +64,7 @@ if [ -z "$bin_dir" ]; then
         done
     else
         # shellcheck disable=SC2086
-        (cd "$root" && cargo build --release $packages)
+        (cd "$root" && cargo build --release --features ginka/github $packages)
         bin_dir="$root/target/release"
     fi
 fi

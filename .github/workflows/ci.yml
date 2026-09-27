@@ -54,6 +54,7 @@ jobs:
       # Scoped to our workspace: a global RUSTFLAGS=-D warnings would also
       # promote warnings in third-party crates and fail on their schedule.
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --features ginka/github -- -D warnings
       - run: cargo test --workspace
       - name: Package and install the Linux archive
         if: runner.os == 'Linux'

@@ -29,7 +29,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Agents run.** `claude` and `codex` drivers normalize their output into one `AgentEvent` stream; a turn is one process, follow-ups resume the vendor's session, and cancelling signals the process group. Transcripts are persisted as events.
 - **Claude delegated agents are visible.** One parent row owns a bounded trail of the child's reasoning, messages and tool lifecycle, and is settled if the turn ends before a final report. Codex child-thread reporting waits on its app-server transport rather than guessing at `exec --json` output.
 - **Checkpoints**: the worktree is snapshotted before the first turn and at every turn boundary, as a commit on no branch, and can be restored.
-- The shell renders a project rail, a session list that opens for the selected project, conversation and resizable right panel, with a composer, context bar, terminal dock and surface chooser. Right-panel and terminal visibility/dimensions plus the active surface persist per workspace; sidebar navigation remains global. Projects are added through one name-and-source-folder modal. Its palette and type bases share e1's token contract for future integration. **Not yet visually signed off** (see roadmap M0).
+- The shell renders a project rail, a session list that opens for the selected project, conversation and resizable right panel, with a composer, context bar, terminal dock and surface chooser. Right-panel and terminal visibility/dimensions plus the active surface persist per workspace; sidebar navigation remains global. Projects are added through one name-and-source-folder modal. Its palette and type bases share the local e1 workspace's token contract. **Not yet visually signed off** (see roadmap M0).
 
 - **The window is live.** The centre column draws the selected workspace's transcript, folded from the daemon's events and followed off its push stream; readable messages can be copied or quoted into the durable draft. Claude and Codex task updates share one bounded live Tasks card, remain searchable after persistence and carry into cross-provider handoffs. Each turn boundary retains the provider, model, reasoning effort and service tier that actually started it. The composer starts an agent or sends a follow-up, picks which agent and model answer, and stops one that is working. Follow-ups that cannot steer the live transport remain as stable queue rows above it; the window, CLI and MCP can edit, remove, reorder or attempt to send them now, and only dispatch makes them transcript history. Codex context readings expose an idle-only manual compaction control; unsupported providers never receive a guessed command. A turn boundary is where a checkpoint was taken, so it is also the way back to it.
 - **Scratch workspaces**: `ginka workspace scratch` makes somewhere to work with no repository at all, and a plain folder is its own workspace.
@@ -91,8 +91,8 @@ What is *not* there yet: dockable/persisted centre and right surfaces (M4), drag
 
 ```bash
 cargo run                                   # the desktop app
-cargo run --features github                 # …with the GitHub client as its Inbox
-scripts/cargo-local-e1 run --features github  # …against ../e1, leaving Cargo.lock as committed
+cargo run --features github                 # …with the local e1 GitHub client as its Inbox
+cargo run -p e1                            # the standalone e1 app
 cargo test --workspace                      # run this rather than `-p`: the CLI's
                                             # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings

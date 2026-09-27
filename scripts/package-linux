@@ -25,7 +25,7 @@ while [ $# -gt 0 ]; do
 done
 
 if [ -z "$bin_dir" ]; then
-    (cd "$root" && cargo build --release -p ginka -p ginka-cli -p ginka-daemon)
+    (cd "$root" && cargo build --release --features ginka/github -p ginka -p ginka-cli -p ginka-daemon)
     bin_dir="$root/target/release"
 fi
 
