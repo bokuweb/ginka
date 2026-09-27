@@ -310,6 +310,13 @@ pub trait AgentDriver: Send + Sync + 'static {
         None
     }
 
+    /// Who the login is, from the same answer as [`AgentDriver::parse_auth`].
+    /// Only what the vendor states: a driver whose CLI does not say returns
+    /// `None`, never a guess from a file it would have to reverse-engineer.
+    fn parse_identity(&self, _output: &str) -> Option<ginka_protocol::model::AccountIdentity> {
+        None
+    }
+
     /// The command that starts a fresh session.
     fn start_command(&self, spec: &SessionSpec) -> CommandSpec;
 

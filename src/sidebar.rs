@@ -54,6 +54,10 @@ pub enum SidebarEvent {
         workspace: WorkspaceId,
         pinned: bool,
     },
+    /// Hand the workspace's merge conflicts to an agent to resolve.
+    ResolveConflicts {
+        workspace: WorkspaceId,
+    },
     /// Move a workspace to the archived section, or bring it back.
     Archive {
         workspace: WorkspaceId,
@@ -84,6 +88,8 @@ pub enum SidebarEvent {
 pub enum Place {
     /// A project's sessions and conversations.
     Workspace,
+    /// Every agent across projects, by what it needs from the reader.
+    Board,
     /// Pull requests and issues, from the GitHub client.
     Inbox,
     /// The reader's markdown notes.
@@ -1047,7 +1053,18 @@ impl SessionSidebar {
                                         .child(summary)
                                 })),
                         )
-                    }),
+                    })
+                    .children(row.status_note.clone().map(|note| {
+                        // What the agent says it is doing, in its own words;
+                        // the title says what it was asked.
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .italic()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(note)
+                    })),
             )
     }
 
@@ -1151,9 +1168,30 @@ impl SessionSidebar {
             });
             cx.notify();
         }));
+        // Offered only on a row whose worktree is stopped on conflicts:
+        // that is the one state where "have the agent sort it out" is a
+        // single, well-defined request.
+        let resolve = row.status.conflict.then(|| {
+            let workspace = row.workspace.clone();
+            menu_item(
+                &tokens,
+                format!("resolve:{key}"),
+                Icon::empty().path(ginka_ui::assets::icon::GIT_MERGE),
+                rust_i18n::t!("sidebar.action.resolve").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_for = None;
+                this.select_workspace(&workspace, cx);
+                cx.emit(SidebarEvent::ResolveConflicts {
+                    workspace: workspace.clone(),
+                });
+                cx.notify();
+            }))
+        });
         floating_menu(
             &tokens,
-            rename.into_iter().chain([pin, archive]),
+            resolve.into_iter().chain(rename).chain([pin, archive]),
             cx.listener(|this, _, _, cx| {
                 this.menu_for = None;
                 cx.notify();
@@ -1499,6 +1537,13 @@ impl Render for SessionSidebar {
         } else {
             "Ctrl ,"
         };
+        let board = self.place_row(
+            Place::Board,
+            Icon::empty().path(ginka_ui::assets::icon::BOARD),
+            rust_i18n::t!("nav.board").to_string(),
+            None,
+            cx,
+        );
         let inbox = self.place_row(
             Place::Inbox,
             Icon::new(IconName::Inbox),
@@ -1561,7 +1606,15 @@ impl Render for SessionSidebar {
                     .border_r_1()
                     .border_color(border)
                     .child(self.header(cx))
-                    .child(v_flex().px_1p5().pb_1().gap_0p5().child(inbox).child(notes))
+                    .child(
+                        v_flex()
+                            .px_1p5()
+                            .pb_1()
+                            .gap_0p5()
+                            .child(board)
+                            .child(inbox)
+                            .child(notes),
+                    )
                     .child(
                         v_flex()
                             .flex_1()

@@ -77,8 +77,20 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../db/migrations/0017_browser_history.sql"),
     ),
     (
-        "0018_tickets",
-        include_str!("../../../db/migrations/0018_tickets.sql"),
+        "0018_workspace_status",
+        include_str!("../../../db/migrations/0018_workspace_status.sql"),
+    ),
+    (
+        "0019_cron_precheck",
+        include_str!("../../../db/migrations/0019_cron_precheck.sql"),
+    ),
+    (
+        "0020_queue_resume_at",
+        include_str!("../../../db/migrations/0020_queue_resume_at.sql"),
+    ),
+    (
+        "0021_tickets",
+        include_str!("../../../db/migrations/0021_tickets.sql"),
     ),
 ];
 

@@ -72,6 +72,19 @@ pub enum Request {
         workspace: WorkspaceId,
         archived: bool,
     },
+    /// Write the line of status shown under a workspace in the sidebar, or
+    /// clear it with `None` or a blank note.
+    ///
+    /// Meant for the agent working there: over MCP it names no workspace and
+    /// sends the directory it runs in as `path` instead, which the daemon
+    /// resolves to the worktree holding it. One of the two is required.
+    SetWorkspaceStatus {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+        #[serde(default)]
+        path: Option<std::path::PathBuf>,
+        note: Option<String>,
+    },
 
     /// Which agents this machine has, and whether they are usable.
     ///
@@ -331,10 +344,16 @@ pub enum Request {
     /// `all` stages everything first, including files git has never seen,
     /// which is what a review that just listed those files leads the user to
     /// expect.
+    ///
+    /// `amend` folds the work into the last commit instead, keeping its
+    /// message when `message` is empty; the daemon refuses it when that
+    /// commit is already on a remote.
     Commit {
         workspace: WorkspaceId,
         message: String,
         all: bool,
+        #[serde(default)]
+        amend: bool,
     },
     /// Merge a workspace's branch into another — fan-out's "merge the
     /// winner". `into` defaults to the branch the project's own checkout is
@@ -568,6 +587,18 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// Hand a worktree's conflicts — a merge, rebase or cherry-pick that
+    /// stopped on them — to an agent to resolve and finish: Orca's "Resolve
+    /// with AI". Refused when nothing is conflicted. Answers with the
+    /// conversation the request went to.
+    ResolveConflicts {
+        workspace: WorkspaceId,
+        /// Which agent resolves them. Omitted, the workspace's latest
+        /// conversation takes them as a follow-up (queued if it is working);
+        /// named, or with no conversation yet, a new one starts on it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// Leave a comment on a line of the diff.
     ///
     /// Orca's loop: marking the three places that are wrong is a better way to
@@ -688,12 +719,16 @@ pub enum Request {
         via: crate::model::CronVia,
         agent: Option<String>,
         body: String,
+        /// Run first on every scheduled firing; a failure skips the firing.
+        #[serde(default)]
+        precheck: Option<String>,
         enabled: bool,
     },
     /// Forget a scheduled job and its history.
     RemoveCronJob { id: i64 },
     /// Fire a job now, as its schedule would — including skipping it while
-    /// its previous run is still going.
+    /// its previous run is still going. Its precheck is not run: asking for
+    /// a run now is the answer the probe would have given.
     RunCronJob { id: i64 },
     /// A job's firings, most recent first.
     CronRuns { id: i64, limit: Option<u32> },
@@ -779,9 +814,14 @@ pub struct Attempt {
 /// One variant per shape rather than per request: several requests legitimately
 /// answer `Ack`, and a client that has to match on the request it sent to
 /// understand the reply is a client that cannot be written generically.
+///
+/// Variants differ widely in size and that is allowed: a response is built
+/// once, serialized and dropped, so boxing the large ones would cost every
+/// construction and match site for memory no one holds.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 pub enum Response {
     /// The request succeeded and there is nothing to return.
     Ack,
@@ -837,6 +877,10 @@ pub enum Response {
         /// Whether the queue is held: nothing dispatches until it is let go.
         #[serde(default)]
         paused: bool,
+        /// Unix seconds at which a hold a usage limit placed lets itself go;
+        /// absent for a hold a person placed, or none.
+        #[serde(default)]
+        resume_at: Option<i64>,
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,

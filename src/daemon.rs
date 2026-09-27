@@ -470,6 +470,7 @@ impl DaemonLink {
         workspace: &WorkspaceId,
         message: String,
         all: bool,
+        amend: bool,
     ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         match client
@@ -477,6 +478,7 @@ impl DaemonLink {
                 workspace: workspace.clone(),
                 message,
                 all,
+                amend,
             })
             .await
         {
@@ -951,7 +953,12 @@ impl DaemonLink {
     pub async fn queued_messages(
         &self,
         session: &SessionId,
-    ) -> (Vec<ginka_protocol::model::QueuedMessage>, bool, bool) {
+    ) -> (
+        Vec<ginka_protocol::model::QueuedMessage>,
+        bool,
+        bool,
+        Option<i64>,
+    ) {
         match self
             .ask_result(Request::QueuedMessages {
                 session: session.clone(),
@@ -962,8 +969,9 @@ impl DaemonLink {
                 messages,
                 can_send_now,
                 paused,
-            }) => (messages, can_send_now, paused),
-            _ => (Vec::new(), false, false),
+                resume_at,
+            }) => (messages, can_send_now, paused, resume_at),
+            _ => (Vec::new(), false, false, None),
         }
     }
 
@@ -1395,6 +1403,17 @@ impl DaemonLink {
         self.ask_result(Request::ArchiveWorkspace {
             workspace: workspace.clone(),
             archived,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Hand a workspace's conflicts to its latest conversation's agent, or
+    /// a new conversation when it has none.
+    pub async fn resolve_conflicts(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::ResolveConflicts {
+            workspace: workspace.clone(),
+            agent: None,
         })
         .await
         .map(|_| ())

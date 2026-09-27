@@ -797,6 +797,7 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
         workspace: id.clone(),
         message: "keep the good half".into(),
         all: false,
+        amend: false,
     }) {
         Response::Committed { commit } => assert!(!commit.is_empty()),
         other => panic!("expected a commit, got {other:?}"),
@@ -1545,6 +1546,7 @@ fn terminal_job(project: &ProjectName, schedule: &str, body: &str) -> Request {
         via: ginka_protocol::model::CronVia::Terminal,
         agent: None,
         body: body.into(),
+        precheck: None,
         enabled: true,
     }
 }
@@ -1568,6 +1570,7 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
             via: ginka_protocol::model::CronVia::Chat,
             agent: None,
             body: "review the diff".into(),
+            precheck: None,
             enabled: true,
         },
     ] {
@@ -1590,6 +1593,7 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
             via: ginka_protocol::model::CronVia::Terminal,
             agent: None,
             body: "true".into(),
+            precheck: None,
             enabled: false,
         },
     );
@@ -2179,4 +2183,97 @@ fn a_conversation_started_in_the_claude_cli_can_be_adopted_once() {
             })
             .is_err()
     );
+}
+
+#[test]
+fn an_agent_writes_its_status_from_inside_its_worktree() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "status".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let inside = workspace.worktree.path.join("src");
+    std::fs::create_dir_all(&inside).unwrap();
+
+    fixture.ask(Request::SetWorkspaceStatus {
+        workspace: None,
+        path: Some(inside),
+        note: Some("tests green, writing docs".into()),
+    });
+    let listed = match fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    let row = listed
+        .iter()
+        .find(|summary| summary.id() == workspace.id())
+        .unwrap();
+    assert_eq!(
+        row.status_note.as_ref().map(|note| note.text.as_str()),
+        Some("tests green, writing docs")
+    );
+    let main = listed
+        .iter()
+        .find(|summary| summary.id() != workspace.id())
+        .unwrap();
+    assert_eq!(
+        main.status_note, None,
+        "the project's own checkout holds the worktree directory, but the innermost worktree wins"
+    );
+
+    fixture.ask(Request::SetWorkspaceStatus {
+        workspace: Some(workspace.id()),
+        path: None,
+        note: None,
+    });
+    let cleared = match fixture.ask(Request::ListWorkspaces {
+        project: Some(project),
+    }) {
+        Response::Workspaces { workspaces } => workspaces,
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    assert!(cleared.iter().all(|summary| summary.status_note.is_none()));
+}
+
+#[test]
+fn a_failing_precheck_skips_the_firing_and_says_why() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let marker = fixture.repo().join(".cron-ran");
+    let mut request = terminal_job(&project, "* * * * *", "echo ran >> .cron-ran");
+    if let Request::SaveCronJob { precheck, .. } = &mut request {
+        *precheck = Some("test -f .go || { echo nothing new; exit 1; }".into());
+    }
+    let job = save_cron(&mut fixture, request);
+    assert_eq!(
+        job.precheck.as_deref(),
+        Some("test -f .go || { echo nothing new; exit 1; }")
+    );
+
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+    let runs = cron_runs(&mut fixture, job.id);
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].outcome, ginka_protocol::model::CronOutcome::Skipped);
+    assert_eq!(
+        runs[0].detail.as_deref(),
+        Some("precheck exited 1: nothing new")
+    );
+    assert!(!marker.exists(), "a skipped firing starts nothing");
+
+    std::fs::write(fixture.repo().join(".go"), "").unwrap();
+    let even_later = later + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(even_later), 1);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !marker.is_file() {
+        assert!(std::time::Instant::now() < deadline, "the job never ran");
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }

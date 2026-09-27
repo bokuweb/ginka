@@ -31,6 +31,7 @@ use gpui_component::input::{
     Editor, EditorState, InputEvent, InputState, Replace, Search, TabSize, Textarea, TextareaState,
 };
 use gpui_component::text::TextView;
+use gpui_component::tooltip::Tooltip;
 use gpui_component::{Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex};
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -229,6 +230,9 @@ pub enum SurfaceEvent {
         /// What happens once the commit is in: nothing, a push, or a push
         /// and a pull request — MonoCode's commit menu.
         then: CommitThen,
+        /// Fold into the last commit rather than adding one; an empty
+        /// `message` then keeps that commit's.
+        amend: bool,
     },
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
@@ -2055,6 +2059,9 @@ impl SurfacePanel {
         let tokens = Tokens::global(cx).clone();
         let open = self.message.clone();
         let generating = self.generating;
+        // Offered only while the last commit is still this clone's alone:
+        // the daemon refuses the rest, and a button that always fails is noise.
+        let amendable = self.history.first().is_some_and(|head| !head.published);
 
         v_flex()
             .w_full()
@@ -2103,7 +2110,7 @@ impl SurfacePanel {
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().accent))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.commit(CommitThen::Nothing, cx)
+                                        this.commit(CommitThen::Nothing, false, cx)
                                     }))
                                     .child(rust_i18n::t!("surface.git.commit").to_string()),
                             )
@@ -2118,7 +2125,7 @@ impl SurfacePanel {
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().row_hover()))
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.commit(CommitThen::Push, cx)
+                                        this.commit(CommitThen::Push, false, cx)
                                     }))
                                     .child(rust_i18n::t!("surface.git.commit_push").to_string()),
                             )
@@ -2135,10 +2142,33 @@ impl SurfacePanel {
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.opening_pull_request = true;
                                         this.pull_request = None;
-                                        this.commit(CommitThen::PullRequest, cx)
+                                        this.commit(CommitThen::PullRequest, false, cx)
                                     }))
                                     .child(rust_i18n::t!("surface.git.commit_pr").to_string()),
                             )
+                            .when(amendable, |row| {
+                                row.child(
+                                    div()
+                                        .id("commit-amend")
+                                        .px_2p5()
+                                        .py_1()
+                                        .rounded(px(tokens.radius.row))
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .cursor_pointer()
+                                        .hover(|this| this.bg(tokens.colors().row_hover()))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new(
+                                                rust_i18n::t!("surface.git.amend_hint").to_string(),
+                                            )
+                                            .build(window, cx)
+                                        })
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.commit(CommitThen::Nothing, true, cx)
+                                        }))
+                                        .child(rust_i18n::t!("surface.git.amend").to_string()),
+                                )
+                            })
                             .child(
                                 div()
                                     .id("generate-commit")
@@ -2216,12 +2246,12 @@ impl SurfacePanel {
     }
 
     /// Hand the message to the shell, which is the one holding the daemon.
-    fn commit(&mut self, then: CommitThen, cx: &mut Context<Self>) {
+    fn commit(&mut self, then: CommitThen, amend: bool, cx: &mut Context<Self>) {
         let Some(state) = self.message.as_ref() else {
             return;
         };
         let message = state.read(cx).value().trim().to_string();
-        if message.is_empty() {
+        if message.is_empty() && !amend {
             self.complaint = Some(
                 rust_i18n::t!("surface.git.needs_message")
                     .to_string()
@@ -2234,6 +2264,7 @@ impl SurfacePanel {
             message,
             only_staged: self.only_staged(),
             then,
+            amend,
         });
     }
 

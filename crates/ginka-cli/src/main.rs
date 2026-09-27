@@ -220,6 +220,16 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Hand a stopped merge, rebase or cherry-pick's conflicts to an agent
+    /// to resolve and finish.
+    Resolve {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Start a new conversation on this agent instead of following up in
+        /// the workspace's latest one.
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Commit a workspace's work.
     Commit {
         /// The workspace id, as shown by `workspace list`.
@@ -229,6 +239,11 @@ enum Command {
         /// Commit only what is already staged.
         #[arg(long)]
         staged: bool,
+        /// Fold the work into the last commit instead of making a new one.
+        /// Without a message the commit keeps its own. Refused once that
+        /// commit has been pushed.
+        #[arg(long, conflicts_with = "generate")]
+        amend: bool,
         /// Have an agent write the message on its cheap tier, print it, and
         /// commit with it.
         #[arg(long)]
@@ -411,6 +426,14 @@ enum WorkspaceCommand {
         #[arg(long)]
         restore: bool,
     },
+    /// Write the line of status the sidebar shows under a workspace, or
+    /// clear it by giving none.
+    Status {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// One line: what the work is doing, or waiting on.
+        note: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -545,6 +568,10 @@ enum CronCommand {
         /// A workspace id; the project's own checkout when omitted.
         #[arg(long)]
         workspace: Option<String>,
+        /// A shell command run in the checkout before each scheduled firing;
+        /// a non-zero exit skips that firing (`gh pr list … | grep -q .`).
+        #[arg(long)]
+        precheck: Option<String>,
         /// Save it switched off.
         #[arg(long)]
         disabled: bool,
@@ -1108,6 +1135,13 @@ fn request_for(command: Command) -> Result<Request> {
                 archived: !restore,
             }
         }
+        Command::Workspace(WorkspaceCommand::Status { workspace, note }) => {
+            Request::SetWorkspaceStatus {
+                workspace: Some(WorkspaceId(workspace)),
+                path: None,
+                note,
+            }
+        }
 
         Command::Agents => Request::ListAgents,
         Command::Slack(SlackCommand::Status) | Command::Slack(SlackCommand::Bindings) => {
@@ -1331,6 +1365,10 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             header,
         },
+        Command::Resolve { workspace, agent } => Request::ResolveConflicts {
+            workspace: WorkspaceId(workspace),
+            agent,
+        },
         Command::Revert { workspace, path } => Request::RevertFile {
             workspace: WorkspaceId(workspace),
             path,
@@ -1339,11 +1377,17 @@ fn request_for(command: Command) -> Result<Request> {
             workspace,
             message,
             staged,
+            amend,
             ..
         } => Request::Commit {
             workspace: WorkspaceId(workspace),
-            message: message.context("a commit needs a message, or --generate")?,
+            message: match message {
+                Some(message) => message,
+                None if amend => String::new(),
+                None => anyhow::bail!("a commit needs a message, or --generate"),
+            },
             all: !staged,
+            amend,
         },
         Command::Push { workspace } => Request::Push {
             workspace: WorkspaceId(workspace),
@@ -1445,6 +1489,7 @@ fn request_for(command: Command) -> Result<Request> {
             prompt,
             agent,
             workspace,
+            precheck,
             disabled,
         }) => {
             let (via, body) = match (shell, prompt) {
@@ -1461,6 +1506,7 @@ fn request_for(command: Command) -> Result<Request> {
                 via,
                 agent,
                 body,
+                precheck,
                 enabled: !disabled,
             }
         }
@@ -1755,6 +1801,7 @@ fn commit_generated(
                 workspace,
                 message,
                 all: !staged,
+                amend: false,
             })
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))
@@ -2182,10 +2229,26 @@ fn print(response: Response, patch: bool) {
             }
         }
         Response::QueuedMessages {
-            messages, paused, ..
+            messages,
+            paused,
+            resume_at,
+            ..
         } => {
-            if paused && !messages.is_empty() {
-                println!("{}", rust_i18n::t!("cli.queue.paused"));
+            match resume_at.and_then(|at| chrono::DateTime::from_timestamp(at, 0)) {
+                Some(at) => println!(
+                    "{}",
+                    rust_i18n::t!(
+                        "cli.queue.resumes_at",
+                        at = at
+                            .with_timezone(&chrono::Local)
+                            .format("%Y-%m-%d %H:%M")
+                            .to_string()
+                    )
+                ),
+                None if paused && !messages.is_empty() => {
+                    println!("{}", rust_i18n::t!("cli.queue.paused"))
+                }
+                None => {}
             }
             for (index, message) in messages.into_iter().enumerate() {
                 println!(

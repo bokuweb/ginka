@@ -1137,6 +1137,9 @@ cli.search.empty:
 cli.notes.empty:
   en: "No notes yet."
   ja: "ノートはまだありません。"
+cli.queue.resumes_at:
+  en: "(held by a usage limit — resumes by itself at %{at}; `queue-pause <session>` keeps it held)"
+  ja: "（利用上限で保留中 — %{at} に自動で再開します。`queue-pause <session>` で保留のままにできます）"
 cli.tickets.empty:
   en: "No open tickets."
   ja: "未着手のチケットはありません。"
@@ -1356,6 +1359,9 @@ composer.queue.interrupt_tooltip:
 composer.queue.held:
   en: Held
   ja: 保留中
+composer.queue.resumes_at:
+  en: "Usage limit — resumes at %{at}"
+  ja: "利用上限 — %{at} に自動再開"
 composer.queue.pause:
   en: Hold
   ja: 保留
@@ -1395,6 +1401,9 @@ sidebar.action.pin:
 sidebar.action.unpin:
   en: Unpin
   ja: ピンを外す
+sidebar.action.resolve:
+  en: Resolve conflicts with the agent
+  ja: コンフリクトをエージェントに解決させる
 sidebar.action.archive:
   en: Archive
   ja: アーカイブ
@@ -1428,6 +1437,12 @@ settings.on:
 settings.off:
   en: "Off"
   ja: オフ
+surface.git.amend:
+  en: Amend
+  ja: 直前のコミットに追加
+surface.git.amend_hint:
+  en: Fold this into the last commit, which has not been pushed. An empty message keeps its own.
+  ja: まだプッシュしていない直前のコミットにまとめます。メッセージが空ならそのコミットのものを使います。
 surface.git.commit_push:
   en: Commit & Push
   ja: コミットしてプッシュ
@@ -1530,3 +1545,27 @@ compare.idle:
 compare.no_answer:
   en: "No answer yet."
   ja: "まだ回答がありません。"
+nav.board:
+  en: Agents
+  ja: エージェント
+board.all_projects:
+  en: All projects
+  ja: すべてのプロジェクト
+board.needs_you:
+  en: Needs you
+  ja: 対応待ち
+board.working:
+  en: Working
+  ja: 作業中
+board.review:
+  en: To review
+  ja: レビュー待ち
+board.idle:
+  en: Idle
+  ja: 待機中
+board.empty:
+  en: Nothing here
+  ja: ありません
+board.conflicted:
+  en: Stopped on conflicts
+  ja: コンフリクトで停止中

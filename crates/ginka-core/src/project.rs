@@ -5,8 +5,9 @@
 //! rather than a domain copy and a wire copy that drift.
 
 use anyhow::Result;
+use ginka_protocol::model::StatusNote;
 use ginka_protocol::{ProjectName, WorkspaceId};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::path::PathBuf;
 
 pub use ginka_protocol::model::{Project, ProjectKind, Worktree};
@@ -161,6 +162,57 @@ pub fn set_archived(conn: &Connection, workspace: &WorkspaceId, archived: bool) 
     Ok(updated > 0)
 }
 
+/// Write, or with `None` clear, a workspace's status note. Returns whether a
+/// row was affected.
+///
+/// `text` is stored as [`StatusNote::normalize`] leaves it, so a blank note
+/// clears rather than showing an empty line.
+pub fn set_status_note(
+    conn: &Connection,
+    workspace: &WorkspaceId,
+    text: Option<&str>,
+    now: i64,
+) -> Result<bool> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    let text = text.and_then(StatusNote::normalize);
+    let at = text.as_ref().map(|_| now);
+    let updated = conn.execute(
+        "UPDATE worktrees SET status_note = ?1, status_note_at = ?2
+         WHERE project_name = ?3 AND name = ?4",
+        rusqlite::params![text, at, project.0, name],
+    )?;
+    Ok(updated > 0)
+}
+
+/// The status note on a workspace, if one is written.
+pub fn status_note(conn: &Connection, workspace: &WorkspaceId) -> Result<Option<StatusNote>> {
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(None);
+    };
+    let row = conn
+        .query_row(
+            "SELECT status_note, status_note_at FROM worktrees
+             WHERE project_name = ?1 AND name = ?2",
+            rusqlite::params![project.0, name],
+            |row| {
+                Ok((
+                    row.get::<_, Option<String>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                ))
+            },
+        )
+        .optional()?;
+    Ok(match row {
+        Some((Some(text), set_at)) => Some(StatusNote {
+            text,
+            set_at: set_at.unwrap_or_default(),
+        }),
+        _ => None,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -197,5 +249,35 @@ mod tests {
         let listed = list_projects(&conn).unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, PathBuf::from("/elsewhere/comet"));
+    }
+
+    #[test]
+    fn a_status_note_is_written_bounded_and_cleared_by_a_blank() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        conn.execute(
+            "INSERT INTO worktrees (project_name, name, branch, path) \
+             VALUES ('comet', 'bright-harbor', 'bright-harbor', '/tmp/wt')",
+            [],
+        )
+        .unwrap();
+        let workspace = WorkspaceId("comet/bright-harbor".into());
+        assert_eq!(status_note(&conn, &workspace).unwrap(), None);
+
+        assert!(set_status_note(&conn, &workspace, Some("  waiting on CI\nlog"), 50).unwrap());
+        assert_eq!(
+            status_note(&conn, &workspace).unwrap(),
+            Some(StatusNote {
+                text: "waiting on CI".into(),
+                set_at: 50
+            })
+        );
+
+        assert!(set_status_note(&conn, &workspace, Some("   "), 60).unwrap());
+        assert_eq!(status_note(&conn, &workspace).unwrap(), None);
+        assert!(
+            !set_status_note(&conn, &WorkspaceId("comet/gone".into()), Some("x"), 70).unwrap(),
+            "an unknown workspace is not silently accepted"
+        );
     }
 }
