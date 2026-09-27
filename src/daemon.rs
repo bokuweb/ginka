@@ -985,6 +985,24 @@ impl DaemonLink {
         .await;
     }
 
+    /// Send the fork's first message and surface a refusal to the caller.
+    pub async fn send_message_checked(
+        &self,
+        session: &SessionId,
+        text: String,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::SendMessage {
+                session: session.clone(),
+                text,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected send response: {other:?}")),
+        }
+    }
+
     /// Follow-ups waiting behind this session's active turn.
     pub async fn queued_messages(
         &self,

@@ -7937,7 +7937,7 @@ impl Shell {
 
     /// Copy the conversation through `after` onto another agent and show it.
     fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
-        self.fork_from_as(after, agent, false, cx);
+        self.fork_from_as(after, agent, ginka_ui::handoff::ForkAction::Continue, cx);
     }
 
     /// Whether a fan-out can start from here: a project to cut worktrees in,
@@ -8530,9 +8530,14 @@ impl Shell {
         )
     }
 
-    /// Fork here onto another agent; `review` hands the fork a request for
-    /// a second opinion on the work so far instead of leaving it to carry on.
-    fn fork_from_as(&mut self, after: u64, agent: String, review: bool, cx: &mut Context<Self>) {
+    /// Fork here onto another agent and optionally start its first turn.
+    fn fork_from_as(
+        &mut self,
+        after: u64,
+        agent: String,
+        action: ginka_ui::handoff::ForkAction,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
             return;
         };
@@ -8547,14 +8552,29 @@ impl Shell {
         cx.notify();
 
         let link = self.link.clone();
+        let prompt = action.prompt(&rust_i18n::locale());
         cx.spawn(async move |this, cx| {
             let requesting = link.clone();
-            let prompt = rust_i18n::t!("transcript.second_opinion.prompt").to_string();
             let result = cx
                 .background_spawn(async move {
-                    let fork = requesting.fork_session(&session, after, agent).await?;
-                    if review {
-                        requesting.send_message(&fork.id, prompt).await;
+                    let fork = requesting
+                        .fork_session(&session, after, agent)
+                        .await
+                        .map_err(|error| {
+                            rust_i18n::t!("transcript.fork.failed", error = error).to_string()
+                        })?;
+                    if let Some(prompt) = prompt {
+                        requesting
+                            .send_message_checked(&fork.id, prompt)
+                            .await
+                            .map_err(|error| {
+                                rust_i18n::t!(
+                                    "transcript.fork.send_failed",
+                                    session = fork.id.to_string(),
+                                    error = error
+                                )
+                                .to_string()
+                            })?;
                     }
                     Ok::<_, String>(fork)
                 })
@@ -8564,9 +8584,7 @@ impl Shell {
                     this.update(cx, |this, cx| {
                         if let Some(menu) = this.forking.as_mut() {
                             menu.busy = false;
-                            menu.error = Some(
-                                rust_i18n::t!("transcript.fork.failed", error = error).to_string(),
-                            );
+                            menu.error = Some(error);
                         }
                         cx.notify();
                     })
@@ -8632,38 +8650,48 @@ impl Shell {
             .filter(|menu| menu.turn == turn && menu.seq == seq)
             .map(|menu| (true, menu.busy, menu.error.clone()))
             .unwrap_or((false, false, None));
-        // MonoCode's second opinion: the same fork, handed a request to review
-        // the work rather than to carry it on.
-        let review_buttons: Vec<AnyElement> = targets
-            .iter()
-            .map(|agent| {
+        let mut action_buttons: Vec<AnyElement> = Vec::new();
+        for agent in &targets {
+            for (action, button_id, label) in [
+                (
+                    ginka_ui::handoff::ForkAction::SecondOpinion,
+                    "review",
+                    "transcript.second_opinion",
+                ),
+                (
+                    ginka_ui::handoff::ForkAction::Plan,
+                    "plan",
+                    "transcript.plan",
+                ),
+                (
+                    ginka_ui::handoff::ForkAction::Build,
+                    "build",
+                    "transcript.build",
+                ),
+            ] {
                 let id = agent.id.clone();
-                Button::new(SharedString::from(format!("review-{turn}-{id}")))
-                    // The toolkit draws a button's hover itself; a second
-                    // one trips its debug assertion.
-                    .ghost()
-                    .disabled(fork_busy)
-                    .px(px(7.))
-                    .py(px(2.))
-                    .rounded(px(tokens.radius.row))
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .when(!fork_busy, |this| {
-                        this.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.fork_from_as(seq, id.clone(), true, cx)
-                            }))
-                    })
-                    .child(
-                        rust_i18n::t!(
-                            "transcript.second_opinion",
-                            agent = agent.display_name.clone()
-                        )
-                        .to_string(),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+                action_buttons.push(
+                    Button::new(SharedString::from(format!("{button_id}-{turn}-{id}")))
+                        // The toolkit draws a button's hover itself; a second
+                        // one trips its debug assertion.
+                        .ghost()
+                        .disabled(fork_busy)
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(tokens.radius.row))
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .when(!fork_busy, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.fork_from_as(seq, id.clone(), action, cx)
+                                }))
+                        })
+                        .child(rust_i18n::t!(label, agent = agent.display_name.clone()).to_string())
+                        .into_any_element(),
+                );
+            }
+        }
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
@@ -8824,7 +8852,9 @@ impl Shell {
                             }),
                     )
                     .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
-                    .children(fork_open.then(|| h_flex().gap_1().children(review_buttons)))
+                    .children(
+                        fork_open.then(|| h_flex().gap_1().flex_wrap().children(action_buttons)),
+                    )
                     .children(fork_error.map(|error| {
                         div()
                             .text_xs()

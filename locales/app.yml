@@ -1533,6 +1533,21 @@ transcript.second_opinion:
 transcript.second_opinion.prompt:
   en: "Give a second opinion on the work above. Review what was asked, what was done and the changes in this worktree: what is wrong, risky or missing, and what you would do differently. Do not change any files."
   ja: "ここまでの作業についてセカンドオピニオンをください。依頼内容・実施内容・このワークツリーの変更を確認し、誤り・リスク・不足と、自分ならどうするかを挙げてください。ファイルは変更しないでください。"
+transcript.plan:
+  en: "Plan with %{agent}"
+  ja: "%{agent} で計画"
+transcript.plan.prompt:
+  en: "Read the conversation and the current worktree, then write a concrete implementation plan for the requested work. Include the files to change, important edge cases and tests. Do not change any files."
+  ja: "会話と現在のワークツリーを確認し、依頼された作業の具体的な実装計画を作成してください。変更するファイル、重要な境界条件、テストを含めてください。ファイルは変更しないでください。"
+transcript.build:
+  en: "Build with %{agent}"
+  ja: "%{agent} で実装"
+transcript.build.prompt:
+  en: "Implement the latest implementation plan in the conversation, adapting it to the current worktree where needed. Run relevant tests and report what changed and any remaining limitations."
+  ja: "会話内の最新の実装計画を現在のワークツリーに合わせて実装してください。関連するテストを実行し、変更内容と残る制約を報告してください。"
+transcript.fork.send_failed:
+  en: "Created fork %{session}, but could not start its first turn: %{error}"
+  ja: "フォーク %{session} を作成しましたが、最初のターンを開始できませんでした: %{error}"
 composer.fan_out:
   en: "Try several ways"
   ja: "複数の方法で試す"

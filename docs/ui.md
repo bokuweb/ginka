@@ -372,6 +372,11 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Second opinion** — each completed turn's footer offers every other ready
   agent as *Second opinion: <agent>*, which forks the conversation there with
   a request to review the work and change nothing.
+- **Plan and build handoff** — the same footer can fork onto another ready
+  agent with *Plan with <agent>* or *Build with <agent>*. Planning asks for a
+  concrete plan without editing files. Building asks the recipient to carry
+  out the latest plan in the copied conversation and run relevant tests. Each
+  action starts the fork's first turn and opens it as a conversation tab.
 - **Split diff** — each changes section has *Unified | Split*. Split puts the
   old file on the left and the new on the right, a removed line beside the
   line that replaced it; either side is clickable for a review comment.
