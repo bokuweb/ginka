@@ -1410,7 +1410,7 @@ impl CronOutcome {
     }
 }
 
-/// A prompt or command run on a cron schedule, in one workspace — or in the
+/// A prompt or command run on a schedule, in one workspace — or in the
 /// project's own checkout when `workspace` is absent.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1419,8 +1419,8 @@ pub struct CronJob {
     pub project: ProjectName,
     pub workspace: Option<WorkspaceId>,
     pub name: String,
-    /// A five-field cron expression or `@daily` and the like, read on the
-    /// daemon host's clock.
+    /// Five cron fields or `@daily` and the like on the daemon host's clock,
+    /// or `@once <RFC3339 timestamp with time zone>` for one firing.
     pub schedule: String,
     pub via: CronVia,
     /// The driver a chat job starts. Absent for a terminal job.

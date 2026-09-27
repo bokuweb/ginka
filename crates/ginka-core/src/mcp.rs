@@ -573,7 +573,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_cron_save",
-            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal) on a cron expression — five fields or @daily and the like, on the daemon host's clock. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
+            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal). Use five cron fields or @daily and the like on the daemon host's clock, or `@once <RFC3339 timestamp with time zone>` for one firing. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
             schema: json!({
                 "type": "object",
                 "properties": {

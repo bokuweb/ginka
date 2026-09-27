@@ -1768,6 +1768,49 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
 }
 
 #[test]
+fn a_one_time_job_requires_a_future_zoned_timestamp_and_fires_only_once() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+    for schedule in [
+        "@once".to_string(),
+        "@once tomorrow".to_string(),
+        "@once 2026-10-01T09:00:00".to_string(),
+        format!("@once {}", past.to_rfc3339()),
+    ] {
+        assert!(
+            fixture
+                .service
+                .handle(terminal_job(&project, &schedule, "true"))
+                .is_err(),
+            "{schedule:?} was accepted"
+        );
+    }
+
+    let at = chrono::Utc::now() + chrono::Duration::minutes(2);
+    let schedule = format!("@once {}", at.to_rfc3339());
+    let job = save_cron(&mut fixture, terminal_job(&project, &schedule, "true"));
+    assert_eq!(job.next_run_at, Some(at.timestamp()));
+    assert_eq!(fixture.service.run_due_cron(chrono::Local::now()), 0);
+
+    let due = at.with_timezone(&chrono::Local) + chrono::Duration::seconds(1);
+    assert_eq!(fixture.service.run_due_cron(due), 1);
+    let claimed = match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => jobs.into_iter().next().unwrap(),
+        other => panic!("expected jobs, got {other:?}"),
+    };
+    assert!(!claimed.enabled, "claiming a one-time job disables it");
+    assert_eq!(claimed.next_run_at, None);
+    assert_eq!(
+        fixture
+            .service
+            .run_due_cron(due + chrono::Duration::days(1)),
+        0
+    );
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
+}
+
+#[test]
 fn a_due_terminal_job_runs_once_and_is_skipped_while_it_is_still_running() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

@@ -5694,12 +5694,14 @@ impl Shell {
             .map(|job| {
                 let id = job.id;
                 let toggled = job.clone();
+                let done = ginka_core::cron::is_completed(job);
                 let when = match job.next_run_at {
                     Some(at) => rust_i18n::t!(
                         "settings.cron.next",
                         when = ginka_ui::workspace::relative_age(at, now)
                     )
                     .to_string(),
+                    None if done => rust_i18n::t!("settings.cron.done").to_string(),
                     None => rust_i18n::t!("settings.cron.off").to_string(),
                 };
                 let last = job
@@ -5746,19 +5748,21 @@ impl Shell {
                             .text_color(tokens.colors().text_muted)
                             .child(format!("{when}  {last}")),
                     )
-                    .child(
-                        Button::new(SharedString::from(format!("cron-toggle-{id}")))
-                            .ghost()
-                            .compact()
-                            .label(if job.enabled {
-                                rust_i18n::t!("settings.cron.pause").to_string()
-                            } else {
-                                rust_i18n::t!("settings.cron.resume").to_string()
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_cron_job(toggled.clone(), window, cx)
-                            })),
-                    )
+                    .when(!done, |this| {
+                        this.child(
+                            Button::new(SharedString::from(format!("cron-toggle-{id}")))
+                                .ghost()
+                                .compact()
+                                .label(if job.enabled {
+                                    rust_i18n::t!("settings.cron.pause").to_string()
+                                } else {
+                                    rust_i18n::t!("settings.cron.resume").to_string()
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.toggle_cron_job(toggled.clone(), window, cx)
+                                })),
+                        )
+                    })
                     .child(
                         Button::new(SharedString::from(format!("cron-run-{id}")))
                             .ghost()

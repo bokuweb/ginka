@@ -382,9 +382,11 @@ Dragging across the terminal grid selects exact character cells in either direct
   line that replaced it; either side is clickable for a review comment.
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
   (in place), *Move up* and *Move down*.
-- **Scheduled jobs** — Settings lists the project's cron jobs: schedule,
-  name, what runs, when it next fires and how it last went, with *Pause*,
-  *Run now* and *Remove*, and a form for a new one (command or prompt).
+- **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
+  schedule, name, what runs, when it next fires and how it last went, with
+  *Pause*, *Run now* and *Remove*, and a form for a new one (command or prompt).
+  The schedule field accepts `@once` followed by a zoned RFC 3339 timestamp;
+  a claimed one-time job shows *done* and cannot be resumed.
 - **Reports** — a cost priced from the public rate table rather than by the
   vendor reads `≈$1.25`; sessions nothing could price are counted as
   `N unpriced` and left out of the total; a footnote says when the table

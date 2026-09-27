@@ -776,6 +776,36 @@ fn a_scheduled_job_is_added_listed_run_and_removed() {
 }
 
 #[test]
+fn a_one_time_job_can_be_added_with_at_but_not_two_schedules() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let added = home.ok(&[
+        "cron", "add", "comet", "reminder", "--at", &at, "--shell", "true",
+    ]);
+    assert!(!added.is_empty());
+    let listed = home.ok(&["cron", "list"]);
+    assert!(listed.contains(&format!("@once {at}")), "{listed}");
+
+    let both = home.run(&[
+        "cron",
+        "add",
+        "comet",
+        "invalid",
+        "--at",
+        &at,
+        "--schedule",
+        "@daily",
+        "--shell",
+        "true",
+    ]);
+    assert!(!both.status.success());
+    let neither = home.run(&["cron", "add", "comet", "invalid", "--shell", "true"]);
+    assert!(!neither.status.success());
+}
+
+#[test]
 fn a_project_can_be_labelled_and_moved() {
     let home = Home::new();
     for name in ["comet", "aurora"] {

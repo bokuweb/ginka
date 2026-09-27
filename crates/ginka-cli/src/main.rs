@@ -586,8 +586,15 @@ enum CronCommand {
         project: String,
         name: String,
         /// Five cron fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`.
-        #[arg(long)]
-        schedule: String,
+        #[arg(long, conflicts_with = "at", required_unless_present = "at")]
+        schedule: Option<String>,
+        /// Run once at an RFC 3339 timestamp with a time zone.
+        #[arg(
+            long,
+            conflicts_with = "schedule",
+            required_unless_present = "schedule"
+        )]
+        at: Option<String>,
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
         #[arg(long, requires = "agent")]
@@ -1602,6 +1609,7 @@ fn request_for(command: Command) -> Result<Request> {
             project,
             name,
             schedule,
+            at,
             shell,
             prompt,
             agent,
@@ -1619,7 +1627,10 @@ fn request_for(command: Command) -> Result<Request> {
                 project: ProjectName(project),
                 workspace: workspace.map(WorkspaceId),
                 name,
-                schedule,
+                schedule: at.map_or_else(
+                    || schedule.expect("clap requires --schedule or --at"),
+                    |at| format!("@once {at}"),
+                ),
                 via,
                 agent,
                 body,

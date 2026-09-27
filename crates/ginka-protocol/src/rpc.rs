@@ -743,8 +743,8 @@ pub enum Request {
     /// Scheduled jobs: a project's, or every project's.
     ListCronJobs { project: Option<ProjectName> },
     /// Save a scheduled job: new without an `id`, a replacement with one.
-    /// The schedule is checked here, so a job that can never fire is refused
-    /// when it is written rather than found silent later.
+    /// The cron expression or `@once` timestamp is checked here, so a job
+    /// that can never fire is refused when written rather than found silent.
     SaveCronJob {
         id: Option<i64>,
         project: ProjectName,
