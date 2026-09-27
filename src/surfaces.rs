@@ -2104,9 +2104,9 @@ impl SurfacePanel {
                                     .px_2p5()
                                     .py_1()
                                     .rounded(px(tokens.radius.row))
-                                    .bg(tokens.colors().accent.opacity(0.9))
+                                    .bg(tokens.colors().primary_fill())
                                     .text_xs()
-                                    .text_color(tokens.colors().bg_window)
+                                    .text_color(tokens.colors().bg_window_opaque())
                                     .cursor_pointer()
                                     .hover(|this| this.bg(tokens.colors().accent))
                                     .on_click(cx.listener(|this, _, _, cx| {
