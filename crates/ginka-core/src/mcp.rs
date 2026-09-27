@@ -735,6 +735,20 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_skill_create",
+            description: "Create a shared agent skill in the user's or a registered project's .agents/skills directory.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "body": {"type": "string", "description": "Markdown instructions"},
+                    "project": {"type": "string"},
+                },
+                "required": ["name", "description", "body"],
+            }),
+        },
+        Tool {
             name: "ginka_checkpoints",
             description: "The points a workspace can be rewound to.",
             schema: json!({
@@ -1152,6 +1166,12 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 .ok_or_else(|| anyhow!("{tool} needs `enabled`"))?,
             project: maybe("project").map(ProjectName),
         },
+        "ginka_skill_create" => Request::CreateSkill {
+            name: text("name")?,
+            description: text("description")?,
+            body: text("body")?,
+            project: maybe("project").map(ProjectName),
+        },
         "ginka_checkpoints" => Request::ListCheckpoints {
             workspace: WorkspaceId(text("workspace")?),
         },
@@ -1268,7 +1288,8 @@ mod tests {
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
-                "body": "# Release\nsteps",
+            "body": "# Release\nsteps",
+            "description": "Write release notes",
                 "query": "needle",
                 "path": "src/main.rs",
                 "header": "@@ -1 +1 @@",

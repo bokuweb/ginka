@@ -1548,6 +1548,22 @@ impl Service {
                 crate::skills::set_enabled(skill, enabled).map_err(failed)?;
                 Ok(Response::Ack)
             }
+            Request::CreateSkill {
+                name,
+                description,
+                body,
+                project,
+            } => {
+                let base = match project {
+                    Some(project) => self.project(&project)?.path,
+                    None => self
+                        .home()
+                        .ok_or_else(|| RpcError::not_found("home directory unavailable"))?,
+                };
+                crate::skills::create(&base.join(".agents/skills"), &name, &description, &body)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::ComposerDraft { workspace } => Ok(Response::Draft {
                 text: session::draft(&self.conn(), &workspace).map_err(failed)?,
             }),

@@ -978,6 +978,18 @@ impl Shell {
                     this.write_terminal_selection(selection.clone(), window, cx)
                 }
                 crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
+                crate::surfaces::SurfaceEvent::CreateSkill {
+                    name,
+                    description,
+                    body,
+                    project,
+                } => this.create_skill(
+                    name.clone(),
+                    description.clone(),
+                    body.clone(),
+                    *project,
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
                     this.set_skill_enabled(name.clone(), *enabled, cx)
                 }
@@ -3543,14 +3555,55 @@ impl Shell {
 
     /// Read the selected project's skills plus the user's own from the daemon.
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
-        self.surfaces
-            .update(cx, |surfaces, cx| surfaces.begin_skill_refresh(cx));
+        let project_available = self.target_project.is_some();
+        self.surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_skill_project_available(project_available, cx);
+            surfaces.begin_skill_refresh(cx);
+        });
         let link = self.link.clone();
         let project = self.target_project.clone();
         let expected_project = project.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { link.skills(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Create a shared skill and refresh its grouped library.
+    fn create_skill(
+        &mut self,
+        name: String,
+        description: String,
+        body: String,
+        project: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.begin_skill_create(cx));
+        let link = self.link.clone();
+        let selected_project = self.target_project.clone();
+        let expected_project = selected_project.clone();
+        let create_project = if project {
+            selected_project.clone()
+        } else {
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.create_skill(name, description, body, create_project)
+                        .await?;
+                    link.skills(selected_project.clone()).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.target_project == expected_project {

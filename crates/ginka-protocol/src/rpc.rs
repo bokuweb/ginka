@@ -584,6 +584,18 @@ pub enum Request {
         #[serde(default)]
         project: Option<ProjectName>,
     },
+    /// Create a skill in the shared user or registered project's `.agents/skills` root.
+    CreateSkill {
+        /// Lowercase slug for the new skill directory.
+        name: String,
+        /// One-line front matter summary.
+        description: String,
+        /// Markdown instructions written to `SKILL.md`.
+        body: String,
+        /// Registered project, or the user's home when omitted.
+        #[serde(default)]
+        project: Option<ProjectName>,
+    },
     /// What the user was in the middle of typing in a workspace.
     ComposerDraft { workspace: WorkspaceId },
     /// Keep what they are typing. An empty draft forgets it.
@@ -1211,6 +1223,12 @@ mod tests {
                 name: "docx".into(),
                 enabled: false,
                 project: None,
+            },
+            Request::CreateSkill {
+                name: "release-notes".into(),
+                description: "Write release notes".into(),
+                body: "Summarize changes.".into(),
+                project: Some(ProjectName("comet".into())),
             },
         ];
         for request in cases {

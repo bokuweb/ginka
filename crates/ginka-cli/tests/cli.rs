@@ -158,6 +158,42 @@ fn a_project_registered_through_the_daemon_is_visible_to_the_next_command() {
 }
 
 #[test]
+fn a_project_skill_created_by_the_cli_is_visible_and_cannot_be_overwritten() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let args = [
+        "skills",
+        "create",
+        "review-guide",
+        "--description",
+        "Review a change",
+        "--body",
+        "Check the tests.",
+        "--project",
+        "comet",
+    ];
+    home.ok(&args);
+    let path = repository.join(".agents/skills/review-guide/SKILL.md");
+    assert!(path.is_file());
+    assert!(
+        home.ok(&["skills", "list", "--project", "comet"])
+            .contains("review-guide")
+    );
+
+    let duplicate = home.run(&args);
+    assert!(!duplicate.status.success());
+    assert_eq!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .matches("Check the tests.")
+            .count(),
+        1
+    );
+}
+
+#[test]
 fn an_account_selection_is_persistent_and_visible() {
     let home = Home::new();
     home.ok(&[

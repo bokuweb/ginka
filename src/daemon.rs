@@ -361,6 +361,28 @@ impl DaemonLink {
         }
     }
 
+    /// Create one shared skill under the user or a registered project.
+    pub async fn create_skill(
+        &self,
+        name: String,
+        description: String,
+        body: String,
+        project: Option<ProjectName>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::CreateSkill {
+                name,
+                description,
+                body,
+                project,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Add a login for a provider: a directory for its CLI to sign into.
     ///
     /// The daemon's refusal — a bad id, a name already taken — comes back as

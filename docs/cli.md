@@ -135,6 +135,7 @@ Save an existing UTF-8 workspace file without overwriting a newer edit
 The skills the agents can load, and whether each is on
 
 - `ginka skills list` — List every skill, grouped across the places it was installed
+- `ginka skills create` — Create a shared skill in the user root, or a registered project's root with `--project` (`ginka skills create <NAME> --description <TEXT> --body <MARKDOWN> [--project <PROJECT>]`)
 - `ginka skills enable` — Turn every copy of a skill on (`ginka skills enable <NAME>`)
 - `ginka skills disable` — Hide a skill from every agent by renaming its SKILL.md. Nothing is deleted (`ginka skills disable <NAME>`)
 - `ginka skills install` — Install the skills that teach an agent to drive Ginka into Claude Code's and Codex's skills directories

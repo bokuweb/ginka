@@ -179,6 +179,14 @@ pub struct SurfacePanel {
     skills: Option<Vec<Skill>>,
     /// What is typed into the skills finder.
     skill_finder: Entity<InputState>,
+    /// Fields for creating one shared skill.
+    skill_name: Entity<InputState>,
+    skill_description: Entity<InputState>,
+    skill_body: Entity<TextareaState>,
+    /// Whether the new skill belongs to the selected project.
+    skill_create_project: bool,
+    skill_project_available: bool,
+    skill_creating: bool,
     /// Scope and enablement facets composed with the skills finder.
     skill_filter: SkillFilter,
     /// The daemon stopped its bounded skill scan before visiting every root.
@@ -290,6 +298,17 @@ pub enum SurfaceEvent {
     AddBrowserContext(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
+    /// Create a shared skill in the user or selected project scope.
+    CreateSkill {
+        /// Lowercase slug for the new skill directory.
+        name: String,
+        /// One-line front matter summary.
+        description: String,
+        /// Markdown instructions for the agent.
+        body: String,
+        /// Whether the selected project owns the skill.
+        project: bool,
+    },
     /// Set every installed copy of a grouped skill to one state.
     SetSkillEnabled { name: String, enabled: bool },
     /// Put a file into the next commit, or take it back out.
@@ -327,6 +346,18 @@ impl SurfacePanel {
         let skill_finder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.skills.search").to_string())
+        });
+        let skill_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.name").to_string())
+        });
+        let skill_description = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.description").to_string())
+        });
+        let skill_body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.body").to_string())
         });
         cx.subscribe(&skill_finder, |this, finder, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -402,6 +433,12 @@ impl SurfacePanel {
             usage: None,
             skills: None,
             skill_finder,
+            skill_name,
+            skill_description,
+            skill_body,
+            skill_create_project: false,
+            skill_project_available: false,
+            skill_creating: false,
             skill_filter: SkillFilter::default(),
             skills_truncated: false,
             skill_changing: None,
@@ -416,6 +453,7 @@ impl SurfacePanel {
         cx: &mut Context<Self>,
     ) {
         self.skill_changing = None;
+        self.skill_creating = false;
         match result {
             Ok((skills, truncated)) => {
                 self.skills = Some(skills);
@@ -434,9 +472,26 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Mark a new skill busy while the daemon writes and re-reads it.
+    pub fn begin_skill_create(&mut self, cx: &mut Context<Self>) {
+        self.skill_creating = true;
+        self.skill_error = None;
+        cx.notify();
+    }
+
+    /// Keep the project scope available only while a project is selected.
+    pub fn set_skill_project_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        self.skill_project_available = available;
+        if !available {
+            self.skill_create_project = false;
+        }
+        cx.notify();
+    }
+
     /// Clear a previous project's library while a new daemon read begins.
     pub fn begin_skill_refresh(&mut self, cx: &mut Context<Self>) {
         self.skills = None;
+        self.skill_creating = false;
         self.skill_changing = None;
         self.skill_error = None;
         cx.notify();
@@ -3047,20 +3102,6 @@ impl SurfacePanel {
                 .into_any_element();
         };
 
-        if skills.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.colors().text_muted)
-                        .child(rust_i18n::t!("surface.skills.empty").to_string()),
-                )
-                .into_any_element();
-        }
-
         let total = skills.len();
         let visible = ginka_ui::skills::filter_skills(&skills, &self.skill_filter)
             .into_iter()
@@ -3197,6 +3238,88 @@ impl SurfacePanel {
                     .gap_2()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(ginka_ui::field::input(&self.skill_name))
+                            .child(ginka_ui::field::input(&self.skill_description))
+                            .child(Textarea::new(&self.skill_body).h(px(80.)))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("skill-create-user")
+                                            .ghost()
+                                            .when(!self.skill_create_project, |this| {
+                                                this.bg(active_bg)
+                                            })
+                                            .child(format!(
+                                                "{}{}",
+                                                if self.skill_create_project {
+                                                    ""
+                                                } else {
+                                                    "✓ "
+                                                },
+                                                rust_i18n::t!("surface.skills.scope.user")
+                                            ))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.skill_create_project = false;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when(self.skill_project_available, |this| {
+                                        this.child(
+                                            Button::new("skill-create-project")
+                                                .ghost()
+                                                .when(self.skill_create_project, |this| {
+                                                    this.bg(active_bg)
+                                                })
+                                                .child(format!(
+                                                    "{}{}",
+                                                    if self.skill_create_project {
+                                                        "✓ "
+                                                    } else {
+                                                        ""
+                                                    },
+                                                    rust_i18n::t!("surface.skills.scope.project")
+                                                ))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.skill_create_project = true;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new("skill-create")
+                                            .disabled(self.skill_creating)
+                                            .child(
+                                                rust_i18n::t!("surface.skills.create.action")
+                                                    .to_string(),
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                cx.emit(SurfaceEvent::CreateSkill {
+                                                    name: this
+                                                        .skill_name
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    description: this
+                                                        .skill_description
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    body: this
+                                                        .skill_body
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    project: this.skill_create_project,
+                                                });
+                                            })),
+                                    ),
+                            ),
+                    )
                     .child(ginka_ui::field::input(&self.skill_finder))
                     .child(
                         h_flex()
@@ -3320,7 +3443,11 @@ impl SurfacePanel {
                             .py_6()
                             .text_sm()
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.skills.no_matches").to_string())
+                            .child(if total == 0 {
+                                rust_i18n::t!("surface.skills.empty").to_string()
+                            } else {
+                                rust_i18n::t!("surface.skills.no_matches").to_string()
+                            })
                     }))
                     .children(rows),
             )

@@ -1191,6 +1191,58 @@ fn a_projects_skills_are_listed_and_switched_off_without_being_deleted() {
 }
 
 #[test]
+fn creates_a_project_skill_and_rejects_a_duplicate() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let request = Request::CreateSkill {
+        name: "review-guide".into(),
+        description: "Review a proposed change".into(),
+        body: "# Review\nCheck the tests.".into(),
+        project: Some(project.clone()),
+    };
+    assert!(matches!(fixture.ask(request.clone()), Response::Ack));
+    let path = fixture.repo().join(".agents/skills/review-guide/SKILL.md");
+    assert!(path.is_file());
+    let listed = fixture.ask(Request::ListSkills {
+        project: Some(project),
+    });
+    let Response::Skills { skills, .. } = listed else {
+        panic!("expected skills");
+    };
+    assert!(skills.iter().any(|skill| skill.name == "review-guide"));
+    assert!(fixture.service.handle(request).is_err());
+    assert!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .contains("Check the tests.")
+    );
+}
+
+#[test]
+fn creates_a_user_skill_without_a_registered_project() {
+    let home = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::configured(|service| service.with_skills_home(home.path()));
+    assert!(matches!(
+        fixture.ask(Request::CreateSkill {
+            name: "daily-review".into(),
+            description: "Review daily changes".into(),
+            body: "Check each changed file.".into(),
+            project: None,
+        }),
+        Response::Ack
+    ));
+    assert!(
+        home.path()
+            .join(".agents/skills/daily-review/SKILL.md")
+            .is_file()
+    );
+    let Response::Skills { skills, .. } = fixture.ask(Request::ListSkills { project: None }) else {
+        panic!("expected skills");
+    };
+    assert!(skills.iter().any(|skill| skill.name == "daily-review"));
+}
+
+#[test]
 fn a_new_worktree_gets_what_the_project_said_it_needs() {
     // A fresh checkout has none of the files the repository deliberately does
     // not track, and an agent started there fails on its first command for a

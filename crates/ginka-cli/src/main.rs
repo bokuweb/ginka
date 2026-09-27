@@ -697,6 +697,19 @@ enum SkillsCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Create a shared skill under the user or a registered project.
+    Create {
+        name: String,
+        /// Short description shown in skill pickers.
+        #[arg(long)]
+        description: String,
+        /// Markdown instructions for the agent.
+        #[arg(long)]
+        body: String,
+        /// Create under this registered project instead of the user home.
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// Turn every copy of a skill on.
     Enable {
         name: String,
@@ -1242,6 +1255,17 @@ fn request_for(command: Command) -> Result<Request> {
             Request::InstallBundledSkills { force }
         }
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
+            project: project.map(ProjectName),
+        },
+        Command::Skills(SkillsCommand::Create {
+            name,
+            description,
+            body,
+            project,
+        }) => Request::CreateSkill {
+            name,
+            description,
+            body,
             project: project.map(ProjectName),
         },
         Command::Skills(SkillsCommand::Enable { name, project }) => Request::SetSkillEnabled {

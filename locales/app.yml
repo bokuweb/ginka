@@ -451,6 +451,18 @@ surface.skills.empty:
 surface.skills.search:
   en: Search skills, descriptions and paths
   ja: Skill、説明、パスを検索
+surface.skills.create.name:
+  en: Skill name (lowercase letters, numbers and hyphens)
+  ja: Skill名（英小文字・数字・ハイフン）
+surface.skills.create.description:
+  en: Short description
+  ja: 短い説明
+surface.skills.create.body:
+  en: Markdown instructions for the agent
+  ja: エージェント向けのMarkdown形式の指示
+surface.skills.create.action:
+  en: Create skill
+  ja: Skillを作成
 surface.skills.filter.all:
   en: All scopes
   ja: すべての範囲
