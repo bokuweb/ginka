@@ -429,6 +429,7 @@ version with the state directory. Opened from the rail or `⌘,`.
 | --- | --- |
 | Window shell, custom title bar | `gpui-component` `TitleBar` + `Root` |
 | Sidebar container, collapse | `gpui-component` `Sidebar` (see its `examples/sidebar`) |
+| Sidebar section headings | `bgpui-kit::section_label`, using Ginka's active theme tokens |
 | Session list | `gpui-component` virtualized `List` with a custom row delegate |
 | Right panel / terminal dock / splits | `gpui-component` **Dock** (`DockArea`, `Panel`, `TabPanel`, resizable + draggable tabs) |
 | Transcript markdown | `gpui-component` `Markdown` |

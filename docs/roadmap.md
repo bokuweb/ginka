@@ -622,6 +622,7 @@ Accessibility is a product requirement, not a pass at the end. GPUI exposes no s
 
 | Date | Decision | Rationale |
 | --- | --- | --- |
+| 2026-09-27 | Share sidebar section labels through `bgpui-kit` | The first reusable primitive takes the active Ginka tokens and leaves navigation, text and state in the app. Its Git revision is pinned so it resolves to the same `gpui-component` and GPUI graph. |
 | 2026-08-31 | Target Band's feature set, not a new product concept | A known-good spec removes product risk and lets the work be measured against something concrete. |
 | 2026-08-31 | Client–daemon split from M2, not later | Retrofitting a process boundary is far more expensive than starting with one, and it is what makes the CLI/MCP surface possible at all. |
 | 2026-08-31 | Worktree-per-workspace, workspace id derived from an immutable `name` | Band learned this the hard way; keying off the live branch breaks when an agent switches branches mid-task. |

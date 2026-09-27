@@ -519,14 +519,7 @@ impl SessionSidebar {
     /// A small muted label over a run of rows.
     fn section(&self, label: String, cx: &App) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx);
-        div()
-            .w_full()
-            .px_3()
-            .pt_3()
-            .pb_1()
-            .text_xs()
-            .text_color(tokens.colors().text_muted)
-            .child(label)
+        bgpui_kit::section_label(label, &tokens.as_shared())
     }
 
     /// The `Projects` label, with the way to add one beside it.
