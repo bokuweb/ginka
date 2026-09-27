@@ -1,0 +1,575 @@
+# Every user-visible string in e1, in both languages it ships with.
+#
+# `_version: 2` keeps the languages side by side so a missing translation is
+# visible in review rather than in a running window. Keys are namespaced by
+# the region of the UI they belong to.
+_version: 2
+
+app.name:
+  en: e1
+  ja: e1
+app.signed_out:
+  en: not signed in
+  ja: 未ログイン
+
+menu.check_for_updates:
+  en: Check for Updates…
+  ja: アップデートを確認…
+menu.services:
+  en: Services
+  ja: サービス
+menu.quit:
+  en: Quit e1
+  ja: e1 を終了
+
+sidebar.inbox:
+  en: Inbox
+  ja: 受信箱
+sidebar.my_pulls:
+  en: My pulls
+  ja: 自分のPR
+sidebar.reviews:
+  en: Reviews
+  ja: レビュー依頼
+sidebar.assigned:
+  en: Assigned
+  ja: 担当のIssue
+sidebar.projects:
+  en: Projects
+  ja: Projects
+sidebar.repositories:
+  en: Repositories
+  ja: リポジトリ
+sidebar.repositories.empty:
+  en: No repositories yet
+  ja: リポジトリはありません
+
+list.pulls:
+  en: Pull requests
+  ja: プルリクエスト
+list.issues:
+  en: Issues
+  ja: Issue
+list.open:
+  en: Open
+  ja: オープン
+list.closed:
+  en: Closed
+  ja: クローズ
+list.empty:
+  en: Nothing here
+  ja: 何もありません
+list.loading:
+  en: Loading…
+  ja: 読み込み中…
+list.pick:
+  en: Pick something on the left
+  ja: 左から選んでください
+list.comments:
+  en: "%{count} comments"
+  ja: "%{count} 件のコメント"
+list.refresh:
+  en: Refresh
+  ja: 更新
+list.projects.empty:
+  en: No projects yet
+  ja: Project はありません
+project.items:
+  en: "%{count} items"
+  ja: "%{count} 件"
+project.items.empty:
+  en: This project has no items
+  ja: この Project に項目はありません
+project.item.draft:
+  en: Draft issue
+  ja: Draft Issue
+project.item.unavailable:
+  en: Unavailable item
+  ja: 閲覧できない項目
+project.item.no_status:
+  en: No status
+  ja: ステータスなし
+project.roadmap.no_dates:
+  en: This roadmap has no date or iteration values to place yet
+  ja: この Roadmap には表示できる日付または Iteration がありません
+project.filter.empty:
+  en: Filter by keyword or field
+  ja: キーワードまたはフィールドで絞り込み
+project.back:
+  en: Back to %{project}
+  ja: "%{project} に戻る"
+
+inbox.reason.review_requested:
+  en: review requested
+  ja: レビュー依頼
+inbox.reason.mention:
+  en: mentioned you
+  ja: メンション
+inbox.reason.assign:
+  en: assigned to you
+  ja: 担当に指定
+inbox.reason.author:
+  en: you opened this
+  ja: 自分が作成
+inbox.reason.comment:
+  en: new comment
+  ja: 新しいコメント
+inbox.reason.subscribed:
+  en: subscribed
+  ja: 購読中
+inbox.reason.state_change:
+  en: state changed
+  ja: 状態が変わりました
+inbox.reason.ci_activity:
+  en: CI activity
+  ja: CI の結果
+inbox.reason.other:
+  en: updated
+  ja: 更新
+
+state.open:
+  en: Open
+  ja: オープン
+state.closed:
+  en: Closed
+  ja: クローズ
+state.merged:
+  en: Merged
+  ja: マージ済み
+state.draft:
+  en: Draft
+  ja: ドラフト
+
+detail.empty:
+  en: Pick something to read
+  ja: 読むものを選んでください
+detail.loading:
+  en: Loading…
+  ja: 読み込み中…
+detail.wants_to_merge:
+  en: "%{head} → %{base}"
+  ja: "%{head} → %{base}"
+detail.files:
+  en: "%{count} files"
+  ja: "%{count} ファイル"
+detail.comments:
+  en: Comments
+  ja: コメント
+detail.no_body:
+  en: No description provided.
+  ja: 説明はありません。
+detail.open_on_github:
+  en: Open on GitHub
+  ja: GitHub で開く
+
+panel.sidebar:
+  en: Sidebar
+  ja: サイドバー
+panel.right:
+  en: Details
+  ja: 詳細
+panel.agent:
+  en: Agent
+  ja: エージェント
+
+error.no_token:
+  en: "No GitHub token. Set E1_GITHUB_TOKEN or GITHUB_TOKEN, or run `gh auth login`."
+  ja: "GitHub トークンがありません。E1_GITHUB_TOKEN か GITHUB_TOKEN を設定するか、`gh auth login` を実行してください。"
+error.rate_limited:
+  en: "GitHub is rate limiting this token"
+  ja: "GitHub のレート制限中です"
+error.failed:
+  en: "Could not reach GitHub: %{detail}"
+  ja: "GitHub に接続できません: %{detail}"
+
+time.now:
+  en: now
+  ja: 今
+
+detail.tab.conversation:
+  en: Conversation
+  ja: 会話
+detail.tab.files:
+  en: "Files"
+  ja: "ファイル"
+detail.files.loading:
+  en: Loading files…
+  ja: ファイルを読み込み中…
+detail.files.empty:
+  en: No files changed
+  ja: 変更されたファイルはありません
+detail.file.no_diff:
+  en: No diff to show for this file
+  ja: このファイルの差分は表示できません
+
+sidebar.sign_out:
+  en: Sign out
+  ja: サインアウト
+
+signin.title:
+  en: Sign in to GitHub
+  ja: GitHub にサインイン
+signin.lead:
+  en: e1 reads your inbox, pull requests and issues. Nothing is sent anywhere but GitHub.
+  ja: e1 は受信箱・プルリクエスト・Issue を読みます。GitHub 以外には何も送りません。
+signin.button:
+  en: Sign in with GitHub
+  ja: GitHub でサインイン
+signin.hint:
+  en: "Or set GITHUB_TOKEN, or run `gh auth login`, and start e1 again."
+  ja: "または GITHUB_TOKEN を設定するか `gh auth login` を実行して、e1 を再起動してください。"
+signin.starting:
+  en: Asking GitHub for a code…
+  ja: GitHub にコードを要求中…
+signin.enter_code:
+  en: Enter this code at
+  ja: このコードを次のページで入力してください
+signin.open:
+  en: Open in browser
+  ja: ブラウザで開く
+signin.copy:
+  en: Copy code
+  ja: コードをコピー
+signin.copied:
+  en: Copied
+  ja: コピーしました
+signin.waiting:
+  en: Waiting for GitHub…
+  ja: GitHub を待っています…
+signin.denied:
+  en: GitHub said no. Try again when you are ready.
+  ja: GitHub に拒否されました。準備ができたらもう一度お試しください。
+signin.expired:
+  en: The code expired. Ask for a new one.
+  ja: コードの有効期限が切れました。新しいコードを要求してください。
+signin.retry:
+  en: Try again
+  ja: もう一度
+
+list.files:
+  en: Files
+  ja: ファイル
+files.search:
+  en: Find a file…
+  ja: ファイルを探す…
+files.loading:
+  en: Reading the tree…
+  ja: ツリーを読み込み中…
+files.empty:
+  en: No files match
+  ja: 一致するファイルはありません
+files.truncated:
+  en: This repository is too large to list in full; only the first part is searchable.
+  ja: このリポジトリは大きすぎて全てを一覧できません。先頭の一部のみ検索できます。
+file.too_large:
+  en: This file is binary, or too large to show here.
+  ja: このファイルはバイナリか、ここに表示するには大きすぎます。
+file.loading:
+  en: Reading…
+  ja: 読み込み中…
+file.bytes:
+  en: "%{count} bytes"
+  ja: "%{count} バイト"
+file.lines:
+  en: "%{count} lines"
+  ja: "%{count} 行"
+
+search.title:
+  en: Search
+  ja: 検索
+palette.placeholder:
+  en: Jump to a repository, or search GitHub…
+  ja: リポジトリへ移動、または GitHub を検索…
+palette.sections:
+  en: Sections
+  ja: セクション
+palette.search:
+  en: Search
+  ja: 検索
+palette.search_for:
+  en: Search GitHub for “%{query}”
+  ja: 「%{query}」を GitHub で検索
+
+detail.comment.placeholder:
+  en: Leave a comment…
+  ja: コメントを書く…
+detail.comment.send:
+  en: Comment
+  ja: コメント
+detail.close:
+  en: Close
+  ja: クローズ
+detail.reopen:
+  en: Reopen
+  ja: 再オープン
+detail.merge:
+  en: Merge
+  ja: マージ
+detail.merge.confirm:
+  en: Merge now?
+  ja: 本当にマージ？
+detail.working:
+  en: Working…
+  ja: 処理中…
+
+sidebar.appearance.dark:
+  en: "Dark. Click for light."
+  ja: "ダーク。クリックでライトに"
+sidebar.appearance.light:
+  en: "Light. Click for dark."
+  ja: "ライト。クリックでダークに"
+
+detail.labels:
+  en: Labels
+  ja: ラベル
+detail.assignees:
+  en: Assignees
+  ja: 担当者
+detail.projects:
+  en: Projects
+  ja: プロジェクト
+detail.none:
+  en: None
+  ja: なし
+detail.add:
+  en: Edit…
+  ja: 編集…
+detail.done:
+  en: Done
+  ja: 完了
+detail.review.approve:
+  en: Approve
+  ja: 承認
+detail.review.request_changes:
+  en: Request changes
+  ja: 修正依頼
+detail.merge.method.merge:
+  en: Merge commit
+  ja: マージコミット
+detail.merge.method.squash:
+  en: Squash
+  ja: スカッシュ
+detail.merge.method.rebase:
+  en: Rebase
+  ja: リベース
+detail.merge.cancel:
+  en: Cancel
+  ja: やめる
+
+checks.passed:
+  en: All checks have passed
+  ja: すべてのチェックが成功
+checks.passed_count:
+  en: "%{count} successful checks"
+  ja: "%{count} 件のチェックが成功"
+checks.failed:
+  en: Some checks were not successful
+  ja: 失敗したチェックがあります
+checks.failed_count:
+  en: "%{failed} failing, %{passed} successful"
+  ja: "%{failed} 件失敗、%{passed} 件成功"
+checks.pending:
+  en: Some checks haven't completed yet
+  ja: 完了していないチェックがあります
+checks.pending_count:
+  en: "%{count} in progress"
+  ja: "%{count} 件実行中"
+checks.none:
+  en: No checks on this commit
+  ja: このコミットにチェックはありません
+checks.details:
+  en: Open in browser
+  ja: ブラウザで開く
+conflicts.none:
+  en: No conflicts with base branch
+  ja: ベースブランチとの競合はありません
+conflicts.auto:
+  en: Merging can be performed automatically.
+  ja: 自動でマージできます。
+conflicts.some:
+  en: This branch has conflicts that must be resolved
+  ja: このブランチには解決が必要な競合があります
+conflicts.unknown:
+  en: Checking for conflicts…
+  ja: 競合を確認中…
+merge.button.merge:
+  en: Merge pull request
+  ja: プルリクエストをマージ
+merge.button.squash:
+  en: Squash and merge
+  ja: スカッシュしてマージ
+merge.button.rebase:
+  en: Rebase and merge
+  ja: リベースしてマージ
+merge.confirm.merge:
+  en: Confirm merge
+  ja: マージを確定
+merge.confirm.squash:
+  en: Confirm squash and merge
+  ja: スカッシュしてマージを確定
+merge.confirm.rebase:
+  en: Confirm rebase and merge
+  ja: リベースしてマージを確定
+merge.method.merge.title:
+  en: Create a merge commit
+  ja: マージコミットを作成
+merge.method.merge.desc:
+  en: All commits from this branch will be added to the base branch via a merge commit.
+  ja: このブランチの全コミットをマージコミットでベースブランチに追加します。
+merge.method.squash.title:
+  en: Squash and merge
+  ja: スカッシュしてマージ
+merge.method.squash.desc:
+  en: The commits from this branch will be combined into one commit on the base branch.
+  ja: このブランチのコミットを 1 つにまとめてベースブランチに追加します。
+merge.method.rebase.title:
+  en: Rebase and merge
+  ja: リベースしてマージ
+merge.method.rebase.desc:
+  en: The commits from this branch will be rebased and added to the base branch.
+  ja: このブランチのコミットをリベースしてベースブランチに追加します。
+facet.filter.labels:
+  en: Filter labels
+  ja: ラベルを絞り込む
+facet.filter.assignees:
+  en: Type or choose a user
+  ja: ユーザーを入力または選択
+facet.filter.projects:
+  en: Filter projects
+  ja: プロジェクトを絞り込む
+facet.assign_self:
+  en: assign yourself
+  ja: 自分を担当にする
+facet.no_match:
+  en: Nothing matches
+  ja: 一致するものはありません
+checks.unknown:
+  en: Reading the checks…
+  ja: チェックを確認中…
+
+diff.unified:
+  en: Unified
+  ja: 統合
+diff.split:
+  en: Split
+  ja: 左右
+diff.comment.placeholder:
+  en: Leave a comment on this line…
+  ja: この行にコメント…
+diff.comment.send:
+  en: Add comment
+  ja: コメントを追加
+diff.outdated:
+  en: "outdated"
+  ja: "古い差分"
+pull.ready:
+  en: Ready for review
+  ja: レビュー可能にする
+pull.still:
+  en: Still in progress?
+  ja: まだ作業中？
+pull.to_draft:
+  en: Convert to draft
+  ja: ドラフトに戻す
+checks.log:
+  en: Log
+  ja: ログ
+log.title:
+  en: "Job #%{id}"
+  ja: "ジョブ #%{id}"
+log.lines:
+  en: "%{count} lines"
+  ja: "%{count} 行"
+log.back:
+  en: Back
+  ja: 戻る
+log.no_steps:
+  en: This job reported no steps; the log is shown whole.
+  ja: このジョブにはステップ情報がないため、ログをそのまま表示します。
+diff.comment.line:
+  en: Line %{line}
+  ja: "%{line} 行目"
+diff.comment.range:
+  en: Lines %{start}–%{end}
+  ja: "%{start}–%{end} 行目"
+list.history:
+  en: History
+  ja: 履歴
+history.empty:
+  en: No commits to show.
+  ja: コミットがありません
+history.commits:
+  en: "%{count} commits"
+  ja: "%{count} コミット"
+commit.files:
+  en: "%{count} files"
+  ja: "%{count} ファイル"
+commit.merge:
+  en: Merge
+  ja: マージ
+commit.parents:
+  en: Parents
+  ja: 親コミット
+ask.title:
+  en: Ask an agent
+  ja: エージェントに聞く
+ask.button:
+  en: Ask AI
+  ja: AIに聞く
+ask.log_source:
+  en: "From the log of the job \"%{job}\", lines %{from}–%{to}"
+  ja: "ジョブ \"%{job}\" のログ %{from}–%{to} 行目"
+ask.item_source:
+  en: The body of the item
+  ja: 本文
+ask.to:
+  en: "Ask %{agent}"
+  ja: "%{agent} に聞く"
+ask.model:
+  en: Model
+  ja: モデル
+ask.effort:
+  en: Thinking
+  ja: 思考量
+ask.default:
+  en: Default
+  ja: 既定
+ask.picked_source:
+  en: The part the reader picked out
+  ja: 選択された部分
+ask.context:
+  en: What goes with it
+  ja: 一緒に送る情報
+ask.excerpt_lines:
+  en: "(%{count} lines)"
+  ja: "（%{count} 行）"
+ask.file_source:
+  en: "From %{path}, lines %{from}–%{to}"
+  ja: "%{path} の %{from}–%{to} 行目"
+ask.diff_source:
+  en: "From the diff of %{path}"
+  ja: "%{path} の差分"
+ask.chat.title:
+  en: Ask
+  ja: Ask
+ask.chat.placeholder:
+  en: Ask, build, or review…
+  ja: 質問、実装、レビューを依頼…
+ask.chat.empty:
+  en: Explore this item with your agent.
+  ja: この項目についてエージェントと話せます
+ask.chat.latest:
+  en: Jump to latest
+  ja: 最新へ移動
+ask.chat.no_agent:
+  en: No agent found
+  ja: エージェントが見つかりません
+ask.chat.demo_reply:
+  en: "The demo conversation is ready. Your next message will resume this same CLI session."
+  ja: "デモ会話を開始しました。次のメッセージも同じCLIセッションに続きます。"
+detail.review.comment:
+  en: Comment
+  ja: コメント
+detail.review.needs_body:
+  en: Say what should change before asking for changes.
+  ja: 変更を求めるには、何を変えてほしいか書いてください

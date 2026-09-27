@@ -1,0 +1,7 @@
+/target
+/.e1-cache
+*.dmg
+.DS_Store
+# macOS AppleDouble sidecars, which appear when the repo lives on a
+# filesystem without native extended attributes.
+._*
