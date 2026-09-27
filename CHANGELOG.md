@@ -17,13 +17,23 @@ far is unreleased.
   edit-and-resend.
 - Fan-out: one prompt in a worktree per attempt, compared side by side, the
   winner kept and merged.
-- Scheduled prompts and commands on cron, with overlap-skip and history.
+- Scheduled prompts and commands on cron, with overlap-skip, history and a
+  precheck that skips a firing its probe says is pointless.
+- A turn refused by a usage limit holds its queue and resumes by itself once
+  the window resets.
+- Agents write a line of status on their workspace, shown in the sidebar.
+- A merge or rebase stopped on conflicts is handed to the agent in one step.
+- An Agents board: every agent across projects, by what it needs from you.
+- The account picker names each login's email, organisation and plan.
+- `.worktreeshare` links heavy ignored directories (`node_modules`) into each
+  new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.
 
 ### The window
 - Project rail, virtualized session list and transcript, tabs, the home
   screen with first-run steps, and the window reopening where it was left.
-- Review: unified and split diffs, staging by file and hunk, commits, pull
+- Review: unified and split diffs, staging by file and hunk, commits and
+  amending an unpushed one, pull
   requests through `gh`, a history graph, and line comments sent back to
   the agent.
 - Terminals owned by the daemon, with splits, scrollback search and file

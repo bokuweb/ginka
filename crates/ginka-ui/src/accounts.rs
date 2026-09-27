@@ -120,6 +120,7 @@ mod tests {
             env_keys: Vec::new(),
             signed_in: None,
             login: None,
+            identity: None,
         }
     }
 

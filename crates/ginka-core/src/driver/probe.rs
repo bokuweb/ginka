@@ -251,9 +251,19 @@ pub fn probe_model_catalogue(
 /// environment. `None` when the CLI cannot be asked or did not answer, which
 /// is not the same as signed out.
 pub fn probe_signed_in(driver: &dyn AgentDriver, env: &[(String, String)]) -> Option<bool> {
+    probe_login(driver, env).map(|(signed_in, _)| signed_in)
+}
+
+/// [`probe_signed_in`], with who the login is when the vendor says — one
+/// run of the CLI for both.
+pub fn probe_login(
+    driver: &dyn AgentDriver,
+    env: &[(String, String)],
+) -> Option<(bool, Option<ginka_protocol::model::AccountIdentity>)> {
     let command = driver.auth_command()?;
-    let (signed_in, _) = run(&command, env).and_then(|output| driver.parse_auth(&output))?;
-    Some(signed_in)
+    let output = run(&command, env)?;
+    let (signed_in, _) = driver.parse_auth(&output)?;
+    Some((signed_in, driver.parse_identity(&output)))
 }
 
 /// How long a provider is given to answer for an account's windows. Longer

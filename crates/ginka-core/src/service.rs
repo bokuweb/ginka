@@ -147,7 +147,8 @@ impl Service {
                 settings.checkpoint_limit,
                 crate::blob::BlobStore::new(paths.blobs()),
             )
-            .with_keep_awake(settings.keep_awake),
+            .with_keep_awake(settings.keep_awake)
+            .with_resume_after_limit(settings.resume_after_limit),
             paths,
             terminals: crate::terminal::Terminals::new(events.clone()),
             conn,
@@ -517,6 +518,17 @@ impl Service {
                     Ok(_) => {}
                     Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
                 }
+                // …and the heavy ignored directories it shares rather than
+                // copies (`.worktreeshare`), on the same best-effort terms.
+                match crate::worktree_include::link_shared(&project.path, &path) {
+                    Ok(linked) if !linked.is_empty() => {
+                        tracing::info!(?linked, "linked .worktreeshare directories");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "could not link .worktreeshare directories")
+                    }
+                }
                 // git records the resolved path, which on macOS differs from
                 // the one we asked for (/var against /private/var).
                 let path = path.canonicalize().unwrap_or(path);
@@ -590,6 +602,31 @@ impl Service {
                 archived,
             } => {
                 if !project::set_archived(&self.conn(), &workspace, archived).map_err(failed)? {
+                    return Err(RpcError::not_found(format!(
+                        "no workspace named {workspace}"
+                    )));
+                }
+                if let Some((project, _)) = workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
+
+            Request::SetWorkspaceStatus {
+                workspace,
+                path,
+                note,
+            } => {
+                let workspace = match (workspace, path) {
+                    (Some(workspace), _) => workspace,
+                    (None, Some(path)) => self.workspace_holding(&path)?,
+                    (None, None) => {
+                        return Err(RpcError::failed("name a workspace, or the path inside one"));
+                    }
+                };
+                if !project::set_status_note(&self.conn(), &workspace, note.as_deref(), now())
+                    .map_err(failed)?
+                {
                     return Err(RpcError::not_found(format!(
                         "no workspace named {workspace}"
                     )));
@@ -721,6 +758,7 @@ impl Service {
                     messages: self.sessions.queued_messages(&session),
                     can_send_now: self.sessions.can_send_queued_message_now(&session),
                     paused: self.sessions.queue_paused(&session),
+                    resume_at: self.sessions.queue_resume_at(&session),
                 })
             }
             Request::QueueMessage { session, text } => {
@@ -927,12 +965,17 @@ impl Service {
                 workspace,
                 message,
                 all,
+                amend,
             } => {
                 let worktree = self.worktree(&workspace)?;
-                if message.trim().is_empty() {
-                    return Err(RpcError::failed("a commit needs a message"));
-                }
-                let commit = git::commit(&worktree.path, &message, all).map_err(failed)?;
+                let commit = if amend {
+                    git::amend(&worktree.path, &message, all).map_err(failed)?
+                } else {
+                    if message.trim().is_empty() {
+                        return Err(RpcError::failed("a commit needs a message"));
+                    }
+                    git::commit(&worktree.path, &message, all).map_err(failed)?
+                };
                 // The branch moved, so what the sidebar says about it is stale.
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: worktree.project.clone(),
@@ -1233,6 +1276,7 @@ impl Service {
                 via,
                 agent,
                 body,
+                precheck,
                 enabled,
             } => {
                 self.project(&project)?;
@@ -1257,6 +1301,7 @@ impl Service {
                     via,
                     agent,
                     body,
+                    precheck,
                     enabled,
                 };
                 let job =
@@ -1455,6 +1500,44 @@ impl Service {
                     return Err(RpcError::not_found(format!("no comment with id {comment}")));
                 }
                 Ok(Response::Ack)
+            }
+            Request::ResolveConflicts { workspace, agent } => {
+                let worktree = self.worktree(&workspace)?;
+                let conflicts = crate::conflicts::read(&worktree.path).map_err(failed)?;
+                if conflicts.paths.is_empty() {
+                    return Err(RpcError::failed(format!(
+                        "nothing is conflicted in {workspace}"
+                    )));
+                }
+                let prompt = crate::conflicts::prompt(&conflicts);
+                let latest =
+                    session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+                match latest
+                    .filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent))
+                {
+                    // The conversation that did the work knows why it did it,
+                    // which is most of resolving a conflict well.
+                    Some(latest) => {
+                        self.handle(Request::QueueMessage {
+                            session: latest.id.clone(),
+                            text: prompt,
+                        })?;
+                        Ok(Response::Session {
+                            session: self.session(&latest.id)?,
+                        })
+                    }
+                    None => self.handle(Request::StartSession {
+                        workspace,
+                        agent: agent.unwrap_or_else(|| "claude".to_string()),
+                        prompt,
+                        model: None,
+                        reasoning_effort: None,
+                        service_tier: None,
+                        account: None,
+                        access_mode: None,
+                        origin: None,
+                    }),
+                }
             }
             Request::SendReviewComments { workspace, session } => {
                 let comments = crate::comments::list(&self.conn(), &workspace).map_err(failed)?;
@@ -1721,7 +1804,12 @@ impl Service {
                     &account.id,
                     driver.home_variable(),
                 );
-                account.signed_in = crate::driver::probe::probe_signed_in(driver.as_ref(), &env);
+                if let Some((signed_in, identity)) =
+                    crate::driver::probe::probe_login(driver.as_ref(), &env)
+                {
+                    account.signed_in = Some(signed_in);
+                    account.identity = identity;
+                }
             }
             self.accounts = Some((std::time::Instant::now(), accounts));
         }
@@ -2534,19 +2622,59 @@ impl Service {
     }
 
     /// Fire every scheduled job a tick at `now` owes, and say how many were
-    /// due — skipped ones included. The daemon calls this on its own clock.
+    /// due — skipped ones included. Prechecks run inline, holding the
+    /// service; the daemon uses [`Service::take_due_cron`] and
+    /// [`Service::fire_due_cron`] instead so it can let go of it meanwhile.
     pub fn run_due_cron(&mut self, now: chrono::DateTime<chrono::Local>) -> usize {
+        let due = self.take_due_cron(now);
+        for job in &due {
+            let verdict = job.precheck();
+            self.fire_due_cron(job, verdict);
+        }
+        due.len()
+    }
+
+    /// The jobs a tick at `now` owes a firing, each with where its precheck
+    /// runs. Their clocks move on here, so a job is owed once however long
+    /// its precheck takes.
+    pub fn take_due_cron(&mut self, now: chrono::DateTime<chrono::Local>) -> Vec<DueCron> {
         let due = match crate::cron::take_due(&self.conn(), &now) {
             Ok(due) => due,
             Err(error) => {
                 tracing::error!(%error, "could not read the scheduled jobs");
-                return 0;
+                return Vec::new();
             }
         };
-        for job in &due {
-            self.fire_cron(job);
+        due.into_iter()
+            .map(|job| {
+                let precheck = job.precheck.clone().and_then(|command| {
+                    let workspace = job
+                        .workspace
+                        .clone()
+                        .or_else(|| self.project_checkout(&job.project))?;
+                    let path = self.worktree(&workspace).ok()?.path;
+                    Some((command, path))
+                });
+                DueCron { job, precheck }
+            })
+            .collect()
+    }
+
+    /// Fire one job [`Service::take_due_cron`] returned, unless its precheck
+    /// said not to — in which case the skip is recorded with the reason.
+    pub fn fire_due_cron(&mut self, due: &DueCron, verdict: crate::cron::Precheck) {
+        match verdict {
+            crate::cron::Precheck::Pass => self.fire_cron(&due.job),
+            crate::cron::Precheck::Skip(reason) => {
+                let _ = crate::cron::record_run(
+                    &self.conn(),
+                    due.job.id,
+                    chrono::Utc::now().timestamp(),
+                    ginka_protocol::model::CronOutcome::Skipped,
+                    Some(&reason),
+                );
+            }
         }
-        due.len()
     }
 
     /// Whether the rate table should be fetched again at `now`: never when
@@ -2573,6 +2701,24 @@ impl Service {
     /// [`Service::run_due_cron`] on the daemon host's clock.
     pub fn run_due_cron_now(&mut self) -> usize {
         self.run_due_cron(chrono::Local::now())
+    }
+
+    /// Let go of every queue a usage limit held whose window has reset by
+    /// `now`, and send the front of each whose session is idle. Answers how
+    /// many were resumed.
+    pub fn resume_limited_queues(&mut self, now: i64) -> usize {
+        let due = self.sessions.resume_due_queues(now);
+        for session in &due {
+            if let Err(error) = self.dispatch_front(session) {
+                tracing::warn!(error = %error.message, %session, "could not resume after the limit");
+            }
+        }
+        due.len()
+    }
+
+    /// [`Service::take_due_cron`] on the daemon host's clock.
+    pub fn take_due_cron_now(&mut self) -> Vec<DueCron> {
+        self.take_due_cron(chrono::Local::now())
     }
 
     /// Fire one job: skip it while what it last started is still running,
@@ -2733,6 +2879,32 @@ impl Service {
             .ok_or_else(|| RpcError::not_found(format!("no workspace named {workspace}")))
     }
 
+    /// The workspace whose worktree holds `path` — the innermost one, since
+    /// a scratch or nested worktree can sit inside another's directory.
+    ///
+    /// Compared both as given and canonicalized, because an agent's working
+    /// directory may name the worktree through a symlink (`/tmp` on macOS).
+    fn workspace_holding(&self, path: &std::path::Path) -> Result<WorkspaceId, RpcError> {
+        let canonical = std::fs::canonicalize(path).ok();
+        let conn = self.conn();
+        let mut best: Option<(usize, WorkspaceId)> = None;
+        for project in project::list_projects(&conn).map_err(failed)? {
+            for worktree in project::list_worktrees(&conn, &project.name).map_err(failed)? {
+                let root = std::fs::canonicalize(&worktree.path).unwrap_or(worktree.path.clone());
+                let inside = path.starts_with(&worktree.path)
+                    || canonical
+                        .as_ref()
+                        .is_some_and(|path| path.starts_with(&root));
+                let depth = root.components().count();
+                if inside && best.as_ref().is_none_or(|(deepest, _)| depth > *deepest) {
+                    best = Some((depth, worktree.workspace_id()));
+                }
+            }
+        }
+        best.map(|(_, workspace)| workspace)
+            .ok_or_else(|| RpcError::not_found(format!("no workspace holds {}", path.display())))
+    }
+
     /// Everything the dashboard draws for one workspace.
     ///
     /// Status is read from git on demand rather than from a cache: a stale
@@ -2758,6 +2930,30 @@ impl Service {
             last_commit_at,
             queued,
             pull_request: self.pull_requests.get(&id).cloned(),
+            status_note: project::status_note(&self.conn(), &id).unwrap_or_default(),
+        }
+    }
+}
+
+/// A scheduled job a tick owes a firing, and the probe to run before it.
+#[derive(Debug, Clone)]
+pub struct DueCron {
+    /// The job, as stored when the tick took it.
+    pub job: ginka_protocol::model::CronJob,
+    /// Its precheck command and the checkout it runs in; `None` when the job
+    /// has none, or has nowhere to run — which firing then reports.
+    pub precheck: Option<(String, std::path::PathBuf)>,
+}
+
+impl DueCron {
+    /// Run the precheck, if there is one. Blocks for up to
+    /// [`crate::cron::PRECHECK_TIMEOUT`]; call it without the service held.
+    pub fn precheck(&self) -> crate::cron::Precheck {
+        match &self.precheck {
+            Some((command, dir)) => {
+                crate::cron::run_precheck(command, dir, crate::cron::PRECHECK_TIMEOUT)
+            }
+            None => crate::cron::Precheck::Pass,
         }
     }
 }

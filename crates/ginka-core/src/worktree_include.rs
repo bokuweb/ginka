@@ -10,6 +10,15 @@
 //! Only ignored files are candidates: a tracked file is in the checkout
 //! already, and copying an untracked-but-not-ignored one would hand the agent
 //! someone's half-finished work as if it were the branch's.
+//!
+//! `.worktreeshare` is the other half, Orca's shared directories: the heavy
+//! ignored directories — `node_modules`, `.venv`, a model cache — that every
+//! worktree would otherwise install or copy again. Each line names one
+//! directory from the repository root, and a new worktree gets a symbolic
+//! link to the source checkout's copy instead of one of its own. Fan-out's
+//! five attempts then cost one install, not five; the price is that they
+//! share it, so a directory an agent is expected to change does not belong
+//! in the file.
 
 use anyhow::{Context as _, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -116,6 +125,124 @@ pub fn copy_included(repo: &Path, worktree: &Path) -> Result<Vec<String>> {
     Ok(copied)
 }
 
+/// The file the shared directories are read from, at the repository root.
+pub const SHARE_FILE: &str = ".worktreeshare";
+
+/// The comment written above the lines [`link_shared`] adds to git's exclude
+/// file, so a reader of that file knows where they came from.
+const EXCLUDE_MARK: &str = "# linked into worktrees by Ginka (.worktreeshare)";
+
+/// Link the directories `.worktreeshare` lists from `repo` into a new
+/// `worktree`, answering with the paths linked.
+///
+/// A line is a plain path from the root — no globs, since a link is one
+/// decision about one directory — and it is taken only when `repo` has that
+/// directory, git ignores it there, and the worktree has nothing at the path
+/// yet. git ignores a *link* by a pattern without a trailing slash only
+/// (`node_modules/` names directories, and a link is not one), so a link git
+/// would show as a new file is excluded through the repository's
+/// `info/exclude` — shared by every worktree, and a no-op for the source
+/// checkout, which ignores the directory already.
+pub fn link_shared(repo: &Path, worktree: &Path) -> Result<Vec<String>> {
+    let listed = std::fs::read_to_string(repo.join(SHARE_FILE))
+        .map(|text| parse(&text))
+        .unwrap_or_default();
+    let mut linked = Vec::new();
+    for line in listed {
+        let path = line.trim_start_matches("./").trim_matches('/').to_string();
+        let safe = !path.is_empty()
+            && Path::new(&path)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_)));
+        if !safe {
+            tracing::warn!(
+                line,
+                "a .worktreeshare line must be a path inside the repository"
+            );
+            continue;
+        }
+        let source = repo.join(&path);
+        let target = worktree.join(&path);
+        if !source.is_dir() || target.symlink_metadata().is_ok() {
+            continue;
+        }
+        if !ignored(repo, &path)? {
+            tracing::warn!(path, "not linking a directory git does not ignore");
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        symlink_dir(&source, &target).with_context(|| format!("linking {path}"))?;
+        if !ignored(worktree, &path)? {
+            exclude(worktree, &path)?;
+        }
+        linked.push(path);
+    }
+    Ok(linked)
+}
+
+/// Whether git ignores `path` in the checkout at `dir`.
+fn ignored(dir: &Path, path: &str) -> Result<bool> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["check-ignore", "-q", "--", path])
+        .status()
+        .context("asking git whether a path is ignored")?;
+    // 0 ignored, 1 not ignored, anything else is git failing.
+    match status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => anyhow::bail!("git check-ignore failed in {}", dir.display()),
+    }
+}
+
+/// Add an anchored `path` to the repository's shared `info/exclude`.
+fn exclude(worktree: &Path, path: &str) -> Result<()> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(worktree)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .context("finding the repository's git directory")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "git rev-parse --git-common-dir failed"
+    );
+    let common = std::path::PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    let file = common.join("info").join("exclude");
+    let existing = std::fs::read_to_string(&file).unwrap_or_default();
+    let entry = format!("/{path}");
+    if existing.lines().any(|line| line.trim() == entry) {
+        return Ok(());
+    }
+    let mut text = existing;
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push('\n');
+    }
+    if !text.lines().any(|line| line == EXCLUDE_MARK) {
+        text.push_str(EXCLUDE_MARK);
+        text.push('\n');
+    }
+    text.push_str(&entry);
+    text.push('\n');
+    if let Some(parent) = file.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&file, text).with_context(|| format!("writing {}", file.display()))
+}
+
+#[cfg(unix)]
+fn symlink_dir(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(source, target)
+}
+
+#[cfg(windows)]
+fn symlink_dir(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_dir(source, target)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +345,89 @@ mod tests {
     fn a_repository_without_the_file_copies_nothing() {
         let dir = tempfile::tempdir().unwrap();
         assert!(copy_included(dir.path(), dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_shared_directory_is_linked_not_copied_and_stays_out_of_the_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["config", "user.email", "t@ginka.invalid"]);
+        git(&repo, &["config", "user.name", "T"]);
+        // The usual spelling, with the slash that does not match a link.
+        std::fs::write(repo.join(".gitignore"), "node_modules/\n.venv/\n").unwrap();
+        std::fs::write(
+            repo.join(SHARE_FILE),
+            "node_modules\n.venv\nsrc\n../outside\nmissing\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        std::fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-q", "-m", "first"],
+        );
+        std::fs::create_dir_all(repo.join("node_modules/left-pad")).unwrap();
+        std::fs::write(repo.join("node_modules/left-pad/index.js"), "x\n").unwrap();
+
+        let worktree = dir.path().join("wt");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        let linked = link_shared(&repo, &worktree).unwrap();
+        assert_eq!(
+            linked,
+            vec!["node_modules"],
+            "not .venv (absent), not src (tracked), not a path out of the repository"
+        );
+        let link = worktree.join("node_modules");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(link.join("left-pad/index.js").is_file());
+
+        let status = Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(["status", "--porcelain"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout),
+            "",
+            "the link is excluded, so the worktree reads as clean"
+        );
+
+        // A second worktree reuses the exclusion instead of repeating it.
+        let second = dir.path().join("wt2");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "second",
+                second.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(link_shared(&repo, &second).unwrap(), vec!["node_modules"]);
+        let exclude = std::fs::read_to_string(repo.join(".git/info/exclude")).unwrap_or_default();
+        assert_eq!(exclude.matches("/node_modules").count(), 1, "{exclude}");
+
+        // Removing a worktree takes the link, never what it points at.
+        git(
+            &repo,
+            &["worktree", "remove", "--force", second.to_str().unwrap()],
+        );
+        assert!(repo.join("node_modules/left-pad/index.js").is_file());
     }
 }

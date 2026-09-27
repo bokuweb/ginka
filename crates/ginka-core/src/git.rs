@@ -681,6 +681,7 @@ pub fn history(worktree: &Path, limit: usize) -> Result<Vec<GitCommit>> {
         return Ok(Vec::new());
     }
     let max_count = format!("--max-count={limit}");
+    let unpublished = unpublished(worktree, limit)?;
     let output = git(
         worktree,
         &[
@@ -716,6 +717,7 @@ pub fn history(worktree: &Path, limit: usize) -> Result<Vec<GitCommit>> {
                 bail!("git log returned a commit without an object id");
             }
             Ok(GitCommit {
+                published: !unpublished.contains(&id),
                 id,
                 parents,
                 author,
@@ -848,6 +850,70 @@ pub fn commit(worktree: &Path, message: &str, all: bool) -> Result<String> {
     }
     git(worktree, &["commit", "-m", message])?;
     head_commit(worktree).context("committed, but git reports no HEAD")
+}
+
+/// Fold what is staged (everything, with `all`) into the last commit.
+///
+/// An empty `message` keeps the commit's own. Refused when there is no commit
+/// yet, and when HEAD is already on a remote: rewriting a commit other people
+/// can have fetched turns the next push into a force-push, and that is a
+/// decision this button must not make for anyone.
+pub fn amend(worktree: &Path, message: &str, all: bool) -> Result<String> {
+    let Some(head) = head_commit(worktree) else {
+        bail!("there is no commit to amend yet");
+    };
+    if published(worktree, &head)? {
+        bail!("the last commit is already pushed, so amending it would rewrite shared history");
+    }
+    if all {
+        git(worktree, &["add", "-A"])?;
+    }
+    if message.trim().is_empty() {
+        git(
+            worktree,
+            &["commit", "--amend", "--no-edit", "--allow-empty"],
+        )?;
+    } else {
+        git(
+            worktree,
+            &["commit", "--amend", "--allow-empty", "-m", message],
+        )?;
+    }
+    head_commit(worktree).context("amended, but git reports no HEAD")
+}
+
+/// Whether `commit` is reachable from any remote-tracking branch.
+///
+/// Read from what was last fetched, never from the network: the question is
+/// asked on every history refresh, and "as far as this clone knows" is the
+/// answer git itself gives before a push.
+pub fn published(worktree: &Path, commit: &str) -> Result<bool> {
+    let containing = git(
+        worktree,
+        &[
+            "for-each-ref",
+            "--count=1",
+            "--contains",
+            commit,
+            "refs/remotes",
+        ],
+    )?;
+    Ok(!containing.trim().is_empty())
+}
+
+/// The commits among the newest `limit` that no remote-tracking branch has.
+fn unpublished(worktree: &Path, limit: usize) -> Result<std::collections::HashSet<String>> {
+    let max_count = format!("--max-count={limit}");
+    let listed = git(
+        worktree,
+        &["rev-list", &max_count, "HEAD", "--not", "--remotes"],
+    )?;
+    Ok(listed
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect())
 }
 
 /// Stage one path for the next commit.
@@ -1583,6 +1649,59 @@ prunable
         let listed = git(&root, &["show", "--name-only", "--format=", &sha]).unwrap();
         assert!(listed.contains("added.rs"), "{listed}");
         assert!(listed.contains("tracked.txt"), "{listed}");
+    }
+
+    #[test]
+    fn amending_folds_new_work_into_the_last_commit_and_keeps_its_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        std::fs::write(root.join("first.txt"), "one\n").unwrap();
+        let before = commit(&root, "the work", true).unwrap();
+        let parent = git(&root, &["rev-parse", "HEAD^"]).unwrap();
+        std::fs::write(root.join("forgotten.txt"), "two\n").unwrap();
+
+        let after = amend(&root, "", true).unwrap();
+        assert_ne!(before, after);
+        assert_eq!(
+            git(&root, &["rev-parse", "HEAD^"]).unwrap(),
+            parent,
+            "no new commit on top"
+        );
+        assert_eq!(
+            git(&root, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "the work"
+        );
+        let listed = git(&root, &["show", "--name-only", "--format=", &after]).unwrap();
+        assert!(listed.contains("forgotten.txt"), "{listed}");
+
+        amend(&root, "a better subject", false).unwrap();
+        assert_eq!(
+            git(&root, &["log", "-1", "--format=%s"]).unwrap().trim(),
+            "a better subject"
+        );
+    }
+
+    #[test]
+    fn a_pushed_commit_is_not_amended() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let head = head_commit(&root).unwrap();
+        // What a push leaves behind, without a network: a remote-tracking ref
+        // at HEAD.
+        git(&root, &["update-ref", "refs/remotes/origin/main", &head]).unwrap();
+        assert!(published(&root, &head).unwrap());
+
+        let refused = amend(&root, "rewrite", true).unwrap_err().to_string();
+        assert!(refused.contains("pushed"), "{refused}");
+        assert_eq!(head_commit(&root).unwrap(), head, "nothing was rewritten");
+
+        std::fs::write(root.join("local.txt"), "new\n").unwrap();
+        let local = commit(&root, "not yet pushed", true).unwrap();
+        let history = history(&root, 10).unwrap();
+        assert!(!history[0].published && history[0].id == local);
+        assert!(history[1].published, "{history:?}");
     }
 
     #[test]

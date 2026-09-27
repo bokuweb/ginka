@@ -408,6 +408,19 @@ names the build command.
 Both apps read one palette: Ginka installs e1's tokens alongside its own on
 every theme change, so a system appearance switch reaches both.
 
+### 3.5a Agents board
+
+A place in the rail above Inbox: every workspace's agent, across projects,
+in four columns by what it needs from the reader — *Needs you* (a question,
+a permission, a failed turn, a worktree stopped on conflicts), *Working* (a
+running turn, or a queue holding work), *To review* (a finished turn that
+left changes or unpushed commits) and *Idle*. Archived workspaces are left
+out. The header's scope chips narrow it to the project on screen. A card is
+the agent's mark and the conversation's title, `project · branch`, the
+agent's status line in italics, and its state in words — the border of a
+*Needs you* card is the attention colour, but the word is always there too.
+A card opens its conversation. The grouping is `ginka_ui::board`.
+
 ### 3.6 Notes
 
 A 360 px list of the notes — the chosen project's, or every one — most
