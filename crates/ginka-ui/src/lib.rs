@@ -37,6 +37,7 @@ pub mod palette;
 pub mod provider_settings;
 pub mod reports;
 pub mod resume;
+pub mod scheduled;
 pub mod search;
 pub mod session_list;
 pub mod skills;

@@ -1113,6 +1113,18 @@ settings.cron.resume:
 settings.cron.run:
   en: "Run now"
   ja: "今すぐ実行"
+settings.cron.edit:
+  en: "Edit"
+  ja: "編集"
+settings.cron.save:
+  en: "Save"
+  ja: "保存"
+settings.cron.cancel:
+  en: "Cancel"
+  ja: "キャンセル"
+settings.cron.changed_project:
+  en: "This job belongs to another project. Select it again to edit."
+  ja: "このジョブは別のプロジェクトに属しています。編集するには選び直してください。"
 settings.cron.needs_project:
   en: "Choose a project first."
   ja: "先にプロジェクトを選んでください。"

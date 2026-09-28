@@ -1768,6 +1768,38 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
 }
 
 #[test]
+fn editing_a_scheduled_job_keeps_its_runs_and_rechecks_its_schedule() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let job = save_cron(&mut fixture, terminal_job(&project, "@yearly", "true"));
+    fixture.ask(Request::RunCronJob { id: job.id });
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
+
+    let at = chrono::Utc::now() + chrono::Duration::minutes(3);
+    let schedule = format!("@once {}", at.to_rfc3339());
+    let edited = save_cron(
+        &mut fixture,
+        Request::SaveCronJob {
+            id: Some(job.id),
+            project,
+            workspace: None,
+            name: "follow up".into(),
+            schedule: schedule.clone(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "echo ready".into(),
+            precheck: None,
+            enabled: true,
+        },
+    );
+    assert_eq!(edited.id, job.id);
+    assert_eq!(edited.name, "follow up");
+    assert_eq!(edited.schedule, schedule);
+    assert_eq!(edited.next_run_at, Some(at.timestamp()));
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
+}
+
+#[test]
 fn a_one_time_job_requires_a_future_zoned_timestamp_and_fires_only_once() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

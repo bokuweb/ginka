@@ -132,13 +132,14 @@ struct ProviderProgramForm {
     busy: bool,
 }
 
-/// The settings page's form for a new scheduled job.
+/// The settings page's form for a new or existing scheduled job.
 struct CronForm {
     name: Entity<InputState>,
     schedule: Entity<InputState>,
     body: Entity<InputState>,
     /// A prompt for an agent rather than a shell command.
     chat: bool,
+    editing: Option<ginka_protocol::model::CronJob>,
     error: Option<String>,
 }
 
@@ -827,6 +828,7 @@ impl Shell {
                     .placeholder(rust_i18n::t!("settings.cron.body").to_string())
             }),
             chat: false,
+            editing: None,
             error: None,
         };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
@@ -2353,6 +2355,7 @@ impl Shell {
                     Ok(()) => {
                         this.cron_form.error = None;
                         if clear_form {
+                            this.cron_form.editing = None;
                             for input in [
                                 this.cron_form.name.clone(),
                                 this.cron_form.schedule.clone(),
@@ -2372,30 +2375,70 @@ impl Shell {
         .detach();
     }
 
-    /// Save the settings page's new scheduled job, in the project on screen.
+    /// Fill the settings form from a job in the selected project.
+    fn edit_cron_job(
+        &mut self,
+        job: ginka_protocol::model::CronJob,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (input, value) in [
+            (self.cron_form.name.clone(), job.name.clone()),
+            (self.cron_form.schedule.clone(), job.schedule.clone()),
+            (self.cron_form.body.clone(), job.body.clone()),
+        ] {
+            input.update(cx, |state, cx| state.set_value(&value, window, cx));
+        }
+        self.cron_form.chat = job.via == ginka_protocol::model::CronVia::Chat;
+        self.cron_form.editing = Some(job);
+        self.cron_form.error = None;
+        cx.notify();
+    }
+
+    /// Leave edit mode and reset the form for a new job.
+    fn cancel_cron_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cron_form.editing = None;
+        self.cron_form.error = None;
+        for input in [
+            self.cron_form.name.clone(),
+            self.cron_form.schedule.clone(),
+            self.cron_form.body.clone(),
+        ] {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Save the settings page's scheduled job in the project on screen.
     fn save_cron_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.target_project.clone() else {
             self.cron_form.error = Some(rust_i18n::t!("settings.cron.needs_project").to_string());
             cx.notify();
             return;
         };
-        let chat = self.cron_form.chat;
-        let request = ginka_protocol::rpc::Request::SaveCronJob {
-            id: None,
+        if self
+            .cron_form
+            .editing
+            .as_ref()
+            .is_some_and(|job| job.project != project)
+        {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.changed_project").to_string());
+            cx.notify();
+            return;
+        }
+        let request = ginka_ui::scheduled::save_request(
             project,
-            workspace: None,
-            name: self.cron_form.name.read(cx).value().to_string(),
-            schedule: self.cron_form.schedule.read(cx).value().to_string(),
-            via: if chat {
+            self.cron_form.editing.as_ref(),
+            self.cron_form.name.read(cx).value().to_string(),
+            self.cron_form.schedule.read(cx).value().to_string(),
+            self.cron_form.body.read(cx).value().to_string(),
+            if self.cron_form.chat {
                 ginka_protocol::model::CronVia::Chat
             } else {
                 ginka_protocol::model::CronVia::Terminal
             },
-            agent: if chat { self.agent_to_start() } else { None },
-            body: self.cron_form.body.read(cx).value().to_string(),
-            precheck: None,
-            enabled: true,
-        };
+            self.agent_to_start(),
+        );
         let link = self.link.clone();
         self.cron_request(
             async move { link.save_cron_job(request).await },
@@ -5694,6 +5737,7 @@ impl Shell {
             .map(|job| {
                 let id = job.id;
                 let toggled = job.clone();
+                let edited = job.clone();
                 let done = ginka_core::cron::is_completed(job);
                 let when = match job.next_run_at {
                     Some(at) => rust_i18n::t!(
@@ -5763,6 +5807,15 @@ impl Shell {
                                 })),
                         )
                     })
+                    .child(
+                        Button::new(SharedString::from(format!("cron-edit-{id}")))
+                            .ghost()
+                            .compact()
+                            .label(rust_i18n::t!("settings.cron.edit").to_string())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.edit_cron_job(edited.clone(), window, cx)
+                            })),
+                    )
                     .child(
                         Button::new(SharedString::from(format!("cron-run-{id}")))
                             .ghost()
@@ -5868,11 +5921,26 @@ impl Shell {
                     .child(
                         Button::new("cron-save")
                             .compact()
-                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .label(if self.cron_form.editing.is_some() {
+                                rust_i18n::t!("settings.cron.save").to_string()
+                            } else {
+                                rust_i18n::t!("settings.quick.add").to_string()
+                            })
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.save_cron_form(window, cx)),
                             ),
-                    ),
+                    )
+                    .when(self.cron_form.editing.is_some(), |this| {
+                        this.child(
+                            Button::new("cron-cancel-edit")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("settings.cron.cancel").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_cron_edit(window, cx)
+                                })),
+                        )
+                    }),
             )
             .children(self.cron_form.error.clone().map(|error| {
                 div()
