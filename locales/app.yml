@@ -950,6 +950,21 @@ surface.git.history_tooltip:
 surface.git.history_empty:
   en: No commits yet
   ja: commitはまだありません
+surface.git.turns:
+  en: Turns
+  ja: ターン
+surface.git.turns_tooltip:
+  en: Show completed turns
+  ja: 完了したターンを表示
+surface.git.turns_empty:
+  en: No completed turns yet
+  ja: 完了したターンはまだありません
+surface.git.turn_read_error:
+  en: Could not read this turn's saved changes. Its start snapshot may be unavailable.
+  ja: このターンの保存済み差分を読み込めません。開始時のスナップショットがない可能性があります。
+surface.git.turn_row:
+  en: "Turn %{turn} · %{label}"
+  ja: "ターン %{turn} · %{label}"
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"

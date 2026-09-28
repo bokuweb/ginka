@@ -139,6 +139,7 @@ cargo run -p ginka-cli -- cron add <project> <name> --schedule @hourly --shell '
 cargo run -p ginka-cli -- pull <workspace>                        # clean fast-forward only
 cargo run -p ginka-cli -- pr <workspace> [--draft]                # push and open a PR with gh
 cargo run -p ginka-cli -- changes <workspace> --commit <id>       # what one commit did
+cargo run -p ginka-cli -- changes <workspace> --turn <checkpoint> # what one completed turn changed
 cargo run -p ginka-cli -- notes list [--project <p>]              # and add|show|edit|remove
 cargo run -p ginka-cli -- attach <path>                            # store an image for a note
 cargo run -p ginka-cli -- attachment-image <reference>             # read its verified data URL

@@ -936,6 +936,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
                     this.open_commit(commit.clone(), cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenTurn(checkpoint) => {
+                    this.open_turn(checkpoint.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
@@ -3168,6 +3171,28 @@ impl Shell {
             });
             surfaces.update(cx, |surfaces, cx| {
                 surfaces.show_commit(commit, Some(changes), cx)
+            });
+        })
+        .detach();
+    }
+
+    /// Read one checkpoint's saved turn snapshots for the Git surface.
+    fn open_turn(&mut self, checkpoint: ginka_protocol::model::Checkpoint, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let source = ginka_protocol::ChangeSource::Turn {
+                checkpoint: checkpoint.id.clone(),
+            };
+            let changes = cx
+                .background_spawn(async move { link.changes(&workspace, source).await })
+                .await
+                .ok_or_else(|| rust_i18n::t!("surface.git.turn_read_error").to_string());
+            surfaces.update(cx, |surfaces, cx| {
+                surfaces.show_turn(checkpoint, Some(changes), cx)
             });
         })
         .detach();
@@ -13673,6 +13698,9 @@ async fn pull_rows(
         this.accounts = accounts;
         this.plans = plans;
         this.checkpoints = checkpoints;
+        this.surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_checkpoints(this.checkpoints.clone(), cx)
+        });
         if let Some(usage) = usage {
             this.surfaces
                 .update(cx, |surfaces, cx| surfaces.set_usage(usage, cx));

@@ -755,6 +755,9 @@ pub struct Checkpoint {
     pub commit: String,
     /// What the transcript said at this point, for the rewind menu.
     pub label: String,
+    /// Whether a saved start snapshot makes this checkpoint a completed turn
+    /// with an exact diff. Initial and restore-safety checkpoints lack one.
+    pub has_turn_start: bool,
     /// Unix seconds.
     pub created_at: i64,
 }
@@ -810,9 +813,11 @@ pub enum ChangeSource {
     Unstaged,
     /// What is staged for the next commit.
     Staged,
-    /// What has happened since a checkpoint: the answer to "what did this turn
-    /// actually do".
+    /// What has happened since a checkpoint, including later worktree edits.
     SinceCheckpoint { checkpoint: CheckpointId },
+    /// Only the changes made during the completed turn ending at this
+    /// checkpoint. Later worktree edits are excluded.
+    Turn { checkpoint: CheckpointId },
     /// What one commit did, against its first parent: what a row of the
     /// history opens. A merge reads as what it brought into the branch.
     ///

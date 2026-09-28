@@ -167,16 +167,19 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
         /// Show what is staged for the next commit instead of everything.
-        #[arg(long, conflicts_with_all = ["unstaged", "since"])]
+        #[arg(long, conflicts_with_all = ["unstaged", "since", "turn"])]
         staged: bool,
         /// Show only edits that are not staged yet.
-        #[arg(long, conflicts_with = "since")]
+        #[arg(long, conflicts_with_all = ["since", "turn"])]
         unstaged: bool,
         /// Show what has happened since a checkpoint, by its id.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "turn")]
         since: Option<String>,
+        /// Show only what one completed turn changed, by its checkpoint id.
+        #[arg(long, conflicts_with_all = ["staged", "unstaged", "since", "commit"])]
+        turn: Option<String>,
         /// Show what one commit did, by the id `history` prints.
-        #[arg(long, conflicts_with_all = ["since", "staged", "unstaged"])]
+        #[arg(long, conflicts_with_all = ["since", "turn", "staged", "unstaged"])]
         commit: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
@@ -1488,21 +1491,25 @@ fn request_for(command: Command) -> Result<Request> {
             staged,
             unstaged,
             since,
+            turn,
             commit,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
-            source: match (staged, unstaged, since) {
+            source: match (staged, unstaged, since, turn) {
                 _ if commit.is_some() => ChangeSource::Commit {
                     commit: commit.unwrap_or_default(),
                 },
-                (_, _, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+                (_, _, _, Some(checkpoint)) => ChangeSource::Turn {
                     checkpoint: CheckpointId(checkpoint),
                 },
-                (true, false, None) => ChangeSource::Staged,
-                (false, true, None) => ChangeSource::Unstaged,
-                (false, false, None) => ChangeSource::Uncommitted,
-                (true, true, None) => unreachable!("clap rejects conflicting diff sources"),
+                (_, _, Some(checkpoint), None) => ChangeSource::SinceCheckpoint {
+                    checkpoint: CheckpointId(checkpoint),
+                },
+                (true, false, None, None) => ChangeSource::Staged,
+                (false, true, None, None) => ChangeSource::Unstaged,
+                (false, false, None, None) => ChangeSource::Uncommitted,
+                _ => unreachable!("clap rejects conflicting diff sources"),
             },
         },
         Command::Pr { workspace, draft } => Request::CreatePullRequest {
@@ -2977,6 +2984,25 @@ mod ginka_cli_format {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{ChangeSource, Cli, Request, request_for};
+        use clap::Parser;
+
+        #[test]
+        fn changes_turn_selects_one_completed_checkpoint() {
+            let cli = Cli::try_parse_from(["ginka", "changes", "w", "--turn", "c-1"]).unwrap();
+            let request = request_for(cli.command).unwrap();
+            assert!(matches!(
+                request,
+                Request::WorkspaceChanges {
+                    source: ChangeSource::Turn { checkpoint },
+                    ..
+                } if checkpoint.0 == "c-1"
+            ));
+            assert!(
+                Cli::try_parse_from(["ginka", "changes", "w", "--turn", "c-1", "--staged"])
+                    .is_err()
+            );
+        }
 
         #[test]
         fn a_clean_worktree_says_so_rather_than_showing_nothing() {

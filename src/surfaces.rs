@@ -6,8 +6,8 @@
 //! beside one another; the arrangement is kept per workspace.
 
 use ginka_protocol::model::{
-    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, GitCommit, LineKind, Skill,
-    SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
+    ChangeKind, Changes, Checkpoint, ContentMatch, FileContent, FileEntry, GitCommit, LineKind,
+    Skill, SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
@@ -101,6 +101,12 @@ pub struct SurfacePanel {
     history: Vec<GitCommit>,
     /// Whether the reader asked to see recent commits above the current diff.
     history_open: bool,
+    /// Completed turns for the selected workspace, newest first.
+    checkpoints: Vec<Checkpoint>,
+    /// Whether the turn list is visible above the current diff.
+    turns_open: bool,
+    /// A completed turn and its exact saved-start to saved-end diff.
+    turn_view: Option<(Checkpoint, Option<Result<Changes, String>>)>,
     /// A commit opened from the history, and what it did once that is read.
     /// Shown in place of the uncommitted diff while it is set.
     commit_view: Option<(GitCommit, Option<Changes>)>,
@@ -261,6 +267,8 @@ pub enum SurfaceEvent {
     /// Read what one commit did; it comes back through
     /// [`SurfacePanel::show_commit`].
     OpenCommit(GitCommit),
+    /// Read exactly one completed turn's saved snapshots.
+    OpenTurn(Checkpoint),
     /// Push the branch and open a pull request for it.
     CreatePullRequest,
     /// Leave a comment on a file, and a line of it.
@@ -439,6 +447,9 @@ impl SurfacePanel {
             diff_finder,
             history: Vec::new(),
             history_open: false,
+            checkpoints: Vec::new(),
+            turns_open: false,
+            turn_view: None,
             commit_view: None,
             pull_request: None,
             opening_pull_request: false,
@@ -1058,6 +1069,32 @@ impl SurfacePanel {
             .and_then(|changes| changes.files.first())
             .map(|file| file.path.clone());
         self.commit_view = Some((commit, changes));
+        self.turn_view = None;
+        cx.notify();
+    }
+
+    /// Show a completed turn, dropping a response if the reader has moved on.
+    pub fn show_turn(
+        &mut self,
+        checkpoint: Checkpoint,
+        changes: Option<Result<Changes, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        if changes.is_some()
+            && self
+                .turn_view
+                .as_ref()
+                .is_none_or(|(shown, _)| shown.id != checkpoint.id)
+        {
+            return;
+        }
+        self.expanded = changes
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|changes| changes.files.first())
+            .map(|file| file.path.clone());
+        self.turn_view = Some((checkpoint, changes));
+        self.commit_view = None;
         cx.notify();
     }
 
@@ -1389,6 +1426,21 @@ impl SurfacePanel {
         }
     }
 
+    /// Update the turn picker from daemon-owned checkpoints.
+    pub fn set_checkpoints(&mut self, checkpoints: Vec<Checkpoint>, cx: &mut Context<Self>) {
+        if self.checkpoints != checkpoints {
+            if self.turn_view.as_ref().is_some_and(|(shown, _)| {
+                !checkpoints
+                    .iter()
+                    .any(|checkpoint| checkpoint.id == shown.id)
+            }) {
+                self.turn_view = None;
+            }
+            self.checkpoints = checkpoints;
+            cx.notify();
+        }
+    }
+
     /// The strip across the top of the panel.
     ///
     /// The window has no title bar (`docs/ui.md` §3.1), so this is the right
@@ -1524,7 +1576,7 @@ impl SurfacePanel {
 
     /// What the agent changed, file by file.
     fn git(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        if let Some(view) = self.commit_view(cx) {
+        if let Some(view) = self.read_only_diff_view(cx) {
             return view;
         }
         let tokens = Tokens::global(cx).clone();
@@ -1561,6 +1613,7 @@ impl SurfacePanel {
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
+                .when(self.turns_open, |this| this.child(self.git_turns(cx)))
                 .child(self.diff_filter_input(cx))
                 .child(
                     div()
@@ -1594,6 +1647,7 @@ impl SurfacePanel {
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
+            .when(self.turns_open, |this| this.child(self.git_turns(cx)))
             .child(self.diff_filter_input(cx))
             .child(
                 h_flex()
@@ -1732,6 +1786,7 @@ impl SurfacePanel {
     fn git_remote_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let history_open = self.history_open;
+        let turns_open = self.turns_open;
         h_flex()
             .w_full()
             .px_3()
@@ -1798,6 +1853,18 @@ impl SurfacePanel {
                         if this.history_open {
                             cx.emit(SurfaceEvent::RefreshHistory);
                         }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("git-turns")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.turns").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.turns_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.turns_open = !turns_open;
                         cx.notify();
                     })),
             )
@@ -1927,12 +1994,99 @@ impl SurfacePanel {
             )
     }
 
+    /// Completed turns are readable even after later edits or commits.
+    fn git_turns(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .id("git-turns")
+            .w_full()
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .when(
+                !self.checkpoints.iter().any(|row| row.has_turn_start),
+                |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.turns_empty").to_string()),
+                    )
+                },
+            )
+            .children(
+                self.checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.has_turn_start)
+                    .enumerate()
+                    .map(|(index, checkpoint)| {
+                        let picked = checkpoint.clone();
+                        let title = rust_i18n::t!(
+                            "surface.git.turn_row",
+                            turn = checkpoint.turn,
+                            label = checkpoint.label.clone()
+                        )
+                        .to_string();
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new(format!("turn-row-{index}"))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .label(title)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.turn_view = Some((picked.clone(), None));
+                                        this.commit_view = None;
+                                        cx.emit(SurfaceEvent::OpenTurn(picked.clone()));
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(checkpoint.session.0.clone()),
+                            )
+                    }),
+            )
+    }
+
     /// What one commit did, read-only: its heading, the way back to the
     /// uncommitted diff, and its files with the one being read expanded.
-    fn commit_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (commit, changes) = self.commit_view.clone()?;
+    fn read_only_diff_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (title, detail, changes) = if let Some((checkpoint, changes)) = self.turn_view.clone() {
+            (
+                rust_i18n::t!(
+                    "surface.git.turn_row",
+                    turn = checkpoint.turn,
+                    label = checkpoint.label
+                )
+                .to_string(),
+                format!("{} · {}", checkpoint.session.0, checkpoint.id.0),
+                changes,
+            )
+        } else {
+            let (commit, changes) = self.commit_view.clone()?;
+            (
+                commit.summary,
+                format!(
+                    "{} · {} · {}",
+                    commit.id.chars().take(12).collect::<String>(),
+                    commit.author,
+                    ginka_ui::workspace::relative_age(crate::daemon::now(), commit.authored_at)
+                ),
+                changes.map(Ok),
+            )
+        };
         let tokens = Tokens::global(cx).clone();
-        let now = crate::daemon::now();
         let head = v_flex()
             .w_full()
             .px_3()
@@ -1953,6 +2107,7 @@ impl SurfacePanel {
                             .tooltip(rust_i18n::t!("surface.git.commit_back").to_string())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.commit_view = None;
+                                this.turn_view = None;
                                 this.expanded = None;
                                 cx.notify();
                             })),
@@ -1964,19 +2119,14 @@ impl SurfacePanel {
                             .text_sm()
                             .text_color(tokens.colors().text_primary)
                             .truncate()
-                            .child(commit.summary.clone()),
+                            .child(title),
                     ),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
-                    .child(format!(
-                        "{} · {} · {}",
-                        commit.id.chars().take(12).collect::<String>(),
-                        commit.author,
-                        ginka_ui::workspace::relative_age(now, commit.authored_at)
-                    )),
+                    .child(detail),
             )
             .child(self.diff_filter_input(cx));
         let body: Vec<AnyElement> = match changes {
@@ -1989,7 +2139,16 @@ impl SurfacePanel {
                     .child(rust_i18n::t!("surface.git.reading").to_string())
                     .into_any_element(),
             ],
-            Some(changes) => {
+            Some(Err(error)) => vec![
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+                    .into_any_element(),
+            ],
+            Some(Ok(changes)) => {
                 let visible = self.diff_filter.visible_count(&changes.files);
                 let (added, removed) = changes
                     .files

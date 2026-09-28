@@ -90,6 +90,7 @@ pub fn take(
         turn,
         commit,
         label,
+        has_turn_start: start.is_some(),
         created_at: now,
     };
     insert(conn, &checkpoint)?;
@@ -138,6 +139,21 @@ pub fn get(conn: &Connection, id: &CheckpointId) -> Result<Option<Checkpoint>> {
     Ok(rows.next().transpose()?)
 }
 
+/// The start and end snapshots of one completed turn, if its start was saved.
+/// Older checkpoints without a start cannot identify the turn's own changes.
+pub fn turn_commits(conn: &Connection, id: &CheckpointId) -> Result<Option<(String, String)>> {
+    let pair = conn.query_row(
+        "SELECT start_commit, commit_id FROM checkpoints WHERE id = ?1",
+        [&id.0],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+    );
+    match pair {
+        Ok((Some(start), end)) => Ok(Some((start, end))),
+        Ok((None, _)) | Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
 /// Drop everything but the newest `keep` checkpoints in a workspace.
 ///
 /// Every checkpoint holds a commit alive through a ref, so a workspace an
@@ -184,7 +200,7 @@ fn trim_label(label: &str) -> String {
     format!("{kept}…")
 }
 
-const SELECT: &str = "SELECT id, session_id, workspace_id, turn, commit_id, label, created_at \
+const SELECT: &str = "SELECT id, session_id, workspace_id, turn, commit_id, label, created_at, start_commit IS NOT NULL \
      FROM checkpoints";
 const ORDER: &str = "ORDER BY created_at DESC, turn DESC";
 
@@ -197,6 +213,7 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Checkpoint> {
         commit: row.get(4)?,
         label: row.get(5)?,
         created_at: row.get(6)?,
+        has_turn_start: row.get(7)?,
     })
 }
 
@@ -237,6 +254,7 @@ mod tests {
             turn,
             commit: format!("commit-{id}"),
             label: format!("turn {turn}"),
+            has_turn_start: false,
             created_at: at,
         }
     }
@@ -253,6 +271,30 @@ mod tests {
         assert_eq!(
             get(&conn, &CheckpointId("a".into())).unwrap().unwrap().turn,
             1
+        );
+    }
+
+    #[test]
+    fn a_turn_diff_requires_its_saved_start() {
+        let conn = db::open_in_memory().unwrap();
+        stored_session(&conn);
+        let id = CheckpointId("a".into());
+        insert(&conn, &checkpoint("a", 1, 100)).unwrap();
+        assert!(!list(&conn, &WorkspaceId("comet/harbor".into())).unwrap()[0].has_turn_start);
+        assert_eq!(turn_commits(&conn, &id).unwrap(), None);
+        conn.execute(
+            "UPDATE checkpoints SET start_commit = 'start-a' WHERE id = 'a'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            turn_commits(&conn, &id).unwrap(),
+            Some(("start-a".into(), "commit-a".into()))
+        );
+        assert!(list(&conn, &WorkspaceId("comet/harbor".into())).unwrap()[0].has_turn_start);
+        assert_eq!(
+            turn_commits(&conn, &CheckpointId("missing".into())).unwrap(),
+            None
         );
     }
 

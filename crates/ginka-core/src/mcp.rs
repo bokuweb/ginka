@@ -368,6 +368,7 @@ pub fn tools() -> Vec<Tool> {
                     "staged": {"type": "boolean", "description": "Only what is staged for the next commit"},
                     "unstaged": {"type": "boolean", "description": "Only worktree edits not yet in the index"},
                     "since_checkpoint": {"type": "string"},
+                    "turn_checkpoint": {"type": "string", "description": "Only what the completed turn ending at this checkpoint changed"},
                     "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
                 },
                 "required": ["workspace"],
@@ -1028,6 +1029,11 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 _ if maybe("commit").is_some() => ginka_protocol::model::ChangeSource::Commit {
                     commit: maybe("commit").unwrap_or_default(),
                 },
+                _ if maybe("turn_checkpoint").is_some() => {
+                    ginka_protocol::model::ChangeSource::Turn {
+                        checkpoint: CheckpointId(maybe("turn_checkpoint").unwrap_or_default()),
+                    }
+                }
                 Some(checkpoint) => ginka_protocol::model::ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
@@ -1429,7 +1435,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_can_be_asked_for_three_ways() {
+    fn changes_can_be_asked_for_each_source() {
         use ginka_protocol::model::ChangeSource;
         let uncommitted = request_for("ginka_changes", &json!({"workspace": "w"})).unwrap();
         let staged =
@@ -1437,6 +1443,11 @@ mod tests {
         let since = request_for(
             "ginka_changes",
             &json!({"workspace": "w", "since_checkpoint": "c-1"}),
+        )
+        .unwrap();
+        let turn = request_for(
+            "ginka_changes",
+            &json!({"workspace": "w", "turn_checkpoint": "c-1"}),
         )
         .unwrap();
         assert!(matches!(
@@ -1457,6 +1468,13 @@ mod tests {
             since,
             Request::WorkspaceChanges {
                 source: ChangeSource::SinceCheckpoint { .. },
+                ..
+            }
+        ));
+        assert!(matches!(
+            turn,
+            Request::WorkspaceChanges {
+                source: ChangeSource::Turn { .. },
                 ..
             }
         ));

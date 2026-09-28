@@ -946,13 +946,38 @@ impl Service {
                     ChangeSource::SinceCheckpoint { checkpoint } => {
                         let stored = checkpoint::get(&self.conn(), checkpoint)
                             .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
                             .ok_or_else(|| {
                                 RpcError::not_found(format!(
-                                    "no checkpoint with id {}",
-                                    checkpoint.0
+                                    "no checkpoint with id {} in workspace {}",
+                                    checkpoint.0, workspace.0
                                 ))
                             })?;
                         git::changes_since(&worktree.path, &stored.commit).map_err(failed)?
+                    }
+                    ChangeSource::Turn { checkpoint } => {
+                        let conn = self.conn();
+                        let stored = checkpoint::get(&conn, checkpoint)
+                            .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {} in workspace {}",
+                                    checkpoint.0, workspace.0
+                                ))
+                            })?;
+                        match checkpoint::turn_commits(&conn, &stored.id).map_err(failed)? {
+                            Some((start, end)) => {
+                                git::changes_between(&worktree.path, &start, &end)
+                                    .map_err(failed)?
+                            }
+                            None => {
+                                return Err(RpcError::not_found(format!(
+                                    "checkpoint {} has no saved turn start",
+                                    checkpoint.0
+                                )));
+                            }
+                        }
                     }
                     other => git::changes(&worktree.path, other).map_err(failed)?,
                 };

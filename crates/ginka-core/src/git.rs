@@ -566,7 +566,7 @@ pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>
             args.extend(common);
             git(worktree, &args)?
         }
-        ChangeSource::SinceCheckpoint { .. } => {
+        ChangeSource::SinceCheckpoint { .. } | ChangeSource::Turn { .. } => {
             unreachable!("a checkpoint is resolved to a commit before this is called")
         }
         ChangeSource::Commit { commit } => {
@@ -743,6 +743,26 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
             "--find-renames",
             "--no-ext-diff",
             "-U3",
+        ],
+    )?;
+    Ok(crate::diff::parse(&patch))
+}
+
+/// Compare the two saved snapshots of a completed turn without reading the
+/// current index or worktree, which may contain later hand edits.
+pub fn changes_between(worktree: &Path, start: &str, end: &str) -> Result<Vec<FileChange>> {
+    anyhow::ensure!(is_object_name(start), "{start:?} is not a commit id");
+    anyhow::ensure!(is_object_name(end), "{end:?} is not a commit id");
+    let patch = git(
+        worktree,
+        &[
+            "diff",
+            "--no-color",
+            "--find-renames",
+            "--no-ext-diff",
+            "-U3",
+            start,
+            end,
         ],
     )?;
     Ok(crate::diff::parse(&patch))
@@ -1803,6 +1823,38 @@ prunable
         let paths: Vec<&str> = changed.iter().map(|file| file.path.as_str()).collect();
         assert!(paths.contains(&"tracked.txt"), "{paths:?}");
         assert!(paths.contains(&"agent.rs"), "{paths:?}");
+    }
+
+    #[test]
+    fn one_past_turn_excludes_later_worktree_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let before = snapshot(&root, "refs/ginka/checkpoints/before", "before").unwrap();
+        std::fs::write(root.join("tracked.txt"), "agent edit\n").unwrap();
+        std::fs::write(root.join("agent.rs"), "fn added() {}\n").unwrap();
+        let after = snapshot(&root, "refs/ginka/checkpoints/after", "after").unwrap();
+        std::fs::write(root.join("tracked.txt"), "later hand edit\n").unwrap();
+        std::fs::write(root.join("later.rs"), "fn later() {}\n").unwrap();
+
+        let files = changes_between(&root, &before, &after).unwrap();
+        let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(paths, vec!["agent.rs", "tracked.txt"]);
+        assert!(
+            files
+                .iter()
+                .flat_map(|file| &file.hunks)
+                .flat_map(|hunk| &hunk.lines)
+                .any(|line| line.text.contains("agent edit"))
+        );
+        assert!(
+            files
+                .iter()
+                .flat_map(|file| &file.hunks)
+                .flat_map(|hunk| &hunk.lines)
+                .all(|line| !line.text.contains("later hand edit"))
+        );
+        assert!(changes_between(&root, "--help", &after).is_err());
     }
 
     #[test]
