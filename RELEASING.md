@@ -49,7 +49,8 @@ exist yet are marked as such.
    Publishing a release whose tag matches the root package version runs
    `.github/workflows/release.yml` and `.github/workflows/e1-release.yml`.
    They build the universal Ginka and standalone e1 macOS apps, sign them
-   with Developer ID, notarize and staple the apps and DMGs, then upload each
+   with Developer ID, require an `Accepted` notarization result for each app
+   and DMG, staple them, then upload each
    app's ZIP, DMG, and checksums as workflow artifacts and attach them to the
    same GitHub Release. Configure Actions
    secrets `MACOS_CERTIFICATE_P12_BASE64`, `MACOS_CERTIFICATE_PASSWORD`, `APPLE_ID`,
