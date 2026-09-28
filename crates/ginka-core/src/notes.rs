@@ -9,7 +9,41 @@
 use anyhow::{Result, bail};
 use ginka_protocol::ProjectName;
 use ginka_protocol::model::Note;
-use rusqlite::{Connection, OptionalExtension as _};
+use rusqlite::{Connection, OptionalExtension as _, types::Type};
+
+/// A note search shared by the daemon and the window.
+///
+/// Text matches title, body or any tag as a case-insensitive substring;
+/// the optional tag matches one normalized tag exactly.
+pub struct NoteFilter {
+    query: Option<String>,
+    tag: Option<String>,
+}
+
+impl NoteFilter {
+    /// Trim and case-fold both conditions; blank conditions do not filter.
+    pub fn new(query: Option<&str>, tag: Option<&str>) -> Self {
+        let normalize = |value: Option<&str>| {
+            value
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_lowercase)
+        };
+        Self {
+            query: normalize(query),
+            tag: normalize(tag),
+        }
+    }
+
+    /// Whether a note satisfies both active conditions.
+    pub fn matches(&self, note: &Note) -> bool {
+        self.query.as_ref().is_none_or(|query| {
+            note.title.to_lowercase().contains(query)
+                || note.body.to_lowercase().contains(query)
+                || note.tags.iter().any(|tag| tag.contains(query))
+        }) && self.tag.as_ref().is_none_or(|tag| note.tags.contains(tag))
+    }
+}
 
 /// What a note with no title is called: its first line, cut to this many
 /// characters. A list of untitled rows is a list nobody can find anything in.
@@ -35,14 +69,17 @@ pub fn save(
     project: Option<&ProjectName>,
     title: &str,
     body: &str,
+    tags: Option<&[String]>,
     now: i64,
 ) -> Result<Note> {
     let title = title_for(title, body);
     match id {
         Some(id) => {
+            let existing = get(conn, id)?.ok_or_else(|| anyhow::anyhow!("no note with id {id}"))?;
+            let tags = tags.map(normalize_tags).unwrap_or(existing.tags);
             let changed = conn.execute(
-                "UPDATE notes SET title = ?2, body = ?3, updated_at = ?4 WHERE id = ?1",
-                rusqlite::params![id, title, body, now],
+                "UPDATE notes SET title = ?2, body = ?3, tags = ?4, updated_at = ?5 WHERE id = ?1",
+                rusqlite::params![id, title, body, serde_json::to_string(&tags)?, now],
             )?;
             if changed == 0 {
                 bail!("no note with id {id}");
@@ -55,17 +92,19 @@ pub fn save(
                 project: project.cloned(),
                 title,
                 body: body.to_string(),
+                tags: tags.map(normalize_tags).unwrap_or_default(),
                 created_at: now,
                 updated_at: now,
             };
             conn.execute(
-                "INSERT INTO notes (id, project, title, body, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO notes (id, project, title, body, tags, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 rusqlite::params![
                     note.id,
                     note.project.as_ref().map(|project| project.0.clone()),
                     note.title,
                     note.body,
+                    serde_json::to_string(&note.tags)?,
                     note.created_at,
                     note.updated_at,
                 ],
@@ -79,17 +118,22 @@ pub fn save(
 pub fn get(conn: &Connection, id: &str) -> Result<Option<Note>> {
     Ok(conn
         .query_row(
-            "SELECT id, project, title, body, created_at, updated_at FROM notes WHERE id = ?1",
+            "SELECT id, project, title, body, created_at, updated_at, tags FROM notes WHERE id = ?1",
             [id],
             row_to_note,
         )
         .optional()?)
 }
 
-/// A project's notes, or all of them, most recently touched first.
-pub fn list(conn: &Connection, project: Option<&ProjectName>) -> Result<Vec<Note>> {
+/// A project's notes, or all of them, filtered by text and exact tag, newest first.
+pub fn list(
+    conn: &Connection,
+    project: Option<&ProjectName>,
+    query: Option<&str>,
+    tag: Option<&str>,
+) -> Result<Vec<Note>> {
     let mut statement = conn.prepare(
-        "SELECT id, project, title, body, created_at, updated_at
+        "SELECT id, project, title, body, created_at, updated_at, tags
            FROM notes
           WHERE ?1 IS NULL OR project = ?1
           ORDER BY updated_at DESC, created_at DESC",
@@ -97,7 +141,22 @@ pub fn list(conn: &Connection, project: Option<&ProjectName>) -> Result<Vec<Note
     let notes = statement
         .query_map([project.map(|project| project.0.clone())], row_to_note)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(notes)
+    let filter = NoteFilter::new(query, tag);
+    Ok(notes
+        .into_iter()
+        .filter(|note| filter.matches(note))
+        .collect())
+}
+
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let tag = tag.trim().to_lowercase();
+        if !tag.is_empty() && !normalized.contains(&tag) {
+            normalized.push(tag);
+        }
+    }
+    normalized
 }
 
 /// Forget a note. Forgetting one that is not there is not an error: the
@@ -115,6 +174,9 @@ fn row_to_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<Note> {
         body: row.get(3)?,
         created_at: row.get(4)?,
         updated_at: row.get(5)?,
+        tags: serde_json::from_str(&row.get::<_, String>(6)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(6, Type::Text, Box::new(error))
+        })?,
     })
 }
 
@@ -141,27 +203,98 @@ mod tests {
     fn a_note_is_saved_listed_edited_and_removed() {
         let conn = conn();
         let project = ProjectName("ginka".into());
-        let first = save(&conn, None, Some(&project), "One", "body", 10).unwrap();
-        let other = save(&conn, None, None, "", "loose", 20).unwrap();
-        assert_eq!(list(&conn, None).unwrap().len(), 2);
-        assert_eq!(list(&conn, Some(&project)).unwrap(), vec![first.clone()]);
+        let first = save(&conn, None, Some(&project), "One", "body", None, 10).unwrap();
+        let other = save(&conn, None, None, "", "loose", None, 20).unwrap();
+        assert_eq!(list(&conn, None, None, None).unwrap().len(), 2);
+        assert_eq!(
+            list(&conn, Some(&project), None, None).unwrap(),
+            vec![first.clone()]
+        );
 
-        let edited = save(&conn, Some(&first.id), None, "One", "changed", 30).unwrap();
+        let edited = save(&conn, Some(&first.id), None, "One", "changed", None, 30).unwrap();
         assert_eq!(edited.body, "changed");
         assert_eq!(edited.project, Some(project), "an edit does not move it");
         assert_eq!(
-            list(&conn, None).unwrap()[0].id,
+            list(&conn, None, None, None).unwrap()[0].id,
             first.id,
             "the one just touched comes first"
         );
 
         remove(&conn, &other.id).unwrap();
         remove(&conn, &other.id).unwrap();
-        assert_eq!(list(&conn, None).unwrap().len(), 1);
+        assert_eq!(list(&conn, None, None, None).unwrap().len(), 1);
     }
 
     #[test]
     fn editing_a_note_that_is_not_there_says_so() {
-        assert!(save(&conn(), Some("missing"), None, "t", "b", 1).is_err());
+        assert!(save(&conn(), Some("missing"), None, "t", "b", None, 1).is_err());
+    }
+
+    #[test]
+    fn tags_survive_edits_and_search_matches_title_body_and_tags() {
+        let conn = conn();
+        let project = ProjectName("ginka".into());
+        let note = save(
+            &conn,
+            None,
+            Some(&project),
+            "Release plan",
+            "Run the migration",
+            Some(&["Deploy".into(), " deploy ".into(), "Ops".into()]),
+            10,
+        )
+        .unwrap();
+        assert_eq!(note.tags, vec!["deploy", "ops"]);
+        assert_eq!(
+            list(&conn, Some(&project), Some("RELEASE"), None).unwrap(),
+            vec![note.clone()]
+        );
+        assert_eq!(
+            list(&conn, None, Some("MIGRATION"), None).unwrap(),
+            vec![note.clone()]
+        );
+        assert_eq!(
+            list(&conn, None, Some("OPS"), None).unwrap(),
+            vec![note.clone()]
+        );
+        assert_eq!(
+            list(&conn, None, None, Some("DEPLOY")).unwrap(),
+            vec![note.clone()]
+        );
+        assert!(list(&conn, None, None, Some("missing")).unwrap().is_empty());
+
+        let edited = save(&conn, Some(&note.id), None, "Changed", "body", None, 20).unwrap();
+        assert_eq!(edited.tags, vec!["deploy", "ops"]);
+        let cleared = save(
+            &conn,
+            Some(&note.id),
+            None,
+            "Changed",
+            "body",
+            Some(&[]),
+            30,
+        )
+        .unwrap();
+        assert!(cleared.tags.is_empty());
+        assert!(list(&conn, None, None, Some("deploy")).unwrap().is_empty());
+    }
+
+    #[test]
+    fn note_filter_combines_text_with_an_exact_case_insensitive_tag() {
+        let note = Note {
+            id: "one".into(),
+            project: None,
+            title: "Release plan".into(),
+            body: "Run migration".into(),
+            tags: vec!["deploy".into(), "operations".into()],
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(NoteFilter::new(Some("  RELEASE  "), Some(" DEPLOY ")).matches(&note));
+        assert!(NoteFilter::new(Some("migration"), Some("deploy")).matches(&note));
+        assert!(NoteFilter::new(Some("operations"), Some("deploy")).matches(&note));
+        assert!(!NoteFilter::new(Some("missing"), Some("deploy")).matches(&note));
+        assert!(!NoteFilter::new(None, Some("operation")).matches(&note));
+        assert!(NoteFilter::new(Some("  "), Some(" ")).matches(&note));
     }
 }

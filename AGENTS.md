@@ -63,7 +63,7 @@ It is a native reimplementation of what [band-app/band](https://github.com/band-
 - **Commit messages (N9).** `ginka commit <workspace> --generate` has an agent write the subject on its cheap tier; the daemon pushes it as `CommitMessageGenerated` and the CLI commits with it.
 - **Access mode (N2).** `session start --access read-only|ask|auto`, the same over MCP, and a chip in the composer. Stored on the session; a follow-up runs under the mode the conversation began in. Claude gets `--permission-mode` and asks about anything the mode does not allow; Codex gets a sandbox and an approval policy (`read-only`+`on-request`, `workspace-write`+`untrusted`, `workspace-write`+`never`) and asks the same way.
 - **Interactive responses.** Ask-user, plan and permission events pause a session; answers from the cards or composer, `session respond`, MCP, and Slack are validated against the open request and delivered into the live transport. A scripted driver pins the loop; of the shipped drivers, ACP raises permission requests as questions and Claude raises tool approvals (Allow/Deny), `AskUserQuestion` and `ExitPlanMode` over its stdio control protocol (`driver::claude::control`); Codex runs over `codex app-server` and raises command and file-change approvals and `requestUserInput` questions (`driver::codex_app`), with `codex exec` kept behind `agents.codex.transport = "exec"`.
-- **Skills.** `ginka skills list|enable|disable`, `ginka_skills` over MCP, and the **Skills** surface manage the agents' own skills across every ecosystem's roots, under the home and under each project (N11). Duplicate installs are one row and its toggle changes every copy without deleting any; the window searches names, descriptions, roots and paths, filters by scope/state, and copies daemon-host paths.
+- **Skills.** `ginka skills list|enable|disable|create`, `ginka_skills` and `ginka_skill_create` over MCP, and the **Skills** surface manage the agents' own skills across every ecosystem's roots, under the home and under each project (N11). Duplicate installs are one row and its toggle changes every copy without deleting any; the window searches names, descriptions, roots and paths, filters by scope/state, copies daemon-host paths, and creates new skills in a shared user or project root.
 - **Accounts.** Several logins per provider (`docs/accounts.md`, N17): `ginka account add|list|login|select|remove|refresh`, `session start --account`, an *Add a login…* row in the pickers, and an account chip in the composer when a provider has more than one. The selected account persists per provider for future chats across UI, CLI and MCP; existing chats retain the login that owns their vendor thread. A separate usage chip stays visible with one login too, combining the active session's live token count, provider-reported current context occupancy and the tightest rate-limit window. A session records the login it ran on, usage is filed by it, and each login's rate-limit windows — Codex's through its app server, Claude's from a refused turn — are shown beside the choice, in the sidebar footer and on the **Reports** surface.
 - **Browser and visual feedback.** On macOS and Windows the Browser surface keeps one native WebView per workspace with navigation and inspect mode. Selecting a DOM element captures bounded HTML, curated CSS, accessibility, geometry and source context for review in the composer; the browser screenshot shortcut, history and find remain. Image attachments can be marked with pen, highlight, arrows, shapes or text and return as a self-contained SVG attachment.
 
@@ -110,6 +110,8 @@ cargo run -p ginka-cli -- account add codex-work --provider codex --label Work
 cargo run -p ginka-cli -- account login codex-work   # the vendor's sign-in, here
 cargo run -p ginka-cli -- account select codex-work  # future Codex sessions use it
 cargo run -p ginka-cli -- account list               # signed in, and headroom
+cargo run -p ginka-cli -- settings providers          # provider availability and executable overrides
+cargo run -p ginka-cli -- settings provider codex --disable  # disable future Codex turns
 cargo run -p ginka-cli -- session log <session>
 cargo run -p ginka-cli -- session queue <session>     # list pending follow-ups
 cargo run -p ginka-cli -- session queue-edit <session> <id> "replacement"
@@ -128,6 +130,7 @@ cargo run -p ginka-cli -- slack status          # the Slack connector, and why i
 cargo run -p ginka-cli -- slack allow U01ABC2   # let one more member speak to it
 cargo run -p ginka-cli -- session fork <session> --agent codex   # move a conversation to another agent
 cargo run -p ginka-cli -- skills list           # the agents' own skills, and whether each is on
+cargo run -p ginka-cli -- skills create deploy-check --description "Check deployments" --body "# Deploy check" [--project <project>]
 cargo run -p ginka-cli -- workspace branches <workspace>          # and `checkout <branch> --create`
 cargo run -p ginka-cli -- commit <workspace> --generate           # an agent writes the message
 cargo run -p ginka-cli -- commit <workspace> --amend [message]    # fold into an unpushed last commit
@@ -136,7 +139,10 @@ cargo run -p ginka-cli -- cron add <project> <name> --schedule @hourly --shell '
 cargo run -p ginka-cli -- pull <workspace>                        # clean fast-forward only
 cargo run -p ginka-cli -- pr <workspace> [--draft]                # push and open a PR with gh
 cargo run -p ginka-cli -- changes <workspace> --commit <id>       # what one commit did
+cargo run -p ginka-cli -- changes <workspace> --turn <checkpoint> # what one completed turn changed
 cargo run -p ginka-cli -- notes list [--project <p>]              # and add|show|edit|remove
+cargo run -p ginka-cli -- attach <path>                            # store an image for a note
+cargo run -p ginka-cli -- attachment-image <reference>             # read its verified data URL
 cargo run -p ginka-cli -- history <workspace>                     # bounded recent commits
 cargo run -p ginka-cli -- stage-hunk <workspace> <path> '<header>' # exact partial stage
 cargo run -p ginka-cli -- revert-hunk <workspace> <path> '<header>' # exact partial discard
@@ -144,6 +150,7 @@ cargo run -p ginka-cli -- workspace index <workspace>            # zg index, so 
 cargo run -p ginka-cli -- project search <project> <query>       # search every active worktree
 cargo run -p ginka-cli -- --json show <workspace> <path>         # includes the revision required to save
 cargo run -p ginka-cli -- save <workspace> <path> --expected-revision <revision> < replacement
+cargo run -p ginka-cli -- open-editor <workspace> <path> [--line <one-based>] # on the daemon host
 
 cargo run -p ginka-protocol --features export --bin export-types   # TypeScript bindings
 ```

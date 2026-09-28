@@ -107,6 +107,17 @@ pub fn install_path_text(install: &SkillInstall) -> String {
     install.directory.to_string_lossy().into_owned()
 }
 
+/// Return a local directory URL only when the daemon's paths belong to this
+/// machine and the install still exists. External daemon paths remain copyable.
+pub fn install_directory_url(install: &SkillInstall, local_paths: bool) -> Option<String> {
+    if !local_paths || !install.directory.is_dir() {
+        return None;
+    }
+    url::Url::from_directory_path(&install.directory)
+        .ok()
+        .map(Into::into)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,5 +234,32 @@ mod tests {
             )
             .is_empty()
         );
+    }
+
+    #[test]
+    fn local_install_directory_opens_as_an_encoded_file_url() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("review notes 日本語");
+        std::fs::create_dir(&directory).unwrap();
+        let mut install = skill(true).installs.remove(0);
+        install.directory = directory.clone();
+
+        let url = install_directory_url(&install, true).unwrap();
+        let parsed = url::Url::parse(&url).unwrap();
+        assert_eq!(parsed.scheme(), "file");
+        assert_eq!(parsed.to_file_path().unwrap(), directory);
+    }
+
+    #[test]
+    fn external_or_missing_skill_directory_cannot_be_opened_locally() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().join("skill");
+        std::fs::create_dir(&directory).unwrap();
+        let mut install = skill(true).installs.remove(0);
+        install.directory = directory.clone();
+
+        assert_eq!(install_directory_url(&install, false), None);
+        std::fs::remove_dir(&directory).unwrap();
+        assert_eq!(install_directory_url(&install, true), None);
     }
 }

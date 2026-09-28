@@ -130,6 +130,21 @@ fn doctor_reports_where_state_lives_without_starting_a_daemon() {
 }
 
 #[test]
+fn stored_images_can_be_read_through_the_cli() {
+    let home = Home::new();
+    let path = home.work.path().join("diagram.bin");
+    std::fs::write(&path, b"\x89PNG\r\n\x1a\npreview").unwrap();
+
+    let reference = home.ok(&["attach", path.to_str().unwrap()]);
+    let image = home.ok(&["attachment-image", reference.trim()]);
+    assert!(image.starts_with("data:image/png;base64,"), "{image}");
+    assert_eq!(
+        home.ok(&["attachment-image", "ginka-attachment:missing"]),
+        ""
+    );
+}
+
+#[test]
 fn the_first_command_starts_a_daemon_and_the_next_one_reuses_it() {
     let home = Home::new();
     home.ok(&["project", "list"]);
@@ -155,6 +170,42 @@ fn a_project_registered_through_the_daemon_is_visible_to_the_next_command() {
     let listed = home.ok(&["project", "list"]);
     assert!(listed.contains("comet"), "{listed}");
     assert!(listed.contains("git"), "the kind is shown: {listed}");
+}
+
+#[test]
+fn a_project_skill_created_by_the_cli_is_visible_and_cannot_be_overwritten() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+
+    let args = [
+        "skills",
+        "create",
+        "review-guide",
+        "--description",
+        "Review a change",
+        "--body",
+        "Check the tests.",
+        "--project",
+        "comet",
+    ];
+    home.ok(&args);
+    let path = repository.join(".agents/skills/review-guide/SKILL.md");
+    assert!(path.is_file());
+    assert!(
+        home.ok(&["skills", "list", "--project", "comet"])
+            .contains("review-guide")
+    );
+
+    let duplicate = home.run(&args);
+    assert!(!duplicate.status.success());
+    assert_eq!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .matches("Check the tests.")
+            .count(),
+        1
+    );
 }
 
 #[test]
@@ -722,6 +773,36 @@ fn a_scheduled_job_is_added_listed_run_and_removed() {
 
     home.ok(&["cron", "remove", &id]);
     assert!(!home.ok(&["cron", "list"]).contains("nightly"));
+}
+
+#[test]
+fn a_one_time_job_can_be_added_with_at_but_not_two_schedules() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    let at = (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339();
+    let added = home.ok(&[
+        "cron", "add", "comet", "reminder", "--at", &at, "--shell", "true",
+    ]);
+    assert!(!added.is_empty());
+    let listed = home.ok(&["cron", "list"]);
+    assert!(listed.contains(&format!("@once {at}")), "{listed}");
+
+    let both = home.run(&[
+        "cron",
+        "add",
+        "comet",
+        "invalid",
+        "--at",
+        &at,
+        "--schedule",
+        "@daily",
+        "--shell",
+        "true",
+    ]);
+    assert!(!both.status.success());
+    let neither = home.run(&["cron", "add", "comet", "invalid", "--shell", "true"]);
+    assert!(!neither.status.success());
 }
 
 #[test]

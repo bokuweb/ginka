@@ -60,6 +60,79 @@ fn stored(response: Response) -> ginka_protocol::model::Attachment {
 }
 
 #[test]
+fn uploaded_images_can_be_read_through_the_daemon_with_signature_checked_preview() {
+    let mut fixture = Fixture::new();
+    let png = b"\x89PNG\r\n\x1a\npreview";
+    let image = stored(fixture.upload("chart.bin", png));
+    let response = fixture
+        .service
+        .handle(Request::ReadAttachmentImage {
+            reference: image.reference,
+        })
+        .unwrap();
+    let Response::AttachmentImage { image: Some(image) } = response else {
+        panic!("expected an image preview: {response:?}");
+    };
+    assert_eq!(image.media_type, "image/png");
+    use base64::Engine as _;
+    assert_eq!(
+        base64::engine::general_purpose::STANDARD
+            .decode(image.data_base64)
+            .unwrap(),
+        png
+    );
+}
+
+#[test]
+fn attachment_image_read_refuses_missing_non_image_and_unsafe_references() {
+    let mut fixture = Fixture::new();
+    let text = stored(fixture.upload("readme.txt", b"not an image"));
+    let mut oversized = vec![0; ginka_core::files::IMAGE_PREVIEW_LIMIT + 1];
+    oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    let oversized = stored(fixture.upload("too-large.png", &oversized));
+    for reference in [
+        text.reference,
+        oversized.reference,
+        "ginka-attachment:../secret".into(),
+        "ginka-attachment:missing".into(),
+    ] {
+        let response = fixture
+            .service
+            .handle(Request::ReadAttachmentImage { reference })
+            .unwrap();
+        assert!(matches!(
+            response,
+            Response::AttachmentImage { image: None }
+        ));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn attachment_image_read_refuses_symlinks_outside_the_store() {
+    let mut fixture = Fixture::new();
+    let attachment = stored(fixture.upload("chart.png", b"\x89PNG\r\n\x1a\ninside"));
+    let path = ginka_core::attachment::AttachmentStore::new(fixture.paths.attachments())
+        .path_of(&attachment.reference)
+        .unwrap();
+    let outside = fixture._home.path().join("outside.png");
+    std::fs::write(&outside, b"\x89PNG\r\n\x1a\noutside").unwrap();
+    std::fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+
+    let response = fixture
+        .service
+        .handle(Request::ReadAttachmentImage {
+            reference: attachment.reference,
+        })
+        .unwrap();
+    assert!(matches!(
+        response,
+        Response::AttachmentImage { image: None }
+    ));
+}
+
+#[test]
 fn an_upload_answers_with_a_reference_the_daemon_can_resolve() {
     let mut fixture = Fixture::new();
     let attachment = stored(fixture.upload("notes.md", b"# hello"));

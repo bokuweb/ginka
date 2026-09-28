@@ -479,8 +479,9 @@ fn a_commit_is_named_as_a_change_source_and_a_note_as_a_request() {
             project: None,
             title: "t".into(),
             body: "b".into(),
+            tags: None,
         }),
-        json!({"method": "save_note", "id": null, "project": null, "title": "t", "body": "b"})
+        json!({"method": "save_note", "id": null, "project": null, "title": "t", "body": "b", "tags": null})
     );
     assert_eq!(
         wire(&Request::CreatePullRequest {

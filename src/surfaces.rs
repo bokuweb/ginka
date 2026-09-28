@@ -6,11 +6,12 @@
 //! beside one another; the arrangement is kept per workspace.
 
 use ginka_protocol::model::{
-    ChangeKind, Changes, ContentMatch, FileContent, FileEntry, GitCommit, LineKind, Skill,
-    SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
+    ChangeKind, Changes, Checkpoint, ContentMatch, FileContent, FileEntry, GitCommit, LineKind,
+    Skill, SkillScope, WorkspaceContentMatch, WorkspaceFileMatch,
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
+use ginka_ui::diff_filter::DiffFilter;
 use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
@@ -92,10 +93,22 @@ pub struct SurfacePanel {
     changes: Option<Changes>,
     /// What is already in the index, shown separately from worktree-only edits.
     staged_changes: Option<Changes>,
+    /// View-only path filter shared by current changes and the commit reader.
+    diff_filter: DiffFilter,
+    /// Surrounding lines requested for each displayed diff hunk.
+    diff_context: u8,
+    /// Input for the view-only diff path filter.
+    diff_finder: Entity<InputState>,
     /// Recent commits for the selected workspace, already bounded by the daemon.
     history: Vec<GitCommit>,
     /// Whether the reader asked to see recent commits above the current diff.
     history_open: bool,
+    /// Completed turns for the selected workspace, newest first.
+    checkpoints: Vec<Checkpoint>,
+    /// Whether the turn list is visible above the current diff.
+    turns_open: bool,
+    /// A completed turn and its exact saved-start to saved-end diff.
+    turn_view: Option<(Checkpoint, Option<Result<Changes, String>>)>,
     /// A commit opened from the history, and what it did once that is read.
     /// Shown in place of the uncommitted diff while it is set.
     commit_view: Option<(GitCommit, Option<Changes>)>,
@@ -179,6 +192,14 @@ pub struct SurfacePanel {
     skills: Option<Vec<Skill>>,
     /// What is typed into the skills finder.
     skill_finder: Entity<InputState>,
+    /// Fields for creating one shared skill.
+    skill_name: Entity<InputState>,
+    skill_description: Entity<InputState>,
+    skill_body: Entity<TextareaState>,
+    /// Whether the new skill belongs to the selected project.
+    skill_create_project: bool,
+    skill_project_available: bool,
+    skill_creating: bool,
     /// Scope and enablement facets composed with the skills finder.
     skill_filter: SkillFilter,
     /// The daemon stopped its bounded skill scan before visiting every root.
@@ -199,6 +220,11 @@ pub enum CommitThen {
 }
 
 pub enum SurfaceEvent {
+    /// Re-read the current diff with a different number of surrounding lines.
+    DiffContextChanged {
+        commit: Option<GitCommit>,
+        turn: Option<Checkpoint>,
+    },
     /// The surfaces open in the right panel, or their arrangement, changed
     /// and should be remembered.
     Arranged,
@@ -248,6 +274,8 @@ pub enum SurfaceEvent {
     /// Read what one commit did; it comes back through
     /// [`SurfacePanel::show_commit`].
     OpenCommit(GitCommit),
+    /// Read exactly one completed turn's saved snapshots.
+    OpenTurn(Checkpoint),
     /// Push the branch and open a pull request for it.
     CreatePullRequest,
     /// Leave a comment on a file, and a line of it.
@@ -281,6 +309,12 @@ pub enum SurfaceEvent {
         text: String,
         expected_revision: String,
     },
+    /// Open a saved file at the active editor line on the daemon host.
+    OpenExternalEditor {
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+    },
     /// Add an editor selection's exact source location to the chat draft.
     AddFileReference(String),
     /// Paste an editor selection into the active terminal.
@@ -290,6 +324,17 @@ pub enum SurfaceEvent {
     AddBrowserContext(String),
     /// Read the selected project's skills plus the user's own.
     RefreshSkills,
+    /// Create a shared skill in the user or selected project scope.
+    CreateSkill {
+        /// Lowercase slug for the new skill directory.
+        name: String,
+        /// One-line front matter summary.
+        description: String,
+        /// Markdown instructions for the agent.
+        body: String,
+        /// Whether the selected project owns the skill.
+        project: bool,
+    },
     /// Set every installed copy of a grouped skill to one state.
     SetSkillEnabled { name: String, enabled: bool },
     /// Put a file into the next commit, or take it back out.
@@ -324,9 +369,31 @@ impl SurfacePanel {
             }
         })
         .detach();
+        let diff_finder = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("surface.git.filter").to_string())
+        });
+        cx.subscribe(&diff_finder, |this, finder, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.diff_filter.query = finder.read(cx).value().to_string();
+                cx.notify();
+            }
+        })
+        .detach();
         let skill_finder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.skills.search").to_string())
+        });
+        let skill_name = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.name").to_string())
+        });
+        let skill_description = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.description").to_string())
+        });
+        let skill_body = cx.new(|cx| {
+            TextareaState::new(window, cx)
+                .placeholder(rust_i18n::t!("surface.skills.create.body").to_string())
         });
         cx.subscribe(&skill_finder, |this, finder, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
@@ -383,8 +450,14 @@ impl SurfacePanel {
             browser_feedback,
             changes: None,
             staged_changes: None,
+            diff_filter: DiffFilter::default(),
+            diff_context: 3,
+            diff_finder,
             history: Vec::new(),
             history_open: false,
+            checkpoints: Vec::new(),
+            turns_open: false,
+            turn_view: None,
             commit_view: None,
             pull_request: None,
             opening_pull_request: false,
@@ -402,6 +475,12 @@ impl SurfacePanel {
             usage: None,
             skills: None,
             skill_finder,
+            skill_name,
+            skill_description,
+            skill_body,
+            skill_create_project: false,
+            skill_project_available: false,
+            skill_creating: false,
             skill_filter: SkillFilter::default(),
             skills_truncated: false,
             skill_changing: None,
@@ -416,6 +495,7 @@ impl SurfacePanel {
         cx: &mut Context<Self>,
     ) {
         self.skill_changing = None;
+        self.skill_creating = false;
         match result {
             Ok((skills, truncated)) => {
                 self.skills = Some(skills);
@@ -434,9 +514,26 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Mark a new skill busy while the daemon writes and re-reads it.
+    pub fn begin_skill_create(&mut self, cx: &mut Context<Self>) {
+        self.skill_creating = true;
+        self.skill_error = None;
+        cx.notify();
+    }
+
+    /// Keep the project scope available only while a project is selected.
+    pub fn set_skill_project_available(&mut self, available: bool, cx: &mut Context<Self>) {
+        self.skill_project_available = available;
+        if !available {
+            self.skill_create_project = false;
+        }
+        cx.notify();
+    }
+
     /// Clear a previous project's library while a new daemon read begins.
     pub fn begin_skill_refresh(&mut self, cx: &mut Context<Self>) {
         self.skills = None;
+        self.skill_creating = false;
         self.skill_changing = None;
         self.skill_error = None;
         cx.notify();
@@ -980,6 +1077,37 @@ impl SurfacePanel {
             .and_then(|changes| changes.files.first())
             .map(|file| file.path.clone());
         self.commit_view = Some((commit, changes));
+        self.turn_view = None;
+        cx.notify();
+    }
+
+    /// Number of unchanged lines currently requested for Git diffs.
+    pub fn diff_context(&self) -> u8 {
+        self.diff_context
+    }
+
+    /// Show a completed turn, dropping a response if the reader has moved on.
+    pub fn show_turn(
+        &mut self,
+        checkpoint: Checkpoint,
+        changes: Option<Result<Changes, String>>,
+        cx: &mut Context<Self>,
+    ) {
+        if changes.is_some()
+            && self
+                .turn_view
+                .as_ref()
+                .is_none_or(|(shown, _)| shown.id != checkpoint.id)
+        {
+            return;
+        }
+        self.expanded = changes
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .and_then(|changes| changes.files.first())
+            .map(|file| file.path.clone());
+        self.turn_view = Some((checkpoint, changes));
+        self.commit_view = None;
         cx.notify();
     }
 
@@ -1311,6 +1439,21 @@ impl SurfacePanel {
         }
     }
 
+    /// Update the turn picker from daemon-owned checkpoints.
+    pub fn set_checkpoints(&mut self, checkpoints: Vec<Checkpoint>, cx: &mut Context<Self>) {
+        if self.checkpoints != checkpoints {
+            if self.turn_view.as_ref().is_some_and(|(shown, _)| {
+                !checkpoints
+                    .iter()
+                    .any(|checkpoint| checkpoint.id == shown.id)
+            }) {
+                self.turn_view = None;
+            }
+            self.checkpoints = checkpoints;
+            cx.notify();
+        }
+    }
+
     /// The strip across the top of the panel.
     ///
     /// The window has no title bar (`docs/ui.md` §3.1), so this is the right
@@ -1446,7 +1589,7 @@ impl SurfacePanel {
 
     /// What the agent changed, file by file.
     fn git(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        if let Some(view) = self.commit_view(cx) {
+        if let Some(view) = self.read_only_diff_view(cx) {
             return view;
         }
         let tokens = Tokens::global(cx).clone();
@@ -1483,6 +1626,9 @@ impl SurfacePanel {
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
+                .when(self.turns_open, |this| this.child(self.git_turns(cx)))
+                .child(self.diff_filter_input(cx))
+                .child(self.diff_context_control(cx))
                 .child(
                     div()
                         .flex_1()
@@ -1496,17 +1642,18 @@ impl SurfacePanel {
                 .into_any_element();
         }
 
-        let (unstaged_added, unstaged_removed) = changes.totals();
-        let (staged_added, staged_removed) = staged_changes.totals();
-        let added = unstaged_added + staged_added;
-        let removed = unstaged_removed + staged_removed;
-        let files = changes
-            .files
-            .iter()
-            .chain(&staged_changes.files)
+        let all_files = changes.files.iter().chain(&staged_changes.files);
+        let files = all_files
+            .clone()
             .map(|file| file.path.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len();
+        let visible = self.diff_filter.visible_count(all_files.clone());
+        let (added, removed) = all_files
+            .filter(|file| self.diff_filter.matches(file))
+            .fold((0, 0), |(added, removed), file| {
+                (added + file.added, removed + file.removed)
+            });
         v_flex()
             .id("git-surface")
             .flex_1()
@@ -1514,6 +1661,9 @@ impl SurfacePanel {
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
+            .when(self.turns_open, |this| this.child(self.git_turns(cx)))
+            .child(self.diff_filter_input(cx))
+            .child(self.diff_context_control(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1526,7 +1676,16 @@ impl SurfacePanel {
                             .flex_1()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.git.summary", files = files).to_string()),
+                            .child(if self.diff_filter.query.trim().is_empty() {
+                                rust_i18n::t!("surface.git.summary", files = files).to_string()
+                            } else {
+                                rust_i18n::t!(
+                                    "surface.git.filtered_summary",
+                                    visible = visible,
+                                    total = files
+                                )
+                                .to_string()
+                            }),
                     )
                     .child(
                         div()
@@ -1541,15 +1700,86 @@ impl SurfacePanel {
                             .child(format!("-{removed}")),
                     ),
             )
-            .when(!changes.is_empty(), |this| {
-                this.child(self.change_section(&changes, false, cx))
+            .when(visible == 0, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_6()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.no_matches").to_string()),
+                )
             })
-            .when(!staged_changes.is_empty(), |this| {
-                this.child(self.change_section(&staged_changes, true, cx))
-            })
+            .when(
+                changes
+                    .files
+                    .iter()
+                    .any(|file| self.diff_filter.matches(file)),
+                |this| this.child(self.change_section(&changes, false, cx)),
+            )
+            .when(
+                staged_changes
+                    .files
+                    .iter()
+                    .any(|file| self.diff_filter.matches(file)),
+                |this| this.child(self.change_section(&staged_changes, true, cx)),
+            )
             .children(self.review_bar(cx))
             .child(self.commit_box(cx))
             .into_any_element()
+    }
+
+    /// Filter the diff rows by path without changing daemon-owned review state.
+    fn diff_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        div()
+            .w_full()
+            .p_2()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(ginka_ui::field::input(&self.diff_finder))
+    }
+
+    /// Switch the number of context lines without changing Git's review state.
+    fn diff_context_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.git.context").to_string()),
+            )
+            .children([3_u8, 10, 25].map(|lines| {
+                Button::new(format!("diff-context-{lines}"))
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(if self.diff_context == lines {
+                        format!("{lines} ✓")
+                    } else {
+                        lines.to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.context_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.diff_context == lines {
+                            return;
+                        }
+                        this.diff_context = lines;
+                        this.reverting_hunk = None;
+                        cx.emit(SurfaceEvent::DiffContextChanged {
+                            commit: this.commit_view.as_ref().map(|(commit, _)| commit.clone()),
+                            turn: this.turn_view.as_ref().map(|(turn, _)| turn.clone()),
+                        });
+                        cx.notify();
+                    }))
+            }))
     }
 
     /// One side of the index boundary and the files on that side.
@@ -1604,6 +1834,7 @@ impl SurfacePanel {
                 changes
                     .files
                     .iter()
+                    .filter(|file| self.diff_filter.matches(file))
                     .map(|file| self.file_row(file, staged, cx).into_any_element()),
             )
     }
@@ -1612,6 +1843,7 @@ impl SurfacePanel {
     fn git_remote_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
         let history_open = self.history_open;
+        let turns_open = self.turns_open;
         h_flex()
             .w_full()
             .px_3()
@@ -1678,6 +1910,18 @@ impl SurfacePanel {
                         if this.history_open {
                             cx.emit(SurfaceEvent::RefreshHistory);
                         }
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("git-turns")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.turns").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.turns_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.turns_open = !turns_open;
                         cx.notify();
                     })),
             )
@@ -1807,12 +2051,99 @@ impl SurfacePanel {
             )
     }
 
+    /// Completed turns are readable even after later edits or commits.
+    fn git_turns(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        v_flex()
+            .id("git-turns")
+            .w_full()
+            .max_h(px(320.))
+            .overflow_y_scroll()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .when(
+                !self.checkpoints.iter().any(|row| row.has_turn_start),
+                |this| {
+                    this.child(
+                        div()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.turns_empty").to_string()),
+                    )
+                },
+            )
+            .children(
+                self.checkpoints
+                    .iter()
+                    .filter(|checkpoint| checkpoint.has_turn_start)
+                    .enumerate()
+                    .map(|(index, checkpoint)| {
+                        let picked = checkpoint.clone();
+                        let title = rust_i18n::t!(
+                            "surface.git.turn_row",
+                            turn = checkpoint.turn,
+                            label = checkpoint.label.clone()
+                        )
+                        .to_string();
+                        h_flex()
+                            .w_full()
+                            .px_3()
+                            .py_1()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Button::new(format!("turn-row-{index}"))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .label(title)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.turn_view = Some((picked.clone(), None));
+                                        this.commit_view = None;
+                                        cx.emit(SurfaceEvent::OpenTurn(picked.clone()));
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(checkpoint.session.0.clone()),
+                            )
+                    }),
+            )
+    }
+
     /// What one commit did, read-only: its heading, the way back to the
     /// uncommitted diff, and its files with the one being read expanded.
-    fn commit_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (commit, changes) = self.commit_view.clone()?;
+    fn read_only_diff_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (title, detail, changes) = if let Some((checkpoint, changes)) = self.turn_view.clone() {
+            (
+                rust_i18n::t!(
+                    "surface.git.turn_row",
+                    turn = checkpoint.turn,
+                    label = checkpoint.label
+                )
+                .to_string(),
+                format!("{} · {}", checkpoint.session.0, checkpoint.id.0),
+                changes,
+            )
+        } else {
+            let (commit, changes) = self.commit_view.clone()?;
+            (
+                commit.summary,
+                format!(
+                    "{} · {} · {}",
+                    commit.id.chars().take(12).collect::<String>(),
+                    commit.author,
+                    ginka_ui::workspace::relative_age(crate::daemon::now(), commit.authored_at)
+                ),
+                changes.map(Ok),
+            )
+        };
         let tokens = Tokens::global(cx).clone();
-        let now = crate::daemon::now();
         let head = v_flex()
             .w_full()
             .px_3()
@@ -1833,6 +2164,7 @@ impl SurfacePanel {
                             .tooltip(rust_i18n::t!("surface.git.commit_back").to_string())
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.commit_view = None;
+                                this.turn_view = None;
                                 this.expanded = None;
                                 cx.notify();
                             })),
@@ -1844,20 +2176,17 @@ impl SurfacePanel {
                             .text_sm()
                             .text_color(tokens.colors().text_primary)
                             .truncate()
-                            .child(commit.summary.clone()),
+                            .child(title),
                     ),
             )
             .child(
                 div()
                     .text_xs()
                     .text_color(tokens.colors().text_muted)
-                    .child(format!(
-                        "{} · {} · {}",
-                        commit.id.chars().take(12).collect::<String>(),
-                        commit.author,
-                        ginka_ui::workspace::relative_age(now, commit.authored_at)
-                    )),
-            );
+                    .child(detail),
+            )
+            .child(self.diff_filter_input(cx))
+            .child(self.diff_context_control(cx));
         let body: Vec<AnyElement> = match changes {
             None => vec![
                 div()
@@ -1868,20 +2197,43 @@ impl SurfacePanel {
                     .child(rust_i18n::t!("surface.git.reading").to_string())
                     .into_any_element(),
             ],
-            Some(changes) => {
-                let (added, removed) = changes.totals();
+            Some(Err(error)) => vec![
+                div()
+                    .px_3()
+                    .py_2()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+                    .into_any_element(),
+            ],
+            Some(Ok(changes)) => {
+                let visible = self.diff_filter.visible_count(&changes.files);
+                let (added, removed) = changes
+                    .files
+                    .iter()
+                    .filter(|file| self.diff_filter.matches(file))
+                    .fold((0, 0), |(added, removed), file| {
+                        (added + file.added, removed + file.removed)
+                    });
                 let mut rows = vec![
                     h_flex()
                         .px_3()
                         .py_1p5()
                         .gap_2()
                         .text_xs()
-                        .child(
-                            div().flex_1().text_color(tokens.colors().text_muted).child(
+                        .child(div().flex_1().text_color(tokens.colors().text_muted).child(
+                            if self.diff_filter.query.trim().is_empty() {
                                 rust_i18n::t!("surface.git.summary", files = changes.files.len())
-                                    .to_string(),
-                            ),
-                        )
+                                    .to_string()
+                            } else {
+                                rust_i18n::t!(
+                                    "surface.git.filtered_summary",
+                                    visible = visible,
+                                    total = changes.files.len()
+                                )
+                                .to_string()
+                            },
+                        ))
                         .child(
                             div()
                                 .text_color(tokens.colors().status_done)
@@ -1894,10 +2246,22 @@ impl SurfacePanel {
                         )
                         .into_any_element(),
                 ];
+                if visible == 0 && !changes.files.is_empty() {
+                    rows.push(
+                        div()
+                            .px_3()
+                            .py_6()
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.no_matches").to_string())
+                            .into_any_element(),
+                    );
+                }
                 rows.extend(
                     changes
                         .files
                         .iter()
+                        .filter(|file| self.diff_filter.matches(file))
                         .map(|file| self.file_row_read_only(file, cx).into_any_element()),
                 );
                 rows
@@ -2592,33 +2956,35 @@ impl SurfacePanel {
                                         .text_color(tokens.colors().text_muted)
                                         .child(hunk_header),
                                 )
-                                .child(
-                                    Button::new(format!(
-                                        "hunk:{}:{}:{}",
-                                        if staged { "unstage" } else { "stage" },
-                                        file.path,
-                                        hunk.header
-                                    ))
-                                    .ghost()
-                                    .compact()
-                                    .small()
-                                    .label(if staged {
-                                        rust_i18n::t!("surface.git.hunk.unstage").to_string()
-                                    } else {
-                                        rust_i18n::t!("surface.git.hunk.stage").to_string()
-                                    })
-                                    .on_click(cx.listener(
-                                        move |_, _, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.emit(SurfaceEvent::StageHunk {
-                                                path: hunk_path.clone(),
-                                                header: action_header.clone(),
-                                                staged: !staged,
-                                            });
-                                        },
-                                    )),
-                                )
-                                .when(!staged, |this| {
+                                .when(self.diff_context == 3, |this| {
+                                    this.child(
+                                        Button::new(format!(
+                                            "hunk:{}:{}:{}",
+                                            if staged { "unstage" } else { "stage" },
+                                            file.path,
+                                            hunk.header
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .small()
+                                        .label(if staged {
+                                            rust_i18n::t!("surface.git.hunk.unstage").to_string()
+                                        } else {
+                                            rust_i18n::t!("surface.git.hunk.stage").to_string()
+                                        })
+                                        .on_click(
+                                            cx.listener(move |_, _, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.emit(SurfaceEvent::StageHunk {
+                                                    path: hunk_path.clone(),
+                                                    header: action_header.clone(),
+                                                    staged: !staged,
+                                                });
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(!staged && self.diff_context == 3, |this| {
                                     this.child(
                                         Button::new(format!(
                                             "discard-hunk:{}:{}",
@@ -3047,20 +3413,6 @@ impl SurfacePanel {
                 .into_any_element();
         };
 
-        if skills.is_empty() {
-            return v_flex()
-                .flex_1()
-                .items_center()
-                .justify_center()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(tokens.colors().text_muted)
-                        .child(rust_i18n::t!("surface.skills.empty").to_string()),
-                )
-                .into_any_element();
-        }
-
         let total = skills.len();
         let visible = ginka_ui::skills::filter_skills(&skills, &self.skill_filter)
             .into_iter()
@@ -3070,6 +3422,7 @@ impl SurfacePanel {
         let scope = self.skill_filter.scope;
         let state = self.skill_filter.state;
         let active_bg = tokens.colors().row_active();
+        let local_paths = self.local_paths;
 
         let rows = visible.into_iter().map(|skill| {
             let request = ginka_ui::skills::toggle_request(&skill);
@@ -3081,6 +3434,8 @@ impl SurfacePanel {
                 .map(|install| {
                     let path = ginka_ui::skills::install_path_text(install);
                     let copied_path = path.clone();
+                    let directory_url =
+                        ginka_ui::skills::install_directory_url(install, local_paths);
                     let scope = match install.scope {
                         SkillScope::User => rust_i18n::t!("surface.skills.scope.user").to_string(),
                         SkillScope::Project => {
@@ -3127,7 +3482,16 @@ impl SurfacePanel {
                                             ));
                                         },
                                     ),
-                                ),
+                                )
+                                .children(directory_url.map(|url| {
+                                    Button::new(SharedString::from(format!(
+                                        "open-skill-folder:{}:{}",
+                                        skill.name, install.root_label
+                                    )))
+                                    .ghost()
+                                    .child(rust_i18n::t!("surface.skills.open_folder").to_string())
+                                    .on_click(move |_, _, cx| cx.open_url(&url))
+                                })),
                         )
                         .into_any_element()
                 })
@@ -3197,6 +3561,88 @@ impl SurfacePanel {
                     .gap_2()
                     .border_b_1()
                     .border_color(tokens.colors().border_subtle)
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(ginka_ui::field::input(&self.skill_name))
+                            .child(ginka_ui::field::input(&self.skill_description))
+                            .child(Textarea::new(&self.skill_body).h(px(80.)))
+                            .child(
+                                h_flex()
+                                    .gap_1()
+                                    .child(
+                                        Button::new("skill-create-user")
+                                            .ghost()
+                                            .when(!self.skill_create_project, |this| {
+                                                this.bg(active_bg)
+                                            })
+                                            .child(format!(
+                                                "{}{}",
+                                                if self.skill_create_project {
+                                                    ""
+                                                } else {
+                                                    "✓ "
+                                                },
+                                                rust_i18n::t!("surface.skills.scope.user")
+                                            ))
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.skill_create_project = false;
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .when(self.skill_project_available, |this| {
+                                        this.child(
+                                            Button::new("skill-create-project")
+                                                .ghost()
+                                                .when(self.skill_create_project, |this| {
+                                                    this.bg(active_bg)
+                                                })
+                                                .child(format!(
+                                                    "{}{}",
+                                                    if self.skill_create_project {
+                                                        "✓ "
+                                                    } else {
+                                                        ""
+                                                    },
+                                                    rust_i18n::t!("surface.skills.scope.project")
+                                                ))
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.skill_create_project = true;
+                                                    cx.notify();
+                                                })),
+                                        )
+                                    })
+                                    .child(div().flex_1())
+                                    .child(
+                                        Button::new("skill-create")
+                                            .disabled(self.skill_creating)
+                                            .child(
+                                                rust_i18n::t!("surface.skills.create.action")
+                                                    .to_string(),
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                cx.emit(SurfaceEvent::CreateSkill {
+                                                    name: this
+                                                        .skill_name
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    description: this
+                                                        .skill_description
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    body: this
+                                                        .skill_body
+                                                        .read(cx)
+                                                        .value()
+                                                        .to_string(),
+                                                    project: this.skill_create_project,
+                                                });
+                                            })),
+                                    ),
+                            ),
+                    )
                     .child(ginka_ui::field::input(&self.skill_finder))
                     .child(
                         h_flex()
@@ -3320,7 +3766,11 @@ impl SurfacePanel {
                             .py_6()
                             .text_sm()
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.skills.no_matches").to_string())
+                            .child(if total == 0 {
+                                rust_i18n::t!("surface.skills.empty").to_string()
+                            } else {
+                                rust_i18n::t!("surface.skills.no_matches").to_string()
+                            })
                     }))
                     .children(rows),
             )
@@ -3811,6 +4261,22 @@ impl SurfacePanel {
                 });
             })
         });
+        let external_editor = self.local_paths.then(|| {
+            let workspace = buffer.workspace.clone();
+            let path = file.path.clone();
+            let editor = buffer.editor.clone();
+            cx.listener(move |_, _: &ClickEvent, _, cx| {
+                let line = editor.as_ref().map(|editor| {
+                    let editor = editor.read(cx);
+                    ginka_ui::editor::cursor_line(&editor.value(), editor.selected_range().start)
+                });
+                cx.emit(SurfaceEvent::OpenExternalEditor {
+                    workspace: workspace.clone(),
+                    path: path.clone(),
+                    line,
+                });
+            })
+        });
         let selection = buffer.editor.as_ref().map(|editor| {
             let disabled = {
                 let editor = editor.read(cx);
@@ -3915,6 +4381,15 @@ impl SurfacePanel {
                             .disabled(state != SaveState::Dirty)
                             .when_some(save, |this, save| this.on_click(save)),
                     )
+                    .children(external_editor.map(|open| {
+                        Button::new("open-external-editor")
+                            .label(rust_i18n::t!("surface.files.open_external").to_string())
+                            .ghost()
+                            .compact()
+                            .small()
+                            .disabled(state == SaveState::Dirty)
+                            .on_click(open)
+                    }))
                     .children(preview_toggle.map(|label| {
                         let path = file.path.clone();
                         Button::new("toggle-file-preview")

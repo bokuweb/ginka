@@ -163,6 +163,128 @@ pub fn set_enabled(skill: &Skill, enabled: bool) -> Result<()> {
     Ok(())
 }
 
+/// Create one skill in the shared `.agents/skills` root. The directory must
+/// be new, so an existing enabled or disabled skill is never overwritten.
+pub fn create(root: &Path, name: &str, description: &str, body: &str) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !name.is_empty()
+            && name.len() <= 64
+            && name.as_bytes()[0].is_ascii_alphanumeric()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
+        "skill name must be a lowercase slug of at most 64 characters"
+    );
+    let description = description.trim();
+    anyhow::ensure!(
+        !description.is_empty() && description.len() <= 200 && !description.contains(['\n', '\r']),
+        "skill description must be one line of at most 200 characters"
+    );
+    let body = body.trim();
+    anyhow::ensure!(
+        !body.is_empty() && body.len() <= 64 * 1024,
+        "skill body must be 1–65536 bytes"
+    );
+    for path in [root.parent(), Some(root)].into_iter().flatten() {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) => anyhow::ensure!(
+                !metadata.file_type().is_symlink(),
+                "skill root component {} must not be a symlink",
+                path.display()
+            ),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("checking {}", path.display()));
+            }
+        }
+    }
+    std::fs::create_dir_all(root).with_context(|| format!("creating {}", root.display()))?;
+    let directory = root.join(name);
+    std::fs::create_dir(&directory)
+        .with_context(|| format!("creating {} (skill may already exist)", directory.display()))?;
+    let path = directory.join(SKILL_FILE);
+    // A JSON string is also a valid YAML double-quoted scalar. Quoting keeps
+    // colons, comment markers and quotation marks in the description intact.
+    let description = serde_json::to_string(description)?;
+    let contents = format!("---\nname: {name}\ndescription: {description}\n---\n\n{body}\n");
+    if let Err(error) = std::fs::write(&path, contents) {
+        let _ = std::fs::remove_dir(&directory);
+        return Err(error).with_context(|| format!("writing {}", path.display()));
+    }
+    Ok(path)
+}
+
+#[cfg(test)]
+mod creation_tests {
+    use super::*;
+
+    #[test]
+    fn creates_discoverable_skill_without_replacing_an_existing_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".agents/skills");
+        let created = create(
+            &root,
+            "release-notes",
+            "Write release notes",
+            "Summarize changes.",
+        )
+        .unwrap();
+        assert_eq!(created, root.join("release-notes/SKILL.md"));
+        let catalog = discover(&[SkillRoot::new("agents", &root, SkillScope::User)]).unwrap();
+        assert_eq!(catalog.skills[0].name, "release-notes");
+        assert_eq!(
+            catalog.skills[0].description.as_deref(),
+            Some("Write release notes")
+        );
+        assert!(create(&root, "release-notes", "Changed", "Overwrite").is_err());
+        assert!(
+            std::fs::read_to_string(created)
+                .unwrap()
+                .contains("Summarize changes.")
+        );
+    }
+
+    #[test]
+    fn rejects_path_traversal_and_front_matter_injection() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["../outside", "a/b", "-bad", "", "a b"] {
+            assert!(
+                create(dir.path(), name, "Description", "Body").is_err(),
+                "{name}"
+            );
+        }
+        assert!(create(dir.path(), "safe", "fine\nname: injected", "Body").is_err());
+        assert!(create(dir.path(), "safe", "Description", "  ").is_err());
+        assert!(!dir.path().join("safe").exists());
+    }
+
+    #[test]
+    fn quoted_description_survives_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(".agents/skills");
+        create(&root, "release", "Fix: \"quotes\" #1", "Body").unwrap();
+        let catalog = discover(&[SkillRoot::new("agents", &root, SkillScope::User)]).unwrap();
+        assert_eq!(
+            catalog.skills[0].description.as_deref(),
+            Some("Fix: \"quotes\" #1")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_create_through_a_symlinked_skill_root() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        symlink(&outside, dir.path().join(".agents")).unwrap();
+        let root = dir.path().join(".agents/skills");
+        assert!(create(&root, "escaped", "Description", "Body").is_err());
+        assert!(!outside.join("skills/escaped/SKILL.md").exists());
+    }
+}
+
 struct FoundSkill {
     name: String,
     description: Option<String>,
@@ -243,9 +365,14 @@ fn parse_front_matter(text: &str) -> BTreeMap<String, String> {
             break;
         }
         if let Some((key, value)) = line.split_once(':') {
-            let value = value.trim().trim_matches('"').trim_matches('\'');
-            if !value.is_empty() {
-                values.insert(key.trim().to_ascii_lowercase(), value.to_string());
+            let value = value.trim();
+            let decoded = value
+                .starts_with('"')
+                .then(|| serde_json::from_str::<String>(value).ok())
+                .flatten()
+                .unwrap_or_else(|| value.trim_matches('"').trim_matches('\'').to_string());
+            if !decoded.is_empty() {
+                values.insert(key.trim().to_ascii_lowercase(), decoded);
             }
         }
     }

@@ -100,6 +100,13 @@ Store a file the daemon keeps, and print the reference a message refers to it by
 
 `ginka attach <PATH>`
 
+## `ginka attachment-image`
+
+Read a stored image by reference as a verified data URL. An unknown reference,
+an unsupported format, or an image above the preview size limit prints nothing.
+
+`ginka attachment-image <REFERENCE>`
+
 ## `ginka files`
 
 List a workspace's files, best matches first
@@ -124,6 +131,15 @@ Print one of a workspace's files
 
 `ginka show <WORKSPACE> <PATH>`
 
+## `ginka open-editor`
+
+Open an existing workspace file in an external editor on the daemon host.
+`--line` is one-based. Set `GINKA_EDITOR`, `VISUAL`, or `EDITOR` to choose an
+editor; otherwise Ginka looks for Zed, VS Code, or Cursor before the platform
+default.
+
+`ginka open-editor <WORKSPACE> <PATH> [--line <LINE>]`
+
 ## `ginka save`
 
 Save an existing UTF-8 workspace file without overwriting a newer edit
@@ -135,6 +151,7 @@ Save an existing UTF-8 workspace file without overwriting a newer edit
 The skills the agents can load, and whether each is on
 
 - `ginka skills list` — List every skill, grouped across the places it was installed
+- `ginka skills create` — Create a shared skill in the user root, or a registered project's root with `--project` (`ginka skills create <NAME> --description <TEXT> --body <MARKDOWN> [--project <PROJECT>]`)
 - `ginka skills enable` — Turn every copy of a skill on (`ginka skills enable <NAME>`)
 - `ginka skills disable` — Hide a skill from every agent by renaming its SKILL.md. Nothing is deleted (`ginka skills disable <NAME>`)
 - `ginka skills install` — Install the skills that teach an agent to drive Ginka into Claude Code's and Codex's skills directories
@@ -274,6 +291,8 @@ Saved shell commands and prompts, run in a workspace
 The daemon's settings: show them, or change one
 
 - `ginka settings show` — Print the daemon's settings as JSON, environment values hidden
+- `ginka settings providers` — List shipped providers, their enabled state and executable overrides
+- `ginka settings provider` — Configure a provider for future turns (`ginka settings provider <PROVIDER> [--enable | --disable] [--program <PATH> | --clear-program]`)
 - `ginka settings set` — Change one top-level setting. The value is JSON — `false`, `7`, `["codex"]` — and anything that is not is taken as a string (`ginka settings set <KEY> <VALUE>`)
 
 ## `ginka terminal`
@@ -291,7 +310,7 @@ The daemon's terminals in a workspace: open one, type into it, read what it prin
 Prompts and commands run on a cron schedule, on this machine's clock
 
 - `ginka cron list` — List scheduled jobs, with when each fires next and how it last went
-- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`) (`ginka cron add --schedule <SCHEDULE> <PROJECT> <NAME>`). `--precheck '<command>'` runs first on every scheduled firing, in the job's checkout; a non-zero exit skips that firing
+- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`). Use `--schedule <CRON>` for a recurring job or `--at <RFC3339>` for one firing with a time zone. `--precheck '<command>'` runs before a scheduled firing in the job's checkout; a non-zero exit skips it
 - `ginka cron remove` — Forget a scheduled job and its history (`ginka cron remove <ID>`)
 - `ginka cron run` — Fire a job now, as its schedule would (`ginka cron run <ID>`)
 - `ginka cron runs` — A job's firings, most recent first (`ginka cron runs <ID>`)

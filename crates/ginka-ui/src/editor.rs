@@ -373,9 +373,23 @@ fn line_at(text: &str, offset: usize) -> usize {
     text[..offset].bytes().filter(|byte| *byte == b'\n').count() + 1
 }
 
+/// One-based line at an editor byte offset, clamped to the live buffer.
+pub fn cursor_line(text: &str, offset: usize) -> u32 {
+    line_at(text, floor_char_boundary(text, offset.min(text.len()))) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cursor_line_counts_unicode_and_clamps_stale_offsets() {
+        let text = "あ\nsecond\n";
+        assert_eq!(cursor_line(text, 0), 1);
+        assert_eq!(cursor_line(text, 2), 1);
+        assert_eq!(cursor_line(text, 4), 2);
+        assert_eq!(cursor_line(text, usize::MAX), 3);
+    }
 
     fn file(text: &str) -> FileContent {
         FileContent {

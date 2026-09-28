@@ -97,6 +97,25 @@ pub fn tools() -> Vec<Tool> {
             schema: json!({"type": "object", "properties": {}}),
         },
         Tool {
+            name: "ginka_provider_settings",
+            description: "List shipped providers, whether each is enabled, and any executable override.",
+            schema: json!({"type": "object", "properties": {}}),
+        },
+        Tool {
+            name: "ginka_provider_configure",
+            description: "Enable or disable a provider or override its executable for future turns.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "provider": {"type": "string", "enum": ["claude", "codex", "gemini", "opencode"]},
+                    "enabled": {"type": "boolean"},
+                    "program": {"type": "string"},
+                    "clear_program": {"type": "boolean"}
+                },
+                "required": ["provider"]
+            }),
+        },
+        Tool {
             name: "ginka_accounts",
             description: "Every login of every provider, with whether each is signed in. A session can be started on one by id.",
             schema: json!({"type": "object", "properties": {}}),
@@ -349,7 +368,9 @@ pub fn tools() -> Vec<Tool> {
                     "staged": {"type": "boolean", "description": "Only what is staged for the next commit"},
                     "unstaged": {"type": "boolean", "description": "Only worktree edits not yet in the index"},
                     "since_checkpoint": {"type": "string"},
+                    "turn_checkpoint": {"type": "string", "description": "Only what the completed turn ending at this checkpoint changed"},
                     "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
+                    "context_lines": {"type": "integer", "minimum": 0, "maximum": 25, "description": "Unchanged lines around each edit; defaults to 3"},
                 },
                 "required": ["workspace"],
             }),
@@ -420,15 +441,19 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_notes",
-            description: "The reader's markdown notes, most recently touched first; one project's when project is given.",
+            description: "Search markdown notes by project, text in title/body/tags, or exact tag; newest first.",
             schema: json!({
                 "type": "object",
-                "properties": {"project": {"type": "string"}},
+                "properties": {
+                    "project": {"type": "string"},
+                    "query": {"type": "string"},
+                    "tag": {"type": "string"}
+                },
             }),
         },
         Tool {
             name: "ginka_note_save",
-            description: "Write a markdown note. Without an id it is a new one; with one, it replaces that note's title and body.",
+            description: "Write a markdown note. Optional tags replace its tags; omitting tags on edit retains them.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -436,8 +461,30 @@ pub fn tools() -> Vec<Tool> {
                     "project": {"type": "string"},
                     "title": {"type": "string"},
                     "body": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
                 },
                 "required": ["body"],
+            }),
+        },
+        Tool {
+            name: "ginka_attachment_upload",
+            description: "Store an attachment on the daemon and return its reference. Notes can use image references in Markdown.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "data_base64": {"type": "string"},
+                },
+                "required": ["name", "data_base64"],
+            }),
+        },
+        Tool {
+            name: "ginka_attachment_image",
+            description: "Read a stored attachment as an image after the daemon verifies its size and format.",
+            schema: json!({
+                "type": "object",
+                "properties": {"reference": {"type": "string"}},
+                "required": ["reference"],
             }),
         },
         Tool {
@@ -528,7 +575,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_cron_save",
-            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal) on a cron expression — five fields or @daily and the like, on the daemon host's clock. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
+            description: "Schedule a prompt (via chat, with an agent) or a shell command (via terminal). Use five cron fields or @daily and the like on the daemon host's clock, or `@once <RFC3339 timestamp with time zone>` for one firing. Omit `workspace` to run in the project's own checkout; pass `id` to replace a job.",
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -654,6 +701,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_open_external_editor",
+            description: "Open an existing workspace file in an external editor on the daemon host. The optional line is one-based.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "line": {"type": "integer", "minimum": 1},
+                },
+                "required": ["workspace", "path"],
+            }),
+        },
+        Tool {
             name: "ginka_write_file",
             description: "Save an existing UTF-8 workspace file. Pass the revision returned by ginka_read_file so a newer edit is never overwritten silently.",
             schema: json!({
@@ -708,6 +768,20 @@ pub fn tools() -> Vec<Tool> {
                     "project": {"type": "string"},
                 },
                 "required": ["name", "enabled"],
+            }),
+        },
+        Tool {
+            name: "ginka_skill_create",
+            description: "Create a shared agent skill in the user's or a registered project's .agents/skills directory.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "description": {"type": "string"},
+                    "body": {"type": "string", "description": "Markdown instructions"},
+                    "project": {"type": "string"},
+                },
+                "required": ["name", "description", "body"],
             }),
         },
         Tool {
@@ -790,6 +864,14 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             }
         }
         "ginka_agents" => Request::ListAgents,
+        "ginka_provider_settings" => Request::ListProviderSettings,
+        "ginka_provider_configure" => Request::UpdateProviderSettings {
+            provider: ginka_protocol::ProviderKind::parse(&text("provider")?)
+                .ok_or_else(|| anyhow!("unknown provider"))?,
+            enabled: arguments.get("enabled").and_then(Value::as_bool),
+            program: maybe("program"),
+            clear_program: flag("clear_program"),
+        },
         "ginka_accounts" => Request::Accounts,
         "ginka_account_select" => Request::SelectAccount {
             id: ginka_protocol::AccountId(text("account")?),
@@ -944,10 +1026,25 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         },
         "ginka_changes" => Request::WorkspaceChanges {
             workspace: WorkspaceId(text("workspace")?),
+            context_lines: arguments
+                .get("context_lines")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|number| u8::try_from(number).ok())
+                        .filter(|number| *number <= 25)
+                        .ok_or_else(|| anyhow!("{tool} needs `context_lines` between 0 and 25"))
+                })
+                .transpose()?,
             source: match maybe("since_checkpoint") {
                 _ if maybe("commit").is_some() => ginka_protocol::model::ChangeSource::Commit {
                     commit: maybe("commit").unwrap_or_default(),
                 },
+                _ if maybe("turn_checkpoint").is_some() => {
+                    ginka_protocol::model::ChangeSource::Turn {
+                        checkpoint: CheckpointId(maybe("turn_checkpoint").unwrap_or_default()),
+                    }
+                }
                 Some(checkpoint) => ginka_protocol::model::ChangeSource::SinceCheckpoint {
                     checkpoint: CheckpointId(checkpoint),
                 },
@@ -971,12 +1068,36 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         },
         "ginka_notes" => Request::ListNotes {
             project: maybe("project").map(ProjectName),
+            query: maybe("query"),
+            tag: maybe("tag"),
         },
         "ginka_note_save" => Request::SaveNote {
             id: maybe("id"),
             project: maybe("project").map(ProjectName),
             title: maybe("title").unwrap_or_default(),
             body: text("body")?,
+            tags: arguments
+                .get("tags")
+                .map(|value| {
+                    value
+                        .as_array()
+                        .ok_or_else(|| anyhow!("{tool}: `tags` must be an array of strings"))?
+                        .iter()
+                        .map(|tag| {
+                            tag.as_str().map(str::to_string).ok_or_else(|| {
+                                anyhow!("{tool}: `tags` must be an array of strings")
+                            })
+                        })
+                        .collect::<Result<Vec<_>>>()
+                })
+                .transpose()?,
+        },
+        "ginka_attachment_upload" => Request::UploadAttachment {
+            name: text("name")?,
+            data_base64: text("data_base64")?,
+        },
+        "ginka_attachment_image" => Request::ReadAttachmentImage {
+            reference: text("reference")?,
         },
         "ginka_stage_hunk" => Request::StageHunk {
             workspace: WorkspaceId(text("workspace")?),
@@ -1078,6 +1199,20 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
         },
+        "ginka_open_external_editor" => Request::OpenExternalEditor {
+            workspace: WorkspaceId(text("workspace")?),
+            path: text("path")?,
+            line: arguments
+                .get("line")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|line| u32::try_from(line).ok())
+                        .filter(|line| *line > 0)
+                        .ok_or_else(|| anyhow!("{tool}: line must be a one-based 32-bit integer"))
+                })
+                .transpose()?,
+        },
         "ginka_write_file" => Request::WriteFile {
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
@@ -1101,6 +1236,12 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 .get("enabled")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| anyhow!("{tool} needs `enabled`"))?,
+            project: maybe("project").map(ProjectName),
+        },
+        "ginka_skill_create" => Request::CreateSkill {
+            name: text("name")?,
+            description: text("description")?,
+            body: text("body")?,
             project: maybe("project").map(ProjectName),
         },
         "ginka_checkpoints" => Request::ListCheckpoints {
@@ -1199,6 +1340,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn external_editor_tool_preserves_the_line_and_rejects_invalid_numbers() {
+        assert!(matches!(
+            request_for(
+                "ginka_open_external_editor",
+                &json!({"workspace": "w", "path": "src/a.rs", "line": 42})
+            )
+            .unwrap(),
+            Request::OpenExternalEditor { line: Some(42), .. }
+        ));
+        for line in [json!(0), json!(-1), json!(4_294_967_296_u64), json!("42")] {
+            assert!(
+                request_for(
+                    "ginka_open_external_editor",
+                    &json!({"workspace": "w", "path": "src/a.rs", "line": line})
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn every_tool_names_the_request_it_stands_for() {
         // The rule the module exists for: a capability an agent has is one a
         // person has, because both go through the same request.
@@ -1214,11 +1376,13 @@ mod tests {
                 "index": 0,
                 "response": "yes",
                 "agent": "claude",
+                "provider": "codex",
                 "account": "claude-work",
                 "prompt": "go",
                 "text": "more",
                 "message": "a commit",
-                "body": "# Release\nsteps",
+            "body": "# Release\nsteps",
+            "description": "Write release notes",
                 "query": "needle",
                 "path": "src/main.rs",
                 "header": "@@ -1 +1 @@",
@@ -1228,6 +1392,8 @@ mod tests {
                 "prefix": "attempt",
                 "agents": ["claude", "codex:gpt-5"],
                 "name": "release-notes",
+                "reference": "ginka-attachment:chart.png",
+                "data_base64": "aGVsbG8=",
                 "enabled": false,
                 "label": "Work",
                 "schedule": "@daily",
@@ -1238,6 +1404,28 @@ mod tests {
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));
         }
+    }
+
+    #[test]
+    fn attachment_tools_use_the_same_requests_as_the_window() {
+        assert!(matches!(
+            request_for(
+                "ginka_attachment_upload",
+                &json!({"name": "chart.png", "data_base64": "aGVsbG8="})
+            )
+            .unwrap(),
+            Request::UploadAttachment { name, data_base64 }
+                if name == "chart.png" && data_base64 == "aGVsbG8="
+        ));
+        assert!(matches!(
+            request_for(
+                "ginka_attachment_image",
+                &json!({"reference": "ginka-attachment:chart.png"})
+            )
+            .unwrap(),
+            Request::ReadAttachmentImage { reference }
+                if reference == "ginka-attachment:chart.png"
+        ));
     }
 
     #[test]
@@ -1258,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_can_be_asked_for_three_ways() {
+    fn changes_can_be_asked_for_each_source() {
         use ginka_protocol::model::ChangeSource;
         let uncommitted = request_for("ginka_changes", &json!({"workspace": "w"})).unwrap();
         let staged =
@@ -1266,6 +1454,11 @@ mod tests {
         let since = request_for(
             "ginka_changes",
             &json!({"workspace": "w", "since_checkpoint": "c-1"}),
+        )
+        .unwrap();
+        let turn = request_for(
+            "ginka_changes",
+            &json!({"workspace": "w", "turn_checkpoint": "c-1"}),
         )
         .unwrap();
         assert!(matches!(
@@ -1289,6 +1482,38 @@ mod tests {
                 ..
             }
         ));
+        assert!(matches!(
+            turn,
+            Request::WorkspaceChanges {
+                source: ChangeSource::Turn { .. },
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn changes_context_is_forwarded_to_the_shared_request() {
+        let request = request_for(
+            "ginka_changes",
+            &json!({"workspace": "w", "context_lines": 10}),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::WorkspaceChanges {
+                context_lines: Some(10),
+                ..
+            }
+        ));
+        for invalid in [json!(-1), json!(26), json!("10")] {
+            assert!(
+                request_for(
+                    "ginka_changes",
+                    &json!({"workspace": "w", "context_lines": invalid})
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -1474,6 +1699,27 @@ mod tests {
             assert!(!tool["description"].as_str().unwrap().is_empty());
             assert_eq!(tool["inputSchema"]["type"], "object");
         }
+    }
+
+    #[test]
+    fn provider_settings_tools_map_to_the_shared_protocol() {
+        assert_eq!(
+            request_for("ginka_provider_settings", &json!({})).unwrap(),
+            Request::ListProviderSettings
+        );
+        assert_eq!(
+            request_for(
+                "ginka_provider_configure",
+                &json!({"provider": "codex", "enabled": false, "program": "/tmp/codex"})
+            )
+            .unwrap(),
+            Request::UpdateProviderSettings {
+                provider: ginka_protocol::ProviderKind::Codex,
+                enabled: Some(false),
+                program: Some("/tmp/codex".into()),
+                clear_program: false,
+            }
+        );
     }
 
     #[test]

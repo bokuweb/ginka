@@ -4,13 +4,62 @@
 //! of week — with lists, ranges and steps, and the `@hourly` family. Times are
 //! wall-clock times in whatever zone the caller gives, because "every weekday
 //! at nine" means nine where the reader is. A day of month and a day of week
-//! both restricted fire on either, as in every cron since Vixie's.
+//! both restricted fire on either, as in every cron since Vixie's. One-time
+//! jobs use an absolute timestamp and are disabled when their firing is claimed.
 
 use anyhow::{Result, bail};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
 use ginka_protocol::model::{CronJob, CronOutcome, CronRun, CronVia};
 use ginka_protocol::{ProjectName, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension as _};
+
+/// The parsed schedule, stored in the existing column for both kinds of job.
+/// `@once` is distinct from every supported named recurring schedule.
+enum JobSchedule {
+    Recurring(Schedule),
+    Once(DateTime<Utc>),
+}
+
+impl JobSchedule {
+    fn parse(expression: &str) -> Result<Self> {
+        let expression = expression.trim();
+        if expression == "@once" || expression.starts_with("@once ") {
+            let timestamp = expression.strip_prefix("@once").unwrap().trim();
+            let at = DateTime::parse_from_rfc3339(timestamp).map_err(|_| {
+                anyhow::anyhow!("@once needs an RFC 3339 timestamp with a time zone")
+            })?;
+            return Ok(Self::Once(at.with_timezone(&Utc)));
+        }
+        Ok(Self::Recurring(Schedule::parse(expression)?))
+    }
+
+    fn next_after<Tz: TimeZone>(&self, after: &DateTime<Tz>) -> Option<DateTime<Tz>> {
+        match self {
+            Self::Recurring(schedule) => schedule.next_after(after),
+            Self::Once(at) if *at > after.with_timezone(&Utc) => {
+                Some(at.with_timezone(&after.timezone()))
+            }
+            Self::Once(_) => None,
+        }
+    }
+
+    fn is_once(&self) -> bool {
+        matches!(self, Self::Once(_))
+    }
+}
+
+/// Whether a one-time job has a recorded firing at or after its scheduled time.
+/// A manual run before the deadline does not complete the schedule.
+pub fn is_completed(job: &CronJob) -> bool {
+    if job.enabled {
+        return false;
+    }
+    let (Ok(JobSchedule::Once(at)), Some(run)) = (JobSchedule::parse(&job.schedule), &job.last_run)
+    else {
+        return false;
+    };
+    run.started_at >= at.timestamp()
+}
 
 /// A parsed cron expression.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,8 +290,12 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
     if draft.body.trim().is_empty() {
         bail!("a scheduled job needs something to run");
     }
-    let schedule = Schedule::parse(&draft.schedule)?;
-    if schedule.next_after(&Utc::now()).is_none() {
+    let schedule = JobSchedule::parse(&draft.schedule)?;
+    let checked = Utc
+        .timestamp_opt(now, 0)
+        .single()
+        .ok_or_else(|| anyhow::anyhow!("the job's checked time is outside the supported range"))?;
+    if schedule.next_after(&checked).is_none() {
         bail!("{} never fires", draft.schedule.trim());
     }
     let agent = match draft.via {
@@ -334,7 +387,7 @@ pub fn take_due<Tz: TimeZone>(conn: &Connection, now: &DateTime<Tz>) -> Result<V
             [job.id],
             |row| row.get(0),
         )?;
-        let Ok(schedule) = Schedule::parse(&job.schedule) else {
+        let Ok(schedule) = JobSchedule::parse(&job.schedule) else {
             continue;
         };
         let Some(checked) = now.timezone().timestamp_opt(checked_at, 0).single() else {
@@ -344,11 +397,14 @@ pub fn take_due<Tz: TimeZone>(conn: &Connection, now: &DateTime<Tz>) -> Result<V
             .next_after(&checked)
             .is_some_and(|next| next <= *now)
         {
-            conn.execute(
-                "UPDATE cron_jobs SET checked_at = ?1 WHERE id = ?2",
-                rusqlite::params![now.timestamp(), job.id],
+            let changed = conn.execute(
+                "UPDATE cron_jobs SET checked_at = ?1, enabled = ?2
+                  WHERE id = ?3 AND enabled = 1 AND checked_at = ?4",
+                rusqlite::params![now.timestamp(), !schedule.is_once(), job.id, checked_at],
             )?;
-            due.push(job);
+            if changed != 0 {
+                due.push(job);
+            }
         }
     }
     Ok(due)
@@ -461,7 +517,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<(CronJob, i64)> {
 /// last run.
 fn finish_job(conn: &Connection, mut job: CronJob, checked_at: i64) -> Result<CronJob> {
     if job.enabled
-        && let Ok(schedule) = Schedule::parse(&job.schedule)
+        && let Ok(schedule) = JobSchedule::parse(&job.schedule)
         && let Some(checked) = Local.timestamp_opt(checked_at, 0).single()
     {
         job.next_run_at = schedule.next_after(&checked).map(|next| next.timestamp());
@@ -568,6 +624,86 @@ pub fn run_precheck(
 mod tests {
     use super::*;
     use chrono::FixedOffset;
+
+    #[test]
+    fn a_claimed_one_time_job_stays_disabled_after_reopening_the_database() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("jobs.sqlite");
+        let conn = crate::db::open(&path).unwrap();
+        let before = at("2026-09-28T00:00:00Z");
+        let due = at("2026-09-28T00:30:00Z");
+        let job = save(
+            &conn,
+            None,
+            &Draft {
+                project: ProjectName("comet".into()),
+                workspace: None,
+                name: "reminder".into(),
+                schedule: "@once 2026-09-28T09:30:00+09:00".into(),
+                via: CronVia::Terminal,
+                agent: None,
+                body: "true".into(),
+                precheck: None,
+                enabled: true,
+            },
+            before.timestamp(),
+        )
+        .unwrap();
+        assert_eq!(job.next_run_at, Some(due.timestamp()));
+        assert!(take_due(&conn, &before).unwrap().is_empty());
+        assert_eq!(take_due(&conn, &due).unwrap().len(), 1);
+        drop(conn);
+
+        let conn = crate::db::open(&path).unwrap();
+        let stored = get(&conn, job.id).unwrap().unwrap();
+        assert!(!stored.enabled);
+        assert_eq!(stored.next_run_at, None);
+        assert!(
+            take_due(&conn, &(due + Duration::days(1)))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_manual_run_before_the_deadline_does_not_mark_a_one_time_job_complete() {
+        let conn = crate::db::open_in_memory().unwrap();
+        let before = at("2026-09-28T00:00:00Z");
+        let due = at("2026-09-28T00:30:00Z");
+        let job = save(
+            &conn,
+            None,
+            &Draft {
+                project: ProjectName("comet".into()),
+                workspace: None,
+                name: "reminder".into(),
+                schedule: "@once 2026-09-28T09:30:00+09:00".into(),
+                via: CronVia::Terminal,
+                agent: None,
+                body: "true".into(),
+                precheck: None,
+                enabled: true,
+            },
+            before.timestamp(),
+        )
+        .unwrap();
+        record_run(
+            &conn,
+            job.id,
+            before.timestamp(),
+            CronOutcome::Finished,
+            None,
+        )
+        .unwrap();
+        let mut paused = job.clone();
+        paused.enabled = false;
+        paused.last_run = get(&conn, job.id).unwrap().unwrap().last_run;
+        assert!(!is_completed(&paused));
+
+        record_run(&conn, job.id, due.timestamp(), CronOutcome::Finished, None).unwrap();
+        paused.last_run = get(&conn, job.id).unwrap().unwrap().last_run;
+        assert!(is_completed(&paused));
+    }
 
     #[test]
     fn a_precheck_passes_on_zero_and_says_why_it_skipped_otherwise() {

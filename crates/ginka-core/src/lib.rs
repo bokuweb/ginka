@@ -26,6 +26,7 @@ pub mod db;
 pub mod diff;
 pub mod driver;
 pub mod events;
+pub mod external_editor;
 pub mod files;
 pub mod git;
 pub mod handoff;
