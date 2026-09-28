@@ -385,8 +385,9 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
   schedule, name, what runs, when it next fires and how it last went, with
   *Pause*, *Edit*, *Run now* and *Remove*. *Edit* fills the form below; saving
-  updates the same job and keeps its run history, workspace and precheck.
-  The form also creates a new command or prompt job, and *Cancel* leaves edit mode.
+  updates the same job and keeps its run history and workspace. The form can
+  set or clear an optional precheck command; a non-zero exit skips a scheduled
+  firing. It also creates a new command or prompt job, and *Cancel* leaves edit mode.
   The schedule field accepts `@once` followed by a zoned RFC 3339 timestamp;
   a claimed one-time job shows *done* and cannot be resumed.
 - **Reports** — a cost priced from the public rate table rather than by the

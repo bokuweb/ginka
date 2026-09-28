@@ -137,6 +137,7 @@ struct CronForm {
     name: Entity<InputState>,
     schedule: Entity<InputState>,
     body: Entity<InputState>,
+    precheck: Entity<InputState>,
     /// A prompt for an agent rather than a shell command.
     chat: bool,
     editing: Option<ginka_protocol::model::CronJob>,
@@ -826,6 +827,10 @@ impl Shell {
             body: cx.new(|cx| {
                 InputState::new(window, cx)
                     .placeholder(rust_i18n::t!("settings.cron.body").to_string())
+            }),
+            precheck: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.precheck").to_string())
             }),
             chat: false,
             editing: None,
@@ -2360,6 +2365,7 @@ impl Shell {
                                 this.cron_form.name.clone(),
                                 this.cron_form.schedule.clone(),
                                 this.cron_form.body.clone(),
+                                this.cron_form.precheck.clone(),
                             ] {
                                 input.update(cx, |state, cx| state.set_value("", window, cx));
                             }
@@ -2386,6 +2392,10 @@ impl Shell {
             (self.cron_form.name.clone(), job.name.clone()),
             (self.cron_form.schedule.clone(), job.schedule.clone()),
             (self.cron_form.body.clone(), job.body.clone()),
+            (
+                self.cron_form.precheck.clone(),
+                job.precheck.clone().unwrap_or_default(),
+            ),
         ] {
             input.update(cx, |state, cx| state.set_value(&value, window, cx));
         }
@@ -2403,6 +2413,7 @@ impl Shell {
             self.cron_form.name.clone(),
             self.cron_form.schedule.clone(),
             self.cron_form.body.clone(),
+            self.cron_form.precheck.clone(),
         ] {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
@@ -2429,13 +2440,16 @@ impl Shell {
         let request = ginka_ui::scheduled::save_request(
             project,
             self.cron_form.editing.as_ref(),
-            self.cron_form.name.read(cx).value().to_string(),
-            self.cron_form.schedule.read(cx).value().to_string(),
-            self.cron_form.body.read(cx).value().to_string(),
-            if self.cron_form.chat {
-                ginka_protocol::model::CronVia::Chat
-            } else {
-                ginka_protocol::model::CronVia::Terminal
+            ginka_ui::scheduled::FormValues {
+                name: self.cron_form.name.read(cx).value().to_string(),
+                schedule: self.cron_form.schedule.read(cx).value().to_string(),
+                body: self.cron_form.body.read(cx).value().to_string(),
+                precheck: self.cron_form.precheck.read(cx).value().to_string(),
+                via: if self.cron_form.chat {
+                    ginka_protocol::model::CronVia::Chat
+                } else {
+                    ginka_protocol::model::CronVia::Terminal
+                },
             },
             self.agent_to_start(),
         );
@@ -5941,6 +5955,23 @@ impl Shell {
                                 })),
                         )
                     }),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("settings.cron.precheck_label").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.cron_form.precheck)),
+                    ),
             )
             .children(self.cron_form.error.clone().map(|error| {
                 div()

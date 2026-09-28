@@ -1095,6 +1095,12 @@ settings.cron.schedule:
 settings.cron.body:
   en: "Command or prompt"
   ja: "コマンドまたはプロンプト"
+settings.cron.precheck_label:
+  en: "Run only if this command succeeds"
+  ja: "このコマンドが成功した場合のみ実行"
+settings.cron.precheck:
+  en: "Optional precheck command"
+  ja: "任意の事前チェックコマンド"
 settings.cron.next:
   en: "in %{when}"
   ja: "%{when}後"

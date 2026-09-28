@@ -1,11 +1,25 @@
 //! Request shape for the scheduled-job settings form.
 //!
 //! Editing changes the visible fields while retaining a job's scope, agent,
-//! precheck, enabled state and run history identity.
+//! enabled state and run history identity.
 
 use ginka_protocol::ProjectName;
 use ginka_protocol::model::{CronJob, CronVia};
 use ginka_protocol::rpc::Request;
+
+/// Values the scheduled-job form lets the reader change.
+pub struct FormValues {
+    /// Job label shown in Settings.
+    pub name: String,
+    /// Cron expression or one-time timestamp.
+    pub schedule: String,
+    /// Command or agent prompt to run.
+    pub body: String,
+    /// Optional shell command whose failure skips a scheduled firing.
+    pub precheck: String,
+    /// Whether to start an agent conversation or a terminal command.
+    pub via: CronVia,
+}
 
 /// Build a save request without dropping fields absent from the settings form.
 ///
@@ -15,13 +29,10 @@ use ginka_protocol::rpc::Request;
 pub fn save_request(
     project: ProjectName,
     editing: Option<&CronJob>,
-    name: String,
-    schedule: String,
-    body: String,
-    via: CronVia,
+    form: FormValues,
     selected_agent: Option<String>,
 ) -> Request {
-    let agent = match via {
+    let agent = match form.via {
         CronVia::Chat => editing
             .filter(|job| job.via == CronVia::Chat)
             .and_then(|job| job.agent.clone())
@@ -32,12 +43,12 @@ pub fn save_request(
         id: editing.map(|job| job.id),
         project,
         workspace: editing.and_then(|job| job.workspace.clone()),
-        name,
-        schedule,
-        via,
+        name: form.name,
+        schedule: form.schedule,
+        via: form.via,
         agent,
-        body,
-        precheck: editing.and_then(|job| job.precheck.clone()),
+        body: form.body,
+        precheck: (!form.precheck.trim().is_empty()).then_some(form.precheck),
         enabled: editing.is_none_or(|job| job.enabled),
     }
 }
@@ -49,7 +60,7 @@ mod tests {
     use ginka_protocol::model::{CronJob, CronVia};
     use ginka_protocol::rpc::Request;
 
-    use super::save_request;
+    use super::{FormValues, save_request};
 
     #[test]
     fn editing_keeps_hidden_job_fields_and_identity() {
@@ -72,10 +83,13 @@ mod tests {
         let request = save_request(
             project.clone(),
             Some(&job),
-            "Review open PRs".into(),
-            "0 9 * * 1-5".into(),
-            "new prompt".into(),
-            CronVia::Chat,
+            FormValues {
+                name: "Review open PRs".into(),
+                schedule: "0 9 * * 1-5".into(),
+                body: "new prompt".into(),
+                precheck: "gh pr list --state open".into(),
+                via: CronVia::Chat,
+            },
             Some("codex".into()),
         );
         assert!(matches!(request, Request::SaveCronJob {
@@ -84,7 +98,7 @@ mod tests {
             precheck: Some(precheck), enabled: false,
         } if p == project && w == workspace && name == "Review open PRs"
             && schedule == "0 9 * * 1-5" && agent == "claude"
-            && body == "new prompt" && precheck == "gh pr list"));
+            && body == "new prompt" && precheck == "gh pr list --state open"));
     }
 
     #[test]
@@ -92,10 +106,13 @@ mod tests {
         let request = save_request(
             ProjectName("shop".into()),
             None,
-            "review".into(),
-            "@daily".into(),
-            "look at the diff".into(),
-            CronVia::Chat,
+            FormValues {
+                name: "review".into(),
+                schedule: "@daily".into(),
+                body: "look at the diff".into(),
+                precheck: String::new(),
+                via: CronVia::Chat,
+            },
             Some("codex".into()),
         );
         assert!(matches!(request, Request::SaveCronJob {
@@ -124,10 +141,13 @@ mod tests {
         let to_chat = save_request(
             project.clone(),
             Some(&job),
-            job.name.clone(),
-            job.schedule.clone(),
-            "review".into(),
-            CronVia::Chat,
+            FormValues {
+                name: job.name.clone(),
+                schedule: job.schedule.clone(),
+                body: "review".into(),
+                precheck: String::new(),
+                via: CronVia::Chat,
+            },
             Some("codex".into()),
         );
         assert!(matches!(to_chat, Request::SaveCronJob {
@@ -139,15 +159,57 @@ mod tests {
         let to_terminal = save_request(
             project,
             Some(&job),
-            job.name.clone(),
-            job.schedule.clone(),
-            "true".into(),
-            CronVia::Terminal,
+            FormValues {
+                name: job.name.clone(),
+                schedule: job.schedule.clone(),
+                body: "true".into(),
+                precheck: String::new(),
+                via: CronVia::Terminal,
+            },
             Some("codex".into()),
         );
         assert!(matches!(
             to_terminal,
             Request::SaveCronJob { agent: None, .. }
+        ));
+    }
+
+    #[test]
+    fn clearing_a_precheck_removes_it_from_an_existing_job() {
+        let project = ProjectName("shop".into());
+        let job = CronJob {
+            id: 7,
+            project: project.clone(),
+            workspace: None,
+            name: "review".into(),
+            schedule: "@daily".into(),
+            via: CronVia::Terminal,
+            agent: None,
+            body: "true".into(),
+            enabled: true,
+            precheck: Some("old probe".into()),
+            next_run_at: None,
+            last_run: None,
+        };
+        let request = save_request(
+            project,
+            Some(&job),
+            FormValues {
+                name: job.name.clone(),
+                schedule: job.schedule.clone(),
+                body: job.body.clone(),
+                precheck: "   ".into(),
+                via: CronVia::Terminal,
+            },
+            None,
+        );
+        assert!(matches!(
+            request,
+            Request::SaveCronJob {
+                id: Some(7),
+                precheck: None,
+                ..
+            }
         ));
     }
 }
