@@ -12,6 +12,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -70,11 +72,15 @@ jobs:
           archive="$dist/e1-v$version-macos-universal.zip"
           image="$dist/e1-v$version-macos-universal.dmg"
           notary() {
+            local result
+            result=$(mktemp "$RUNNER_TEMP/e1-notary.XXXXXX")
             xcrun notarytool submit "$1" \
               --apple-id "$APPLE_ID" \
               --password "$APPLE_APP_SPECIFIC_PASSWORD" \
               --team-id 66U862VS9W \
-              --wait
+              --wait --output-format json > "$result"
+            jq -e '.status == "Accepted"' "$result"
+            rm -f "$result"
           }
           notary "$archive"
           xcrun stapler staple "$app"
