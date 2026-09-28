@@ -370,6 +370,7 @@ pub fn tools() -> Vec<Tool> {
                     "since_checkpoint": {"type": "string"},
                     "turn_checkpoint": {"type": "string", "description": "Only what the completed turn ending at this checkpoint changed"},
                     "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
+                    "context_lines": {"type": "integer", "minimum": 0, "maximum": 25, "description": "Unchanged lines around each edit; defaults to 3"},
                 },
                 "required": ["workspace"],
             }),
@@ -1025,6 +1026,16 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         },
         "ginka_changes" => Request::WorkspaceChanges {
             workspace: WorkspaceId(text("workspace")?),
+            context_lines: arguments
+                .get("context_lines")
+                .map(|value| {
+                    value
+                        .as_u64()
+                        .and_then(|number| u8::try_from(number).ok())
+                        .filter(|number| *number <= 25)
+                        .ok_or_else(|| anyhow!("{tool} needs `context_lines` between 0 and 25"))
+                })
+                .transpose()?,
             source: match maybe("since_checkpoint") {
                 _ if maybe("commit").is_some() => ginka_protocol::model::ChangeSource::Commit {
                     commit: maybe("commit").unwrap_or_default(),
@@ -1478,6 +1489,31 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn changes_context_is_forwarded_to_the_shared_request() {
+        let request = request_for(
+            "ginka_changes",
+            &json!({"workspace": "w", "context_lines": 10}),
+        )
+        .unwrap();
+        assert!(matches!(
+            request,
+            Request::WorkspaceChanges {
+                context_lines: Some(10),
+                ..
+            }
+        ));
+        for invalid in [json!(-1), json!(26), json!("10")] {
+            assert!(
+                request_for(
+                    "ginka_changes",
+                    &json!({"workspace": "w", "context_lines": invalid})
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

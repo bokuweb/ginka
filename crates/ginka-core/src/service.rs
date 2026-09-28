@@ -938,7 +938,15 @@ impl Service {
                 })
             }
 
-            Request::WorkspaceChanges { workspace, source } => {
+            Request::WorkspaceChanges {
+                workspace,
+                source,
+                context_lines,
+            } => {
+                let context_lines = context_lines.unwrap_or(3);
+                if context_lines > 25 {
+                    return Err(RpcError::failed("diff context exceeds 25 lines"));
+                }
                 let worktree = self.worktree(&workspace)?;
                 let files = match &source {
                     // A checkpoint names a commit, and the commit is what git
@@ -953,7 +961,12 @@ impl Service {
                                     checkpoint.0, workspace.0
                                 ))
                             })?;
-                        git::changes_since(&worktree.path, &stored.commit).map_err(failed)?
+                        git::changes_since_with_context(
+                            &worktree.path,
+                            &stored.commit,
+                            context_lines,
+                        )
+                        .map_err(failed)?
                     }
                     ChangeSource::Turn { checkpoint } => {
                         let conn = self.conn();
@@ -967,10 +980,13 @@ impl Service {
                                 ))
                             })?;
                         match checkpoint::turn_commits(&conn, &stored.id).map_err(failed)? {
-                            Some((start, end)) => {
-                                git::changes_between(&worktree.path, &start, &end)
-                                    .map_err(failed)?
-                            }
+                            Some((start, end)) => git::changes_between_with_context(
+                                &worktree.path,
+                                &start,
+                                &end,
+                                context_lines,
+                            )
+                            .map_err(failed)?,
                             None => {
                                 return Err(RpcError::not_found(format!(
                                     "checkpoint {} has no saved turn start",
@@ -979,7 +995,8 @@ impl Service {
                             }
                         }
                     }
-                    other => git::changes(&worktree.path, other).map_err(failed)?,
+                    other => git::changes_with_context(&worktree.path, other, context_lines)
+                        .map_err(failed)?,
                 };
                 Ok(Response::Changes {
                     changes: Changes { source, files },

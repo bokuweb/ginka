@@ -184,6 +184,9 @@ enum Command {
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
+        /// Unchanged lines around each edit, up to 25.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=25))]
+        context: u8,
     },
     /// Show recent commits in a workspace, newest first.
     History {
@@ -1493,9 +1496,11 @@ fn request_for(command: Command) -> Result<Request> {
             since,
             turn,
             commit,
+            context,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
+            context_lines: Some(context),
             source: match (staged, unstaged, since, turn) {
                 _ if commit.is_some() => ChangeSource::Commit {
                     commit: commit.unwrap_or_default(),
@@ -3002,6 +3007,19 @@ mod ginka_cli_format {
                 Cli::try_parse_from(["ginka", "changes", "w", "--turn", "c-1", "--staged"])
                     .is_err()
             );
+        }
+
+        #[test]
+        fn changes_context_is_bounded_and_sent_to_the_daemon() {
+            let cli = Cli::try_parse_from(["ginka", "changes", "w", "--context", "10"]).unwrap();
+            assert!(matches!(
+                request_for(cli.command).unwrap(),
+                Request::WorkspaceChanges {
+                    context_lines: Some(10),
+                    ..
+                }
+            ));
+            assert!(Cli::try_parse_from(["ginka", "changes", "w", "--context", "26"]).is_err());
         }
 
         #[test]

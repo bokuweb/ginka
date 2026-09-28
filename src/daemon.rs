@@ -501,10 +501,21 @@ impl DaemonLink {
 
     /// What has changed in a workspace, against `source`.
     pub async fn changes(&self, workspace: &WorkspaceId, source: ChangeSource) -> Option<Changes> {
+        self.changes_with_context(workspace, source, 3).await
+    }
+
+    /// Read a workspace diff with the requested number of surrounding lines.
+    pub async fn changes_with_context(
+        &self,
+        workspace: &WorkspaceId,
+        source: ChangeSource,
+        context_lines: u8,
+    ) -> Option<Changes> {
         match self
             .ask(Request::WorkspaceChanges {
                 workspace: workspace.clone(),
                 source,
+                context_lines: Some(context_lines),
             })
             .await
         {

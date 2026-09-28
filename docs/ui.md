@@ -422,6 +422,8 @@ The diff list separates worktree-only changes from staged changes. The same path
 
 The Git surface filters diff rows by old or new file path as the reader types, across both index sections and the read-only commit view. Whitespace-separated terms must all match, without case sensitivity. The visible count and line totals follow the filter; staging, comments and commits still use the complete daemon-owned changes.
 
+The context control above the diff selects 3, 10 or 25 unchanged lines around edits, including saved turn and commit views. At the default three lines, hunk stage, unstage and discard controls use the canonical Git hunk header. Wider views hide those hunk controls because their headers no longer identify the canonical hunk; file controls and line comments remain available.
+
 ### 3.5 Inbox
 
 Built with `--features github` from the local `e1-views` workspace crate:

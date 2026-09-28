@@ -535,8 +535,26 @@ fn git_with_env(repo: &Path, args: &[&str], env: &[(&str, &str)]) -> Result<Stri
 /// `--intent-to-add` records only the path, so nothing of the user's staging is
 /// disturbed.
 pub fn changes(worktree: &Path, source: &ChangeSource) -> Result<Vec<FileChange>> {
+    changes_with_context(worktree, source, 3)
+}
+
+/// Read a diff with a bounded number of unchanged lines around each edit.
+/// Hunk staging still uses the canonical three-line diff, so callers must not
+/// pass headers from a different context to those editing operations.
+pub fn changes_with_context(
+    worktree: &Path,
+    source: &ChangeSource,
+    context_lines: u8,
+) -> Result<Vec<FileChange>> {
+    anyhow::ensure!(context_lines <= 25, "diff context exceeds 25 lines");
     // Rename detection and no colour: this is parsed, not printed.
-    let common = ["--no-color", "--find-renames", "--no-ext-diff", "-U3"];
+    let unified = format!("--unified={context_lines}");
+    let common = [
+        "--no-color",
+        "--find-renames",
+        "--no-ext-diff",
+        unified.as_str(),
+    ];
 
     let patch = match source {
         ChangeSource::Uncommitted => {
@@ -733,6 +751,17 @@ pub fn history(worktree: &Path, limit: usize) -> Result<Vec<GitCommit>> {
 /// This is what "what did this turn do" means: the checkpoint taken at the end
 /// of the turn before it is the thing worth comparing against.
 pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
+    changes_since_with_context(worktree, commit, 3)
+}
+
+/// Read a checkpoint diff with a bounded number of context lines.
+pub fn changes_since_with_context(
+    worktree: &Path,
+    commit: &str,
+    context_lines: u8,
+) -> Result<Vec<FileChange>> {
+    anyhow::ensure!(context_lines <= 25, "diff context exceeds 25 lines");
+    let unified = format!("--unified={context_lines}");
     git(worktree, &["add", "--intent-to-add", "--all"]).ok();
     let patch = git(
         worktree,
@@ -742,7 +771,7 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
             "--no-color",
             "--find-renames",
             "--no-ext-diff",
-            "-U3",
+            unified.as_str(),
         ],
     )?;
     Ok(crate::diff::parse(&patch))
@@ -751,8 +780,20 @@ pub fn changes_since(worktree: &Path, commit: &str) -> Result<Vec<FileChange>> {
 /// Compare the two saved snapshots of a completed turn without reading the
 /// current index or worktree, which may contain later hand edits.
 pub fn changes_between(worktree: &Path, start: &str, end: &str) -> Result<Vec<FileChange>> {
+    changes_between_with_context(worktree, start, end, 3)
+}
+
+/// Read two saved turn snapshots with a bounded number of context lines.
+pub fn changes_between_with_context(
+    worktree: &Path,
+    start: &str,
+    end: &str,
+    context_lines: u8,
+) -> Result<Vec<FileChange>> {
+    anyhow::ensure!(context_lines <= 25, "diff context exceeds 25 lines");
     anyhow::ensure!(is_object_name(start), "{start:?} is not a commit id");
     anyhow::ensure!(is_object_name(end), "{end:?} is not a commit id");
+    let unified = format!("--unified={context_lines}");
     let patch = git(
         worktree,
         &[
@@ -760,7 +801,7 @@ pub fn changes_between(worktree: &Path, start: &str, end: &str) -> Result<Vec<Fi
             "--no-color",
             "--find-renames",
             "--no-ext-diff",
-            "-U3",
+            unified.as_str(),
             start,
             end,
         ],
@@ -1823,6 +1864,29 @@ prunable
         let paths: Vec<&str> = changed.iter().map(|file| file.path.as_str()).collect();
         assert!(paths.contains(&"tracked.txt"), "{paths:?}");
         assert!(paths.contains(&"agent.rs"), "{paths:?}");
+    }
+
+    #[test]
+    fn diff_context_can_expand_without_changing_the_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("repo");
+        repository(&root);
+        let original = (1..=30).map(|n| format!("line {n}\n")).collect::<String>();
+        std::fs::write(root.join("context.txt"), &original).unwrap();
+        git(&root, &["add", "context.txt"]).unwrap();
+        git(&root, &["commit", "-m", "Add context fixture"]).unwrap();
+        std::fs::write(
+            root.join("context.txt"),
+            original.replace("line 15\n", "changed 15\n"),
+        )
+        .unwrap();
+
+        let narrow = changes_with_context(&root, &ChangeSource::Unstaged, 3).unwrap();
+        let wide = changes_with_context(&root, &ChangeSource::Unstaged, 10).unwrap();
+        assert_eq!(narrow[0].added, wide[0].added);
+        assert_eq!(narrow[0].removed, wide[0].removed);
+        assert_eq!(narrow[0].hunks[0].lines.len(), 8);
+        assert_eq!(wide[0].hunks[0].lines.len(), 22);
     }
 
     #[test]

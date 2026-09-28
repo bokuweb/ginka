@@ -330,6 +330,9 @@ pub enum Request {
     WorkspaceChanges {
         workspace: WorkspaceId,
         source: ChangeSource,
+        /// Unchanged lines around each edit; omitted means three, at most 25.
+        #[serde(default)]
+        context_lines: Option<u8>,
     },
     /// Recent commits in a workspace, newest first and bounded by the daemon.
     WorkspaceHistory {

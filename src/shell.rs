@@ -868,6 +868,14 @@ impl Shell {
             &surfaces,
             window,
             |this, _, event, window, cx| match event {
+                crate::surfaces::SurfaceEvent::DiffContextChanged { commit, turn } => {
+                    this.refresh_changes(cx);
+                    if let Some(commit) = commit {
+                        this.open_commit(commit.clone(), cx);
+                    } else if let Some(turn) = turn {
+                        this.open_turn(turn.clone(), cx);
+                    }
+                }
                 crate::surfaces::SurfaceEvent::Arranged => {
                     this.persist_surfaces(cx);
                     this.follow_terminal_placement(cx);
@@ -3114,20 +3122,32 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
         cx.spawn(async move |_, cx| {
             let (changes, staged_changes, comments) = cx
                 .background_spawn(async move {
                     let changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Unstaged)
+                        .changes_with_context(
+                            &workspace,
+                            ginka_protocol::ChangeSource::Unstaged,
+                            context_lines,
+                        )
                         .await;
                     let staged_changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Staged)
+                        .changes_with_context(
+                            &workspace,
+                            ginka_protocol::ChangeSource::Staged,
+                            context_lines,
+                        )
                         .await;
                     let comments = link.comments(&workspace).await;
                     (changes, staged_changes, comments)
                 })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
+                if surfaces.diff_context() != context_lines {
+                    return;
+                }
                 surfaces.set_changes(changes, cx);
                 let staged = staged_changes
                     .as_ref()
@@ -3149,13 +3169,15 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
         cx.spawn(async move |_, cx| {
             let id = commit.id.clone();
             let changes = cx
                 .background_spawn(async move {
-                    link.changes(
+                    link.changes_with_context(
                         &workspace,
                         ginka_protocol::ChangeSource::Commit { commit: id },
+                        context_lines,
                     )
                     .await
                 })
@@ -3170,7 +3192,9 @@ impl Shell {
                 files: Vec::new(),
             });
             surfaces.update(cx, |surfaces, cx| {
-                surfaces.show_commit(commit, Some(changes), cx)
+                if surfaces.diff_context() == context_lines {
+                    surfaces.show_commit(commit, Some(changes), cx);
+                }
             });
         })
         .detach();
@@ -3183,16 +3207,22 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
         cx.spawn(async move |_, cx| {
             let source = ginka_protocol::ChangeSource::Turn {
                 checkpoint: checkpoint.id.clone(),
             };
             let changes = cx
-                .background_spawn(async move { link.changes(&workspace, source).await })
+                .background_spawn(async move {
+                    link.changes_with_context(&workspace, source, context_lines)
+                        .await
+                })
                 .await
                 .ok_or_else(|| rust_i18n::t!("surface.git.turn_read_error").to_string());
             surfaces.update(cx, |surfaces, cx| {
-                surfaces.show_turn(checkpoint, Some(changes), cx)
+                if surfaces.diff_context() == context_lines {
+                    surfaces.show_turn(checkpoint, Some(changes), cx);
+                }
             });
         })
         .detach();
@@ -13604,7 +13634,7 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (showing, wants_changes, wants_usage, wants_history) = this
+    let (showing, wants_changes, wants_usage, wants_history, context_lines) = this
         .update(cx, |this, cx| {
             let surfaces = this.surfaces.read(cx);
             let git = surfaces.shows(ginka_ui::surface::Surface::Git);
@@ -13616,6 +13646,7 @@ async fn pull_rows(
                 git,
                 surfaces.shows(ginka_ui::surface::Surface::Reports),
                 git && surfaces.history_is_open(),
+                surfaces.diff_context(),
             )
         })
         .map_err(|_| ())?;
@@ -13658,10 +13689,18 @@ async fn pull_rows(
             let (changes, staged_changes, comments) = match (&showing, wants_changes) {
                 (Some(workspace), true) => (
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Unstaged)
+                        .changes_with_context(
+                            workspace,
+                            ginka_protocol::ChangeSource::Unstaged,
+                            context_lines,
+                        )
                         .await,
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Staged)
+                        .changes_with_context(
+                            workspace,
+                            ginka_protocol::ChangeSource::Staged,
+                            context_lines,
+                        )
                         .await,
                     listing.comments(workspace).await,
                 ),
@@ -13712,6 +13751,9 @@ async fn pull_rows(
             .update(cx, |sidebar, cx| sidebar.set_projects(listed, cx));
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
+                if surfaces.diff_context() != context_lines {
+                    return;
+                }
                 let staged = staged_changes
                     .as_ref()
                     .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())

@@ -95,6 +95,8 @@ pub struct SurfacePanel {
     staged_changes: Option<Changes>,
     /// View-only path filter shared by current changes and the commit reader.
     diff_filter: DiffFilter,
+    /// Surrounding lines requested for each displayed diff hunk.
+    diff_context: u8,
     /// Input for the view-only diff path filter.
     diff_finder: Entity<InputState>,
     /// Recent commits for the selected workspace, already bounded by the daemon.
@@ -218,6 +220,11 @@ pub enum CommitThen {
 }
 
 pub enum SurfaceEvent {
+    /// Re-read the current diff with a different number of surrounding lines.
+    DiffContextChanged {
+        commit: Option<GitCommit>,
+        turn: Option<Checkpoint>,
+    },
     /// The surfaces open in the right panel, or their arrangement, changed
     /// and should be remembered.
     Arranged,
@@ -444,6 +451,7 @@ impl SurfacePanel {
             changes: None,
             staged_changes: None,
             diff_filter: DiffFilter::default(),
+            diff_context: 3,
             diff_finder,
             history: Vec::new(),
             history_open: false,
@@ -1073,6 +1081,11 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Number of unchanged lines currently requested for Git diffs.
+    pub fn diff_context(&self) -> u8 {
+        self.diff_context
+    }
+
     /// Show a completed turn, dropping a response if the reader has moved on.
     pub fn show_turn(
         &mut self,
@@ -1615,6 +1628,7 @@ impl SurfacePanel {
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .when(self.turns_open, |this| this.child(self.git_turns(cx)))
                 .child(self.diff_filter_input(cx))
+                .child(self.diff_context_control(cx))
                 .child(
                     div()
                         .flex_1()
@@ -1649,6 +1663,7 @@ impl SurfacePanel {
             .when(self.history_open, |this| this.child(self.git_history(cx)))
             .when(self.turns_open, |this| this.child(self.git_turns(cx)))
             .child(self.diff_filter_input(cx))
+            .child(self.diff_context_control(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1723,6 +1738,48 @@ impl SurfacePanel {
             .border_b_1()
             .border_color(tokens.colors().border_subtle)
             .child(ginka_ui::field::input(&self.diff_finder))
+    }
+
+    /// Switch the number of context lines without changing Git's review state.
+    fn diff_context_control(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        h_flex()
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_xs()
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("surface.git.context").to_string()),
+            )
+            .children([3_u8, 10, 25].map(|lines| {
+                Button::new(format!("diff-context-{lines}"))
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(if self.diff_context == lines {
+                        format!("{lines} ✓")
+                    } else {
+                        lines.to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.context_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.diff_context == lines {
+                            return;
+                        }
+                        this.diff_context = lines;
+                        this.reverting_hunk = None;
+                        cx.emit(SurfaceEvent::DiffContextChanged {
+                            commit: this.commit_view.as_ref().map(|(commit, _)| commit.clone()),
+                            turn: this.turn_view.as_ref().map(|(turn, _)| turn.clone()),
+                        });
+                        cx.notify();
+                    }))
+            }))
     }
 
     /// One side of the index boundary and the files on that side.
@@ -2128,7 +2185,8 @@ impl SurfacePanel {
                     .text_color(tokens.colors().text_muted)
                     .child(detail),
             )
-            .child(self.diff_filter_input(cx));
+            .child(self.diff_filter_input(cx))
+            .child(self.diff_context_control(cx));
         let body: Vec<AnyElement> = match changes {
             None => vec![
                 div()
@@ -2898,33 +2956,35 @@ impl SurfacePanel {
                                         .text_color(tokens.colors().text_muted)
                                         .child(hunk_header),
                                 )
-                                .child(
-                                    Button::new(format!(
-                                        "hunk:{}:{}:{}",
-                                        if staged { "unstage" } else { "stage" },
-                                        file.path,
-                                        hunk.header
-                                    ))
-                                    .ghost()
-                                    .compact()
-                                    .small()
-                                    .label(if staged {
-                                        rust_i18n::t!("surface.git.hunk.unstage").to_string()
-                                    } else {
-                                        rust_i18n::t!("surface.git.hunk.stage").to_string()
-                                    })
-                                    .on_click(cx.listener(
-                                        move |_, _, _, cx| {
-                                            cx.stop_propagation();
-                                            cx.emit(SurfaceEvent::StageHunk {
-                                                path: hunk_path.clone(),
-                                                header: action_header.clone(),
-                                                staged: !staged,
-                                            });
-                                        },
-                                    )),
-                                )
-                                .when(!staged, |this| {
+                                .when(self.diff_context == 3, |this| {
+                                    this.child(
+                                        Button::new(format!(
+                                            "hunk:{}:{}:{}",
+                                            if staged { "unstage" } else { "stage" },
+                                            file.path,
+                                            hunk.header
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .small()
+                                        .label(if staged {
+                                            rust_i18n::t!("surface.git.hunk.unstage").to_string()
+                                        } else {
+                                            rust_i18n::t!("surface.git.hunk.stage").to_string()
+                                        })
+                                        .on_click(
+                                            cx.listener(move |_, _, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.emit(SurfaceEvent::StageHunk {
+                                                    path: hunk_path.clone(),
+                                                    header: action_header.clone(),
+                                                    staged: !staged,
+                                                });
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(!staged && self.diff_context == 3, |this| {
                                     this.child(
                                         Button::new(format!(
                                             "discard-hunk:{}:{}",

@@ -968,6 +968,12 @@ surface.git.turn_row:
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"
+surface.git.context:
+  en: Context lines
+  ja: 前後の行数
+surface.git.context_tooltip:
+  en: Show unchanged lines around each edit. Hunk actions are available at 3 lines.
+  ja: 変更の前後に表示する未変更行の数。hunk操作は3行で利用できます。
 surface.git.filter:
   en: Filter changed files by path…
   ja: 変更ファイルをパスで絞り込み…
