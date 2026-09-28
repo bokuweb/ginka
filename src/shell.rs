@@ -138,6 +138,7 @@ struct CronForm {
     schedule: Entity<InputState>,
     body: Entity<InputState>,
     precheck: Entity<InputState>,
+    workspace: Option<ginka_protocol::WorkspaceId>,
     /// A prompt for an agent rather than a shell command.
     chat: bool,
     editing: Option<ginka_protocol::model::CronJob>,
@@ -832,6 +833,7 @@ impl Shell {
                 InputState::new(window, cx)
                     .placeholder(rust_i18n::t!("settings.cron.precheck").to_string())
             }),
+            workspace: None,
             chat: false,
             editing: None,
             error: None,
@@ -2361,6 +2363,7 @@ impl Shell {
                         this.cron_form.error = None;
                         if clear_form {
                             this.cron_form.editing = None;
+                            this.cron_form.workspace = None;
                             for input in [
                                 this.cron_form.name.clone(),
                                 this.cron_form.schedule.clone(),
@@ -2399,6 +2402,7 @@ impl Shell {
         ] {
             input.update(cx, |state, cx| state.set_value(&value, window, cx));
         }
+        self.cron_form.workspace = job.workspace.clone();
         self.cron_form.chat = job.via == ginka_protocol::model::CronVia::Chat;
         self.cron_form.editing = Some(job);
         self.cron_form.error = None;
@@ -2408,6 +2412,7 @@ impl Shell {
     /// Leave edit mode and reset the form for a new job.
     fn cancel_cron_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.cron_form.editing = None;
+        self.cron_form.workspace = None;
         self.cron_form.error = None;
         for input in [
             self.cron_form.name.clone(),
@@ -2437,10 +2442,27 @@ impl Shell {
             cx.notify();
             return;
         }
+        if let Some(workspace) = &self.cron_form.workspace
+            && !self.sidebar.read(cx).rows().iter().any(|row| {
+                row.workspace == *workspace
+                    && project.0 == row.origin
+                    && (!row.archived
+                        || self
+                            .cron_form
+                            .editing
+                            .as_ref()
+                            .is_some_and(|job| job.workspace.as_ref() == Some(workspace)))
+            })
+        {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.changed_scope").to_string());
+            cx.notify();
+            return;
+        }
         let request = ginka_ui::scheduled::save_request(
             project,
             self.cron_form.editing.as_ref(),
             ginka_ui::scheduled::FormValues {
+                workspace: self.cron_form.workspace.clone(),
                 name: self.cron_form.name.read(cx).value().to_string(),
                 schedule: self.cron_form.schedule.read(cx).value().to_string(),
                 body: self.cron_form.body.read(cx).value().to_string(),
@@ -5728,6 +5750,20 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let now = chrono::Utc::now().timestamp();
         let chat = self.cron_form.chat;
+        let selected_workspace = self.cron_form.workspace.clone();
+        let workspace_choices: Vec<_> = self
+            .sidebar
+            .read(cx)
+            .rows()
+            .iter()
+            .filter(|row| {
+                self.target_project
+                    .as_ref()
+                    .is_some_and(|project| project.0 == row.origin)
+                    && (!row.archived || selected_workspace.as_ref() == Some(&row.workspace))
+            })
+            .map(|row| row.workspace.clone())
+            .collect();
         let chip = |id: &'static str, label: String, on: bool| {
             div()
                 .id(id)
@@ -5767,6 +5803,10 @@ impl Shell {
                     .as_ref()
                     .map(|run| run.outcome.as_str().to_string())
                     .unwrap_or_default();
+                let scope = job.workspace.as_ref().map_or_else(
+                    || rust_i18n::t!("settings.cron.project_checkout").to_string(),
+                    |workspace| workspace.0.clone(),
+                );
                 h_flex()
                     .w_full()
                     .py_1p5()
@@ -5798,7 +5838,7 @@ impl Shell {
                             .text_xs()
                             .text_color(tokens.colors().text_secondary)
                             .truncate()
-                            .child(format!("{} · {}", job.via.as_str(), job.body)),
+                            .child(format!("{} · {} · {}", job.via.as_str(), scope, job.body)),
                     )
                     .child(
                         div()
@@ -5887,6 +5927,52 @@ impl Shell {
                 h_flex()
                     .w_full()
                     .pt_2()
+                    .gap_2()
+                    .flex_wrap()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("settings.cron.scope").to_string()),
+                    )
+                    .child(
+                        Button::new("cron-scope-project")
+                            .ghost()
+                            .compact()
+                            .label(format!(
+                                "{}{}",
+                                if selected_workspace.is_none() {
+                                    "✓ "
+                                } else {
+                                    ""
+                                },
+                                rust_i18n::t!("settings.cron.project_checkout")
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cron_form.workspace = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children(workspace_choices.into_iter().map(|workspace| {
+                        let selected = selected_workspace.as_ref() == Some(&workspace);
+                        Button::new(SharedString::from(format!("cron-scope-{}", workspace.0)))
+                            .ghost()
+                            .compact()
+                            .label(format!(
+                                "{}{}",
+                                if selected { "✓ " } else { "" },
+                                workspace.0
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.cron_form.workspace = Some(workspace.clone());
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .w_full()
                     .gap_2()
                     .items_center()
                     .child(

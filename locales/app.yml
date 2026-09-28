@@ -1095,6 +1095,12 @@ settings.cron.schedule:
 settings.cron.body:
   en: "Command or prompt"
   ja: "コマンドまたはプロンプト"
+settings.cron.scope:
+  en: "Run in"
+  ja: "実行先"
+settings.cron.project_checkout:
+  en: "Project checkout"
+  ja: "プロジェクトのチェックアウト"
 settings.cron.precheck_label:
   en: "Run only if this command succeeds"
   ja: "このコマンドが成功した場合のみ実行"
@@ -1131,6 +1137,9 @@ settings.cron.cancel:
 settings.cron.changed_project:
   en: "This job belongs to another project. Select it again to edit."
   ja: "このジョブは別のプロジェクトに属しています。編集するには選び直してください。"
+settings.cron.changed_scope:
+  en: "Choose an active workspace in this project or the project checkout."
+  ja: "このプロジェクトの有効なワークスペースかプロジェクトのチェックアウトを選んでください。"
 settings.cron.needs_project:
   en: "Choose a project first."
   ja: "先にプロジェクトを選んでください。"

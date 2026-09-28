@@ -1,14 +1,16 @@
 //! Request shape for the scheduled-job settings form.
 //!
-//! Editing changes the visible fields while retaining a job's scope, agent,
-//! enabled state and run history identity.
+//! Editing changes the visible fields while retaining a job's agent, enabled
+//! state and run history identity.
 
-use ginka_protocol::ProjectName;
 use ginka_protocol::model::{CronJob, CronVia};
 use ginka_protocol::rpc::Request;
+use ginka_protocol::{ProjectName, WorkspaceId};
 
 /// Values the scheduled-job form lets the reader change.
 pub struct FormValues {
+    /// Worktree to run in, or the project checkout when absent.
+    pub workspace: Option<WorkspaceId>,
     /// Job label shown in Settings.
     pub name: String,
     /// Cron expression or one-time timestamp.
@@ -21,7 +23,7 @@ pub struct FormValues {
     pub via: CronVia,
 }
 
-/// Build a save request without dropping fields absent from the settings form.
+/// Build a save request from the settings form without dropping hidden fields.
 ///
 /// A chat job keeps its original agent while it is edited; changing a terminal
 /// job to chat uses the currently selected agent. The daemon retains run
@@ -42,7 +44,7 @@ pub fn save_request(
     Request::SaveCronJob {
         id: editing.map(|job| job.id),
         project,
-        workspace: editing.and_then(|job| job.workspace.clone()),
+        workspace: form.workspace,
         name: form.name,
         schedule: form.schedule,
         via: form.via,
@@ -84,6 +86,7 @@ mod tests {
             project.clone(),
             Some(&job),
             FormValues {
+                workspace: Some(workspace.clone()),
                 name: "Review open PRs".into(),
                 schedule: "0 9 * * 1-5".into(),
                 body: "new prompt".into(),
@@ -107,6 +110,7 @@ mod tests {
             ProjectName("shop".into()),
             None,
             FormValues {
+                workspace: None,
                 name: "review".into(),
                 schedule: "@daily".into(),
                 body: "look at the diff".into(),
@@ -142,6 +146,7 @@ mod tests {
             project.clone(),
             Some(&job),
             FormValues {
+                workspace: None,
                 name: job.name.clone(),
                 schedule: job.schedule.clone(),
                 body: "review".into(),
@@ -160,6 +165,7 @@ mod tests {
             project,
             Some(&job),
             FormValues {
+                workspace: None,
                 name: job.name.clone(),
                 schedule: job.schedule.clone(),
                 body: "true".into(),
@@ -195,6 +201,7 @@ mod tests {
             project,
             Some(&job),
             FormValues {
+                workspace: None,
                 name: job.name.clone(),
                 schedule: job.schedule.clone(),
                 body: job.body.clone(),
@@ -208,6 +215,72 @@ mod tests {
             Request::SaveCronJob {
                 id: Some(7),
                 precheck: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn new_job_can_target_a_workspace() {
+        let workspace = WorkspaceId("shop-review".into());
+        let request = save_request(
+            ProjectName("shop".into()),
+            None,
+            FormValues {
+                workspace: Some(workspace.clone()),
+                name: "review".into(),
+                schedule: "@daily".into(),
+                body: "true".into(),
+                precheck: String::new(),
+                via: CronVia::Terminal,
+            },
+            None,
+        );
+        assert!(matches!(request, Request::SaveCronJob {
+            id: None, workspace: Some(actual), ..
+        } if actual == workspace));
+    }
+
+    #[test]
+    fn editing_can_change_or_clear_the_workspace() {
+        let project = ProjectName("shop".into());
+        let job = CronJob {
+            id: 7,
+            project: project.clone(),
+            workspace: Some(WorkspaceId("shop-old".into())),
+            name: "review".into(),
+            schedule: "@daily".into(),
+            via: CronVia::Terminal,
+            agent: None,
+            body: "true".into(),
+            enabled: true,
+            precheck: None,
+            next_run_at: None,
+            last_run: None,
+        };
+        let form = |workspace| FormValues {
+            workspace,
+            name: job.name.clone(),
+            schedule: job.schedule.clone(),
+            body: job.body.clone(),
+            precheck: String::new(),
+            via: job.via,
+        };
+        let changed = save_request(
+            project.clone(),
+            Some(&job),
+            form(Some(WorkspaceId("shop-new".into()))),
+            None,
+        );
+        assert!(matches!(changed, Request::SaveCronJob {
+            id: Some(7), workspace: Some(actual), ..
+        } if actual == WorkspaceId("shop-new".into())));
+        let cleared = save_request(project, Some(&job), form(None), None);
+        assert!(matches!(
+            cleared,
+            Request::SaveCronJob {
+                id: Some(7),
+                workspace: None,
                 ..
             }
         ));
