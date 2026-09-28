@@ -17,6 +17,7 @@ pub mod branches;
 pub mod browser;
 pub mod chrome;
 pub mod composer;
+pub mod diff_filter;
 pub mod dock;
 pub mod editor;
 pub mod fan_out;

@@ -11,6 +11,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
+use ginka_ui::diff_filter::DiffFilter;
 use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
     DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
@@ -92,6 +93,10 @@ pub struct SurfacePanel {
     changes: Option<Changes>,
     /// What is already in the index, shown separately from worktree-only edits.
     staged_changes: Option<Changes>,
+    /// View-only path filter shared by current changes and the commit reader.
+    diff_filter: DiffFilter,
+    /// Input for the view-only diff path filter.
+    diff_finder: Entity<InputState>,
     /// Recent commits for the selected workspace, already bounded by the daemon.
     history: Vec<GitCommit>,
     /// Whether the reader asked to see recent commits above the current diff.
@@ -349,6 +354,16 @@ impl SurfacePanel {
             }
         })
         .detach();
+        let diff_finder = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("surface.git.filter").to_string())
+        });
+        cx.subscribe(&diff_finder, |this, finder, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.diff_filter.query = finder.read(cx).value().to_string();
+                cx.notify();
+            }
+        })
+        .detach();
         let skill_finder = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("surface.skills.search").to_string())
@@ -420,6 +435,8 @@ impl SurfacePanel {
             browser_feedback,
             changes: None,
             staged_changes: None,
+            diff_filter: DiffFilter::default(),
+            diff_finder,
             history: Vec::new(),
             history_open: false,
             commit_view: None,
@@ -1544,6 +1561,7 @@ impl SurfacePanel {
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
+                .child(self.diff_filter_input(cx))
                 .child(
                     div()
                         .flex_1()
@@ -1557,17 +1575,18 @@ impl SurfacePanel {
                 .into_any_element();
         }
 
-        let (unstaged_added, unstaged_removed) = changes.totals();
-        let (staged_added, staged_removed) = staged_changes.totals();
-        let added = unstaged_added + staged_added;
-        let removed = unstaged_removed + staged_removed;
-        let files = changes
-            .files
-            .iter()
-            .chain(&staged_changes.files)
+        let all_files = changes.files.iter().chain(&staged_changes.files);
+        let files = all_files
+            .clone()
             .map(|file| file.path.as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len();
+        let visible = self.diff_filter.visible_count(all_files.clone());
+        let (added, removed) = all_files
+            .filter(|file| self.diff_filter.matches(file))
+            .fold((0, 0), |(added, removed), file| {
+                (added + file.added, removed + file.removed)
+            });
         v_flex()
             .id("git-surface")
             .flex_1()
@@ -1575,6 +1594,7 @@ impl SurfacePanel {
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
+            .child(self.diff_filter_input(cx))
             .child(
                 h_flex()
                     .w_full()
@@ -1587,7 +1607,16 @@ impl SurfacePanel {
                             .flex_1()
                             .text_xs()
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("surface.git.summary", files = files).to_string()),
+                            .child(if self.diff_filter.query.trim().is_empty() {
+                                rust_i18n::t!("surface.git.summary", files = files).to_string()
+                            } else {
+                                rust_i18n::t!(
+                                    "surface.git.filtered_summary",
+                                    visible = visible,
+                                    total = files
+                                )
+                                .to_string()
+                            }),
                     )
                     .child(
                         div()
@@ -1602,15 +1631,44 @@ impl SurfacePanel {
                             .child(format!("-{removed}")),
                     ),
             )
-            .when(!changes.is_empty(), |this| {
-                this.child(self.change_section(&changes, false, cx))
+            .when(visible == 0, |this| {
+                this.child(
+                    div()
+                        .px_3()
+                        .py_6()
+                        .text_sm()
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("surface.git.no_matches").to_string()),
+                )
             })
-            .when(!staged_changes.is_empty(), |this| {
-                this.child(self.change_section(&staged_changes, true, cx))
-            })
+            .when(
+                changes
+                    .files
+                    .iter()
+                    .any(|file| self.diff_filter.matches(file)),
+                |this| this.child(self.change_section(&changes, false, cx)),
+            )
+            .when(
+                staged_changes
+                    .files
+                    .iter()
+                    .any(|file| self.diff_filter.matches(file)),
+                |this| this.child(self.change_section(&staged_changes, true, cx)),
+            )
             .children(self.review_bar(cx))
             .child(self.commit_box(cx))
             .into_any_element()
+    }
+
+    /// Filter the diff rows by path without changing daemon-owned review state.
+    fn diff_filter_input(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let tokens = Tokens::global(cx).clone();
+        div()
+            .w_full()
+            .p_2()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle)
+            .child(ginka_ui::field::input(&self.diff_finder))
     }
 
     /// One side of the index boundary and the files on that side.
@@ -1665,6 +1723,7 @@ impl SurfacePanel {
                 changes
                     .files
                     .iter()
+                    .filter(|file| self.diff_filter.matches(file))
                     .map(|file| self.file_row(file, staged, cx).into_any_element()),
             )
     }
@@ -1918,7 +1977,8 @@ impl SurfacePanel {
                         commit.author,
                         ginka_ui::workspace::relative_age(now, commit.authored_at)
                     )),
-            );
+            )
+            .child(self.diff_filter_input(cx));
         let body: Vec<AnyElement> = match changes {
             None => vec![
                 div()
@@ -1930,19 +1990,33 @@ impl SurfacePanel {
                     .into_any_element(),
             ],
             Some(changes) => {
-                let (added, removed) = changes.totals();
+                let visible = self.diff_filter.visible_count(&changes.files);
+                let (added, removed) = changes
+                    .files
+                    .iter()
+                    .filter(|file| self.diff_filter.matches(file))
+                    .fold((0, 0), |(added, removed), file| {
+                        (added + file.added, removed + file.removed)
+                    });
                 let mut rows = vec![
                     h_flex()
                         .px_3()
                         .py_1p5()
                         .gap_2()
                         .text_xs()
-                        .child(
-                            div().flex_1().text_color(tokens.colors().text_muted).child(
+                        .child(div().flex_1().text_color(tokens.colors().text_muted).child(
+                            if self.diff_filter.query.trim().is_empty() {
                                 rust_i18n::t!("surface.git.summary", files = changes.files.len())
-                                    .to_string(),
-                            ),
-                        )
+                                    .to_string()
+                            } else {
+                                rust_i18n::t!(
+                                    "surface.git.filtered_summary",
+                                    visible = visible,
+                                    total = changes.files.len()
+                                )
+                                .to_string()
+                            },
+                        ))
                         .child(
                             div()
                                 .text_color(tokens.colors().status_done)
@@ -1955,10 +2029,22 @@ impl SurfacePanel {
                         )
                         .into_any_element(),
                 ];
+                if visible == 0 && !changes.files.is_empty() {
+                    rows.push(
+                        div()
+                            .px_3()
+                            .py_6()
+                            .text_sm()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.no_matches").to_string())
+                            .into_any_element(),
+                    );
+                }
                 rows.extend(
                     changes
                         .files
                         .iter()
+                        .filter(|file| self.diff_filter.matches(file))
                         .map(|file| self.file_row_read_only(file, cx).into_any_element()),
                 );
                 rows

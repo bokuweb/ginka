@@ -953,6 +953,15 @@ surface.git.history_empty:
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"
+surface.git.filter:
+  en: Filter changed files by path…
+  ja: 変更ファイルをパスで絞り込み…
+surface.git.filtered_summary:
+  en: "%{visible} of %{total} changed"
+  ja: "%{total} 件中 %{visible} 件を表示"
+surface.git.no_matches:
+  en: No changed files match this path
+  ja: 一致する変更ファイルはありません
 surface.git.section.unstaged:
   en: Changes
   ja: 未ステージの変更

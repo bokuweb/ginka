@@ -420,6 +420,8 @@ History beside those controls expands a bounded newest-first commit graph withou
 
 The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and unstaged hunks also have a two-step Discard action. Stage, unstage and discard all regenerate the corresponding side of the diff; a stale header reports its refusal inline instead of applying to another hunk. Discard reverses only the worktree-versus-index patch, preserving already staged edits in the same file.
 
+The Git surface filters diff rows by old or new file path as the reader types, across both index sections and the read-only commit view. Whitespace-separated terms must all match, without case sensitivity. The visible count and line totals follow the filter; staging, comments and commits still use the complete daemon-owned changes.
+
 ### 3.5 Inbox
 
 Built with `--features github` from the local `e1-views` workspace crate:

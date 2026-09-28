@@ -67,7 +67,7 @@ waku is a shipping Rust/GPUI agent client with the same client–daemon shape as
 | An editor: save, find and replace, markdown preview, file tree | Syntax editing, conflict-safe save, find/replace, independent tabs, live-buffer Markdown preview, bounded local image preview and an expandable file tree in the files surface | M4 |
 | Branch picker with checkout and create | **Done 2026-09-06** on the CLI and MCP (`workspace branches|checkout`); the picker in the window is M4 | M4 |
 | Agent-generated commit message on a cheap model | **Done 2026-09-06:** `ginka commit --generate`, pushed as `CommitMessageGenerated`, and *Write it for me* in the commit box | — |
-| Diff: expand context, filter, a specific past turn | Three sources, word marks, comments | M3 leftover |
+| Diff: expand context, filter, a specific past turn | Three sources, word marks, comments, and path filtering across current and commit diffs | M3 leftover: expand context and select a specific past turn |
 | Embedded browser (WKWebView / WebView2) and computer use through a QuickJS MCP kernel | Deferred | M5 browser; Q5 and Q6 say no to the rest |
 | Background-work panel: detached processes, monitors, subagents that outlive a turn | Claude delegated-agent work is nested in its parent transcript row and settles at the turn boundary | Long-lived work still needs a reporting driver and panel (M5) |
 | Usage page by day / month / project, from the vendors' own on-disk transcripts, priced from LiteLLM | Reports by day, agent and account, from Ginka's own turns | M5: the scanner and N13 |
