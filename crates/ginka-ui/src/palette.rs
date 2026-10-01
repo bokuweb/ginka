@@ -12,7 +12,7 @@
 use crate::layout::{Layout, Panel};
 use crate::surface::Surface;
 use crate::workspace::SessionRow;
-use ginka_protocol::WorkspaceId;
+use ginka_protocol::{SessionId, WorkspaceId};
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher};
 
@@ -59,6 +59,8 @@ pub enum Command {
     NavigateForward,
     /// Select a workspace in the sidebar.
     Switch(WorkspaceId),
+    /// Show a conversation in the selected workspace.
+    SwitchConversation(SessionId),
     /// Run a saved shell command in a new terminal, or send a saved prompt.
     RunQuick(ginka_protocol::model::QuickCommand),
     /// Switch between the dark and the light theme.

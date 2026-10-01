@@ -550,6 +550,18 @@ transcript.outline.tooltip:
 composer.project.pick:
   en: Choose where this runs
   ja: 実行する場所を選ぶ
+composer.conversation.pick:
+  en: Conversations
+  ja: 会話を切り替え
+composer.command.goal.description:
+  en: Keep an objective across turns; /goal done clears it
+  ja: 目標を会話中に維持します。/goal done で解除
+composer.command.side.description:
+  en: Start a connected side conversation
+  ja: 現在の会話につながる別の会話を開始
+composer.command.btw.description:
+  en: Ask a brief read-only question in a separate conversation
+  ja: 読み取り専用の短い質問を別の会話で行う
 composer.project.new:
   en: New project…
   ja: 新しいプロジェクト…
@@ -782,6 +794,9 @@ palette.workspace.reindex:
 palette.switch:
   en: "Go to %{workspace}"
   ja: "%{workspace} に移動"
+palette.conversation.switch:
+  en: "Show conversation: %{title}"
+  ja: "会話を表示: %{title}"
 palette.placeholder:
   en: Type a command
   ja: コマンドを入力

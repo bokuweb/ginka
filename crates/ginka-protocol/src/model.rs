@@ -632,6 +632,8 @@ pub struct ReviewComment {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandScope {
+    /// Handled by Ginka before a prompt reaches a provider.
+    BuiltIn,
     /// Defined in the workspace, so it travels with the code.
     Project,
     /// Defined in the user's own home, so it travels with them.

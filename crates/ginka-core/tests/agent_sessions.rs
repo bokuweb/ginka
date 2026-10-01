@@ -534,6 +534,129 @@ fn spoken(transcript: &[TranscriptPayload]) -> String {
 }
 
 #[test]
+fn a_goal_survives_turns_and_a_daemon_restart_until_cleared() {
+    let mut fixture = Fixture::new();
+    let script = [
+        r#"{"type":"thread.started","thread_id":"goal-thread"}"#,
+        r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+        r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+    ]
+    .join("\n");
+    let session = fixture.start_with("codex", &script, "/goal Ship the parser");
+    let first = spoken(&fixture.wait_for_said(&session, "Ship the parser"));
+    assert!(first.contains("durable goal"), "{first}");
+    assert!(!format!("{:?}", fixture.transcript(&session)).contains("/goal Ship"));
+
+    fixture.restart();
+    assert_eq!(
+        fixture.ask(Request::SendMessage {
+            session: session.clone(),
+            text: "What next?".into(),
+        }),
+        Response::Ack
+    );
+    let second = spoken(&fixture.wait_for_said(&session, "What next?"));
+    assert!(second.contains("durable goal: Ship the parser"), "{second}");
+
+    let forked = match fixture.ask(Request::ForkSession {
+        session: session.clone(),
+        after: None,
+        agent: None,
+        model: None,
+        account: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a forked session, got {other:?}"),
+    };
+    fixture.ask(Request::SendMessage {
+        session: forked.id.clone(),
+        text: "Check the fork".into(),
+    });
+    let fork_answer = spoken(&fixture.wait_for_said(&forked.id, "Check the fork"));
+    assert!(
+        fork_answer.contains("durable goal: Ship the parser"),
+        "{fork_answer}"
+    );
+
+    assert_eq!(
+        fixture.ask(Request::SendMessage {
+            session: session.clone(),
+            text: "/goal done".into(),
+        }),
+        Response::Ack
+    );
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "Report status".into(),
+    });
+    let third = spoken(&fixture.wait_for_said(&session, "Report status"));
+    assert_eq!(
+        third.matches("durable goal: Ship the parser").count(),
+        2,
+        "{third}"
+    );
+}
+
+#[test]
+fn side_questions_start_separate_sessions_and_btw_is_read_only() {
+    let mut fixture = Fixture::new();
+    let script = [
+        r#"{"type":"thread.started","thread_id":"side-thread"}"#,
+        r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+        r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+    ]
+    .join("\n");
+    let main = fixture.start_with("codex", &script, "Investigate the parser");
+    fixture.wait_for_said(&main, "Investigate the parser");
+    let main_before = fixture.transcript(&main);
+
+    let side = match fixture.ask(Request::SendMessage {
+        session: main.clone(),
+        text: "/side Could this use a tokenizer?".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a side session, got {other:?}"),
+    };
+    assert_ne!(side.id, main);
+    let side_answer = spoken(&fixture.wait_for_said(&side.id, "Could this use a tokenizer?"));
+    assert!(
+        side_answer.contains("Investigate the parser"),
+        "{side_answer}"
+    );
+    assert_eq!(fixture.transcript(&main), main_before);
+
+    let empty_side = match fixture.ask(Request::SendMessage {
+        session: main.clone(),
+        text: "/side".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected an empty side session, got {other:?}"),
+    };
+    assert_eq!(empty_side.state, SessionState::Idle);
+    assert!(fixture.transcript(&empty_side.id).is_empty());
+    assert_eq!(fixture.transcript(&main), main_before);
+    fixture.ask(Request::SendMessage {
+        session: empty_side.id.clone(),
+        text: "What should I check?".into(),
+    });
+    let empty_side_answer = spoken(&fixture.wait_for_said(&empty_side.id, "What should I check?"));
+    assert!(empty_side_answer.contains("Investigate the parser"));
+    assert_eq!(fixture.transcript(&main), main_before);
+
+    let btw = match fixture.ask(Request::SendMessage {
+        session: main.clone(),
+        text: "/btw What is a token?".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a btw session, got {other:?}"),
+    };
+    assert_eq!(btw.access_mode, ginka_protocol::AccessMode::ReadOnly);
+    let btw_answer = spoken(&fixture.wait_for_said(&btw.id, "What is a token?"));
+    assert!(btw_answer.contains("--sandbox read-only"), "{btw_answer}");
+    assert_eq!(fixture.transcript(&main), main_before);
+}
+
+#[test]
 fn a_session_records_the_prompt_and_the_agents_answer() {
     let mut fixture = Fixture::new();
     let session = fixture.start(
