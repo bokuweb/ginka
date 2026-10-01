@@ -1,13 +1,8 @@
 //! The commands a workspace offers after `/`.
 //!
-//! Read from the filesystem, where the agents themselves keep them:
-//! `.claude/commands/**.md` in the project and the same under the user's home.
-//! A command is a markdown file whose name is the command and whose frontmatter
-//! says what it does.
-//!
-//! waku also asks each vendor's CLI for its own list, which is per-vendor and
-//! changes with their versions. The files are the part every agent agrees on
-//! and the part a user can read, so they are the part worth having first.
+//! Ginka's built-in commands take priority. Additional commands are read from
+//! `.claude/commands/**.md` in the project and under the user's home. A file's
+//! name is the command and its frontmatter says what it does.
 
 use ginka_protocol::model::{CommandScope, SlashCommand};
 use std::path::{Path, PathBuf};
@@ -18,10 +13,10 @@ use std::path::{Path, PathBuf};
 /// directory tree, not a menu.
 const MAX_DEPTH: usize = 3;
 
-/// Every command a workspace offers, project first.
+/// Every command a workspace offers, built-ins first.
 ///
-/// A project command shadows a user one of the same name: the workspace's own
-/// definition is the specific one, and specificity wins.
+/// Built-ins shadow command files, and a project file shadows a user file of
+/// the same name.
 pub fn discover(worktree: &Path, home: Option<&Path>) -> Vec<SlashCommand> {
     let mut found: Vec<SlashCommand> = [
         (
@@ -57,7 +52,7 @@ pub fn discover(worktree: &Path, home: Option<&Path>) -> Vec<SlashCommand> {
         );
     }
 
-    // Project before user, then by name, and the first of each name wins.
+    // Built-in before project before user; the first of each name wins.
     found.sort_by(|left, right| {
         left.scope
             .cmp(&right.scope)
