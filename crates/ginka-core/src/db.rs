@@ -93,8 +93,12 @@ const MIGRATIONS: &[(&str, &str)] = &[
         include_str!("../../../db/migrations/0021_tickets.sql"),
     ),
     (
-        "0022_conversation_commands",
-        include_str!("../../../db/migrations/0022_conversation_commands.sql"),
+        "0022_note_tags",
+        include_str!("../../../db/migrations/0022_note_tags.sql"),
+    ),
+    (
+        "0023_conversation_commands",
+        include_str!("../../../db/migrations/0023_conversation_commands.sql"),
     ),
 ];
 
@@ -188,6 +192,34 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn existing_notes_gain_empty_tags_without_losing_their_content() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        let before_tags = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "0022_note_tags")
+            .expect("the note tags migration is registered");
+        for (_, sql) in &MIGRATIONS[..before_tags] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before_tags)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO notes (id, project, title, body, created_at, updated_at)
+             VALUES ('n', 'ginka', 'Plan', 'Existing markdown', 1, 2)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let note = crate::notes::get(&conn, "n").unwrap().unwrap();
+        assert_eq!(note.title, "Plan");
+        assert_eq!(note.body, "Existing markdown");
+        assert!(note.tags.is_empty());
     }
 
     #[test]

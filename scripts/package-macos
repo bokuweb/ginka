@@ -123,7 +123,9 @@ codesign --verify --strict "$app"
 if $dmg && [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
     ditto -c -k --sequesterRsrc --keepParent "$app" "$work/Ginka-notarization.zip"
     xcrun notarytool submit "$work/Ginka-notarization.zip" \
-        --keychain-profile "$GINKA_NOTARY_PROFILE" --wait
+        --keychain-profile "$GINKA_NOTARY_PROFILE" --wait \
+        --output-format json > "$work/app-notary.json"
+    jq -e '.status == "Accepted"' "$work/app-notary.json"
     xcrun stapler staple "$app"
     xcrun stapler validate "$app"
     codesign --verify --strict "$app"
@@ -148,7 +150,9 @@ if [ "$identity" != "-" ]; then
     codesign --force --timestamp --sign "$identity" "$image"
 fi
 if [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
-    xcrun notarytool submit "$image" --keychain-profile "$GINKA_NOTARY_PROFILE" --wait
+    xcrun notarytool submit "$image" --keychain-profile "$GINKA_NOTARY_PROFILE" \
+        --wait --output-format json > "$work/dmg-notary.json"
+    jq -e '.status == "Accepted"' "$work/dmg-notary.json"
     xcrun stapler staple "$image"
 fi
 (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" "$(basename "$image")" > SHA256SUMS)

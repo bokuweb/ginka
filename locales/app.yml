@@ -451,6 +451,18 @@ surface.skills.empty:
 surface.skills.search:
   en: Search skills, descriptions and paths
   ja: Skill、説明、パスを検索
+surface.skills.create.name:
+  en: Skill name (lowercase letters, numbers and hyphens)
+  ja: Skill名（英小文字・数字・ハイフン）
+surface.skills.create.description:
+  en: Short description
+  ja: 短い説明
+surface.skills.create.body:
+  en: Markdown instructions for the agent
+  ja: エージェント向けのMarkdown形式の指示
+surface.skills.create.action:
+  en: Create skill
+  ja: Skillを作成
 surface.skills.filter.all:
   en: All scopes
   ja: すべての範囲
@@ -466,6 +478,9 @@ surface.skills.no_matches:
 surface.skills.copy_path:
   en: Copy path
   ja: パスをコピー
+surface.skills.open_folder:
+  en: Open folder
+  ja: フォルダを開く
 surface.skills.retry:
   en: Try again
   ja: 再試行
@@ -827,6 +842,9 @@ surface.files.close:
 surface.files.save:
   en: Save
   ja: 保存
+surface.files.open_external:
+  en: Open in editor
+  ja: 外部エディタで開く
 surface.files.preview:
   en: Preview
   ja: プレビュー
@@ -947,9 +965,39 @@ surface.git.history_tooltip:
 surface.git.history_empty:
   en: No commits yet
   ja: commitはまだありません
+surface.git.turns:
+  en: Turns
+  ja: ターン
+surface.git.turns_tooltip:
+  en: Show completed turns
+  ja: 完了したターンを表示
+surface.git.turns_empty:
+  en: No completed turns yet
+  ja: 完了したターンはまだありません
+surface.git.turn_read_error:
+  en: Could not read this turn's saved changes. Its start snapshot may be unavailable.
+  ja: このターンの保存済み差分を読み込めません。開始時のスナップショットがない可能性があります。
+surface.git.turn_row:
+  en: "Turn %{turn} · %{label}"
+  ja: "ターン %{turn} · %{label}"
 surface.git.summary:
   en: "%{files} changed"
   ja: "%{files} ファイルが変更"
+surface.git.context:
+  en: Context lines
+  ja: 前後の行数
+surface.git.context_tooltip:
+  en: Show unchanged lines around each edit. Hunk actions are available at 3 lines.
+  ja: 変更の前後に表示する未変更行の数。hunk操作は3行で利用できます。
+surface.git.filter:
+  en: Filter changed files by path…
+  ja: 変更ファイルをパスで絞り込み…
+surface.git.filtered_summary:
+  en: "%{visible} of %{total} changed"
+  ja: "%{total} 件中 %{visible} 件を表示"
+surface.git.no_matches:
+  en: No changed files match this path
+  ja: 一致する変更ファイルはありません
 surface.git.section.unstaged:
   en: Changes
   ja: 未ステージの変更
@@ -1081,8 +1129,8 @@ settings.cron:
   en: Scheduled
   ja: スケジュール
 settings.cron.note:
-  en: "Prompts and commands run on a cron schedule in this project's checkout, on this machine's clock. A run is skipped while the last one is still going."
-  ja: "cron のスケジュールで、このプロジェクトのチェックアウトでプロンプトやコマンドを実行します（このマシンの時刻）。前回の実行が続いている間はスキップします。"
+  en: "Run prompts and commands on a cron schedule or once with @once followed by an RFC 3339 time (for example, @once 2026-10-01T09:00:00+09:00). Cron uses this machine's clock. A run is skipped while the last one is still going."
+  ja: "cron または @once と RFC 3339 の日時（例: @once 2026-10-01T09:00:00+09:00）でプロンプトやコマンドを実行します。cron はこのマシンの時刻を使います。前回の実行中はスキップします。"
 settings.cron.name:
   en: "Name"
   ja: "名前"
@@ -1092,12 +1140,27 @@ settings.cron.schedule:
 settings.cron.body:
   en: "Command or prompt"
   ja: "コマンドまたはプロンプト"
+settings.cron.scope:
+  en: "Run in"
+  ja: "実行先"
+settings.cron.project_checkout:
+  en: "Project checkout"
+  ja: "プロジェクトのチェックアウト"
+settings.cron.precheck_label:
+  en: "Run only if this command succeeds"
+  ja: "このコマンドが成功した場合のみ実行"
+settings.cron.precheck:
+  en: "Optional precheck command"
+  ja: "任意の事前チェックコマンド"
 settings.cron.next:
   en: "in %{when}"
   ja: "%{when}後"
 settings.cron.off:
   en: "paused"
   ja: "停止中"
+settings.cron.done:
+  en: "done"
+  ja: "完了"
 settings.cron.pause:
   en: "Pause"
   ja: "停止"
@@ -1107,6 +1170,21 @@ settings.cron.resume:
 settings.cron.run:
   en: "Run now"
   ja: "今すぐ実行"
+settings.cron.edit:
+  en: "Edit"
+  ja: "編集"
+settings.cron.save:
+  en: "Save"
+  ja: "保存"
+settings.cron.cancel:
+  en: "Cancel"
+  ja: "キャンセル"
+settings.cron.changed_project:
+  en: "This job belongs to another project. Select it again to edit."
+  ja: "このジョブは別のプロジェクトに属しています。編集するには選び直してください。"
+settings.cron.changed_scope:
+  en: "Choose an active workspace in this project or the project checkout."
+  ja: "このプロジェクトの有効なワークスペースかプロジェクトのチェックアウトを選んでください。"
 settings.cron.needs_project:
   en: "Choose a project first."
   ja: "先にプロジェクトを選んでください。"
@@ -1296,6 +1374,21 @@ notes.body:
 notes.edit:
   en: Edit
   ja: 編集
+notes.image.choose:
+  en: Choose an image for this note
+  ja: ノートに挿入する画像を選択
+notes.image.insert:
+  en: Insert image
+  ja: 画像を挿入
+notes.image.error:
+  en: Could not insert image
+  ja: 画像を挿入できませんでした
+notes.image.too_large:
+  en: Image exceeds the preview limit
+  ja: 画像がプレビューの上限を超えています
+notes.image.unsupported:
+  en: Unsupported image format
+  ja: 対応していない画像形式です
 notes.empty:
   en: No notes yet.
   ja: ノートはまだありません。
@@ -1314,6 +1407,18 @@ notes.remove:
 notes.remove.confirm:
   en: Delete for good?
   ja: 本当に削除しますか？
+notes.search:
+  en: Search notes…
+  ja: ノートを検索…
+notes.filter.all_tags:
+  en: All tags
+  ja: すべてのタグ
+notes.no_matches:
+  en: No matching notes
+  ja: 一致するノートがありません
+notes.tags:
+  en: Tags, separated by commas
+  ja: タグ（カンマ区切り）
 notes.title:
   en: Title
   ja: タイトル
@@ -1338,6 +1443,27 @@ settings.appearance.system:
 settings.general:
   en: General
   ja: 一般
+settings.providers:
+  en: Providers
+  ja: プロバイダー
+settings.providers.auto:
+  en: Automatically detected executable
+  ja: 実行ファイルを自動検出
+settings.providers.edit:
+  en: Edit path
+  ja: パスを編集
+settings.providers.path:
+  en: Executable path
+  ja: 実行ファイルのパス
+settings.providers.save:
+  en: Save
+  ja: 保存
+settings.providers.clear:
+  en: Use automatic
+  ja: 自動検出に戻す
+settings.providers.cancel:
+  en: Cancel
+  ja: キャンセル
 settings.language:
   en: Language
   ja: 言語
@@ -1515,6 +1641,21 @@ transcript.second_opinion:
 transcript.second_opinion.prompt:
   en: "Give a second opinion on the work above. Review what was asked, what was done and the changes in this worktree: what is wrong, risky or missing, and what you would do differently. Do not change any files."
   ja: "ここまでの作業についてセカンドオピニオンをください。依頼内容・実施内容・このワークツリーの変更を確認し、誤り・リスク・不足と、自分ならどうするかを挙げてください。ファイルは変更しないでください。"
+transcript.plan:
+  en: "Plan with %{agent}"
+  ja: "%{agent} で計画"
+transcript.plan.prompt:
+  en: "Read the conversation and the current worktree, then write a concrete implementation plan for the requested work. Include the files to change, important edge cases and tests. Do not change any files."
+  ja: "会話と現在のワークツリーを確認し、依頼された作業の具体的な実装計画を作成してください。変更するファイル、重要な境界条件、テストを含めてください。ファイルは変更しないでください。"
+transcript.build:
+  en: "Build with %{agent}"
+  ja: "%{agent} で実装"
+transcript.build.prompt:
+  en: "Implement the latest implementation plan in the conversation, adapting it to the current worktree where needed. Run relevant tests and report what changed and any remaining limitations."
+  ja: "会話内の最新の実装計画を現在のワークツリーに合わせて実装してください。関連するテストを実行し、変更内容と残る制約を報告してください。"
+transcript.fork.send_failed:
+  en: "Created fork %{session}, but could not start its first turn: %{error}"
+  ja: "フォーク %{session} を作成しましたが、最初のターンを開始できませんでした: %{error}"
 composer.fan_out:
   en: "Try several ways"
   ja: "複数の方法で試す"

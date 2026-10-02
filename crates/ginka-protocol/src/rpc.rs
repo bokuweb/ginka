@@ -330,6 +330,9 @@ pub enum Request {
     WorkspaceChanges {
         workspace: WorkspaceId,
         source: ChangeSource,
+        /// Unchanged lines around each edit; omitted means three, at most 25.
+        #[serde(default)]
+        context_lines: Option<u8>,
     },
     /// Recent commits in a workspace, newest first and bounded by the daemon.
     WorkspaceHistory {
@@ -430,6 +433,12 @@ pub enum Request {
     ListNotes {
         #[serde(default)]
         project: Option<ProjectName>,
+        /// Case-insensitive substring in title, body or tags.
+        #[serde(default)]
+        query: Option<String>,
+        /// Exact tag, compared without case.
+        #[serde(default)]
+        tag: Option<String>,
     },
     /// Write a note. Without an `id` it is a new one; with one it replaces the
     /// title and body of the note that has it.
@@ -440,6 +449,9 @@ pub enum Request {
         project: Option<ProjectName>,
         title: String,
         body: String,
+        /// Omit to retain existing tags on edit; an empty list clears them.
+        #[serde(default)]
+        tags: Option<Vec<String>>,
     },
     /// Forget a note.
     RemoveNote { id: String },
@@ -575,6 +587,18 @@ pub enum Request {
         #[serde(default)]
         project: Option<ProjectName>,
     },
+    /// Create a skill in the shared user or registered project's `.agents/skills` root.
+    CreateSkill {
+        /// Lowercase slug for the new skill directory.
+        name: String,
+        /// One-line front matter summary.
+        description: String,
+        /// Markdown instructions written to `SKILL.md`.
+        body: String,
+        /// Registered project, or the user's home when omitted.
+        #[serde(default)]
+        project: Option<ProjectName>,
+    },
     /// What the user was in the middle of typing in a workspace.
     ComposerDraft { workspace: WorkspaceId },
     /// Keep what they are typing. An empty draft forgets it.
@@ -634,6 +658,9 @@ pub enum Request {
     /// writes them once and every later mention is the reference it answers
     /// with (`docs/roadmap.md` §3.3 N6).
     UploadAttachment { name: String, data_base64: String },
+    /// Read a daemon-owned attachment as a bounded, signature-checked image.
+    /// Returns no image for missing, unsafe, oversized or non-image references.
+    ReadAttachmentImage { reference: String },
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint { checkpoint: CheckpointId },
 
@@ -674,6 +701,17 @@ pub enum Request {
         workspace: WorkspaceId,
         path: String,
     },
+    /// Launch a daemon-host editor on an existing file inside the worktree.
+    /// `line` is one-based; an external client must expect the editor to open
+    /// on the daemon's machine, not on its own.
+    OpenExternalEditor {
+        /// Workspace whose worktree contains the file.
+        workspace: WorkspaceId,
+        /// Path relative to the worktree root.
+        path: String,
+        /// Optional one-based line to focus.
+        line: Option<u32>,
+    },
     /// Save an existing text file if it still matches the revision read.
     WriteFile {
         /// Workspace whose worktree contains the file.
@@ -708,8 +746,8 @@ pub enum Request {
     /// Scheduled jobs: a project's, or every project's.
     ListCronJobs { project: Option<ProjectName> },
     /// Save a scheduled job: new without an `id`, a replacement with one.
-    /// The schedule is checked here, so a job that can never fire is refused
-    /// when it is written rather than found silent later.
+    /// The cron expression or `@once` timestamp is checked here, so a job
+    /// that can never fire is refused when written rather than found silent.
     SaveCronJob {
         id: Option<i64>,
         project: ProjectName,
@@ -749,6 +787,18 @@ pub enum Request {
     /// Change one top-level setting to a JSON value, checked against the
     /// settings' shape before it is written and taken at once.
     UpdateDaemonSettings { key: String, value: String },
+    /// The providers shipped by this build and their daemon-owned settings.
+    ListProviderSettings,
+    /// Change one provider without replacing other providers' settings.
+    UpdateProviderSettings {
+        provider: ProviderKind,
+        /// Leave the enabled state unchanged when absent.
+        enabled: Option<bool>,
+        /// Set a CLI path, or leave it unchanged when absent.
+        program: Option<String>,
+        /// Remove a CLI path override and use the driver's default binary.
+        clear_program: bool,
+    },
 
     /// A page the browser surface finished loading in a workspace, for the
     /// address bar to complete from. Credentials, fragments and
@@ -807,6 +857,18 @@ pub struct Attempt {
     /// Which login to run on; the provider's active account when absent.
     #[serde(default)]
     pub account: Option<AccountId>,
+}
+
+/// One shipped provider's runtime configuration, excluding environment secrets.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProviderSetting {
+    /// The provider whose driver this build ships.
+    pub provider: ProviderKind,
+    /// Whether new turns may use it.
+    pub enabled: bool,
+    /// CLI path override, or the driver's default command when absent.
+    pub program: Option<String>,
 }
 
 /// What the daemon answers with.
@@ -912,6 +974,10 @@ pub enum Response {
     Attachment {
         attachment: Attachment,
     },
+    /// A previewable attachment, or no image if it cannot be safely displayed.
+    AttachmentImage {
+        image: Option<crate::model::FileImage>,
+    },
     Draft {
         text: String,
     },
@@ -998,6 +1064,10 @@ pub enum Response {
     /// The daemon's settings, secrets left out.
     DaemonSettings {
         json: String,
+    },
+    /// Runtime provider choices, including disabled providers.
+    ProviderSettings {
+        providers: Vec<ProviderSetting>,
     },
     /// Pages the address bar can offer.
     BrowserSuggestions {
@@ -1174,6 +1244,12 @@ mod tests {
                 name: "docx".into(),
                 enabled: false,
                 project: None,
+            },
+            Request::CreateSkill {
+                name: "release-notes".into(),
+                description: "Write release notes".into(),
+                body: "Summarize changes.".into(),
+                project: Some(ProjectName("comet".into())),
             },
         ];
         for request in cases {

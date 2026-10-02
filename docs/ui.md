@@ -377,14 +377,25 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Second opinion** — each completed turn's footer offers every other ready
   agent as *Second opinion: <agent>*, which forks the conversation there with
   a request to review the work and change nothing.
+- **Plan and build handoff** — the same footer can fork onto another ready
+  agent with *Plan with <agent>* or *Build with <agent>*. Planning asks for a
+  concrete plan without editing files. Building asks the recipient to carry
+  out the latest plan in the copied conversation and run relevant tests. Each
+  action starts the fork's first turn and opens it as a conversation tab.
 - **Split diff** — each changes section has *Unified | Split*. Split puts the
   old file on the left and the new on the right, a removed line beside the
   line that replaced it; either side is clickable for a review comment.
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
   (in place), *Move up* and *Move down*.
-- **Scheduled jobs** — Settings lists the project's cron jobs: schedule,
-  name, what runs, when it next fires and how it last went, with *Pause*,
-  *Run now* and *Remove*, and a form for a new one (command or prompt).
+- **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
+  schedule, name, execution scope, what runs, when it next fires and how it last went, with
+  *Pause*, *Edit*, *Run now* and *Remove*. *Edit* fills the form below; saving
+  updates the same job and keeps its run history. The form chooses the project
+  checkout or an active workspace for new and existing jobs, and can
+  set or clear an optional precheck command; a non-zero exit skips a scheduled
+  firing. It also creates a new command or prompt job, and *Cancel* leaves edit mode.
+  The schedule field accepts `@once` followed by a zoned RFC 3339 timestamp;
+  a claimed one-time job shows *done* and cannot be resumed.
 - **Reports** — a cost priced from the public rate table rather than by the
   vendor reads `≈$1.25`; sessions nothing could price are counted as
   `N unpriced` and left out of the total; a footnote says when the table
@@ -404,11 +415,19 @@ Dragging across the terminal grid selects exact character cells in either direct
 
 A dock area that hosts one or more surfaces: **Terminal** (the workspace's daemon terminals, the same ones the dock shows: while this tab is on screen they are drawn here instead of in the dock, sized to the tab, and every action that would open the dock uses the tab instead), **Git** (status + diff + commit + per-file staging and review comments), **Files** (show a directory-first expandable tree while the query is empty; typing switches to fuzzy path and full-text results; scope chips search either this workspace or every active workspace in its project, and a project hit switches workspace before opening; keep several independently editable `CodeEditor` tabs, move through file visits with back/forward, toggle a live-buffer Markdown preview, find/replace, save, add a saved selection's exact line location to chat, or paste the current selection into the active terminal; stale revisions stay in their tab with the refusal shown, and dirty tabs refuse to close), **Browser** (one page per workspace — Chromium drawn as a GPUI element on macOS, a WebView2 child window on Windows — with address, back/forward/reload, find and inspect controls), **Reports** (usage by day, agent and account, with each account's rate-limit windows and the age of the reading), and **Skills** (the selected project's and user's agent skills, grouped by name with every install path and one all-copies enable/disable action). Sending a selection to the terminal opens the dock and a daemon-owned shell when necessary, preserves the selected text including its own newlines, and never appends an extra Return. The tree retains at most 2,000 files, says when it was truncated, and leaves search able to reach the complete daemon catalogue. Project search is globally bounded and excludes archived worktrees. Skills search matches names, descriptions, provider roots and daemon-host paths; scope and grouped enablement facets compose with the query, keep the catalogue's stable order, and show the visible/total count. Each path has a copy action. Installed local language servers provide hover, diagnostics and definition jumps across workspace file tabs; targets outside the canonical worktree are not opened, and missing or failed servers leave the editor in syntax-only mode. An externally addressed daemon also stays syntax-only because its daemon-host worktree path is never handed to a client-host language-server process. Browser inspect mode highlights the hovered DOM element, intercepts one click, and presents bounded selector, HTML, curated computed style, accessibility, bounds and development source context for review before appending it to the composer; page-provided content is validated again in Rust. Markdown preview renders no repository-named image or raw HTML image. PNG, JPEG, GIF and WebP files recognized from their bytes render through a separate local preview, bounded to 4 MiB before base64 wire encoding; unsupported and oversized binaries remain explanatory empty states. An image attachment opens a full-size annotation dialog from its thumbnail. The dialog offers pen, highlight, arrow, rectangle, ellipse and text tools plus undo and clear; attaching replaces that draft item with a self-contained SVG containing the immutable source image and marks, uploaded through the ordinary daemon attachment path. Empty state is a centred title, one line of help, and a stacked list of large surface buttons; the toolbar plus returns to it, while `⌘⌥←/→` cycles directly and wraps at either end. Each surface is a tab of the right panel's dock area: tabs are reordered, grouped and split by dragging, and the arrangement persists per workspace. The dock's tab bar is ours (`src/surface_dock.rs`): the same rounded tab as the conversation strip, with its close control, on a clear strip with one hairline under it — no rules between tabs or before the toolbar. The panel header's right-hand controls fill the window with the panel (hiding the rail, session list and centre until pressed again; not persisted) and close the panel, as `⌘⌥B` does. A header strip's sun or moon beside Settings, and a palette entry, switch between the dark and light themes.
 
+The Files toolbar offers **Open in editor** for a clean file tab when the daemon is local. It sends the current one-based cursor line to the daemon's editor launcher; a dirty buffer keeps the control disabled until saved, and a remote daemon shows no local-editor control.
+
+The Skills surface keeps a creation form visible even when its catalogue is empty. A name, description and Markdown body create `SKILL.md` under the shared user root or the selected project's shared root through the daemon; duplicate names are refused and the catalogue refreshes after success. An existing local install directory has an Open folder control beside Copy path. For an externally addressed daemon, its paths stay copyable but the client does not try to open them on its own host; a stale local directory also has no open control.
+
 The Git surface keeps Pull and Push visible even when the worktree is clean. Pull is a daemon-owned fast-forward-only operation; dirty or diverged branches leave the worktree untouched and show the refusal inline without clearing a commit-message draft.
 
-History beside those controls expands a bounded newest-first commit graph without hiding the current diff. Each row is a lane drawing — a dot per commit, a lane per line of history, curves where branches fork and merge, laid out by `ginka_ui::graph` from the parent ids alone and coloured from the status palette — then the subject, short id and relative age. A row opens a read-only view of what that commit did against its first parent, with the way back to the uncommitted diff at its head. *Create PR* beside Push pushes the branch and opens a pull request with `gh`; the answer is a link to it, or the refusal in `gh`'s own words.
+History beside those controls expands a bounded newest-first commit graph without hiding the current diff. Each row is a lane drawing — a dot per commit, a lane per line of history, curves where branches fork and merge, laid out by `ginka_ui::graph` from the parent ids alone and coloured from the status palette — then the subject, short id and relative age. A row opens a read-only view of what that commit did against its first parent, with the way back to the uncommitted diff at its head. *Turns* lists only checkpoints with a saved start and opens a read-only diff between that turn's saved start and end snapshots; initial and restore-safety snapshots stay in the rewind menu. An older checkpoint without a saved start returns an error through CLI or MCP. *Create PR* beside Push pushes the branch and opens a pull request with `gh`; the answer is a link to it, or the refusal in `gh`'s own words.
 
 The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and unstaged hunks also have a two-step Discard action. Stage, unstage and discard all regenerate the corresponding side of the diff; a stale header reports its refusal inline instead of applying to another hunk. Discard reverses only the worktree-versus-index patch, preserving already staged edits in the same file.
+
+The Git surface filters diff rows by old or new file path as the reader types, across both index sections and the read-only commit view. Whitespace-separated terms must all match, without case sensitivity. The visible count and line totals follow the filter; staging, comments and commits still use the complete daemon-owned changes.
+
+The context control above the diff selects 3, 10 or 25 unchanged lines around edits, including saved turn and commit views. At the default three lines, hunk stage, unstage and discard controls use the canonical Git hunk header. Wider views hide those hunk controls because their headers no longer identify the canonical hunk; file controls and line comments remain available.
 
 ### 3.5 Inbox
 
@@ -442,10 +461,18 @@ A card opens its conversation. The grouping is `ginka_ui::board`.
 ### 3.6 Notes
 
 A 360 px list of the notes — the chosen project's, or every one — most
-recently touched first, with a new-note action, and the note being written in
-the centre at 720 px: its title, then its markdown, with *Edit / Preview*
+recently touched first, with a text search across title, body and tags, a
+scrollable row of exact tag filters that combines with the text search, and a
+new-note action. Each list row shows its tags. The note being written in
+the centre at 720 px has its title, comma-separated tags and markdown, with *Edit / Preview*
 segments and a two-step delete. Typing saves after a 600 ms pause; there is no
-save button. The daemon keeps them (`ginka notes`, MCP).
+save button. The daemon keeps them (`ginka notes`, MCP); each tag edit saves
+with the note and an omitted tag list on other clients retains the existing tags.
+*Insert image* chooses a local PNG, JPEG, GIF or WebP up to 4 MiB, stores it as a
+daemon attachment and inserts its reference at the cursor. Preview resolves
+those references through the daemon and renders only verified image bytes;
+other Markdown image destinations remain inert. The image is available after
+reopening the note, including from a client on another machine.
 
 ### 3.7 Settings
 
@@ -453,6 +480,11 @@ Appearance (System, Dark, Light), language (System, English, 日本語) and
 notifications (on, off), each
 a segmented control that applies at once and persists to `app.json`, and the
 version with the state directory. Opened from the rail or `⌘,`.
+The Providers section lists each shipped driver with its executable override and
+an immediate enable/disable control. Edit path opens a focused executable field;
+Save applies the trimmed path, Use automatic clears the override, and errors stay
+beside the field. The daemon owns these settings; the window, CLI and MCP use the
+same request to set or clear an executable override.
 
 ## 4. Component mapping
 

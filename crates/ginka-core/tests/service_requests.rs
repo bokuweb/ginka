@@ -308,6 +308,28 @@ fn a_file_save_crosses_the_service_and_refuses_a_stale_editor() {
 }
 
 #[test]
+fn external_editor_rejects_invalid_lines_and_paths_before_launch() {
+    let mut fixture = Fixture::new();
+    fixture.with_project();
+    let workspace = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces[0].id(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    for (path, line) in [
+        ("README.md", Some(0)),
+        ("missing.txt", Some(1)),
+        ("../../missing.txt", None),
+    ] {
+        let result = fixture.service.handle(Request::OpenExternalEditor {
+            workspace: workspace.clone(),
+            path: path.into(),
+            line,
+        });
+        assert!(result.is_err(), "{path} at {line:?} must be refused");
+    }
+}
+
+#[test]
 fn project_search_tags_active_workspaces_and_shares_one_limit() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
@@ -719,6 +741,77 @@ fn an_agent_that_is_missing_is_reported_before_a_prompt_is_sent() {
 }
 
 #[test]
+fn provider_settings_apply_to_new_sessions_and_preserve_other_overrides() {
+    let mut fixture = Fixture::configured(Service::with_settings_drivers);
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: Some(false),
+        program: Some("/opt/agents/codex".into()),
+        clear_program: false,
+    });
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(!codex.enabled);
+    assert_eq!(codex.program.as_deref(), Some("/opt/agents/codex"));
+    assert!(
+        providers
+            .iter()
+            .find(|row| row.provider.as_str() == "claude")
+            .unwrap()
+            .enabled
+    );
+    let Response::Agents { agents } = fixture.ask(Request::ListAgents) else {
+        panic!("expected agents");
+    };
+    assert!(!agents.iter().any(|agent| agent.id == "codex"));
+
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: Some(true),
+        program: None,
+        clear_program: true,
+    });
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(codex.enabled);
+    assert_eq!(codex.program, None);
+
+    fixture.ask(Request::UpdateProviderSettings {
+        provider: ginka_protocol::provider::ProviderKind::Codex,
+        enabled: None,
+        program: Some("/opt/alternate/codex".into()),
+        clear_program: false,
+    });
+    let Response::Agents { agents } = fixture.ask(Request::ListAgents) else {
+        panic!("expected agents");
+    };
+    let codex = agents.iter().find(|agent| agent.id == "codex").unwrap();
+    assert_eq!(codex.program, "/opt/alternate/codex");
+    let Response::ProviderSettings { providers } = fixture.ask(Request::ListProviderSettings)
+    else {
+        panic!("expected provider settings");
+    };
+    let codex = providers
+        .iter()
+        .find(|row| row.provider.as_str() == "codex")
+        .unwrap();
+    assert!(codex.enabled);
+    assert_eq!(codex.program.as_deref(), Some("/opt/alternate/codex"));
+}
+
+#[test]
 fn the_agent_probe_is_not_re_run_on_every_ask() {
     // Probing shells out twice per agent and the sidebar asks on every tick;
     // an installed CLI does not come and go between them.
@@ -777,6 +870,7 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
     let staged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Staged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -805,11 +899,57 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
     let left = match fixture.ask(Request::WorkspaceChanges {
         workspace: id,
         source: ChangeSource::Uncommitted,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
     };
     assert!(left.is_empty(), "nothing is left over: {left:?}");
+}
+
+#[test]
+fn changes_context_crosses_the_service_boundary_and_is_bounded() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let baseline = (1..=30)
+        .map(|line| format!("line {line}\n"))
+        .collect::<String>();
+    std::fs::write(fixture.repo().join("README.md"), &baseline).unwrap();
+    support::git(&fixture.repo(), &["add", "README.md"]);
+    support::git(&fixture.repo(), &["commit", "-m", "Add context fixture"]);
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "context".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(
+        workspace.worktree.path.join("README.md"),
+        baseline.replace("line 15\n", "changed 15\n"),
+    )
+    .unwrap();
+    let get = |fixture: &mut Fixture, context_lines| match fixture.ask(Request::WorkspaceChanges {
+        workspace: workspace.id(),
+        source: ChangeSource::Unstaged,
+        context_lines,
+    }) {
+        Response::Changes { changes } => changes.files[0].hunks[0].lines.len(),
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(get(&mut fixture, None), 8);
+    assert_eq!(get(&mut fixture, Some(10)), 22);
+    assert!(
+        fixture
+            .service
+            .handle(Request::WorkspaceChanges {
+                workspace: workspace.id(),
+                source: ChangeSource::Unstaged,
+                context_lines: Some(26),
+            })
+            .is_err()
+    );
 }
 
 #[test]
@@ -840,6 +980,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let unstaged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Unstaged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -859,6 +1000,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let staged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Staged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -866,6 +1008,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let left = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Unstaged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -894,6 +1037,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let staged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Staged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -901,6 +1045,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let unstaged = match fixture.ask(Request::WorkspaceChanges {
         workspace: id.clone(),
         source: ChangeSource::Unstaged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -916,6 +1061,7 @@ fn one_hunk_can_be_staged_unstaged_and_discarded_across_the_service_boundary() {
     let left = match fixture.ask(Request::WorkspaceChanges {
         workspace: id,
         source: ChangeSource::Unstaged,
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -1117,6 +1263,58 @@ fn a_projects_skills_are_listed_and_switched_off_without_being_deleted() {
         })
         .unwrap_err();
     assert!(error.message.contains("no-such-skill"));
+}
+
+#[test]
+fn creates_a_project_skill_and_rejects_a_duplicate() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let request = Request::CreateSkill {
+        name: "review-guide".into(),
+        description: "Review a proposed change".into(),
+        body: "# Review\nCheck the tests.".into(),
+        project: Some(project.clone()),
+    };
+    assert!(matches!(fixture.ask(request.clone()), Response::Ack));
+    let path = fixture.repo().join(".agents/skills/review-guide/SKILL.md");
+    assert!(path.is_file());
+    let listed = fixture.ask(Request::ListSkills {
+        project: Some(project),
+    });
+    let Response::Skills { skills, .. } = listed else {
+        panic!("expected skills");
+    };
+    assert!(skills.iter().any(|skill| skill.name == "review-guide"));
+    assert!(fixture.service.handle(request).is_err());
+    assert!(
+        std::fs::read_to_string(path)
+            .unwrap()
+            .contains("Check the tests.")
+    );
+}
+
+#[test]
+fn creates_a_user_skill_without_a_registered_project() {
+    let home = tempfile::tempdir().unwrap();
+    let mut fixture = Fixture::configured(|service| service.with_skills_home(home.path()));
+    assert!(matches!(
+        fixture.ask(Request::CreateSkill {
+            name: "daily-review".into(),
+            description: "Review daily changes".into(),
+            body: "Check each changed file.".into(),
+            project: None,
+        }),
+        Response::Ack
+    ));
+    assert!(
+        home.path()
+            .join(".agents/skills/daily-review/SKILL.md")
+            .is_file()
+    );
+    let Response::Skills { skills, .. } = fixture.ask(Request::ListSkills { project: None }) else {
+        panic!("expected skills");
+    };
+    assert!(skills.iter().any(|skill| skill.name == "daily-review"));
 }
 
 #[test]
@@ -1326,6 +1524,7 @@ fn a_history_row_opens_what_that_commit_did_and_nothing_else_is_taken_as_one() {
         source: ChangeSource::Commit {
             commit: commits[0].id.clone(),
         },
+        context_lines: None,
     }) {
         Response::Changes { changes } => changes,
         other => panic!("expected changes, got {other:?}"),
@@ -1343,6 +1542,7 @@ fn a_history_row_opens_what_that_commit_did_and_nothing_else_is_taken_as_one() {
                 source: ChangeSource::Commit {
                     commit: "--output=/tmp/ginka-pwned".into(),
                 },
+                context_lines: None,
             })
             .is_err()
     );
@@ -1357,6 +1557,7 @@ fn notes_are_kept_per_project_and_survive_an_edit() {
         project: Some(project.clone()),
         title: String::new(),
         body: "# Release\nrun the script".into(),
+        tags: Some(vec!["deploy".into()]),
     }) {
         Response::Note { note } => note,
         other => panic!("expected a note, got {other:?}"),
@@ -1367,19 +1568,27 @@ fn notes_are_kept_per_project_and_survive_an_edit() {
         project: None,
         title: "Release steps".into(),
         body: "changed".into(),
+        tags: None,
     });
     match fixture.ask(Request::ListNotes {
         project: Some(project),
+        query: Some("DEPLOY".into()),
+        tag: Some("deploy".into()),
     }) {
         Response::Notes { notes } => {
             assert_eq!(notes.len(), 1);
             assert_eq!(notes[0].title, "Release steps");
             assert_eq!(notes[0].body, "changed");
+            assert_eq!(notes[0].tags, vec!["deploy"]);
         }
         other => panic!("expected notes, got {other:?}"),
     }
     fixture.ask(Request::RemoveNote { id: note.id });
-    match fixture.ask(Request::ListNotes { project: None }) {
+    match fixture.ask(Request::ListNotes {
+        project: None,
+        query: None,
+        tag: None,
+    }) {
         Response::Notes { notes } => assert!(notes.is_empty()),
         other => panic!("expected notes, got {other:?}"),
     }
@@ -1611,6 +1820,81 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
         Response::CronJobs { jobs } => assert!(jobs.is_empty()),
         other => panic!("expected jobs, got {other:?}"),
     }
+}
+
+#[test]
+fn editing_a_scheduled_job_keeps_its_runs_and_rechecks_its_schedule() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let job = save_cron(&mut fixture, terminal_job(&project, "@yearly", "true"));
+    fixture.ask(Request::RunCronJob { id: job.id });
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
+
+    let at = chrono::Utc::now() + chrono::Duration::minutes(3);
+    let schedule = format!("@once {}", at.to_rfc3339());
+    let edited = save_cron(
+        &mut fixture,
+        Request::SaveCronJob {
+            id: Some(job.id),
+            project,
+            workspace: None,
+            name: "follow up".into(),
+            schedule: schedule.clone(),
+            via: ginka_protocol::model::CronVia::Terminal,
+            agent: None,
+            body: "echo ready".into(),
+            precheck: None,
+            enabled: true,
+        },
+    );
+    assert_eq!(edited.id, job.id);
+    assert_eq!(edited.name, "follow up");
+    assert_eq!(edited.schedule, schedule);
+    assert_eq!(edited.next_run_at, Some(at.timestamp()));
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
+}
+
+#[test]
+fn a_one_time_job_requires_a_future_zoned_timestamp_and_fires_only_once() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let past = chrono::Utc::now() - chrono::Duration::minutes(1);
+    for schedule in [
+        "@once".to_string(),
+        "@once tomorrow".to_string(),
+        "@once 2026-10-01T09:00:00".to_string(),
+        format!("@once {}", past.to_rfc3339()),
+    ] {
+        assert!(
+            fixture
+                .service
+                .handle(terminal_job(&project, &schedule, "true"))
+                .is_err(),
+            "{schedule:?} was accepted"
+        );
+    }
+
+    let at = chrono::Utc::now() + chrono::Duration::minutes(2);
+    let schedule = format!("@once {}", at.to_rfc3339());
+    let job = save_cron(&mut fixture, terminal_job(&project, &schedule, "true"));
+    assert_eq!(job.next_run_at, Some(at.timestamp()));
+    assert_eq!(fixture.service.run_due_cron(chrono::Local::now()), 0);
+
+    let due = at.with_timezone(&chrono::Local) + chrono::Duration::seconds(1);
+    assert_eq!(fixture.service.run_due_cron(due), 1);
+    let claimed = match fixture.ask(Request::ListCronJobs { project: None }) {
+        Response::CronJobs { jobs } => jobs.into_iter().next().unwrap(),
+        other => panic!("expected jobs, got {other:?}"),
+    };
+    assert!(!claimed.enabled, "claiming a one-time job disables it");
+    assert_eq!(claimed.next_run_at, None);
+    assert_eq!(
+        fixture
+            .service
+            .run_due_cron(due + chrono::Duration::days(1)),
+        0
+    );
+    assert_eq!(cron_runs(&mut fixture, job.id).len(), 1);
 }
 
 #[test]

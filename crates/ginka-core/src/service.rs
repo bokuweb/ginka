@@ -23,8 +23,8 @@ use ginka_protocol::model::{
     AgentStatus, ChangeSource, Changes, Project, ProjectKind, Session, SessionOrigin, SessionState,
     WorkspaceSummary, Worktree,
 };
-use ginka_protocol::provider::{AccessMode, OptionOutcome, SessionOptions};
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::provider::{AccessMode, OptionOutcome, ProviderKind, SessionOptions};
+use ginka_protocol::rpc::{ProviderSetting, Request, Response};
 use ginka_protocol::{CheckpointId, ProjectName, RpcError, SessionId, WorkspaceId};
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -938,7 +938,15 @@ impl Service {
                 })
             }
 
-            Request::WorkspaceChanges { workspace, source } => {
+            Request::WorkspaceChanges {
+                workspace,
+                source,
+                context_lines,
+            } => {
+                let context_lines = context_lines.unwrap_or(3);
+                if context_lines > 25 {
+                    return Err(RpcError::failed("diff context exceeds 25 lines"));
+                }
                 let worktree = self.worktree(&workspace)?;
                 let files = match &source {
                     // A checkpoint names a commit, and the commit is what git
@@ -946,15 +954,49 @@ impl Service {
                     ChangeSource::SinceCheckpoint { checkpoint } => {
                         let stored = checkpoint::get(&self.conn(), checkpoint)
                             .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
                             .ok_or_else(|| {
                                 RpcError::not_found(format!(
-                                    "no checkpoint with id {}",
-                                    checkpoint.0
+                                    "no checkpoint with id {} in workspace {}",
+                                    checkpoint.0, workspace.0
                                 ))
                             })?;
-                        git::changes_since(&worktree.path, &stored.commit).map_err(failed)?
+                        git::changes_since_with_context(
+                            &worktree.path,
+                            &stored.commit,
+                            context_lines,
+                        )
+                        .map_err(failed)?
                     }
-                    other => git::changes(&worktree.path, other).map_err(failed)?,
+                    ChangeSource::Turn { checkpoint } => {
+                        let conn = self.conn();
+                        let stored = checkpoint::get(&conn, checkpoint)
+                            .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {} in workspace {}",
+                                    checkpoint.0, workspace.0
+                                ))
+                            })?;
+                        match checkpoint::turn_commits(&conn, &stored.id).map_err(failed)? {
+                            Some((start, end)) => git::changes_between_with_context(
+                                &worktree.path,
+                                &start,
+                                &end,
+                                context_lines,
+                            )
+                            .map_err(failed)?,
+                            None => {
+                                return Err(RpcError::not_found(format!(
+                                    "checkpoint {} has no saved turn start",
+                                    checkpoint.0
+                                )));
+                            }
+                        }
+                    }
+                    other => git::changes_with_context(&worktree.path, other, context_lines)
+                        .map_err(failed)?,
                 };
                 Ok(Response::Changes {
                     changes: Changes { source, files },
@@ -1097,14 +1139,25 @@ impl Service {
                 });
                 Ok(Response::PullRequest { url })
             }
-            Request::ListNotes { project } => Ok(Response::Notes {
-                notes: crate::notes::list(&self.conn(), project.as_ref()).map_err(failed)?,
+            Request::ListNotes {
+                project,
+                query,
+                tag,
+            } => Ok(Response::Notes {
+                notes: crate::notes::list(
+                    &self.conn(),
+                    project.as_ref(),
+                    query.as_deref(),
+                    tag.as_deref(),
+                )
+                .map_err(failed)?,
             }),
             Request::SaveNote {
                 id,
                 project,
                 title,
                 body,
+                tags,
             } => Ok(Response::Note {
                 note: crate::notes::save(
                     &self.conn(),
@@ -1112,6 +1165,7 @@ impl Service {
                     project.as_ref(),
                     &title,
                     &body,
+                    tags.as_deref(),
                     now(),
                 )
                 .map_err(failed)?,
@@ -1180,6 +1234,55 @@ impl Service {
                 Ok(Response::DaemonSettings {
                     json: serde_json::to_string_pretty(&value).map_err(failed)?,
                 })
+            }
+            Request::ListProviderSettings => Ok(Response::ProviderSettings {
+                providers: Registry::with_defaults()
+                    .ids()
+                    .into_iter()
+                    .filter_map(ProviderKind::parse)
+                    .map(|provider| ProviderSetting {
+                        provider,
+                        enabled: self.settings.is_enabled(provider),
+                        program: self
+                            .settings
+                            .binary_override(provider)
+                            .map(|path| path.to_string_lossy().into_owned()),
+                    })
+                    .collect(),
+            }),
+            Request::UpdateProviderSettings {
+                provider,
+                enabled,
+                program,
+                clear_program,
+            } => {
+                if program.is_some() && clear_program {
+                    return Err(RpcError::failed("program and clear_program conflict"));
+                }
+                if program
+                    .as_ref()
+                    .is_some_and(|program| program.trim().is_empty())
+                {
+                    return Err(RpcError::failed("program must not be empty"));
+                }
+                if !Registry::with_defaults().ids().contains(&provider.as_str()) {
+                    return Err(RpcError::failed(format!(
+                        "{} is not a shipped provider",
+                        provider.as_str()
+                    )));
+                }
+                let mut settings = self.settings.clone();
+                if let Some(enabled) = enabled {
+                    settings.set_enabled(provider, enabled);
+                }
+                if clear_program {
+                    settings.set_binary_override(provider, None);
+                } else if let Some(program) = program {
+                    settings.set_binary_override(provider, Some(std::path::PathBuf::from(program)));
+                }
+                crate::settings::save(&self.paths.daemon_settings(), &settings).map_err(failed)?;
+                self.take_settings(settings);
+                Ok(Response::Ack)
             }
             Request::UpdateDaemonSettings { key, value } => {
                 let value: serde_json::Value = serde_json::from_str(&value).map_err(|error| {
@@ -1487,6 +1590,22 @@ impl Service {
                 crate::skills::set_enabled(skill, enabled).map_err(failed)?;
                 Ok(Response::Ack)
             }
+            Request::CreateSkill {
+                name,
+                description,
+                body,
+                project,
+            } => {
+                let base = match project {
+                    Some(project) => self.project(&project)?.path,
+                    None => self
+                        .home()
+                        .ok_or_else(|| RpcError::not_found("home directory unavailable"))?,
+                };
+                crate::skills::create(&base.join(".agents/skills"), &name, &description, &body)
+                    .map_err(failed)?;
+                Ok(Response::Ack)
+            }
             Request::ComposerDraft { workspace } => Ok(Response::Draft {
                 text: session::draft(&self.conn(), &workspace).map_err(failed)?,
             }),
@@ -1613,6 +1732,19 @@ impl Service {
                     },
                 })
             }
+            Request::ReadAttachmentImage { reference } => {
+                let store = crate::attachment::AttachmentStore::new(self.paths.attachments());
+                let image = store
+                    .path_of(&reference)
+                    .and_then(|path| std::fs::symlink_metadata(path).ok())
+                    .filter(|metadata| {
+                        metadata.file_type().is_file()
+                            && metadata.len() <= crate::files::IMAGE_PREVIEW_LIMIT as u64
+                    })
+                    .and_then(|_| store.read(&reference).ok().flatten())
+                    .and_then(|bytes| crate::files::preview_image(&bytes));
+                Ok(Response::AttachmentImage { image })
+            }
 
             Request::OpenTerminal {
                 workspace,
@@ -1693,6 +1825,15 @@ impl Service {
                 Ok(Response::FileContent {
                     file: crate::files::read(&worktree.path, &path).map_err(failed)?,
                 })
+            }
+            Request::OpenExternalEditor {
+                workspace,
+                path,
+                line,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                crate::external_editor::open(&worktree.path, &path, line).map_err(failed)?;
+                Ok(Response::Ack)
             }
             Request::WriteFile {
                 workspace,

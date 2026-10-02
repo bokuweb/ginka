@@ -73,6 +73,11 @@ enum Command {
         /// The file to store.
         path: PathBuf,
     },
+    /// Read a stored image as a data URL after the daemon verifies its format.
+    AttachmentImage {
+        /// The reference printed by `ginka attach`.
+        reference: String,
+    },
     /// List a workspace's files, best matches first.
     Files {
         /// The workspace id, as shown by `workspace list`.
@@ -116,6 +121,16 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Open a workspace file in an editor on the daemon host.
+    OpenEditor {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The path, relative to the worktree root.
+        path: String,
+        /// One-based line to focus when the editor supports it.
+        #[arg(long)]
+        line: Option<u32>,
+    },
     /// Save an existing UTF-8 workspace file without overwriting a newer edit.
     Save {
         /// The workspace id, as shown by `workspace list`.
@@ -152,20 +167,26 @@ enum Command {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
         /// Show what is staged for the next commit instead of everything.
-        #[arg(long, conflicts_with_all = ["unstaged", "since"])]
+        #[arg(long, conflicts_with_all = ["unstaged", "since", "turn"])]
         staged: bool,
         /// Show only edits that are not staged yet.
-        #[arg(long, conflicts_with = "since")]
+        #[arg(long, conflicts_with_all = ["since", "turn"])]
         unstaged: bool,
         /// Show what has happened since a checkpoint, by its id.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "turn")]
         since: Option<String>,
+        /// Show only what one completed turn changed, by its checkpoint id.
+        #[arg(long, conflicts_with_all = ["staged", "unstaged", "since", "commit"])]
+        turn: Option<String>,
         /// Show what one commit did, by the id `history` prints.
-        #[arg(long, conflicts_with_all = ["since", "staged", "unstaged"])]
+        #[arg(long, conflicts_with_all = ["since", "turn", "staged", "unstaged"])]
         commit: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
+        /// Unchanged lines around each edit, up to 25.
+        #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u8).range(0..=25))]
+        context: u8,
     },
     /// Show recent commits in a workspace, newest first.
     History {
@@ -520,6 +541,20 @@ enum QuickCommand {
 enum SettingsCommand {
     /// Print the daemon's settings as JSON, environment values hidden.
     Show,
+    /// List the shipped providers and their enabled state and executable override.
+    Providers,
+    /// Configure a shipped provider for future turns.
+    Provider {
+        provider: String,
+        #[arg(long, conflicts_with = "disable")]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+        #[arg(long, conflicts_with = "clear_program")]
+        program: Option<String>,
+        #[arg(long)]
+        clear_program: bool,
+    },
     /// Change one top-level setting. The value is JSON — `false`, `7`,
     /// `["codex"]` — and anything that is not is taken as a string.
     Set { key: String, value: String },
@@ -557,8 +592,15 @@ enum CronCommand {
         project: String,
         name: String,
         /// Five cron fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`.
-        #[arg(long)]
-        schedule: String,
+        #[arg(long, conflicts_with = "at", required_unless_present = "at")]
+        schedule: Option<String>,
+        /// Run once at an RFC 3339 timestamp with a time zone.
+        #[arg(
+            long,
+            conflicts_with = "schedule",
+            required_unless_present = "schedule"
+        )]
+        at: Option<String>,
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
         #[arg(long, requires = "agent")]
@@ -595,6 +637,12 @@ enum NotesCommand {
         /// Only this project's notes.
         #[arg(long)]
         project: Option<String>,
+        /// Search titles, bodies and tags.
+        #[arg(long)]
+        query: Option<String>,
+        /// Match one tag exactly.
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Print one note's markdown.
     Show { id: String },
@@ -608,6 +656,9 @@ enum NotesCommand {
         /// The project it belongs to.
         #[arg(long)]
         project: Option<String>,
+        /// Add a tag; repeat for several tags.
+        #[arg(long = "tag")]
+        tags: Vec<String>,
     },
     /// Replace a note's title and body. The body is read from stdin when
     /// `--body` is absent.
@@ -617,6 +668,12 @@ enum NotesCommand {
         title: String,
         #[arg(long)]
         body: Option<String>,
+        /// Replace tags; repeat for several tags.
+        #[arg(long = "tag", conflicts_with = "clear_tags")]
+        tags: Vec<String>,
+        /// Remove every tag.
+        #[arg(long)]
+        clear_tags: bool,
     },
     /// Forget a note.
     Remove { id: String },
@@ -665,6 +722,19 @@ enum SkillsCommand {
     /// List every skill, grouped across the places it was installed.
     List {
         /// Only this project's skills, plus the user's own.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Create a shared skill under the user or a registered project.
+    Create {
+        name: String,
+        /// Short description shown in skill pickers.
+        #[arg(long)]
+        description: String,
+        /// Markdown instructions for the agent.
+        #[arg(long)]
+        body: String,
+        /// Create under this registered project instead of the user home.
         #[arg(long)]
         project: Option<String>,
     },
@@ -1215,6 +1285,17 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Skills(SkillsCommand::List { project }) => Request::ListSkills {
             project: project.map(ProjectName),
         },
+        Command::Skills(SkillsCommand::Create {
+            name,
+            description,
+            body,
+            project,
+        }) => Request::CreateSkill {
+            name,
+            description,
+            body,
+            project: project.map(ProjectName),
+        },
         Command::Skills(SkillsCommand::Enable { name, project }) => Request::SetSkillEnabled {
             name,
             enabled: true,
@@ -1265,6 +1346,15 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             path,
         },
+        Command::OpenEditor {
+            workspace,
+            path,
+            line,
+        } => Request::OpenExternalEditor {
+            workspace: WorkspaceId(workspace),
+            path,
+            line,
+        },
         Command::Save {
             workspace,
             path,
@@ -1303,6 +1393,7 @@ fn request_for(command: Command) -> Result<Request> {
                 data_base64: base64::engine::general_purpose::STANDARD.encode(bytes),
             }
         }
+        Command::AttachmentImage { reference } => Request::ReadAttachmentImage { reference },
         Command::Files {
             workspace,
             query,
@@ -1403,51 +1494,96 @@ fn request_for(command: Command) -> Result<Request> {
             staged,
             unstaged,
             since,
+            turn,
             commit,
+            context,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
-            source: match (staged, unstaged, since) {
+            context_lines: Some(context),
+            source: match (staged, unstaged, since, turn) {
                 _ if commit.is_some() => ChangeSource::Commit {
                     commit: commit.unwrap_or_default(),
                 },
-                (_, _, Some(checkpoint)) => ChangeSource::SinceCheckpoint {
+                (_, _, _, Some(checkpoint)) => ChangeSource::Turn {
                     checkpoint: CheckpointId(checkpoint),
                 },
-                (true, false, None) => ChangeSource::Staged,
-                (false, true, None) => ChangeSource::Unstaged,
-                (false, false, None) => ChangeSource::Uncommitted,
-                (true, true, None) => unreachable!("clap rejects conflicting diff sources"),
+                (_, _, Some(checkpoint), None) => ChangeSource::SinceCheckpoint {
+                    checkpoint: CheckpointId(checkpoint),
+                },
+                (true, false, None, None) => ChangeSource::Staged,
+                (false, true, None, None) => ChangeSource::Unstaged,
+                (false, false, None, None) => ChangeSource::Uncommitted,
+                _ => unreachable!("clap rejects conflicting diff sources"),
             },
         },
         Command::Pr { workspace, draft } => Request::CreatePullRequest {
             workspace: WorkspaceId(workspace),
             draft,
         },
-        Command::Notes(NotesCommand::List { project }) => Request::ListNotes {
+        Command::Notes(NotesCommand::List {
+            project,
+            query,
+            tag,
+        }) => Request::ListNotes {
             project: project.map(ProjectName),
+            query,
+            tag,
         },
         // One note is the list read and filtered: the window never needs one
         // alone, so the daemon has no request for it.
-        Command::Notes(NotesCommand::Show { .. }) => Request::ListNotes { project: None },
+        Command::Notes(NotesCommand::Show { .. }) => Request::ListNotes {
+            project: None,
+            query: None,
+            tag: None,
+        },
         Command::Notes(NotesCommand::Add {
             title,
             body,
             project,
+            tags,
         }) => Request::SaveNote {
             id: None,
             project: project.map(ProjectName),
             title,
             body: body_or_stdin(body)?,
+            tags: Some(tags),
         },
-        Command::Notes(NotesCommand::Edit { id, title, body }) => Request::SaveNote {
+        Command::Notes(NotesCommand::Edit {
+            id,
+            title,
+            body,
+            tags,
+            clear_tags,
+        }) => Request::SaveNote {
             id: Some(id),
             project: None,
             title,
             body: body_or_stdin(body)?,
+            tags: (clear_tags || !tags.is_empty()).then_some(tags),
         },
         Command::Notes(NotesCommand::Remove { id }) => Request::RemoveNote { id },
         Command::Settings(SettingsCommand::Show) => Request::DaemonSettings,
+        Command::Settings(SettingsCommand::Providers) => Request::ListProviderSettings,
+        Command::Settings(SettingsCommand::Provider {
+            provider,
+            enable,
+            disable,
+            program,
+            clear_program,
+        }) => Request::UpdateProviderSettings {
+            provider: ProviderKind::parse(&provider)
+                .ok_or_else(|| anyhow::anyhow!("unknown provider: {provider}"))?,
+            enabled: if enable {
+                Some(true)
+            } else if disable {
+                Some(false)
+            } else {
+                None
+            },
+            program,
+            clear_program,
+        },
         Command::Settings(SettingsCommand::Set { key, value }) => Request::UpdateDaemonSettings {
             key,
             value: if serde_json::from_str::<serde_json::Value>(&value).is_ok() {
@@ -1485,6 +1621,7 @@ fn request_for(command: Command) -> Result<Request> {
             project,
             name,
             schedule,
+            at,
             shell,
             prompt,
             agent,
@@ -1502,7 +1639,10 @@ fn request_for(command: Command) -> Result<Request> {
                 project: ProjectName(project),
                 workspace: workspace.map(WorkspaceId),
                 name,
-                schedule,
+                schedule: at.map_or_else(
+                    || schedule.expect("clap requires --schedule or --at"),
+                    |at| format!("@once {at}"),
+                ),
                 via,
                 agent,
                 body,
@@ -1961,10 +2101,15 @@ fn print(response: Response, patch: bool) {
             }
             for note in notes {
                 println!(
-                    "{}  {:<12} {}",
+                    "{}  {:<12} {}{}",
                     note.id,
                     note.project.map(|project| project.0).unwrap_or_default(),
-                    note.title
+                    note.title,
+                    if note.tags.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" [{}]", note.tags.join(", "))
+                    }
                 );
             }
         }
@@ -2001,6 +2146,20 @@ fn print(response: Response, patch: bool) {
         }
         Response::QuickCommand { command } => println!("{}", command.id),
         Response::DaemonSettings { json } => println!("{json}"),
+        Response::ProviderSettings { providers } => {
+            for provider in providers {
+                println!(
+                    "{:<10} {:<8} {}",
+                    provider.provider.as_str(),
+                    if provider.enabled {
+                        "enabled"
+                    } else {
+                        "disabled"
+                    },
+                    provider.program.unwrap_or_default()
+                );
+            }
+        }
         Response::BrowserSuggestions { pages } => {
             for page in pages {
                 println!(
@@ -2081,6 +2240,11 @@ fn print(response: Response, patch: bool) {
         // The reference and nothing else, so it can be interpolated straight
         // into the next command.
         Response::Attachment { attachment } => println!("{}", attachment.reference),
+        Response::AttachmentImage { image } => {
+            if let Some(image) = image {
+                println!("data:{};base64,{}", image.media_type, image.data_base64);
+            }
+        }
         // A terminal is opened by a window, which is where it is typed into;
         // printing the id is all a script can do with one.
         // The file as it is: a viewer prints what is in it, and anything
@@ -2826,6 +2990,38 @@ mod ginka_cli_format {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::{ChangeSource, Cli, Request, request_for};
+        use clap::Parser;
+
+        #[test]
+        fn changes_turn_selects_one_completed_checkpoint() {
+            let cli = Cli::try_parse_from(["ginka", "changes", "w", "--turn", "c-1"]).unwrap();
+            let request = request_for(cli.command).unwrap();
+            assert!(matches!(
+                request,
+                Request::WorkspaceChanges {
+                    source: ChangeSource::Turn { checkpoint },
+                    ..
+                } if checkpoint.0 == "c-1"
+            ));
+            assert!(
+                Cli::try_parse_from(["ginka", "changes", "w", "--turn", "c-1", "--staged"])
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn changes_context_is_bounded_and_sent_to_the_daemon() {
+            let cli = Cli::try_parse_from(["ginka", "changes", "w", "--context", "10"]).unwrap();
+            assert!(matches!(
+                request_for(cli.command).unwrap(),
+                Request::WorkspaceChanges {
+                    context_lines: Some(10),
+                    ..
+                }
+            ));
+            assert!(Cli::try_parse_from(["ginka", "changes", "w", "--context", "26"]).is_err());
+        }
 
         #[test]
         fn a_clean_worktree_says_so_rather_than_showing_nothing() {

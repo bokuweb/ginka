@@ -19,7 +19,7 @@ use ginka_protocol::model::{
     FileContent, FileEntry, Note, PlanSnapshot, Project, ReviewComment, Session, SessionMatch,
     Skill, SlashCommand, TerminalInfo, TranscriptEntry, WorkspaceSummary,
 };
-use ginka_protocol::rpc::{Request, Response};
+use ginka_protocol::rpc::{ProviderSetting, Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use ginka_ui::workspace::SessionRow;
 use std::sync::{Arc, Mutex};
@@ -119,6 +119,42 @@ impl DaemonLink {
         match self.ask(Request::ListAgents).await {
             Some(Response::Agents { agents }) => agents,
             _ => Vec::new(),
+        }
+    }
+
+    /// Provider availability and executable overrides held by the daemon.
+    pub async fn provider_settings(&self) -> Vec<ProviderSetting> {
+        match self.ask(Request::ListProviderSettings).await {
+            Some(Response::ProviderSettings { providers }) => providers,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Change the availability of one provider for future turns.
+    pub async fn set_provider_enabled(
+        &self,
+        provider: ginka_protocol::ProviderKind,
+        enabled: bool,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::UpdateProviderSettings {
+                provider,
+                enabled: Some(enabled),
+                program: None,
+                clear_program: false,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Persist an executable edit using the same provider settings request as CLI and MCP.
+    pub async fn update_provider_settings(&self, request: Request) -> Result<(), String> {
+        match self.ask_result(request).await? {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
         }
     }
 
@@ -244,6 +280,20 @@ impl DaemonLink {
         }
     }
 
+    /// Read a daemon-owned image for a note preview, without exposing its path.
+    pub async fn attachment_image(
+        &self,
+        reference: String,
+    ) -> Result<Option<ginka_protocol::model::FileImage>, String> {
+        match self
+            .ask_result(Request::ReadAttachmentImage { reference })
+            .await?
+        {
+            Response::AttachmentImage { image } => Ok(image),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
     /// Start an agent in a workspace, and return the session it created.
     pub async fn start_session(&self, launch: SessionLaunch) -> Option<Session> {
         match self
@@ -330,6 +380,28 @@ impl DaemonLink {
             .ask_result(Request::SetSkillEnabled {
                 name,
                 enabled,
+                project,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Create one shared skill under the user or a registered project.
+    pub async fn create_skill(
+        &self,
+        name: String,
+        description: String,
+        body: String,
+        project: Option<ProjectName>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::CreateSkill {
+                name,
+                description,
+                body,
                 project,
             })
             .await?
@@ -443,10 +515,21 @@ impl DaemonLink {
 
     /// What has changed in a workspace, against `source`.
     pub async fn changes(&self, workspace: &WorkspaceId, source: ChangeSource) -> Option<Changes> {
+        self.changes_with_context(workspace, source, 3).await
+    }
+
+    /// Read a workspace diff with the requested number of surrounding lines.
+    pub async fn changes_with_context(
+        &self,
+        workspace: &WorkspaceId,
+        source: ChangeSource,
+        context_lines: u8,
+    ) -> Option<Changes> {
         match self
             .ask(Request::WorkspaceChanges {
                 workspace: workspace.clone(),
                 source,
+                context_lines: Some(context_lines),
             })
             .await
         {
@@ -713,6 +796,26 @@ impl DaemonLink {
         }
     }
 
+    /// Open a validated workspace file in an editor on the daemon's host.
+    pub async fn open_external_editor(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        line: Option<u32>,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::OpenExternalEditor {
+                workspace: workspace.clone(),
+                path: path.to_string(),
+                line,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            response => Err(format!("unexpected response: {response:?}")),
+        }
+    }
+
     /// Save a file only if it still has the revision the editor opened.
     pub async fn write_file(
         &self,
@@ -970,6 +1073,24 @@ impl DaemonLink {
             Response::Ack => Ok(None),
             Response::Session { session } => Ok(Some(session)),
             other => Err(format!("unexpected answer {other:?}")),
+        }
+    }
+
+    /// Send the fork's first message and surface a refusal to the caller.
+    pub async fn send_message_checked(
+        &self,
+        session: &SessionId,
+        text: String,
+    ) -> Result<(), String> {
+        match self
+            .ask_result(Request::SendMessage {
+                session: session.clone(),
+                text,
+            })
+            .await?
+        {
+            Response::Ack => Ok(()),
+            other => Err(format!("unexpected send response: {other:?}")),
         }
     }
 
@@ -1341,7 +1462,14 @@ impl DaemonLink {
 
     /// A project's notes, or every note.
     pub async fn notes(&self, project: Option<ProjectName>) -> Vec<Note> {
-        match self.ask(Request::ListNotes { project }).await {
+        match self
+            .ask(Request::ListNotes {
+                project,
+                query: None,
+                tag: None,
+            })
+            .await
+        {
             Some(Response::Notes { notes }) => notes,
             _ => Vec::new(),
         }
@@ -1354,6 +1482,7 @@ impl DaemonLink {
         project: Option<ProjectName>,
         title: String,
         body: String,
+        tags: Option<Vec<String>>,
     ) -> Option<Note> {
         match self
             .ask(Request::SaveNote {
@@ -1361,6 +1490,7 @@ impl DaemonLink {
                 project,
                 title,
                 body,
+                tags,
             })
             .await
         {

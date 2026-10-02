@@ -793,6 +793,7 @@ impl Inner {
         let changed_files = match self.ask(Request::WorkspaceChanges {
             workspace: workspace.clone(),
             source: ChangeSource::Uncommitted,
+            context_lines: None,
         }) {
             Ok(Response::Changes { changes }) => changes.files.len(),
             _ => 0,

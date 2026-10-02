@@ -757,6 +757,9 @@ pub struct Checkpoint {
     pub commit: String,
     /// What the transcript said at this point, for the rewind menu.
     pub label: String,
+    /// Whether a saved start snapshot makes this checkpoint a completed turn
+    /// with an exact diff. Initial and restore-safety checkpoints lack one.
+    pub has_turn_start: bool,
     /// Unix seconds.
     pub created_at: i64,
 }
@@ -812,9 +815,11 @@ pub enum ChangeSource {
     Unstaged,
     /// What is staged for the next commit.
     Staged,
-    /// What has happened since a checkpoint: the answer to "what did this turn
-    /// actually do".
+    /// What has happened since a checkpoint, including later worktree edits.
     SinceCheckpoint { checkpoint: CheckpointId },
+    /// Only the changes made during the completed turn ending at this
+    /// checkpoint. Later worktree edits are excluded.
+    Turn { checkpoint: CheckpointId },
     /// What one commit did, against its first parent: what a row of the
     /// history opens. A merge reads as what it brought into the branch.
     ///
@@ -1282,6 +1287,9 @@ pub struct Note {
     pub title: String,
     /// Markdown.
     pub body: String,
+    /// Lowercase, distinct labels used to organize and find the note.
+    #[serde(default)]
+    pub tags: Vec<String>,
     /// Unix seconds.
     pub created_at: i64,
     /// Unix seconds; notes are listed most recently touched first.
@@ -1409,7 +1417,7 @@ impl CronOutcome {
     }
 }
 
-/// A prompt or command run on a cron schedule, in one workspace — or in the
+/// A prompt or command run on a schedule, in one workspace — or in the
 /// project's own checkout when `workspace` is absent.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1418,8 +1426,8 @@ pub struct CronJob {
     pub project: ProjectName,
     pub workspace: Option<WorkspaceId>,
     pub name: String,
-    /// A five-field cron expression or `@daily` and the like, read on the
-    /// daemon host's clock.
+    /// Five cron fields or `@daily` and the like on the daemon host's clock,
+    /// or `@once <RFC3339 timestamp with time zone>` for one firing.
     pub schedule: String,
     pub via: CronVia,
     /// The driver a chat job starts. Absent for a terminal job.

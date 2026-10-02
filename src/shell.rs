@@ -126,13 +126,24 @@ struct QuickForm {
     error: Option<String>,
 }
 
-/// The settings page's form for a new scheduled job.
+/// Executable override being edited for one provider.
+struct ProviderProgramForm {
+    provider: ginka_protocol::ProviderKind,
+    path: Entity<InputState>,
+    error: Option<String>,
+    busy: bool,
+}
+
+/// The settings page's form for a new or existing scheduled job.
 struct CronForm {
     name: Entity<InputState>,
     schedule: Entity<InputState>,
     body: Entity<InputState>,
+    precheck: Entity<InputState>,
+    workspace: Option<ginka_protocol::WorkspaceId>,
     /// A prompt for an agent rather than a shell command.
     chat: bool,
+    editing: Option<ginka_protocol::model::CronJob>,
     error: Option<String>,
 }
 
@@ -561,6 +572,10 @@ pub struct Shell {
     /// What each agent CLI on this machine says about itself, so the composer
     /// can say which agent it would start and whether it will work.
     agents: Vec<AgentStatus>,
+    /// Provider settings from the daemon, shown in Settings.
+    provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
+    /// The provider executable editor, when open in Settings.
+    provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
     accounts: Vec<ginka_protocol::model::Account>,
     /// The latest reading of each login's rate-limit windows, followed from
@@ -818,7 +833,13 @@ impl Shell {
                 InputState::new(window, cx)
                     .placeholder(rust_i18n::t!("settings.cron.body").to_string())
             }),
+            precheck: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.cron.precheck").to_string())
+            }),
+            workspace: None,
             chat: false,
+            editing: None,
             error: None,
         };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
@@ -851,6 +872,14 @@ impl Shell {
             &surfaces,
             window,
             |this, _, event, window, cx| match event {
+                crate::surfaces::SurfaceEvent::DiffContextChanged { commit, turn } => {
+                    this.refresh_changes(cx);
+                    if let Some(commit) = commit {
+                        this.open_commit(commit.clone(), cx);
+                    } else if let Some(turn) = turn {
+                        this.open_turn(turn.clone(), cx);
+                    }
+                }
                 crate::surfaces::SurfaceEvent::Arranged => {
                     this.persist_surfaces(cx);
                     this.follow_terminal_placement(cx);
@@ -919,6 +948,9 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
                     this.open_commit(commit.clone(), cx)
                 }
+                crate::surfaces::SurfaceEvent::OpenTurn(checkpoint) => {
+                    this.open_turn(checkpoint.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
@@ -959,6 +991,11 @@ impl Shell {
                     expected_revision.clone(),
                     cx,
                 ),
+                crate::surfaces::SurfaceEvent::OpenExternalEditor {
+                    workspace,
+                    path,
+                    line,
+                } => this.open_external_editor(workspace.clone(), path.clone(), *line, cx),
                 crate::surfaces::SurfaceEvent::AddFileReference(reference) => {
                     this.add_file_reference(reference, window, cx)
                 }
@@ -970,6 +1007,18 @@ impl Shell {
                     this.write_terminal_selection(selection.clone(), window, cx)
                 }
                 crate::surfaces::SurfaceEvent::RefreshSkills => this.refresh_skills(cx),
+                crate::surfaces::SurfaceEvent::CreateSkill {
+                    name,
+                    description,
+                    body,
+                    project,
+                } => this.create_skill(
+                    name.clone(),
+                    description.clone(),
+                    body.clone(),
+                    *project,
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::SetSkillEnabled { name, enabled } => {
                     this.set_skill_enabled(name.clone(), *enabled, cx)
                 }
@@ -1492,6 +1541,8 @@ impl Shell {
             transcript_search: None,
             prompt_outline_open: false,
             agents: Vec::new(),
+            provider_settings: Vec::new(),
+            provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
             reveal: Reveal::new(),
@@ -2327,10 +2378,13 @@ impl Shell {
                     Ok(()) => {
                         this.cron_form.error = None;
                         if clear_form {
+                            this.cron_form.editing = None;
+                            this.cron_form.workspace = None;
                             for input in [
                                 this.cron_form.name.clone(),
                                 this.cron_form.schedule.clone(),
                                 this.cron_form.body.clone(),
+                                this.cron_form.precheck.clone(),
                             ] {
                                 input.update(cx, |state, cx| state.set_value("", window, cx));
                             }
@@ -2346,30 +2400,97 @@ impl Shell {
         .detach();
     }
 
-    /// Save the settings page's new scheduled job, in the project on screen.
+    /// Fill the settings form from a job in the selected project.
+    fn edit_cron_job(
+        &mut self,
+        job: ginka_protocol::model::CronJob,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for (input, value) in [
+            (self.cron_form.name.clone(), job.name.clone()),
+            (self.cron_form.schedule.clone(), job.schedule.clone()),
+            (self.cron_form.body.clone(), job.body.clone()),
+            (
+                self.cron_form.precheck.clone(),
+                job.precheck.clone().unwrap_or_default(),
+            ),
+        ] {
+            input.update(cx, |state, cx| state.set_value(&value, window, cx));
+        }
+        self.cron_form.workspace = job.workspace.clone();
+        self.cron_form.chat = job.via == ginka_protocol::model::CronVia::Chat;
+        self.cron_form.editing = Some(job);
+        self.cron_form.error = None;
+        cx.notify();
+    }
+
+    /// Leave edit mode and reset the form for a new job.
+    fn cancel_cron_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cron_form.editing = None;
+        self.cron_form.workspace = None;
+        self.cron_form.error = None;
+        for input in [
+            self.cron_form.name.clone(),
+            self.cron_form.schedule.clone(),
+            self.cron_form.body.clone(),
+            self.cron_form.precheck.clone(),
+        ] {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Save the settings page's scheduled job in the project on screen.
     fn save_cron_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(project) = self.target_project.clone() else {
             self.cron_form.error = Some(rust_i18n::t!("settings.cron.needs_project").to_string());
             cx.notify();
             return;
         };
-        let chat = self.cron_form.chat;
-        let request = ginka_protocol::rpc::Request::SaveCronJob {
-            id: None,
+        if self
+            .cron_form
+            .editing
+            .as_ref()
+            .is_some_and(|job| job.project != project)
+        {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.changed_project").to_string());
+            cx.notify();
+            return;
+        }
+        if let Some(workspace) = &self.cron_form.workspace
+            && !self.sidebar.read(cx).rows().iter().any(|row| {
+                row.workspace == *workspace
+                    && project.0 == row.origin
+                    && (!row.archived
+                        || self
+                            .cron_form
+                            .editing
+                            .as_ref()
+                            .is_some_and(|job| job.workspace.as_ref() == Some(workspace)))
+            })
+        {
+            self.cron_form.error = Some(rust_i18n::t!("settings.cron.changed_scope").to_string());
+            cx.notify();
+            return;
+        }
+        let request = ginka_ui::scheduled::save_request(
             project,
-            workspace: None,
-            name: self.cron_form.name.read(cx).value().to_string(),
-            schedule: self.cron_form.schedule.read(cx).value().to_string(),
-            via: if chat {
-                ginka_protocol::model::CronVia::Chat
-            } else {
-                ginka_protocol::model::CronVia::Terminal
+            self.cron_form.editing.as_ref(),
+            ginka_ui::scheduled::FormValues {
+                workspace: self.cron_form.workspace.clone(),
+                name: self.cron_form.name.read(cx).value().to_string(),
+                schedule: self.cron_form.schedule.read(cx).value().to_string(),
+                body: self.cron_form.body.read(cx).value().to_string(),
+                precheck: self.cron_form.precheck.read(cx).value().to_string(),
+                via: if self.cron_form.chat {
+                    ginka_protocol::model::CronVia::Chat
+                } else {
+                    ginka_protocol::model::CronVia::Terminal
+                },
             },
-            agent: if chat { self.agent_to_start() } else { None },
-            body: self.cron_form.body.read(cx).value().to_string(),
-            precheck: None,
-            enabled: true,
-        };
+            self.agent_to_start(),
+        );
         let link = self.link.clone();
         self.cron_request(
             async move { link.save_cron_job(request).await },
@@ -3006,20 +3127,32 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
         cx.spawn(async move |_, cx| {
             let (changes, staged_changes, comments) = cx
                 .background_spawn(async move {
                     let changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Unstaged)
+                        .changes_with_context(
+                            &workspace,
+                            ginka_protocol::ChangeSource::Unstaged,
+                            context_lines,
+                        )
                         .await;
                     let staged_changes = link
-                        .changes(&workspace, ginka_protocol::ChangeSource::Staged)
+                        .changes_with_context(
+                            &workspace,
+                            ginka_protocol::ChangeSource::Staged,
+                            context_lines,
+                        )
                         .await;
                     let comments = link.comments(&workspace).await;
                     (changes, staged_changes, comments)
                 })
                 .await;
             surfaces.update(cx, |surfaces, cx| {
+                if surfaces.diff_context() != context_lines {
+                    return;
+                }
                 surfaces.set_changes(changes, cx);
                 let staged = staged_changes
                     .as_ref()
@@ -3041,13 +3174,15 @@ impl Shell {
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
         cx.spawn(async move |_, cx| {
             let id = commit.id.clone();
             let changes = cx
                 .background_spawn(async move {
-                    link.changes(
+                    link.changes_with_context(
                         &workspace,
                         ginka_protocol::ChangeSource::Commit { commit: id },
+                        context_lines,
                     )
                     .await
                 })
@@ -3062,7 +3197,37 @@ impl Shell {
                 files: Vec::new(),
             });
             surfaces.update(cx, |surfaces, cx| {
-                surfaces.show_commit(commit, Some(changes), cx)
+                if surfaces.diff_context() == context_lines {
+                    surfaces.show_commit(commit, Some(changes), cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Read one checkpoint's saved turn snapshots for the Git surface.
+    fn open_turn(&mut self, checkpoint: ginka_protocol::model::Checkpoint, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let context_lines = surfaces.read(cx).diff_context();
+        cx.spawn(async move |_, cx| {
+            let source = ginka_protocol::ChangeSource::Turn {
+                checkpoint: checkpoint.id.clone(),
+            };
+            let changes = cx
+                .background_spawn(async move {
+                    link.changes_with_context(&workspace, source, context_lines)
+                        .await
+                })
+                .await
+                .ok_or_else(|| rust_i18n::t!("surface.git.turn_read_error").to_string());
+            surfaces.update(cx, |surfaces, cx| {
+                if surfaces.diff_context() == context_lines {
+                    surfaces.show_turn(checkpoint, Some(changes), cx);
+                }
             });
         })
         .detach();
@@ -3295,6 +3460,33 @@ impl Shell {
                     surfaces.set_file_save_error(&saved_workspace, &saved_path, error, cx)
                 }
             });
+        })
+        .detach();
+    }
+
+    /// Ask the daemon to open the selected saved file in a host editor.
+    fn open_external_editor(
+        &mut self,
+        workspace: WorkspaceId,
+        path: String,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        let shown_workspace = workspace.clone();
+        let shown_path = path.clone();
+        cx.spawn(async move |_, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.open_external_editor(&workspace, &path, line).await
+                })
+                .await;
+            if let Err(error) = result {
+                surfaces.update(cx, |surfaces, cx| {
+                    surfaces.set_file_save_error(&shown_workspace, &shown_path, error, cx)
+                });
+            }
         })
         .detach();
     }
@@ -3534,14 +3726,55 @@ impl Shell {
 
     /// Read the selected project's skills plus the user's own from the daemon.
     fn refresh_skills(&mut self, cx: &mut Context<Self>) {
-        self.surfaces
-            .update(cx, |surfaces, cx| surfaces.begin_skill_refresh(cx));
+        let project_available = self.target_project.is_some();
+        self.surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_skill_project_available(project_available, cx);
+            surfaces.begin_skill_refresh(cx);
+        });
         let link = self.link.clone();
         let project = self.target_project.clone();
         let expected_project = project.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_spawn(async move { link.skills(project).await })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.target_project == expected_project {
+                    this.surfaces
+                        .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Create a shared skill and refresh its grouped library.
+    fn create_skill(
+        &mut self,
+        name: String,
+        description: String,
+        body: String,
+        project: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.surfaces
+            .update(cx, |surfaces, cx| surfaces.begin_skill_create(cx));
+        let link = self.link.clone();
+        let selected_project = self.target_project.clone();
+        let expected_project = selected_project.clone();
+        let create_project = if project {
+            selected_project.clone()
+        } else {
+            None
+        };
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.create_skill(name, description, body, create_project)
+                        .await?;
+                    link.skills(selected_project.clone()).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.target_project == expected_project {
@@ -3576,6 +3809,120 @@ impl Shell {
                     this.surfaces
                         .update(cx, |surfaces, cx| surfaces.set_skills(result, cx));
                 }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Persist a provider toggle and refresh the daemon's visible catalogue.
+    fn set_provider_enabled(
+        &mut self,
+        provider: ginka_protocol::ProviderKind,
+        enabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.set_provider_enabled(provider, enabled).await?;
+                    Ok::<_, String>((link.provider_settings().await, link.agents().await))
+                })
+                .await;
+            if let Ok((providers, agents)) = result {
+                this.update(cx, |this, cx| {
+                    this.provider_settings = providers;
+                    this.agents = agents;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Open an executable editor with the daemon's latest value.
+    fn edit_provider_program(
+        &mut self,
+        provider: ginka_protocol::ProviderKind,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self
+            .provider_settings
+            .iter()
+            .find(|setting| setting.provider == provider)
+            .and_then(|setting| setting.program.clone())
+            .unwrap_or_default();
+        let path = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("settings.providers.path").to_string())
+        });
+        path.update(cx, |state, cx| state.set_value(value, window, cx));
+        cx.subscribe(&path, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_provider_program(cx);
+            }
+        })
+        .detach();
+        path.read(cx).focus_handle(cx).focus(window, cx);
+        self.provider_program = Some(ProviderProgramForm {
+            provider,
+            path,
+            error: None,
+            busy: false,
+        });
+        cx.notify();
+    }
+
+    /// Save or clear an executable override through the daemon's shared RPC.
+    fn save_provider_program(&mut self, cx: &mut Context<Self>) {
+        let Some(form) = self.provider_program.as_mut() else {
+            return;
+        };
+        if form.busy {
+            return;
+        }
+        let provider = form.provider;
+        let request = ginka_ui::provider_settings::program_request(
+            provider,
+            form.path.read(cx).value().as_ref(),
+        );
+        form.busy = true;
+        form.error = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    link.update_provider_settings(request).await?;
+                    Ok::<_, String>((link.provider_settings().await, link.agents().await))
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                match result {
+                    Ok((providers, agents)) => {
+                        this.provider_settings = providers;
+                        this.agents = agents;
+                        if this.provider_program.as_ref().map(|form| form.provider)
+                            == Some(provider)
+                        {
+                            this.provider_program = None;
+                        }
+                    }
+                    Err(error) => {
+                        if let Some(form) = this
+                            .provider_program
+                            .as_mut()
+                            .filter(|form| form.provider == provider)
+                        {
+                            form.error = Some(error);
+                            form.busy = false;
+                        }
+                    }
+                }
+                cx.notify();
             })
             .ok();
         })
@@ -5026,6 +5373,131 @@ impl Shell {
             .into_any_element();
         let quick_section = self.quick_settings(cx);
         let cron_section = self.cron_settings(cx);
+        let provider_section = v_flex()
+            .w_full()
+            .pt_5()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.providers").to_string()),
+            )
+            .children(self.provider_settings.iter().map(|setting| {
+                let provider = setting.provider;
+                let control = h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().bg_surface)
+                    .children(
+                        [(true, "settings.on"), (false, "settings.off")]
+                            .into_iter()
+                            .map(|(enabled, key)| {
+                                choice(
+                                    format!("provider:{}:{enabled}", provider.as_str()),
+                                    rust_i18n::t!(key).to_string(),
+                                    setting.enabled == enabled,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        this.set_provider_enabled(provider, enabled, cx);
+                                    },
+                                ))
+                            }),
+                    )
+                    .into_any_element();
+                let control = h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(control)
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "provider-edit-{}",
+                            provider.as_str()
+                        )))
+                        .ghost()
+                        .compact()
+                        .label(rust_i18n::t!("settings.providers.edit").to_string())
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.edit_provider_program(provider, window, cx);
+                            },
+                        )),
+                    )
+                    .into_any_element();
+                row(
+                    provider.as_str().to_string(),
+                    setting
+                        .program
+                        .clone()
+                        .unwrap_or_else(|| rust_i18n::t!("settings.providers.auto").to_string()),
+                    control,
+                )
+            }))
+            .children(self.provider_program.as_ref().map(|form| {
+                let provider = form.provider;
+                v_flex()
+                    .w_full()
+                    .gap_2()
+                    .py_2()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(format!(
+                                "{} · {}",
+                                provider.as_str(),
+                                rust_i18n::t!("settings.providers.path")
+                            )),
+                    )
+                    .child(ginka_ui::field::input(&form.path))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("provider-program-save")
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.save").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_provider_program(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("provider-program-auto")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.clear").to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(form) = &this.provider_program {
+                                            form.path.update(cx, |state, cx| {
+                                                state.set_value("", window, cx)
+                                            });
+                                        }
+                                        this.save_provider_program(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("provider-program-cancel")
+                                    .ghost()
+                                    .compact()
+                                    .disabled(form.busy)
+                                    .label(rust_i18n::t!("settings.providers.cancel").to_string())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.provider_program = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .children(form.error.clone().map(|error| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().status_error)
+                            .child(error)
+                    }))
+            }));
         let notifying = self.settings.notifications;
         let notifications_control = h_flex()
             .p_0p5()
@@ -5164,6 +5636,7 @@ impl Shell {
                                     .into_any_element(),
                             ))
                             .child(quick_section)
+                            .child(provider_section)
                             .child(cron_section),
                     ),
             )
@@ -5372,6 +5845,20 @@ impl Shell {
         let tokens = Tokens::global(cx).clone();
         let now = chrono::Utc::now().timestamp();
         let chat = self.cron_form.chat;
+        let selected_workspace = self.cron_form.workspace.clone();
+        let workspace_choices: Vec<_> = self
+            .sidebar
+            .read(cx)
+            .rows()
+            .iter()
+            .filter(|row| {
+                self.target_project
+                    .as_ref()
+                    .is_some_and(|project| project.0 == row.origin)
+                    && (!row.archived || selected_workspace.as_ref() == Some(&row.workspace))
+            })
+            .map(|row| row.workspace.clone())
+            .collect();
         let chip = |id: &'static str, label: String, on: bool| {
             div()
                 .id(id)
@@ -5395,12 +5882,15 @@ impl Shell {
             .map(|job| {
                 let id = job.id;
                 let toggled = job.clone();
+                let edited = job.clone();
+                let done = ginka_core::cron::is_completed(job);
                 let when = match job.next_run_at {
                     Some(at) => rust_i18n::t!(
                         "settings.cron.next",
                         when = ginka_ui::workspace::relative_age(at, now)
                     )
                     .to_string(),
+                    None if done => rust_i18n::t!("settings.cron.done").to_string(),
                     None => rust_i18n::t!("settings.cron.off").to_string(),
                 };
                 let last = job
@@ -5408,6 +5898,10 @@ impl Shell {
                     .as_ref()
                     .map(|run| run.outcome.as_str().to_string())
                     .unwrap_or_default();
+                let scope = job.workspace.as_ref().map_or_else(
+                    || rust_i18n::t!("settings.cron.project_checkout").to_string(),
+                    |workspace| workspace.0.clone(),
+                );
                 h_flex()
                     .w_full()
                     .py_1p5()
@@ -5439,7 +5933,7 @@ impl Shell {
                             .text_xs()
                             .text_color(tokens.colors().text_secondary)
                             .truncate()
-                            .child(format!("{} · {}", job.via.as_str(), job.body)),
+                            .child(format!("{} · {} · {}", job.via.as_str(), scope, job.body)),
                     )
                     .child(
                         div()
@@ -5447,17 +5941,28 @@ impl Shell {
                             .text_color(tokens.colors().text_muted)
                             .child(format!("{when}  {last}")),
                     )
+                    .when(!done, |this| {
+                        this.child(
+                            Button::new(SharedString::from(format!("cron-toggle-{id}")))
+                                .ghost()
+                                .compact()
+                                .label(if job.enabled {
+                                    rust_i18n::t!("settings.cron.pause").to_string()
+                                } else {
+                                    rust_i18n::t!("settings.cron.resume").to_string()
+                                })
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.toggle_cron_job(toggled.clone(), window, cx)
+                                })),
+                        )
+                    })
                     .child(
-                        Button::new(SharedString::from(format!("cron-toggle-{id}")))
+                        Button::new(SharedString::from(format!("cron-edit-{id}")))
                             .ghost()
                             .compact()
-                            .label(if job.enabled {
-                                rust_i18n::t!("settings.cron.pause").to_string()
-                            } else {
-                                rust_i18n::t!("settings.cron.resume").to_string()
-                            })
+                            .label(rust_i18n::t!("settings.cron.edit").to_string())
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                this.toggle_cron_job(toggled.clone(), window, cx)
+                                this.edit_cron_job(edited.clone(), window, cx)
                             })),
                     )
                     .child(
@@ -5518,6 +6023,52 @@ impl Shell {
                     .w_full()
                     .pt_2()
                     .gap_2()
+                    .flex_wrap()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("settings.cron.scope").to_string()),
+                    )
+                    .child(
+                        Button::new("cron-scope-project")
+                            .ghost()
+                            .compact()
+                            .label(format!(
+                                "{}{}",
+                                if selected_workspace.is_none() {
+                                    "✓ "
+                                } else {
+                                    ""
+                                },
+                                rust_i18n::t!("settings.cron.project_checkout")
+                            ))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.cron_form.workspace = None;
+                                cx.notify();
+                            })),
+                    )
+                    .children(workspace_choices.into_iter().map(|workspace| {
+                        let selected = selected_workspace.as_ref() == Some(&workspace);
+                        Button::new(SharedString::from(format!("cron-scope-{}", workspace.0)))
+                            .ghost()
+                            .compact()
+                            .label(format!(
+                                "{}{}",
+                                if selected { "✓ " } else { "" },
+                                workspace.0
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.cron_form.workspace = Some(workspace.clone());
+                                cx.notify();
+                            }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
                     .items_center()
                     .child(
                         chip(
@@ -5565,10 +6116,42 @@ impl Shell {
                     .child(
                         Button::new("cron-save")
                             .compact()
-                            .label(rust_i18n::t!("settings.quick.add").to_string())
+                            .label(if self.cron_form.editing.is_some() {
+                                rust_i18n::t!("settings.cron.save").to_string()
+                            } else {
+                                rust_i18n::t!("settings.quick.add").to_string()
+                            })
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.save_cron_form(window, cx)),
                             ),
+                    )
+                    .when(self.cron_form.editing.is_some(), |this| {
+                        this.child(
+                            Button::new("cron-cancel-edit")
+                                .ghost()
+                                .compact()
+                                .label(rust_i18n::t!("settings.cron.cancel").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.cancel_cron_edit(window, cx)
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("settings.cron.precheck_label").to_string()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.cron_form.precheck)),
                     ),
             )
             .children(self.cron_form.error.clone().map(|error| {
@@ -7733,7 +8316,7 @@ impl Shell {
 
     /// Copy the conversation through `after` onto another agent and show it.
     fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
-        self.fork_from_as(after, agent, false, cx);
+        self.fork_from_as(after, agent, ginka_ui::handoff::ForkAction::Continue, cx);
     }
 
     /// Whether a fan-out can start from here: a project to cut worktrees in,
@@ -8326,9 +8909,14 @@ impl Shell {
         )
     }
 
-    /// Fork here onto another agent; `review` hands the fork a request for
-    /// a second opinion on the work so far instead of leaving it to carry on.
-    fn fork_from_as(&mut self, after: u64, agent: String, review: bool, cx: &mut Context<Self>) {
+    /// Fork here onto another agent and optionally start its first turn.
+    fn fork_from_as(
+        &mut self,
+        after: u64,
+        agent: String,
+        action: ginka_ui::handoff::ForkAction,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.session.as_ref().and_then(|row| row.session.clone()) else {
             return;
         };
@@ -8343,14 +8931,29 @@ impl Shell {
         cx.notify();
 
         let link = self.link.clone();
+        let prompt = action.prompt(&rust_i18n::locale());
         cx.spawn(async move |this, cx| {
             let requesting = link.clone();
-            let prompt = rust_i18n::t!("transcript.second_opinion.prompt").to_string();
             let result = cx
                 .background_spawn(async move {
-                    let fork = requesting.fork_session(&session, after, agent).await?;
-                    if review {
-                        let _ = requesting.send_message(&fork.id, prompt).await;
+                    let fork = requesting
+                        .fork_session(&session, after, agent)
+                        .await
+                        .map_err(|error| {
+                            rust_i18n::t!("transcript.fork.failed", error = error).to_string()
+                        })?;
+                    if let Some(prompt) = prompt {
+                        requesting
+                            .send_message_checked(&fork.id, prompt)
+                            .await
+                            .map_err(|error| {
+                                rust_i18n::t!(
+                                    "transcript.fork.send_failed",
+                                    session = fork.id.to_string(),
+                                    error = error
+                                )
+                                .to_string()
+                            })?;
                     }
                     Ok::<_, String>(fork)
                 })
@@ -8360,9 +8963,7 @@ impl Shell {
                     this.update(cx, |this, cx| {
                         if let Some(menu) = this.forking.as_mut() {
                             menu.busy = false;
-                            menu.error = Some(
-                                rust_i18n::t!("transcript.fork.failed", error = error).to_string(),
-                            );
+                            menu.error = Some(error);
                         }
                         cx.notify();
                     })
@@ -8428,38 +9029,48 @@ impl Shell {
             .filter(|menu| menu.turn == turn && menu.seq == seq)
             .map(|menu| (true, menu.busy, menu.error.clone()))
             .unwrap_or((false, false, None));
-        // MonoCode's second opinion: the same fork, handed a request to review
-        // the work rather than to carry it on.
-        let review_buttons: Vec<AnyElement> = targets
-            .iter()
-            .map(|agent| {
+        let mut action_buttons: Vec<AnyElement> = Vec::new();
+        for agent in &targets {
+            for (action, button_id, label) in [
+                (
+                    ginka_ui::handoff::ForkAction::SecondOpinion,
+                    "review",
+                    "transcript.second_opinion",
+                ),
+                (
+                    ginka_ui::handoff::ForkAction::Plan,
+                    "plan",
+                    "transcript.plan",
+                ),
+                (
+                    ginka_ui::handoff::ForkAction::Build,
+                    "build",
+                    "transcript.build",
+                ),
+            ] {
                 let id = agent.id.clone();
-                Button::new(SharedString::from(format!("review-{turn}-{id}")))
-                    // The toolkit draws a button's hover itself; a second
-                    // one trips its debug assertion.
-                    .ghost()
-                    .disabled(fork_busy)
-                    .px(px(7.))
-                    .py(px(2.))
-                    .rounded(px(tokens.radius.row))
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .when(!fork_busy, |this| {
-                        this.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.fork_from_as(seq, id.clone(), true, cx)
-                            }))
-                    })
-                    .child(
-                        rust_i18n::t!(
-                            "transcript.second_opinion",
-                            agent = agent.display_name.clone()
-                        )
-                        .to_string(),
-                    )
-                    .into_any_element()
-            })
-            .collect();
+                action_buttons.push(
+                    Button::new(SharedString::from(format!("{button_id}-{turn}-{id}")))
+                        // The toolkit draws a button's hover itself; a second
+                        // one trips its debug assertion.
+                        .ghost()
+                        .disabled(fork_busy)
+                        .px(px(7.))
+                        .py(px(2.))
+                        .rounded(px(tokens.radius.row))
+                        .text_xs()
+                        .text_color(tokens.colors().text_secondary)
+                        .when(!fork_busy, |this| {
+                            this.cursor_pointer()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.fork_from_as(seq, id.clone(), action, cx)
+                                }))
+                        })
+                        .child(rust_i18n::t!(label, agent = agent.display_name.clone()).to_string())
+                        .into_any_element(),
+                );
+            }
+        }
         let target_buttons = targets.into_iter().map(|agent| {
             let id = agent.id.clone();
             Button::new(SharedString::from(format!("fork-{turn}-{id}")))
@@ -8620,7 +9231,9 @@ impl Shell {
                             }),
                     )
                     .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
-                    .children(fork_open.then(|| h_flex().gap_1().children(review_buttons)))
+                    .children(
+                        fork_open.then(|| h_flex().gap_1().flex_wrap().children(action_buttons)),
+                    )
                     .children(fork_error.map(|error| {
                         div()
                             .text_xs()
@@ -13135,7 +13748,7 @@ async fn pull_rows(
     let listing = link.clone();
     // A request to the daemon, which does the storage and one `git status` per
     // worktree: off the main thread, or the window stalls on every refresh.
-    let (showing, wants_changes, wants_usage, wants_history) = this
+    let (showing, wants_changes, wants_usage, wants_history, context_lines) = this
         .update(cx, |this, cx| {
             let surfaces = this.surfaces.read(cx);
             let git = surfaces.shows(ginka_ui::surface::Surface::Git);
@@ -13147,6 +13760,7 @@ async fn pull_rows(
                 git,
                 surfaces.shows(ginka_ui::surface::Surface::Reports),
                 git && surfaces.history_is_open(),
+                surfaces.diff_context(),
             )
         })
         .map_err(|_| ())?;
@@ -13155,6 +13769,7 @@ async fn pull_rows(
         rows,
         projects,
         agents,
+        provider_settings,
         accounts,
         plans,
         usage,
@@ -13173,6 +13788,7 @@ async fn pull_rows(
             // Cached by the daemon, so this is a request rather than two
             // subprocesses per agent every tick.
             let agents = listing.agents().await;
+            let provider_settings = listing.provider_settings().await;
             // The logins and their gauges: cached and pushed by the daemon
             // respectively, so both are a request rather than a probe.
             let accounts = listing.accounts().await;
@@ -13193,10 +13809,18 @@ async fn pull_rows(
             let (changes, staged_changes, comments) = match (&showing, wants_changes) {
                 (Some(workspace), true) => (
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Unstaged)
+                        .changes_with_context(
+                            workspace,
+                            ginka_protocol::ChangeSource::Unstaged,
+                            context_lines,
+                        )
                         .await,
                     listing
-                        .changes(workspace, ginka_protocol::ChangeSource::Staged)
+                        .changes_with_context(
+                            workspace,
+                            ginka_protocol::ChangeSource::Staged,
+                            context_lines,
+                        )
                         .await,
                     listing.comments(workspace).await,
                 ),
@@ -13210,6 +13834,7 @@ async fn pull_rows(
                 rows,
                 projects,
                 agents,
+                provider_settings,
                 accounts,
                 plans,
                 usage,
@@ -13229,12 +13854,16 @@ async fn pull_rows(
     );
     this.update(cx, |this, cx| {
         this.agents = agents;
+        this.provider_settings = provider_settings;
         this.accounts = accounts;
         this.plans = plans;
         this.checkpoints = checkpoints;
         if this.session.as_ref().map(|row| &row.workspace) == requested_workspace.as_ref() {
             this.workspace_sessions = workspace_sessions;
         }
+        this.surfaces.update(cx, |surfaces, cx| {
+            surfaces.set_checkpoints(this.checkpoints.clone(), cx)
+        });
         if let Some(usage) = usage {
             this.surfaces
                 .update(cx, |surfaces, cx| surfaces.set_usage(usage, cx));
@@ -13246,6 +13875,9 @@ async fn pull_rows(
             .update(cx, |sidebar, cx| sidebar.set_projects(listed, cx));
         if wants_changes {
             this.surfaces.update(cx, |surfaces, cx| {
+                if surfaces.diff_context() != context_lines {
+                    return;
+                }
                 let staged = staged_changes
                     .as_ref()
                     .map(|changes| changes.files.iter().map(|file| file.path.clone()).collect())
@@ -13933,7 +14565,9 @@ impl Shell {
         let notes = self.notes.clone();
         cx.spawn(async move |this, cx| {
             let saved = cx
-                .background_spawn(async move { link.save_note(None, project, title, body).await })
+                .background_spawn(
+                    async move { link.save_note(None, project, title, body, None).await },
+                )
                 .await;
             this.update(cx, |this, cx| {
                 if saved.is_some() {

@@ -7,15 +7,19 @@
 //! loses the last paragraph.
 
 use crate::daemon::DaemonLink;
+use ginka_core::notes::NoteFilter;
 use ginka_protocol::ProjectName;
 use ginka_protocol::model::Note;
 use ginka_ui::Tokens;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, h_flex, v_flex};
+use gpui_component::{Disableable, Icon, h_flex, v_flex};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -27,10 +31,14 @@ pub struct NotesView {
     /// The project whose notes are listed; every note when `None`.
     project: Option<ProjectName>,
     notes: Vec<Note>,
+    /// Exact tag chosen in the list; text search is applied alongside it.
+    selected_tag: Option<String>,
     /// The note in the editor. `None` with the editor filled is a new note
     /// that has not been written yet.
     editing: Option<String>,
+    search: Entity<InputState>,
     title: Entity<InputState>,
+    tags: Entity<InputState>,
     body: Entity<TextareaState>,
     /// Markdown rendered instead of the source.
     preview: bool,
@@ -44,15 +52,27 @@ pub struct NotesView {
     loading: bool,
     /// A note to put into the fields at the next render, which is the first
     /// place with a window.
-    pending: Option<(String, String)>,
+    pending: Option<(String, String, String)>,
     /// Whether the editor is open: on a note, or on a new one.
     composing: bool,
+    /// Verified images are cached by daemon reference across note switches.
+    images: HashMap<String, String>,
+    images_loading: HashSet<String>,
+    image_busy: bool,
+    image_error: Option<String>,
+    image_context: u64,
 }
 
 impl NotesView {
     pub fn new(link: Arc<DaemonLink>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("notes.search").to_string())
+        });
         let title = cx.new(|cx| {
             InputState::new(window, cx).placeholder(rust_i18n::t!("notes.title").to_string())
+        });
+        let tags = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(rust_i18n::t!("notes.tags").to_string())
         });
         let body = cx.new(|cx| {
             TextareaState::new(window, cx)
@@ -60,6 +80,18 @@ impl NotesView {
                 .auto_grow(12, 400)
         });
         cx.subscribe(&title, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.edited(cx);
+            }
+        })
+        .detach();
+        cx.subscribe(&search, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        })
+        .detach();
+        cx.subscribe(&tags, |this, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.edited(cx);
             }
@@ -75,8 +107,11 @@ impl NotesView {
             link,
             project: None,
             notes: Vec::new(),
+            selected_tag: None,
             editing: None,
+            search,
             title,
+            tags,
             body,
             preview: false,
             generation: 0,
@@ -84,11 +119,19 @@ impl NotesView {
             loading: false,
             pending: None,
             composing: false,
+            images: HashMap::new(),
+            images_loading: HashSet::new(),
+            image_busy: false,
+            image_error: None,
+            image_context: 0,
         }
     }
 
     /// List a project's notes — or all of them — and read them again.
     pub fn show_project(&mut self, project: Option<ProjectName>, cx: &mut Context<Self>) {
+        if self.project != project {
+            self.selected_tag = None;
+        }
         self.project = project;
         self.reload(cx);
     }
@@ -111,15 +154,129 @@ impl NotesView {
     }
 
     fn open(&mut self, note: Option<&Note>, cx: &mut Context<Self>) {
+        self.image_context = self.image_context.wrapping_add(1);
+        self.image_error = None;
+        if let Some(note) = note {
+            self.load_images(&note.body, cx);
+        }
         self.editing = note.map(|note| note.id.clone());
         self.pending = Some(match note {
-            Some(note) => (note.title.clone(), note.body.clone()),
-            None => (String::new(), String::new()),
+            Some(note) => (note.title.clone(), note.body.clone(), note.tags.join(", ")),
+            None => (String::new(), String::new(), String::new()),
         });
         self.preview = note.is_some_and(|note| !note.body.is_empty());
         self.removing = false;
         self.composing = true;
         cx.notify();
+    }
+
+    fn load_images(&mut self, body: &str, cx: &mut Context<Self>) {
+        for reference in ginka_ui::notes::image_references(body) {
+            if self.images.contains_key(&reference)
+                || !self.images_loading.insert(reference.clone())
+            {
+                continue;
+            }
+            let link = self.link.clone();
+            cx.spawn(async move |this, cx| {
+                let loaded = cx
+                    .background_spawn({
+                        let reference = reference.clone();
+                        async move { link.attachment_image(reference).await }
+                    })
+                    .await;
+                this.update(cx, |this, cx| {
+                    this.images_loading.remove(&reference);
+                    if let Ok(Some(image)) = loaded {
+                        this.images.insert(
+                            reference,
+                            format!("data:{};base64,{}", image.media_type, image.data_base64),
+                        );
+                    }
+                    cx.notify();
+                })
+                .ok();
+            })
+            .detach();
+        }
+    }
+
+    fn choose_image(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.image_busy {
+            return;
+        }
+        let context = self.image_context;
+        let chosen = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some(rust_i18n::t!("notes.image.choose").to_string().into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            let Ok(Ok(Some(paths))) = chosen.await else {
+                return;
+            };
+            if let Some(path) = paths.into_iter().next() {
+                this.update(cx, |this, cx| {
+                    if this.image_context == context {
+                        this.insert_image(path, cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    fn insert_image(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if self.image_busy {
+            return;
+        }
+        self.image_busy = true;
+        self.image_error = None;
+        let context = self.image_context;
+        let link = self.link.clone();
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let uploaded = cx
+                .background_spawn(async move {
+                    let metadata = std::fs::metadata(&path).map_err(|error| error.to_string())?;
+                    if metadata.len() > ginka_core::files::IMAGE_PREVIEW_LIMIT as u64 {
+                        return Err(rust_i18n::t!("notes.image.too_large").to_string());
+                    }
+                    let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+                    if ginka_core::files::preview_image(&bytes).is_none() {
+                        return Err(rust_i18n::t!("notes.image.unsupported").to_string());
+                    }
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "image".to_string());
+                    let attachment = link.upload_attachment(name.clone(), bytes).await?;
+                    Ok::<_, String>((attachment.reference, name))
+                })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                this.image_busy = false;
+                match uploaded {
+                    Ok((reference, name)) if this.image_context == context => {
+                        let alt = name.replace(['[', ']', '\n', '\r'], "_");
+                        this.preview = false;
+                        this.body.update(cx, |body, cx| {
+                            body.insert(format!("\n![{alt}]({reference})\n"), window, cx)
+                        });
+                        // Programmatic insertion is silent to InputEvent::Change.
+                        this.edited(cx);
+                    }
+                    Ok(_) => {}
+                    Err(error) if this.image_context == context => this.image_error = Some(error),
+                    Err(_) => {}
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The reader typed: write it once they pause.
@@ -144,15 +301,23 @@ impl NotesView {
     fn save(&mut self, cx: &mut Context<Self>) {
         let title = self.title.read(cx).value().to_string();
         let body = self.body.read(cx).value().to_string();
-        if self.editing.is_none() && title.trim().is_empty() && body.trim().is_empty() {
+        let tags = self.tags.read(cx).value().to_string();
+        if self.editing.is_none()
+            && title.trim().is_empty()
+            && body.trim().is_empty()
+            && tags.trim().is_empty()
+        {
             return;
         }
+        let tags = tags.split(',').map(str::trim).map(str::to_string).collect();
         let link = self.link.clone();
         let id = self.editing.clone();
         let project = self.project.clone();
         cx.spawn(async move |this, cx| {
             let saved = cx
-                .background_spawn(async move { link.save_note(id, project, title, body).await })
+                .background_spawn(async move {
+                    link.save_note(id, project, title, body, Some(tags)).await
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if let Some(note) = saved {
@@ -174,8 +339,10 @@ impl NotesView {
     fn remove(&mut self, cx: &mut Context<Self>) {
         let Some(id) = self.editing.clone() else {
             // A new note nobody wrote anything in: closing it is removing it.
+            self.image_context = self.image_context.wrapping_add(1);
+            self.image_error = None;
             self.composing = false;
-            self.pending = Some((String::new(), String::new()));
+            self.pending = Some((String::new(), String::new(), String::new()));
             cx.notify();
             return;
         };
@@ -186,8 +353,10 @@ impl NotesView {
         }
         let link = self.link.clone();
         self.notes.retain(|note| note.id != id);
+        self.image_context = self.image_context.wrapping_add(1);
+        self.image_error = None;
         self.editing = None;
-        self.pending = Some((String::new(), String::new()));
+        self.pending = Some((String::new(), String::new(), String::new()));
         self.removing = false;
         self.composing = false;
         cx.background_spawn(async move { link.remove_note(id).await })
@@ -198,6 +367,15 @@ impl NotesView {
     /// The list column: a heading, the way to write a new one, the notes.
     pub fn list(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
+        let query = self.search.read(cx).value().to_string();
+        let filter = NoteFilter::new(Some(&query), self.selected_tag.as_deref());
+        let visible_notes: Vec<_> = self
+            .notes
+            .iter()
+            .filter(|note| filter.matches(note))
+            .collect();
+        let available_tags = ginka_ui::notes::available_tags(&self.notes);
+        let is_empty = visible_notes.is_empty();
         let heading = self
             .project
             .as_ref()
@@ -258,6 +436,55 @@ impl NotesView {
                     .text_color(tokens.colors().text_muted)
                     .child(heading),
             )
+            .child(div().px_3().pb_2().child(Input::new(&self.search)))
+            .when(
+                !available_tags.is_empty() || self.selected_tag.is_some(),
+                |this| {
+                    this.child(
+                        h_flex()
+                            .id("note-tag-filters")
+                            .w_full()
+                            .flex_shrink_0()
+                            .px_3()
+                            .pb_2()
+                            .gap_1()
+                            .overflow_x_scroll()
+                            .child(
+                                Button::new("note-tag-all")
+                                    .ghost()
+                                    .flex_shrink_0()
+                                    .when(self.selected_tag.is_none(), |this| {
+                                        this.bg(tokens.colors().row_active())
+                                    })
+                                    .child(if self.selected_tag.is_none() {
+                                        format!("✓ {}", rust_i18n::t!("notes.filter.all_tags"))
+                                    } else {
+                                        rust_i18n::t!("notes.filter.all_tags").to_string()
+                                    })
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.selected_tag = None;
+                                        cx.notify();
+                                    })),
+                            )
+                            .children(available_tags.into_iter().map(|tag| {
+                                let selected = self.selected_tag.as_deref() == Some(tag.as_str());
+                                Button::new(SharedString::from(format!("note-tag:{tag}")))
+                                    .ghost()
+                                    .flex_shrink_0()
+                                    .when(selected, |this| this.bg(tokens.colors().row_active()))
+                                    .child(if selected {
+                                        format!("✓ {tag}")
+                                    } else {
+                                        tag.clone()
+                                    })
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.selected_tag = Some(tag.clone());
+                                        cx.notify();
+                                    }))
+                            })),
+                    )
+                },
+            )
             .child(
                 v_flex()
                     .id("notes-list")
@@ -266,7 +493,7 @@ impl NotesView {
                     .px_2()
                     .gap_0p5()
                     .overflow_y_scroll()
-                    .children(self.notes.iter().map(|note| {
+                    .children(visible_notes.into_iter().map(|note| {
                         let chosen = self.editing.as_deref() == Some(note.id.as_str());
                         let picked = note.clone();
                         let first_line = note
@@ -322,26 +549,41 @@ impl NotesView {
                                     .truncate()
                                     .child(first_line),
                             )
+                            .when(!note.tags.is_empty(), |this| {
+                                this.child(
+                                    div()
+                                        .text_size(px(11.))
+                                        .text_color(tokens.colors().text_secondary)
+                                        .truncate()
+                                        .child(note.tags.join(" · ")),
+                                )
+                            })
                     }))
-                    .children(self.notes.is_empty().then(|| {
+                    .children(is_empty.then(|| {
                         div()
                             .px_3()
                             .py_4()
                             .text_size(px(12.5))
                             .text_color(tokens.colors().text_muted)
-                            .child(rust_i18n::t!("notes.empty").to_string())
+                            .child(if query.trim().is_empty() && self.selected_tag.is_none() {
+                                rust_i18n::t!("notes.empty").to_string()
+                            } else {
+                                rust_i18n::t!("notes.no_matches").to_string()
+                            })
                     })),
             )
     }
 
     /// The editor, in the centre column.
     pub fn editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        if let Some((title, body)) = self.pending.take() {
+        if let Some((title, body, tags)) = self.pending.take() {
             self.loading = true;
             self.title
                 .update(cx, |state, cx| state.set_value(title, window, cx));
             self.body
                 .update(cx, |state, cx| state.set_value(body, window, cx));
+            self.tags
+                .update(cx, |state, cx| state.set_value(tags, window, cx));
             self.loading = false;
         }
         let tokens = Tokens::global(cx).clone();
@@ -431,9 +673,20 @@ impl NotesView {
                                 .on_click(cx.listener(
                                     |this, _, _, cx| {
                                         this.preview = true;
+                                        let body = this.body.read(cx).value().to_string();
+                                        this.load_images(&body, cx);
                                         cx.notify();
                                     },
                                 )),
+                            ),
+                    )
+                    .child(
+                        Button::new("note-insert-image")
+                            .ghost()
+                            .disabled(self.image_busy)
+                            .label(rust_i18n::t!("notes.image.insert").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.choose_image(window, cx)),
                             ),
                     )
                     .child(
@@ -481,14 +734,26 @@ impl NotesView {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(Input::new(&self.title).appearance(false)),
                             )
+                            .child(Input::new(&self.tags))
+                            .when_some(self.image_error.clone(), |this, error| {
+                                this.child(div().text_color(tokens.colors().status_error).child(
+                                    format!("{}: {error}", rust_i18n::t!("notes.image.error")),
+                                ))
+                            })
                             .child(if preview {
                                 div()
                                     .text_size(px(14.))
                                     .line_height(px(22.4))
                                     .text_color(tokens.colors().text_primary)
                                     .child(
-                                        TextView::markdown("note-markdown", body_text)
-                                            .selectable(true),
+                                        TextView::markdown(
+                                            "note-markdown",
+                                            ginka_ui::notes::markdown_with_images(
+                                                &body_text,
+                                                &self.images,
+                                            ),
+                                        )
+                                        .selectable(true),
                                     )
                                     .into_any_element()
                             } else {
