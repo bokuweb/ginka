@@ -601,6 +601,7 @@ fn wait_for_callback(listener: TcpListener, expected_state: &str) -> Result<Stri
         }
         match listener.accept() {
             Ok((mut stream, _)) => {
+                stream.set_nonblocking(false).map_err(Error::CallbackIo)?;
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .map_err(Error::CallbackIo)?;

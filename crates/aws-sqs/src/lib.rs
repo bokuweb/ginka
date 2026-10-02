@@ -367,7 +367,7 @@ impl AwsCli {
         self.console_environment(&mut command, home);
         command.args(["login", "--profile", "ginka-console", "--region"]);
         command.arg(self.region.as_deref().unwrap_or_default());
-        let output = command.stdin(Stdio::null()).output()?;
+        let output = retry_executable_busy(|| command.stdin(Stdio::null()).output())?;
         if !output.status.success() {
             return Err(command_error(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -442,7 +442,7 @@ impl AwsCli {
         }
         command.args(["sso", "login", "--use-device-code", "--no-browser"]);
         command.stdout(Stdio::piped()).stderr(Stdio::piped());
-        let mut child = command.spawn()?;
+        let mut child = retry_executable_busy(|| command.spawn())?;
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -968,7 +968,8 @@ impl AwsCli {
         if let Some(region) = &self.region {
             command.arg("--region").arg(region);
         }
-        let output = command.args(args).output()?;
+        command.args(args);
+        let output = retry_executable_busy(|| command.output())?;
         if !output.status.success() {
             let error = String::from_utf8_lossy(&output.stderr);
             return Err(command_error(error.trim().to_string()));
@@ -981,6 +982,20 @@ impl Default for AwsCli {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn retry_executable_busy<T>(mut start: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    for attempt in 0..5 {
+        match start() {
+            Err(error) if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < 4 => {
+                // A newly written CLI or test executable can be momentarily
+                // unavailable to exec on Linux. No process started, so retry.
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            result => return result,
+        }
+    }
+    unreachable!("the final attempt always returns")
 }
 
 fn nonempty(value: String) -> Option<String> {
@@ -1069,6 +1084,26 @@ mod tests {
         std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(&pending, &script).unwrap();
         AwsCli::new().with_executable(script)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retries_a_temporarily_busy_executable() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("aws");
+        std::fs::write(&script, "#!/bin/sh\nprintf ready\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&script)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            drop(writer);
+        });
+        let output = retry_executable_busy(|| Command::new(&script).output()).unwrap();
+        release.join().unwrap();
+        assert_eq!(output.stdout, b"ready");
     }
 
     #[test]
