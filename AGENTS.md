@@ -94,6 +94,7 @@ What is *not* there yet: dockable/persisted centre and right surfaces (M4), drag
 cargo run                                   # the desktop app
 cargo run --features github                 # …with the local e1 GitHub client as its Inbox
 cargo run -p e1                            # the standalone e1 app
+cargo run -p aws                           # standalone AWS/SQS client
 cargo test --workspace                      # run this rather than `-p`: the CLI's
                                             # tests start the daemon binary next to it
 cargo clippy --workspace --all-targets -- -D warnings

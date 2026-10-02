@@ -1,0 +1,19 @@
+[package]
+name = "aws-views"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+description = "Embeddable AWS client views using Ginka's UI tokens"
+
+[dependencies]
+aws-sqs.workspace = true
+chrono.workspace = true
+ginka-core.workspace = true
+ginka-ui.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+rust-i18n.workspace = true
+smol.workspace = true
+
+[lints]
+workspace = true

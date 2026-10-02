@@ -486,6 +486,65 @@ Save applies the trimmed path, Use automatic clears the override, and errors sta
 beside the field. The daemon owns these settings; the window, CLI and MCP use the
 same request to set or clear an executable override.
 
+### 3.8 Standalone AWS client
+
+The `aws` binary mounts `aws-views::SqsView` with the same GPUI toolkit and
+`ginka-ui` theme tokens as Ginka. It uses Ginka's transparent titlebar, blurred
+window, 44 px column headers and 13 px type base. A 250 px service rail uses
+the shared active-row colour, icon size and section-label treatment to keep
+SQS selected. Once connected, it places the account, role, region and
+change-login control in a compact footer, as the other clients do. The
+flexible queue column has a 320 px minimum and refreshes and filters by name or
+URL, creates a standard or FIFO queue, and can open a pasted URL without listing
+queues. The queue list uses compact active and hover rows; create and direct-URL
+actions sit below it in a small, labelled footer. Before queues load, the
+flexible main column uses the same centred, unframed 420 px sign-in composition
+as e1, with a themed icon, title, short lead and one primary browser sign-in
+button. First use defaults to AWS Console browser sign-in with an SQS region
+input. It requires AWS CLI 2.32 or later, uses an app-owned profile and cache,
+and can be changed under connection settings. The second method is IAM Identity
+Center: it asks for the organization's start URL, Identity Center region and
+SQS region, then offers browser PKCE or Device Authorization (PKCE initially
+selected). The chosen method and non-secret values are restored from `aws.json`
+on later launches. The connection settings control reveals both methods and
+their requirements without displacing the primary sign-in action.
+The response area shows starting
+progress, a device code when needed, the authorization link, errors, and
+assigned account and role choices. The authorization page opens when the
+selected flow starts. A sole account or role
+is selected automatically. Queue editing and the 500 px detail column appear
+after credentials are obtained; direct queue URL access stays available when
+listing fails. With credentials, account, role, region and a change-login action
+move to the service rail. Changing the login or region clears previous queue
+data. The queue list selects the detail pane.
+The pane groups its overview, queue settings, message composer and received
+messages with subtle borders and muted section labels. It shows the queue URL,
+approximate depth counters on a theme surface, current default delay, visibility timeout, receive wait and message
+retention, editors for
+the 0–900 second queue delay, 0–43,200 second default visibility timeout and
+0–20 second default receive wait, and a 60–1,209,600 second retention editor
+with a second confirmation click and expiry warning, two-step
+purge and queue deletion controls, message composer and received
+messages with two-step delete buttons. Received rows show available system
+metadata beneath the message ID: receive count, locally formatted sent time,
+and the FIFO group ID. Returned custom attributes appear under the body. The
+composer accepts an optional JSON object of String attributes and clears it
+after a successful send. FIFO queues expose message group and deduplication
+fields; standard queues expose an optional 0–900 second send delay
+field, whose empty value uses the queue default. Send, receive, delete and make available again give an
+inline result; a receive hides messages under SQS visibility timeout until the
+timeout expires or the user makes them available again. An optional seconds field
+beside Receive overrides the queue's visibility timeout for one receive; an empty
+field leaves the queue default in effect. A button beside Receive cycles through
+a short poll, a 20-second wait and the queue's default wait. A count field beside
+Receive selects a 1–10 message limit for that request and starts at 10. A separate
+seconds field above the received rows sets the timeout on the row whose
+*Apply visibility* button is pressed; zero makes that row available again.
+All network work runs off the UI thread. Console mode delegates sign-in,
+credential refresh and SQS operations to the AWS CLI within the app-owned
+profile. Identity Center mode obtains temporary role credentials and signs
+SQS requests directly without AWS CLI.
+
 ## 4. Component mapping
 
 | Region | Component source |
