@@ -995,6 +995,15 @@ impl Service {
                             }
                         }
                     }
+                    ChangeSource::Branch { base } => {
+                        let base = match base {
+                            Some(base) => base.clone(),
+                            None => self.project(&worktree.project)?.default_branch,
+                        };
+                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
+                        git::changes_since_with_context(&worktree.path, &fork, context_lines)
+                            .map_err(failed)?
+                    }
                     other => git::changes_with_context(&worktree.path, other, context_lines)
                         .map_err(failed)?,
                 };
@@ -1107,9 +1116,16 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
-            Request::Push { workspace } => {
+            Request::Push {
+                workspace,
+                force_with_lease,
+            } => {
                 let worktree = self.worktree(&workspace)?;
-                git::push(&worktree.path).map_err(failed)?;
+                if force_with_lease {
+                    git::push_with_lease(&worktree.path).map_err(failed)?;
+                } else {
+                    git::push(&worktree.path).map_err(failed)?;
+                }
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: worktree.project.clone(),
                 });
@@ -1665,34 +1681,21 @@ impl Service {
                     )));
                 }
                 let prompt = crate::conflicts::prompt(&conflicts);
-                let latest =
-                    session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
-                match latest
-                    .filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent))
-                {
-                    // The conversation that did the work knows why it did it,
-                    // which is most of resolving a conflict well.
-                    Some(latest) => {
-                        self.handle(Request::QueueMessage {
-                            session: latest.id.clone(),
-                            text: prompt,
-                        })?;
-                        Ok(Response::Session {
-                            session: self.session(&latest.id)?,
-                        })
-                    }
-                    None => self.handle(Request::StartSession {
-                        workspace,
-                        agent: agent.unwrap_or_else(|| "claude".to_string()),
-                        prompt,
-                        model: None,
-                        reasoning_effort: None,
-                        service_tier: None,
-                        account: None,
-                        access_mode: None,
-                        origin: None,
-                    }),
+                self.hand_to_agent(workspace, agent, prompt)
+            }
+            Request::FixCommitFailure {
+                workspace,
+                message,
+                output,
+                agent,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if output.trim().is_empty() {
+                    return Err(RpcError::failed("there is no failure to hand over"));
                 }
+                let staged = crate::commit_failure::staged_paths(&worktree.path).map_err(failed)?;
+                let prompt = crate::commit_failure::prompt(&message, &output, &staged);
+                self.hand_to_agent(workspace, agent, prompt)
             }
             Request::SendReviewComments { workspace, session } => {
                 let comments = crate::comments::list(&self.conn(), &workspace).map_err(failed)?;
@@ -3065,6 +3068,41 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
+    /// Give `prompt` to the workspace's latest conversation — queued if it is
+    /// working — or, when `agent` names another or there is none, to a new
+    /// conversation on that agent. The conversation that did the work knows
+    /// why it did it, which is most of fixing what went wrong with it.
+    fn hand_to_agent(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: Option<String>,
+        prompt: String,
+    ) -> Result<Response, RpcError> {
+        let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+        match latest.filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent)) {
+            Some(latest) => {
+                self.handle(Request::QueueMessage {
+                    session: latest.id.clone(),
+                    text: prompt,
+                })?;
+                Ok(Response::Session {
+                    session: self.session(&latest.id)?,
+                })
+            }
+            None => self.handle(Request::StartSession {
+                workspace,
+                agent: agent.unwrap_or_else(|| "claude".to_string()),
+                prompt,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                account: None,
+                access_mode: None,
+                origin: None,
+            }),
+        }
+    }
+
     fn session(&self, id: &SessionId) -> Result<Session, RpcError> {
         session::get(&self.conn(), id)
             .map_err(failed)?

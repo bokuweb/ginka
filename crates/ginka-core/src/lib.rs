@@ -16,6 +16,7 @@ pub mod cli_sessions;
 pub mod commands;
 pub mod comments;
 pub mod commit;
+pub mod commit_failure;
 pub mod composer;
 pub mod conflicts;
 pub mod connector;

@@ -3772,3 +3772,80 @@ fn conflicts_go_to_the_conversation_that_made_the_branch() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
+
+#[test]
+fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-hook"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-hook"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "write the parser");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let path = fixture.workspace_path();
+    let hooks = std::path::PathBuf::from(support::git(
+        &path,
+        &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+    ));
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'lint: trailing whitespace in parser.rs' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(path.join("parser.rs"), "fn parse() {} \n").unwrap();
+
+    let refused = fixture
+        .service
+        .handle(Request::Commit {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            all: true,
+            amend: false,
+        })
+        .unwrap_err();
+    assert!(
+        refused.message.contains("trailing whitespace in parser.rs"),
+        "the refusal carries what the hook said: {refused:?}"
+    );
+
+    match fixture
+        .service
+        .handle(Request::FixCommitFailure {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            output: refused.message.clone(),
+            agent: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session: answered } => assert_eq!(answered.id, session),
+        other => panic!("expected the session, got {other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let asked = fixture.transcript(&session).iter().any(|entry| {
+            matches!(entry, TranscriptPayload::User { text }
+                if text.starts_with("A commit in this worktree was refused")
+                    && text.contains("- parser.rs")
+                    && text.contains("Add the parser")
+                    && text.contains("trailing whitespace in parser.rs"))
+        });
+        if asked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was never asked"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}

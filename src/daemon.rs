@@ -611,10 +611,12 @@ impl DaemonLink {
         }
     }
 
-    /// Push a workspace branch through the daemon.
-    pub async fn push(&self, workspace: &WorkspaceId) -> Result<(), String> {
+    /// Push a workspace branch through the daemon; `with_lease` replaces
+    /// rewritten history if the remote is still what was last fetched.
+    pub async fn push(&self, workspace: &WorkspaceId, with_lease: bool) -> Result<(), String> {
         self.git_sync(Request::Push {
             workspace: workspace.clone(),
+            force_with_lease: with_lease,
         })
         .await
     }
@@ -1357,13 +1359,14 @@ impl DaemonLink {
         session: &SessionId,
         after: u64,
         agent: String,
+        model: Option<String>,
     ) -> Result<Session, String> {
         match self
             .ask_result(Request::ForkSession {
                 session: session.clone(),
                 after: Some(after),
                 agent: Some(agent),
-                model: None,
+                model,
                 account: None,
             })
             .await?
@@ -1557,6 +1560,23 @@ impl DaemonLink {
         self.ask_result(Request::ArchiveWorkspace {
             workspace: workspace.clone(),
             archived,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Hand a refused commit to the workspace's latest conversation.
+    pub async fn fix_commit(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+        output: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::FixCommitFailure {
+            workspace: workspace.clone(),
+            message,
+            output,
+            agent: None,
         })
         .await
         .map(|_| ())

@@ -183,6 +183,8 @@ Show what has changed in a workspace
 
 `ginka changes <WORKSPACE>`
 
+`--branch [BASE]` shows everything the branch did since it left `BASE` (the project's default branch when omitted): its commits and uncommitted work.
+
 ## `ginka history`
 
 Show recent commits in a workspace, newest first
@@ -238,7 +240,9 @@ Commit a workspace's work. `--amend` folds it into the last commit instead — k
 
 Push a workspace's branch, setting an upstream if it has none
 
-`ginka push <WORKSPACE>`
+`ginka push <WORKSPACE> [--force-with-lease]`
+
+`--force-with-lease` pushes rewritten history (after an amend or a rebase), refused if the remote moved since the last fetch.
 
 ## `ginka pull`
 

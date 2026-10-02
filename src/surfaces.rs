@@ -116,6 +116,13 @@ pub struct SurfacePanel {
     pull_request: Option<(SharedString, bool)>,
     /// A pull request is being opened.
     opening_pull_request: bool,
+    /// The last plain push was refused, so overwriting the remote with a
+    /// lease is offered — and `true` in the second field once the reader has
+    /// asked once and must confirm.
+    lease_push: Option<bool>,
+    /// The complaint on screen is a refused commit, which the agent can be
+    /// asked to fix.
+    commit_refused: bool,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -269,6 +276,12 @@ pub enum SurfaceEvent {
     Sync,
     /// Push the workspace branch, creating its upstream when needed.
     Push,
+    /// Replace the remote branch with rewritten history, if the remote is
+    /// still what was last fetched. Offered only after a plain push failed.
+    PushWithLease,
+    /// Hand a refused commit — what git and its hooks said, and the message
+    /// it was going to use — to the workspace's agent to fix.
+    FixCommit { message: String, output: String },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
     /// Read what one commit did; it comes back through
@@ -461,6 +474,8 @@ impl SurfacePanel {
             commit_view: None,
             pull_request: None,
             opening_pull_request: false,
+            lease_push: None,
+            commit_refused: false,
             expanded: None,
             split: false,
             comments: Vec::new(),
@@ -1043,6 +1058,7 @@ impl SurfacePanel {
     /// Say why a commit did not happen, or clear it once one did.
     pub fn set_commit_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = self.complaint.is_some();
         if self.complaint.is_none() {
             // It went in; the message belongs to the commit now.
             self.message = None;
@@ -1053,7 +1069,23 @@ impl SurfacePanel {
     /// Show a remote-sync error without disturbing a commit message draft.
     pub fn set_git_sync_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = false;
         cx.notify();
+    }
+
+    /// Say how a push went: a refused plain push offers the lease push,
+    /// anything that went through takes the offer away.
+    pub fn set_push_result(
+        &mut self,
+        complaint: Option<String>,
+        with_lease: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.lease_push = match (&complaint, with_lease) {
+            (Some(_), false) => Some(false),
+            _ => None,
+        };
+        self.set_git_sync_result(complaint, cx);
     }
 
     /// Show what a commit did. `changes` is `None` while it is being read; a
@@ -1879,6 +1911,29 @@ impl SurfacePanel {
                     .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
             )
+            .children(self.lease_push.map(|armed| {
+                // Two activations, like discarding a file: overwriting a
+                // remote branch is not undone from here.
+                Button::new("git-push-lease")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(if armed {
+                        rust_i18n::t!("surface.git.push_lease.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.push_lease").to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.push_lease_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if armed {
+                            this.lease_push = None;
+                            cx.emit(SurfaceEvent::PushWithLease);
+                        } else {
+                            this.lease_push = Some(true);
+                        }
+                        cx.notify();
+                    }))
+            }))
             .child(
                 Button::new("git-create-pr")
                     .ghost()
@@ -2443,6 +2498,35 @@ impl SurfacePanel {
                     .text_color(tokens.colors().status_error)
                     .child(why)
             }))
+            .when(self.commit_refused, |this| {
+                // Orca's "Fix with AI": the hook said what is wrong, and the
+                // agent that wrote the code is the one to fix it.
+                this.child(
+                    Button::new("commit-fix-with-agent")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_commit").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_commit_tooltip").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(output) = this.complaint.clone() else {
+                                return;
+                            };
+                            let message = this
+                                .message
+                                .as_ref()
+                                .map(|state| state.read(cx).value().to_string())
+                                .unwrap_or_default();
+                            this.commit_refused = false;
+                            this.complaint = None;
+                            cx.emit(SurfaceEvent::FixCommit {
+                                message,
+                                output: output.to_string(),
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .child(match open {
                 Some(state) => v_flex()
                     .w_full()

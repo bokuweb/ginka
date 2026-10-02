@@ -580,3 +580,17 @@ fn a_setting_is_changed_by_its_key_and_a_json_value() {
         json!({"method": "update_daemon_settings", "key": "keep_awake", "value": "false"})
     );
 }
+
+#[test]
+fn a_branch_diff_names_its_base_or_leaves_it_to_the_project() {
+    use ginka_protocol::model::ChangeSource;
+    assert_eq!(
+        serde_json::to_value(ChangeSource::Branch {
+            base: Some("main".into())
+        })
+        .unwrap(),
+        json!({"against": "branch", "base": "main"})
+    );
+    let defaulted: ChangeSource = serde_json::from_value(json!({"against": "branch"})).unwrap();
+    assert_eq!(defaulted, ChangeSource::Branch { base: None });
+}

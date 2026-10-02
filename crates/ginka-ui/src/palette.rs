@@ -33,6 +33,8 @@ pub enum Command {
     FindTerminal,
     /// Copy the active terminal's visible output to the clipboard.
     CopyTerminalOutput,
+    /// Copy the last lines of the terminal's output, scrollback included.
+    CopyTerminalContext,
     /// Quote the active terminal selection into the chat composer.
     QuoteTerminalSelection,
     /// Quote the selected transcript text into the chat composer.
@@ -159,10 +161,19 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
                 command: Command::CopyTerminalOutput,
             },
         );
+        entries.insert(
+            3,
+            Entry {
+                id: "terminal:copy-context".into(),
+                label: rust_i18n::t!("terminal.copy_context").to_string(),
+                hint: None,
+                command: Command::CopyTerminalContext,
+            },
+        );
     }
     if state.has_selection {
         entries.insert(
-            3,
+            4.min(entries.len()),
             Entry {
                 id: "terminal:quote-selection".into(),
                 label: rust_i18n::t!("terminal.quote_selection").to_string(),
@@ -686,6 +697,7 @@ mod tests {
             Command::ToggleTerminalSplit,
             Command::FindTerminal,
             Command::CopyTerminalOutput,
+            Command::CopyTerminalContext,
             Command::QuoteTerminalSelection,
             Command::TerminalToLive,
             Command::CloseTerminal,
@@ -742,7 +754,9 @@ mod tests {
         });
         assert!(!entries.iter().any(|entry| matches!(
             entry.command,
-            Command::CopyTerminalOutput | Command::QuoteTerminalSelection
+            Command::CopyTerminalOutput
+                | Command::CopyTerminalContext
+                | Command::QuoteTerminalSelection
         )));
     }
 }

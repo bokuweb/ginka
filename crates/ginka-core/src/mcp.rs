@@ -370,6 +370,8 @@ pub fn tools() -> Vec<Tool> {
                     "since_checkpoint": {"type": "string"},
                     "turn_checkpoint": {"type": "string", "description": "Only what the completed turn ending at this checkpoint changed"},
                     "commit": {"type": "string", "description": "What one commit did, by the id ginka_history gives"},
+                    "branch": {"type": "boolean", "description": "Everything the branch did since it left its base: its commits and uncommitted work"},
+                    "base": {"type": "string", "description": "With `branch`, the base branch; the project's default branch when omitted"},
                     "context_lines": {"type": "integer", "minimum": 0, "maximum": 25, "description": "Unchanged lines around each edit; defaults to 3"},
                 },
                 "required": ["workspace"],
@@ -527,6 +529,20 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_fix_commit",
+            description: "Hand a commit that git or its hooks refused to an agent to fix: `output` is what the refusal said, `message` the commit message. The staged files are added by the daemon. Without `agent`, the workspace's latest conversation takes it.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "output": {"type": "string"},
+                    "message": {"type": "string"},
+                    "agent": {"type": "string"},
+                },
+                "required": ["workspace", "output"],
+            }),
+        },
+        Tool {
             name: "ginka_resolve_conflicts",
             description: "Hand a workspace's conflicts — a merge, rebase or cherry-pick that stopped on them — to an agent to resolve and finish. Without `agent`, the workspace's latest conversation takes it as a follow-up.",
             schema: json!({
@@ -631,10 +647,10 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_push",
-            description: "Push a workspace branch, setting its upstream on the first push.",
+            description: "Push a workspace branch, setting its upstream on the first push. `force_with_lease` replaces rewritten history (after an amend or rebase) only if the remote is still what was last fetched; never use it to get past a rejected plain push you do not understand.",
             schema: json!({
                 "type": "object",
-                "properties": {"workspace": workspace},
+                "properties": {"workspace": workspace, "force_with_lease": {"type": "boolean"}},
                 "required": ["workspace"],
             }),
         },
@@ -1037,6 +1053,9 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 })
                 .transpose()?,
             source: match maybe("since_checkpoint") {
+                _ if flag("branch") => ginka_protocol::model::ChangeSource::Branch {
+                    base: maybe("base"),
+                },
                 _ if maybe("commit").is_some() => ginka_protocol::model::ChangeSource::Commit {
                     commit: maybe("commit").unwrap_or_default(),
                 },
@@ -1113,6 +1132,12 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             path: text("path")?,
             header: text("header")?,
         },
+        "ginka_fix_commit" => Request::FixCommitFailure {
+            workspace: WorkspaceId(text("workspace")?),
+            message: maybe("message").unwrap_or_default(),
+            output: text("output")?,
+            agent: maybe("agent"),
+        },
         "ginka_resolve_conflicts" => Request::ResolveConflicts {
             workspace: WorkspaceId(text("workspace")?),
             agent: maybe("agent"),
@@ -1173,6 +1198,7 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         },
         "ginka_push" => Request::Push {
             workspace: WorkspaceId(text("workspace")?),
+            force_with_lease: flag("force_with_lease"),
         },
         "ginka_pull" => Request::Pull {
             workspace: WorkspaceId(text("workspace")?),
@@ -1400,6 +1426,7 @@ mod tests {
                 "via": "terminal",
                 "ticket": "t-1",
                 "title": "Remove dead code",
+                "output": "pre-commit: lint failed",
             });
             request_for(tool.name, &arguments)
                 .unwrap_or_else(|error| panic!("{}: {error}", tool.name));
@@ -1778,5 +1805,33 @@ mod tests {
                 .contains("s-me")
         );
         assert!(server_info().get("instructions").is_none());
+    }
+
+    #[test]
+    fn a_branch_diff_crosses_the_mcp_boundary_with_or_without_a_base() {
+        let own = request_for(
+            "ginka_changes",
+            &json!({"workspace": "comet/a", "branch": true}),
+        )
+        .unwrap();
+        assert!(matches!(
+            own,
+            Request::WorkspaceChanges {
+                source: ginka_protocol::model::ChangeSource::Branch { base: None },
+                ..
+            }
+        ));
+        let named = request_for(
+            "ginka_changes",
+            &json!({"workspace": "comet/a", "branch": true, "base": "release"}),
+        )
+        .unwrap();
+        assert!(matches!(
+            named,
+            Request::WorkspaceChanges {
+                source: ginka_protocol::model::ChangeSource::Branch { base: Some(base) },
+                ..
+            } if base == "release"
+        ));
     }
 }

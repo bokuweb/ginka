@@ -181,6 +181,16 @@ enum Command {
         /// Show what one commit did, by the id `history` prints.
         #[arg(long, conflicts_with_all = ["since", "turn", "staged", "unstaged"])]
         commit: Option<String>,
+        /// Show everything the branch did since it left BASE — its commits
+        /// and uncommitted work. Without BASE, the project's default branch.
+        #[arg(
+            long,
+            value_name = "BASE",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with_all = ["since", "turn", "staged", "unstaged", "commit"]
+        )]
+        branch: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
@@ -278,6 +288,10 @@ enum Command {
     Push {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
+        /// Replace rewritten history on the remote (after an amend or a
+        /// rebase), only if the remote is still what was last fetched.
+        #[arg(long)]
+        force_with_lease: bool,
     },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull {
@@ -1480,8 +1494,12 @@ fn request_for(command: Command) -> Result<Request> {
             all: !staged,
             amend,
         },
-        Command::Push { workspace } => Request::Push {
+        Command::Push {
+            workspace,
+            force_with_lease,
+        } => Request::Push {
             workspace: WorkspaceId(workspace),
+            force_with_lease,
         },
         Command::Pull { workspace } => Request::Pull {
             workspace: WorkspaceId(workspace),
@@ -1496,12 +1514,16 @@ fn request_for(command: Command) -> Result<Request> {
             since,
             turn,
             commit,
+            branch,
             context,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
             context_lines: Some(context),
             source: match (staged, unstaged, since, turn) {
+                _ if branch.is_some() => ChangeSource::Branch {
+                    base: branch.filter(|base| !base.is_empty()),
+                },
                 _ if commit.is_some() => ChangeSource::Commit {
                     commit: commit.unwrap_or_default(),
                 },

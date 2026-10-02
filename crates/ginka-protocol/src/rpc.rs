@@ -408,7 +408,15 @@ pub enum Request {
         path: String,
     },
     /// Push a workspace's branch, setting an upstream if it has none.
-    Push { workspace: WorkspaceId },
+    ///
+    /// `force_with_lease` replaces rewritten history on the remote — after
+    /// an amend or a rebase — only if the remote is still what was last
+    /// fetched. It is never what a plain push falls back to.
+    Push {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        force_with_lease: bool,
+    },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull { workspace: WorkspaceId },
     /// Bring a workspace branch level with its remote in one action: publish
@@ -620,6 +628,17 @@ pub enum Request {
         /// Which agent resolves them. Omitted, the workspace's latest
         /// conversation takes them as a follow-up (queued if it is working);
         /// named, or with no conversation yet, a new one starts on it.
+        #[serde(default)]
+        agent: Option<String>,
+    },
+    /// Hand a refused commit to an agent to fix — Orca's "Fix with AI":
+    /// `output` is what git and its hooks said (the `Commit` error), and
+    /// `message` the message it was going to use. The daemon adds the staged
+    /// files. Routed like [`Request::ResolveConflicts`].
+    FixCommitFailure {
+        workspace: WorkspaceId,
+        message: String,
+        output: String,
         #[serde(default)]
         agent: Option<String>,
     },

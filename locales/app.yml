@@ -1725,3 +1725,21 @@ board.empty:
 board.conflicted:
   en: Stopped on conflicts
   ja: コンフリクトで停止中
+surface.git.push_lease:
+  en: Force push…
+  ja: 強制プッシュ…
+surface.git.push_lease.confirm:
+  en: Replace the remote branch
+  ja: リモートのブランチを置き換える
+surface.git.push_lease_tooltip:
+  en: Push rewritten history (after an amend or a rebase) with --force-with-lease. It is refused if someone pushed since your last fetch.
+  ja: amend や rebase で書き換えた履歴を --force-with-lease でプッシュします。最後の fetch 以降に誰かがプッシュしていれば拒否されます。
+surface.git.fix_commit:
+  en: Ask the agent to fix it
+  ja: エージェントに直させる
+surface.git.fix_commit_tooltip:
+  en: Send what git and its hooks said, the staged files and the message to this workspace's conversation, to fix without skipping the hooks
+  ja: git とフックの出力、ステージ済みのファイル、メッセージをこのワークスペースの会話に送り、フックを飛ばさずに直させます
+terminal.copy_context:
+  en: Copy terminal context (last 400 lines, scrollback included)
+  ja: ターミナルの文脈をコピー（スクロールバックを含む最後の400行）

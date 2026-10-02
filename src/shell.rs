@@ -310,6 +310,10 @@ const TERMINAL_TEXT: f32 = 11.5;
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 15.5;
 
+/// How many lines "Copy context" takes from a terminal: enough for a build
+/// or test failure and its cause, not a whole session's log.
+const TERMINAL_CONTEXT_LINES: usize = 400;
+
 /// Width of one monospace cell in the terminal grid: 0.6 of the text size,
 /// the advance of the system monospace faces.
 const TERMINAL_CELL_WIDTH: f32 = TERMINAL_TEXT * 0.6;
@@ -943,6 +947,20 @@ impl Shell {
                 }
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
+                crate::surfaces::SurfaceEvent::PushWithLease => {
+                    this.sync_git(RemoteAction::PushWithLease, cx)
+                }
+                crate::surfaces::SurfaceEvent::FixCommit { message, output } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, message, output) =
+                            (this.link.clone(), message.clone(), output.clone());
+                        this.after_row_change(
+                            async move { link.fix_commit(&workspace, message, output).await },
+                            cx,
+                        );
+                    }
+                }
                 crate::surfaces::SurfaceEvent::Sync => this.sync_git(RemoteAction::Sync, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
@@ -1478,6 +1496,11 @@ impl Shell {
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
                                 if this.terminals.feed(&terminal, &data) {
+                                    // A program's own yank (OSC 52), from
+                                    // live output only.
+                                    if let Some(text) = this.terminals.take_clipboard(&terminal) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
                                     this.refresh_terminal_search(&terminal, cx);
                                     cx.notify();
                                 }
@@ -2977,7 +3000,7 @@ impl Shell {
                     let after = match (&committed, then) {
                         (Err(_), _) | (Ok(_), CommitThen::Nothing) => None,
                         (Ok(_), CommitThen::Push) => {
-                            Some(link.push(&workspace).await.map(|_| None))
+                            Some(link.push(&workspace, false).await.map(|_| None))
                         }
                         (Ok(_), CommitThen::PullRequest) => {
                             Some(link.create_pull_request(&workspace).await.map(Some))
@@ -3013,14 +3036,20 @@ impl Shell {
             let outcome = cx
                 .background_spawn(async move {
                     match action {
-                        RemoteAction::Push => link.push(&workspace).await,
+                        RemoteAction::Push => link.push(&workspace, false).await,
+                        RemoteAction::PushWithLease => link.push(&workspace, true).await,
                         RemoteAction::Pull => link.pull(&workspace).await,
                         RemoteAction::Sync => link.sync(&workspace).await,
                     }
                 })
                 .await;
-            surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_git_sync_result(outcome.err(), cx)
+            surfaces.update(cx, |surfaces, cx| match action {
+                RemoteAction::Push | RemoteAction::PushWithLease => surfaces.set_push_result(
+                    outcome.err(),
+                    action == RemoteAction::PushWithLease,
+                    cx,
+                ),
+                _ => surfaces.set_git_sync_result(outcome.err(), cx),
             });
         })
         .detach();
@@ -4105,7 +4134,7 @@ impl Shell {
                     .await;
                 if let Some(history) = history {
                     this.update(cx, |this, cx| {
-                        this.terminals.feed(&terminal, &history);
+                        this.terminals.feed_replay(&terminal, &history);
                         cx.notify();
                     })
                     .ok();
@@ -4224,6 +4253,20 @@ impl Shell {
                 .map(|tab| tab.screen.text())
                 .filter(|text| !text.is_empty())
         }) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Copy the last [`TERMINAL_CONTEXT_LINES`] lines of the active
+    /// terminal, scrollback included — what explains the error on screen is
+    /// usually what scrolled off it.
+    fn copy_terminal_context(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.context_text(TERMINAL_CONTEXT_LINES))
+            .filter(|text| !text.is_empty())
+        {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -6977,6 +7020,7 @@ impl Shell {
                 self.open_terminal_search(window, cx);
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
+            Command::CopyTerminalContext => self.copy_terminal_context(cx),
             Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
             Command::QuoteTranscriptSelection => {
                 if let Some(selection) = selected_text {
@@ -8315,8 +8359,20 @@ impl Shell {
     }
 
     /// Copy the conversation through `after` onto another agent and show it.
-    fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
-        self.fork_from_as(after, agent, ginka_ui::handoff::ForkAction::Continue, cx);
+    fn fork_from(
+        &mut self,
+        after: u64,
+        agent: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_from_as(
+            after,
+            agent,
+            model,
+            ginka_ui::handoff::ForkAction::Continue,
+            cx,
+        );
     }
 
     /// Whether a fan-out can start from here: a project to cut worktrees in,
@@ -8914,6 +8970,7 @@ impl Shell {
         &mut self,
         after: u64,
         agent: String,
+        model: Option<String>,
         action: ginka_ui::handoff::ForkAction,
         cx: &mut Context<Self>,
     ) {
@@ -8937,7 +8994,7 @@ impl Shell {
             let result = cx
                 .background_spawn(async move {
                     let fork = requesting
-                        .fork_session(&session, after, agent)
+                        .fork_session(&session, after, agent, model)
                         .await
                         .map_err(|error| {
                             rust_i18n::t!("transcript.fork.failed", error = error).to_string()
@@ -9021,7 +9078,12 @@ impl Shell {
             .as_ref()
             .map(|row| row.agent.driver_id())
             .unwrap_or_default();
-        let targets = ginka_ui::handoff::fork_targets(&self.agents, current_agent);
+        let current_model = self.session.as_ref().and_then(|row| row.model.clone());
+        let targets = ginka_ui::handoff::model_fork_targets(
+            &self.agents,
+            current_agent,
+            current_model.as_deref(),
+        );
         let has_targets = !targets.is_empty();
         let (fork_open, fork_busy, fork_error) = self
             .forking
@@ -9048,9 +9110,11 @@ impl Shell {
                     "transcript.build",
                 ),
             ] {
-                let id = agent.id.clone();
+                let id = agent.agent.id.clone();
+                let model = agent.model.map(|model| model.id.clone());
+                let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
                 action_buttons.push(
-                    Button::new(SharedString::from(format!("{button_id}-{turn}-{id}")))
+                    Button::new(SharedString::from(format!("{button_id}-{turn}-{key}")))
                         // The toolkit draws a button's hover itself; a second
                         // one trips its debug assertion.
                         .ghost()
@@ -9063,17 +9127,19 @@ impl Shell {
                         .when(!fork_busy, |this| {
                             this.cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.fork_from_as(seq, id.clone(), action, cx)
+                                    this.fork_from_as(seq, id.clone(), model.clone(), action, cx)
                                 }))
                         })
-                        .child(rust_i18n::t!(label, agent = agent.display_name.clone()).to_string())
+                        .child(rust_i18n::t!(label, agent = agent.label()).to_string())
                         .into_any_element(),
                 );
             }
         }
-        let target_buttons = targets.into_iter().map(|agent| {
-            let id = agent.id.clone();
-            Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+        let target_buttons = targets.into_iter().map(|target| {
+            let id = target.agent.id.clone();
+            let model = target.model.map(|model| model.id.clone());
+            let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
+            Button::new(SharedString::from(format!("fork-{turn}-{key}")))
                 // The toolkit draws a button's hover itself; a second
                 // one trips its debug assertion.
                 .ghost()
@@ -9084,11 +9150,12 @@ impl Shell {
                 .text_xs()
                 .text_color(tokens.colors().text_primary)
                 .when(!fork_busy, |this| {
-                    this.cursor_pointer().on_click(
-                        cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
-                    )
+                    this.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.fork_from(seq, id.clone(), model.clone(), cx)
+                        }))
                 })
-                .child(agent.display_name.clone())
+                .child(target.label())
                 .into_any_element()
         });
         let rule = || {
@@ -14544,10 +14611,11 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
 }
 
 /// What the Git surface asks of the workspace's remote.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoteAction {
     Pull,
     Push,
+    PushWithLease,
     Sync,
 }
 

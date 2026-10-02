@@ -827,6 +827,15 @@ pub enum ChangeSource {
     /// handed to git as an argument, and anything that could be read as an
     /// option or a revision expression is refused before it gets there.
     Commit { commit: String },
+    /// Everything the branch did since it left `base` — its commits and
+    /// whatever is not committed yet — measured from their merge base, so
+    /// later commits on the base are not counted (Orca's base-branch diff).
+    /// `None` is the project's default branch. `base` must name a branch or
+    /// remote-tracking branch; anything else is refused before git runs.
+    Branch {
+        #[serde(default)]
+        base: Option<String>,
+    },
 }
 
 /// How one file changed.
