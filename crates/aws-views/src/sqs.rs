@@ -5,12 +5,12 @@ use aws_sqs::{
     RoleCredentials, SsoSession, parse_string_message_attributes,
 };
 use ginka_core::settings;
-use ginka_ui::Tokens;
+use ginka_ui::{Tokens, field};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_component::{Disableable, IconName, Sizable as _, h_flex, v_flex};
+use gpui_component::input::{InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::{Disableable, IconName, Selectable as _, Sizable as _, h_flex, v_flex};
 use std::path::PathBuf;
 
 /// SQS surface shared by the standalone AWS window and any other GPUI host.
@@ -1486,7 +1486,7 @@ impl Render for SqsView {
                                             .child(v_flex().gap_1().pt_2()
                                                 .child(div().text_size(px(11.)).text_color(tokens.colors().text_muted)
                                                     .child(rust_i18n::t!("aws.region").to_string()))
-                                                .child(Input::new(&self.region).disabled(self.login_busy || self.busy)))
+                                                .child(field::input(&self.region).disabled(self.login_busy || self.busy)))
                                             .child(Button::new("aws-change-login")
                                                 .label(rust_i18n::t!("aws.change_login").to_string())
                                                 .on_click(cx.listener(|this, _, _, cx| {
@@ -1536,12 +1536,13 @@ impl Render for SqsView {
                                                         )
                                                         .child(
                                                             div()
-                                                                .text_size(px(22.))
+                                                                .text_xl()
                                                                 .font_weight(FontWeight::MEDIUM)
                                                                 .child(rust_i18n::t!("aws.sign_in_title").to_string()),
                                                         )
                                                         .child(
                                                             div()
+                                                                .text_size(px(13.))
                                                                 .text_color(tokens.colors().text_secondary)
                                                                 .text_center()
                                                                 .child(if self.login_method == LoginMethod::Console {
@@ -1563,12 +1564,14 @@ impl Render for SqsView {
                                                                 .child(h_flex().w_full().gap_2()
                                                                     .child(Button::new("aws-method-console")
                                                                         .label(rust_i18n::t!("aws.console_login").to_string())
-                                                                        .when(self.login_method == LoginMethod::Console, |button| button.primary())
+                                                                        .compact()
+                                                                        .selected(self.login_method == LoginMethod::Console)
                                                                         .disabled(self.login_busy)
                                                                         .on_click(cx.listener(|this, _, _, cx| this.select_login_method(LoginMethod::Console, cx))))
                                                                     .child(Button::new("aws-method-identity-center")
                                                                         .label(rust_i18n::t!("aws.identity_center_login").to_string())
-                                                                        .when(self.login_method == LoginMethod::IdentityCenter, |button| button.primary())
+                                                                        .compact()
+                                                                        .selected(self.login_method == LoginMethod::IdentityCenter)
                                                                         .disabled(self.login_busy)
                                                                         .on_click(cx.listener(|this, _, _, cx| this.select_login_method(LoginMethod::IdentityCenter, cx)))))
                                                                 .when(self.login_method == LoginMethod::Console, |form| form.child(
@@ -1578,7 +1581,7 @@ impl Render for SqsView {
                                                                         .child(v_flex().gap_1()
                                                                             .child(div().text_size(px(11.)).text_color(tokens.colors().text_muted)
                                                                                 .child(rust_i18n::t!("aws.region").to_string()))
-                                                                            .child(Input::new(&self.region).disabled(self.login_busy || self.busy)))
+                                                                            .child(field::input(&self.region).disabled(self.login_busy || self.busy)))
                                                                 ))
                                                                 .when(self.login_method == LoginMethod::IdentityCenter, |form| form.child(
                                                                     v_flex().w_full().gap_3().child(
@@ -1586,7 +1589,7 @@ impl Render for SqsView {
                                                                         .gap_1()
                                                                         .child(div().text_size(px(11.)).text_color(tokens.colors().text_muted)
                                                                             .child(rust_i18n::t!("aws.start_url").to_string()))
-                                                                        .child(Input::new(&self.start_url).disabled(self.login_busy || self.busy)),
+                                                                        .child(field::input(&self.start_url).disabled(self.login_busy || self.busy)),
                                                                 )
                                                                 .child(
                                                                     h_flex()
@@ -1595,11 +1598,11 @@ impl Render for SqsView {
                                                                         .child(v_flex().flex_1().min_w_0().gap_1()
                                                                             .child(div().text_size(px(11.)).text_color(tokens.colors().text_muted)
                                                                                 .child(rust_i18n::t!("aws.sso_region").to_string()))
-                                                                            .child(Input::new(&self.sso_region).disabled(self.login_busy || self.busy)))
+                                                                            .child(field::input(&self.sso_region).disabled(self.login_busy || self.busy)))
                                                                         .child(v_flex().flex_1().min_w_0().gap_1()
                                                                             .child(div().text_size(px(11.)).text_color(tokens.colors().text_muted)
                                                                                 .child(rust_i18n::t!("aws.region").to_string()))
-                                                                            .child(Input::new(&self.region).disabled(self.login_busy || self.busy))),
+                                                                            .child(field::input(&self.region).disabled(self.login_busy || self.busy))),
                                                                 )
                                                                 .when(self.session.is_none(), |form| form.child(
                                                                     v_flex()
@@ -1615,7 +1618,8 @@ impl Render for SqsView {
                                                                                 .child(
                                                                                     Button::new("aws-login-pkce")
                                                                                         .label(rust_i18n::t!("aws.login_pkce").to_string())
-                                                                                        .when(self.auth_flow == AuthFlow::Pkce, |button| button.primary())
+                                                                                        .compact()
+                                                                                        .selected(self.auth_flow == AuthFlow::Pkce)
                                                                                         .disabled(self.login_busy)
                                                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                                                             this.auth_flow = AuthFlow::Pkce;
@@ -1625,7 +1629,8 @@ impl Render for SqsView {
                                                                                 .child(
                                                                                     Button::new("aws-login-device")
                                                                                         .label(rust_i18n::t!("aws.login_device").to_string())
-                                                                                        .when(self.auth_flow == AuthFlow::Device, |button| button.primary())
+                                                                                        .compact()
+                                                                                        .selected(self.auth_flow == AuthFlow::Device)
                                                                                         .disabled(self.login_busy)
                                                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                                                             this.auth_flow = AuthFlow::Device;
@@ -1647,6 +1652,7 @@ impl Render for SqsView {
                                                         .when(self.session.is_none(), |content| content.child(
                                                             v_flex()
                                                                 .w_full()
+                                                                .items_center()
                                                                 .gap_2()
                                                                 .child(
                                                                     Button::new("aws-login-main")
@@ -1669,6 +1675,7 @@ impl Render for SqsView {
                                                                         } else {
                                                                             rust_i18n::t!("aws.connection_settings").to_string()
                                                                         })
+                                                                        .text()
                                                                         .disabled(self.login_busy)
                                                                         .on_click(cx.listener(|this, _, _, cx| {
                                                                             this.show_connection_settings = !this.show_connection_settings;
@@ -1755,7 +1762,7 @@ impl Render for SqsView {
                                                                 .gap_2()
                                                                 .border_t_1()
                                                                 .border_color(tokens.colors().border_subtle)
-                                                                .child(Input::new(&self.queue_url))
+                                                                .child(field::input(&self.queue_url))
                                                                 .child(
                                                                     Button::new("aws-open-queue-url-sign-in")
                                                                         .label(rust_i18n::t!("aws.sqs.open_queue_url").to_string())
@@ -1790,7 +1797,7 @@ impl Render for SqsView {
                                 v_flex()
                                     .px_3()
                                     .py_3()
-                                    .child(Input::new(&self.queue_filter)),
+                                    .child(field::input(&self.queue_filter)),
                             )
                             .child(
                                 v_flex()
@@ -1879,7 +1886,7 @@ impl Render for SqsView {
                                             .child(
                                                 h_flex().gap_2()
                                                     .child(div().flex_1().min_w_0()
-                                                        .child(Input::new(&self.new_queue_name).disabled(self.busy)))
+                                                        .child(field::input(&self.new_queue_name).disabled(self.busy)))
                                                     .child(Button::new("aws-create-queue")
                                                         .label(rust_i18n::t!("aws.sqs.create_queue").to_string())
                                                         .disabled(self.busy)
@@ -1893,7 +1900,7 @@ impl Render for SqsView {
                                                 .child(rust_i18n::t!("aws.sqs.queue_url_placeholder").to_string()))
                                             .child(
                                                 h_flex().gap_2()
-                                                    .child(div().flex_1().min_w_0().child(Input::new(&self.queue_url)))
+                                                    .child(div().flex_1().min_w_0().child(field::input(&self.queue_url)))
                                                     .child(Button::new("aws-open-queue-url")
                                                         .label(rust_i18n::t!("aws.sqs.open_queue_url").to_string())
                                                         .disabled(self.busy)
@@ -2054,7 +2061,7 @@ impl Render for SqsView {
                                                     .child(
                                                         div()
                                                             .w(px(210.))
-                                                            .child(Input::new(&self.queue_delay).disabled(self.busy)),
+                                                            .child(field::input(&self.queue_delay).disabled(self.busy)),
                                                     )
                                                     .child(
                                                         Button::new("aws-apply-queue-delay")
@@ -2070,7 +2077,7 @@ impl Render for SqsView {
                                                     .child(
                                                         div()
                                                             .w(px(210.))
-                                                            .child(Input::new(&self.queue_visibility_timeout).disabled(self.busy)),
+                                                            .child(field::input(&self.queue_visibility_timeout).disabled(self.busy)),
                                                     )
                                                     .child(
                                                         Button::new("aws-apply-queue-visibility")
@@ -2086,7 +2093,7 @@ impl Render for SqsView {
                                                     .child(
                                                         div()
                                                             .w(px(210.))
-                                                            .child(Input::new(&self.queue_receive_wait).disabled(self.busy)),
+                                                            .child(field::input(&self.queue_receive_wait).disabled(self.busy)),
                                                     )
                                                     .child(
                                                         Button::new("aws-apply-queue-receive-wait")
@@ -2102,7 +2109,7 @@ impl Render for SqsView {
                                                     .child(
                                                         div()
                                                             .w(px(210.))
-                                                            .child(Input::new(&self.queue_message_retention).disabled(self.busy)),
+                                                            .child(field::input(&self.queue_message_retention).disabled(self.busy)),
                                                     )
                                                     .child(
                                                         Button::new("aws-apply-queue-message-retention")
@@ -2226,7 +2233,7 @@ impl Render for SqsView {
                                                                     .to_string(),
                                                             ),
                                                         )
-                                                        .child(Input::new(&self.send_delay))
+                                                        .child(field::input(&self.send_delay))
                                                     })
                                                     .when(is_fifo, |form| {
                                                         form.child(
@@ -2235,7 +2242,7 @@ impl Render for SqsView {
                                                                     .to_string(),
                                                             ),
                                                         )
-                                                        .child(Input::new(&self.group_id))
+                                                        .child(field::input(&self.group_id))
                                                         .child(
                                                             div().child(
                                                                 rust_i18n::t!(
@@ -2244,7 +2251,7 @@ impl Render for SqsView {
                                                                 .to_string(),
                                                             ),
                                                         )
-                                                        .child(Input::new(&self.deduplication_id))
+                                                        .child(field::input(&self.deduplication_id))
                                                     })
                                                     .child(
                                                         Button::new("aws-send")
@@ -2307,7 +2314,7 @@ impl Render for SqsView {
                                                             )
                                                             .child(
                                                                 div().w(px(72.)).child(
-                                                                    Input::new(&self.receive_count)
+                                                                    field::input(&self.receive_count)
                                                                         .disabled(self.busy),
                                                                 ),
                                                             ),
@@ -2325,7 +2332,7 @@ impl Render for SqsView {
                                                             )
                                                             .child(
                                                                 div().w(px(150.)).child(
-                                                                    Input::new(
+                                                                    field::input(
                                                                         &self.receive_visibility_timeout,
                                                                     )
                                                                     .disabled(self.busy),
@@ -2358,7 +2365,7 @@ impl Render for SqsView {
                                                     )
                                                     .child(
                                                         div().w(px(150.)).child(
-                                                            Input::new(&self.message_visibility_timeout)
+                                                            field::input(&self.message_visibility_timeout)
                                                                 .disabled(self.busy),
                                                         ),
                                                     ),

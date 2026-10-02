@@ -507,7 +507,13 @@ Center: it asks for the organization's start URL, Identity Center region and
 SQS region, then offers browser PKCE or Device Authorization (PKCE initially
 selected). The chosen method and non-secret values are restored from `aws.json`
 on later launches. The connection settings control reveals both methods and
-their requirements without displacing the primary sign-in action.
+their requirements without displacing the primary sign-in action. The title
+and lead use e1's 20 px and 13 px sign-in hierarchy. The browser sign-in button
+is the sole filled action in the centred composition; connection settings is a
+quiet text button below it. Method and authorization-flow choices use compact
+selected states of the shared `gpui-component::Button`, and all single-line AWS
+fields use `ginka-ui::field` for the same thin focus border as Ginka. Disabled
+fields keep that treatment while background work runs.
 The response area shows starting
 progress, a device code when needed, the authorization link, errors, and
 assigned account and role choices. The authorization page opens when the
