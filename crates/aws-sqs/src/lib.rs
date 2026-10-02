@@ -93,6 +93,9 @@ pub enum Error {
         "queue name must be 1–80 ASCII letters, digits, hyphens or underscores; FIFO names end in .fifo"
     )]
     InvalidQueueName,
+    /// A dead-letter queue ARN cannot be resolved to an SQS queue name and owner.
+    #[error("invalid SQS queue ARN")]
+    InvalidQueueArn,
     /// SQS accepts a receive wait from zero through twenty seconds.
     #[error("receive wait must be between 0 and 20 seconds")]
     InvalidReceiveWait,
@@ -148,6 +151,10 @@ pub struct AwsCli {
 /// Queue settings and approximate counts from SQS.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueueAttributes {
+    /// ARN used by SQS to identify this queue.
+    pub queue_arn: Option<String>,
+    /// ARN of the configured dead-letter queue, when redrive is configured.
+    pub dead_letter_target_arn: Option<String>,
     /// Messages available to receive.
     pub available: u64,
     /// Messages in flight and hidden by a visibility timeout.
@@ -214,6 +221,24 @@ struct CreateQueueOutput {
 #[serde(rename_all = "PascalCase")]
 struct AttributesOutput {
     attributes: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RedrivePolicy {
+    dead_letter_target_arn: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct QueueUrlOutput {
+    queue_url: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct MoveTaskOutput {
+    task_handle: String,
 }
 
 #[derive(Deserialize)]
@@ -519,7 +544,15 @@ impl AwsCli {
             "VisibilityTimeout",
             "ReceiveMessageWaitTimeSeconds",
             "MessageRetentionPeriod",
+            "QueueArn",
+            "RedrivePolicy",
         ])?;
+        let dead_letter_target_arn = output
+            .attributes
+            .get("RedrivePolicy")
+            .map(|raw| serde_json::from_str::<RedrivePolicy>(raw))
+            .transpose()?
+            .map(|policy| policy.dead_letter_target_arn);
         let count = |key| {
             output
                 .attributes
@@ -528,6 +561,8 @@ impl AwsCli {
                 .unwrap_or(0)
         };
         Ok(QueueAttributes {
+            queue_arn: output.attributes.get("QueueArn").cloned(),
+            dead_letter_target_arn,
             available: count("ApproximateNumberOfMessages"),
             in_flight: count("ApproximateNumberOfMessagesNotVisible"),
             delayed: count("ApproximateNumberOfMessagesDelayed"),
@@ -548,6 +583,51 @@ impl AwsCli {
                 .get("MessageRetentionPeriod")
                 .and_then(|value| value.parse().ok()),
         })
+    }
+
+    /// Resolve an SQS queue ARN to its URL, including queues in another account.
+    pub fn queue_url_for_arn(&self, arn: &str) -> Result<String, Error> {
+        let parts = arn.splitn(6, ':').collect::<Vec<_>>();
+        if parts.len() != 6
+            || parts[0] != "arn"
+            || parts[1].is_empty()
+            || parts[2] != "sqs"
+            || parts[3].is_empty()
+            || parts[4].len() != 12
+            || !parts[4].bytes().all(|byte| byte.is_ascii_digit())
+            || parts[5].is_empty()
+        {
+            return Err(Error::InvalidQueueArn);
+        }
+        let output: QueueUrlOutput = self.run(&[
+            "sqs",
+            "get-queue-url",
+            "--queue-name",
+            parts[5],
+            "--queue-owner-aws-account-id",
+            parts[4],
+        ])?;
+        Ok(output.queue_url)
+    }
+
+    /// Start an asynchronous SQS move task from a DLQ to the specified queue.
+    /// SQS moves all available messages in the DLQ, so callers must confirm the destination.
+    pub fn start_message_move_task(
+        &self,
+        source_arn: &str,
+        destination_arn: &str,
+    ) -> Result<String, Error> {
+        required(source_arn, "DLQ ARN")?;
+        required(destination_arn, "destination queue ARN")?;
+        let output: MoveTaskOutput = self.run(&[
+            "sqs",
+            "start-message-move-task",
+            "--source-arn",
+            source_arn,
+            "--destination-arn",
+            destination_arn,
+        ])?;
+        Ok(output.task_handle)
     }
 
     /// Set the queue's default delivery delay to 0–900 seconds.
@@ -1213,6 +1293,8 @@ mod tests {
         assert_eq!(
             counts,
             QueueAttributes {
+                queue_arn: None,
+                dead_letter_target_arn: None,
                 available: 3,
                 in_flight: 2,
                 delayed: 0,
@@ -1221,6 +1303,66 @@ mod tests {
                 receive_wait_seconds: None,
                 message_retention_period: None,
             }
+        );
+    }
+
+    #[test]
+    fn reads_dead_letter_queue_from_redrive_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let attrs = cli(
+            r#"{"Attributes":{"QueueArn":"arn:aws:sqs:ap-northeast-1:123456789012:orders","RedrivePolicy":"{\"deadLetterTargetArn\":\"arn:aws:sqs:ap-northeast-1:123456789012:orders-dlq\",\"maxReceiveCount\":\"5\"}"}}"#,
+            &log,
+        )
+        .queue_attributes("url")
+        .unwrap();
+        assert_eq!(
+            attrs.queue_arn.as_deref(),
+            Some("arn:aws:sqs:ap-northeast-1:123456789012:orders")
+        );
+        assert_eq!(
+            attrs.dead_letter_target_arn.as_deref(),
+            Some("arn:aws:sqs:ap-northeast-1:123456789012:orders-dlq")
+        );
+        let args = std::fs::read_to_string(log).unwrap();
+        assert!(args.lines().any(|arg| arg == "QueueArn"));
+        assert!(args.lines().any(|arg| arg == "RedrivePolicy"));
+    }
+
+    #[test]
+    fn resolves_dead_letter_queue_url_from_arn() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let url = cli(
+            r#"{"QueueUrl":"https://sqs.ap-northeast-1.amazonaws.com/123456789012/orders-dlq"}"#,
+            &log,
+        )
+        .queue_url_for_arn("arn:aws:sqs:ap-northeast-1:123456789012:orders-dlq")
+        .unwrap();
+        assert!(url.ends_with("/orders-dlq"));
+        let args = std::fs::read_to_string(log).unwrap();
+        assert!(args.contains("get-queue-url\n--queue-name\norders-dlq\n"));
+        assert!(args.contains("--queue-owner-aws-account-id\n123456789012\n"));
+    }
+
+    #[test]
+    fn redrive_targets_the_explicit_source_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("args");
+        let handle = cli(r#"{"TaskHandle":"move-123"}"#, &log)
+            .start_message_move_task(
+                "arn:aws:sqs:ap-northeast-1:123456789012:orders-dlq",
+                "arn:aws:sqs:ap-northeast-1:123456789012:orders",
+            )
+            .unwrap();
+        assert_eq!(handle, "move-123");
+        let args = std::fs::read_to_string(log).unwrap();
+        assert!(args.contains("start-message-move-task\n"));
+        assert!(
+            args.contains("--source-arn\narn:aws:sqs:ap-northeast-1:123456789012:orders-dlq\n")
+        );
+        assert!(
+            args.contains("--destination-arn\narn:aws:sqs:ap-northeast-1:123456789012:orders\n")
         );
     }
 

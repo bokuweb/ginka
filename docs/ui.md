@@ -526,7 +526,12 @@ data. The queue list selects the detail pane.
 The pane groups its overview, queue settings, message composer and received
 messages with subtle borders and muted section labels. It shows the queue URL,
 approximate depth counters on a theme surface, current default delay, visibility timeout, receive wait and message
-retention, editors for
+retention. A configured dead-letter queue appears with its ARN and a shared
+Button that opens its detail. The DLQ detail has a compact source-queue card. That card names the
+redrive destination and requires a second click before starting a move task
+for all available DLQ messages. A back button returns to the source queue;
+the existing Receive control inspects DLQ messages without a separate flow.
+The pane also includes editors for
 the 0–900 second queue delay, 0–43,200 second default visibility timeout and
 0–20 second default receive wait, and a 60–1,209,600 second retention editor
 with a second confirmation click and expiry warning, two-step

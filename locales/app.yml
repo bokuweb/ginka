@@ -1905,6 +1905,30 @@ aws.sqs.refresh_attributes:
 aws.sqs.overview:
   en: Overview
   ja: 概要
+aws.sqs.dead_letter_queue:
+  en: Dead-letter queue
+  ja: デッドレターキュー
+aws.sqs.open_dead_letter_queue:
+  en: Open dead-letter queue
+  ja: デッドレターキューを開く
+aws.sqs.back_to_source_queue:
+  en: Back to source queue
+  ja: 元のキューに戻る
+aws.sqs.redrive_destination:
+  en: Redrive destination
+  ja: 再投入先
+aws.sqs.redrive_dead_letter_queue:
+  en: Redrive messages
+  ja: メッセージを再投入
+aws.sqs.confirm_redrive:
+  en: Confirm redrive
+  ja: 再投入を確定
+aws.sqs.redrive_warning:
+  en: SQS moves every available message in this dead-letter queue to the destination, including messages from other source queues. Confirm the destination before continuing.
+  ja: このデッドレターキュー内の受信可能な全メッセージを再投入先へ移動します。他の元キューから来たメッセージも含まれます。再投入先を確認してください。
+aws.sqs.redrive_started:
+  en: Redrive task started. Refresh both queues to check progress.
+  ja: 再投入タスクを開始しました。両方のキューを更新して進行状況を確認してください。
 aws.sqs.available:
   en: Available
   ja: 受信可能

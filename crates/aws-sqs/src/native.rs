@@ -387,11 +387,19 @@ impl NativeSqs {
                 }
                 ("CreateQueue", body)
             }
+            "get-queue-url" => (
+                "GetQueueUrl",
+                json!({"QueueName": value("--queue-name")?, "QueueOwnerAWSAccountId": value("--queue-owner-aws-account-id")?}),
+            ),
+            "start-message-move-task" => (
+                "StartMessageMoveTask",
+                json!({"SourceArn": value("--source-arn")?, "DestinationArn": value("--destination-arn")?}),
+            ),
             "purge-queue" => ("PurgeQueue", json!({"QueueUrl": value("--queue-url")?})),
             "delete-queue" => ("DeleteQueue", json!({"QueueUrl": value("--queue-url")?})),
             "get-queue-attributes" => (
                 "GetQueueAttributes",
-                json!({"QueueUrl": value("--queue-url")?, "AttributeNames": ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed", "DelaySeconds", "VisibilityTimeout", "ReceiveMessageWaitTimeSeconds", "MessageRetentionPeriod"]}),
+                json!({"QueueUrl": value("--queue-url")?, "AttributeNames": ["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed", "DelaySeconds", "VisibilityTimeout", "ReceiveMessageWaitTimeSeconds", "MessageRetentionPeriod", "QueueArn", "RedrivePolicy"]}),
             ),
             "set-queue-attributes" => {
                 let (name, val) = value("--attributes")?

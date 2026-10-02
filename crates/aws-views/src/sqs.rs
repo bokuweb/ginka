@@ -73,6 +73,16 @@ struct QueueState {
     pending_delete: Option<String>,
     pending_queue_action: Option<QueueAction>,
     pending_message_retention: Option<u32>,
+    dlq_source: Option<DlqSource>,
+    pending_redrive: bool,
+}
+
+#[derive(Clone)]
+struct DlqSource {
+    queue_url: String,
+    queue_arn: String,
+    dead_letter_arn: String,
+    dead_letter_url: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -712,6 +722,8 @@ impl SqsView {
         self.queue_state.attributes = None;
         self.queue_state.pending_queue_action = None;
         self.queue_state.pending_message_retention = None;
+        self.queue_state.dlq_source = None;
+        self.queue_state.pending_redrive = false;
         self.clear_queue_delay = Some(self.queue_delay.read(cx).value().to_string());
         self.clear_queue_visibility_timeout =
             Some(self.queue_visibility_timeout.read(cx).value().to_string());
@@ -789,6 +801,99 @@ impl SqsView {
                     Ok(attributes) => {
                         this.queue_state.attributes = Some(attributes);
                         this.status = None;
+                    }
+                    Err(error) => this.status = Some((error.to_string(), true)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_dead_letter_queue(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(queue_url) = self.queue_state.selected.clone() else {
+            return;
+        };
+        let Some(attributes) = self.queue_state.attributes.as_ref() else {
+            return;
+        };
+        let (Some(queue_arn), Some(dead_letter_arn)) = (
+            attributes.queue_arn.clone(),
+            attributes.dead_letter_target_arn.clone(),
+        ) else {
+            return;
+        };
+        self.busy = true;
+        self.status = None;
+        let client = self.client(cx);
+        cx.spawn(async move |this, cx| {
+            let arn = dead_letter_arn.clone();
+            let result = cx
+                .background_spawn(async move {
+                    smol::unblock(move || client.queue_url_for_arn(&arn)).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(dead_letter_url) => {
+                        this.select(dead_letter_url.clone(), cx);
+                        this.queue_state.dlq_source = Some(DlqSource {
+                            queue_url,
+                            queue_arn,
+                            dead_letter_arn,
+                            dead_letter_url,
+                        });
+                    }
+                    Err(error) => this.status = Some((error.to_string(), true)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn redrive_dead_letter_queue(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        let Some(source) = self.queue_state.dlq_source.clone() else {
+            return;
+        };
+        if self.queue_state.selected.as_deref() != Some(source.dead_letter_url.as_str()) {
+            return;
+        }
+        if !self.queue_state.pending_redrive {
+            self.queue_state.pending_redrive = true;
+            cx.notify();
+            return;
+        }
+        self.queue_state.pending_redrive = false;
+        self.busy = true;
+        self.status = None;
+        let client = self.client(cx);
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_spawn(async move {
+                    smol::unblock(move || {
+                        client.start_message_move_task(&source.dead_letter_arn, &source.queue_arn)
+                    })
+                    .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                match result {
+                    Ok(_) => {
+                        this.queue_state.messages.clear();
+                        this.queue_state.attributes = None;
+                        this.status =
+                            Some((rust_i18n::t!("aws.sqs.redrive_started").to_string(), false));
                     }
                     Err(error) => this.status = Some((error.to_string(), true)),
                 }
@@ -1388,6 +1493,8 @@ impl Render for SqsView {
         let selected = self.queue_state.selected.clone();
         let pending_delete = self.queue_state.pending_delete.clone();
         let pending_queue_action = self.queue_state.pending_queue_action;
+        let dlq_source = self.queue_state.dlq_source.clone();
+        let pending_redrive = self.queue_state.pending_redrive;
         let queue_filter = self.queue_filter.read(cx).value().trim().to_lowercase();
         let matching_queues = self
             .queue_state
@@ -2042,8 +2149,61 @@ impl Render for SqsView {
                                                             seconds
                                                         ))
                                                     })
+                                                    .when_some(attrs.dead_letter_target_arn.as_ref(), |detail, arn| {
+                                                        detail.child(
+                                                            v_flex()
+                                                                .gap_2()
+                                                                .child(div().text_color(tokens.colors().text_muted)
+                                                                    .child(format!("{}: {}", rust_i18n::t!("aws.sqs.dead_letter_queue"), arn)))
+                                                                .child(Button::new("aws-open-dlq")
+                                                                    .label(rust_i18n::t!("aws.sqs.open_dead_letter_queue").to_string())
+                                                                    .disabled(self.busy || attrs.queue_arn.is_none())
+                                                                    .on_click(cx.listener(|this, _, _, cx| this.open_dead_letter_queue(cx)))),
+                                                        )
+                                                    })
                                                 },
                                             )
+                                            .when_some(dlq_source.clone(), |detail, source| {
+                                                let original_queue = source.queue_url.clone();
+                                                detail.child(
+                                                    v_flex()
+                                                        .gap_2()
+                                                        .p_3()
+                                                        .rounded(px(tokens.radius.card))
+                                                        .bg(tokens.colors().bg_surface)
+                                                        .child(format!("{}: {}", rust_i18n::t!("aws.sqs.redrive_destination"), queue_name(&source.queue_url)))
+                                                        .child(
+                                                            h_flex()
+                                                                .gap_2()
+                                                                .child(Button::new("aws-back-from-dlq")
+                                                                    .label(rust_i18n::t!("aws.sqs.back_to_source_queue").to_string())
+                                                                    .disabled(self.busy)
+                                                                    .on_click(cx.listener(move |this, _, _, cx| this.select(original_queue.clone(), cx))))
+                                                                .child(Button::new("aws-redrive-dlq")
+                                                                    .label(if pending_redrive {
+                                                                        rust_i18n::t!("aws.sqs.confirm_redrive").to_string()
+                                                                    } else {
+                                                                        rust_i18n::t!("aws.sqs.redrive_dead_letter_queue").to_string()
+                                                                    })
+                                                                    .disabled(self.busy)
+                                                                    .on_click(cx.listener(|this, _, _, cx| this.redrive_dead_letter_queue(cx)))),
+                                                        )
+                                                        .when(pending_redrive, |card| {
+                                                            card.child(
+                                                                v_flex()
+                                                                    .gap_2()
+                                                                    .child(div().text_color(tokens.colors().text_muted)
+                                                                        .child(rust_i18n::t!("aws.sqs.redrive_warning").to_string()))
+                                                                    .child(Button::new("aws-cancel-redrive")
+                                                                        .label(rust_i18n::t!("aws.sqs.cancel_queue_action").to_string())
+                                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                                            this.queue_state.pending_redrive = false;
+                                                                            cx.notify();
+                                                                        }))),
+                                                            )
+                                                        }),
+                                                )
+                                            })
                                             .child(
                                                 div()
                                                     .pt_3()

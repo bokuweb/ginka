@@ -51,8 +51,18 @@ with a `.fifo` suffix; new FIFO queues use content-based deduplication. Filter
 the queue list by name or URL, or paste a queue URL and open it directly when the
 identity has queue access but cannot list queues. Changing the login or region
 clears the previous queue and message data; refresh the list or open a URL for
-the new account, role, or region. FIFO queues also require a message group ID. Sending a
-message can be delayed by 0–900 seconds on standard queues; leave **Send delay**
+the new account, role, or region. FIFO queues also require a message group ID.
+When a queue has a configured dead-letter queue, its detail shows the DLQ ARN
+and an **Open dead-letter queue** button. The DLQ uses the same detail and
+**Receive** control to inspect its messages. From that DLQ detail, **Redrive
+messages** starts an asynchronous move task back to the source queue after a
+second confirmation click. The destination is shown before confirmation.
+SQS moves every available message in the DLQ, including messages from other
+sources if the DLQ is shared, so confirm the destination carefully. Refresh
+the source and DLQ details to inspect progress; a started task is not a
+completion notice.
+
+Sending a message can be delayed by 0–900 seconds on standard queues; leave **Send delay**
 blank to use the queue default. Add up to ten String message attributes as a JSON object, such as
 `{"orderId":"42"}`. Leave the attribute field blank to send none. Received
 messages show returned String and Number values and base64-encoded Binary values.
@@ -95,8 +105,11 @@ The selected AWS identity needs `sqs:ListQueues` to browse and
 `sqs:DeleteMessage`, `sqs:ChangeMessageVisibility`, `sqs:PurgeQueue` and
 `sqs:DeleteQueue` as appropriate. Opening
 a URL directly does not call `ListQueues`. Native Identity Center credentials
-expire and a fresh sign-in is currently required after expiry. Console login
-uses the CLI's isolated credential cache and refresh behavior.
+need `sqs:GetQueueUrl` to open a configured DLQ and `sqs:StartMessageMoveTask`
+on the DLQ to redrive it. The destination queue must allow the move.
+Identity Center credentials expire and a fresh sign-in is currently required
+after expiry. Console login uses the CLI's isolated credential cache and refresh
+behavior.
 
 The login choices follow the documented behavior of [AWS Toolkit for VS Code](https://docs.aws.amazon.com/toolkit-for-vscode/latest/userguide/connect.html),
 [AWS Toolkit for JetBrains](https://docs.aws.amazon.com/toolkit-for-jetbrains/latest/userguide/account-connect.html),
