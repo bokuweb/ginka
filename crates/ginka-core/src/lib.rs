@@ -19,6 +19,7 @@ pub mod commit;
 pub mod composer;
 pub mod conflicts;
 pub mod connector;
+pub mod conversation_commands;
 pub mod crash;
 pub mod cron;
 pub mod daemon;

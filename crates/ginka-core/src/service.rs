@@ -2118,6 +2118,53 @@ impl Service {
         access_mode: AccessMode,
         origin: Option<SessionOrigin>,
     ) -> Result<Response, RpcError> {
+        use crate::conversation_commands::Command;
+        let goal = match crate::conversation_commands::parse(&prompt) {
+            Some(Command::Goal(objective)) if !objective.is_empty() => Some(objective.to_owned()),
+            Some(Command::Side(_) | Command::Btw(_)) => {
+                return Err(RpcError::failed(
+                    "/side and /btw need an existing conversation",
+                ));
+            }
+            Some(Command::ClearGoal) => {
+                return Err(RpcError::failed("/goal done needs an existing goal"));
+            }
+            Some(Command::Goal(_)) => return Err(RpcError::failed("/goal needs an objective")),
+            None => None,
+        };
+        let prompt = goal.clone().unwrap_or(prompt);
+        let preamble = goal.as_ref().map(|objective| goal_preamble(objective));
+        self.start_session_with_context(
+            workspace,
+            agent,
+            prompt,
+            model,
+            reasoning_effort,
+            service_tier,
+            account,
+            access_mode,
+            origin,
+            preamble,
+            goal,
+        )
+    }
+
+    /// Start a fresh vendor thread with optional context kept outside its transcript.
+    #[allow(clippy::too_many_arguments)]
+    fn start_session_with_context(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: &str,
+        prompt: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        service_tier: Option<String>,
+        account: Option<ginka_protocol::AccountId>,
+        access_mode: AccessMode,
+        origin: Option<SessionOrigin>,
+        preamble: Option<String>,
+        goal: Option<String>,
+    ) -> Result<Response, RpcError> {
         let worktree = self.worktree(&workspace)?;
         let driver = self.driver(agent)?;
         let account = crate::account::resolve(&self.settings, driver.id(), account.as_ref())
@@ -2152,6 +2199,10 @@ impl Service {
             updated_at: now,
         };
         session::insert(&self.conn(), &session).map_err(failed)?;
+        if let Some(objective) = goal {
+            crate::conversation_commands::set_goal(&self.conn(), &session.id, Some(&objective))
+                .map_err(failed)?;
+        }
         self.events.emit(DaemonEvent::SessionStarted {
             session: Box::new(session.clone()),
         });
@@ -2160,6 +2211,7 @@ impl Service {
         // reaches it as a path on this host (§3.3 N6). The transcript keeps
         // the reference, so the window can still draw the attachment.
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&prompt))
+            .with_preamble(preamble)
             .with_model(model)
             .with_reasoning_effort(reasoning_effort)
             .with_service_tier(service_tier)
@@ -2283,6 +2335,12 @@ impl Service {
                 session::close_origin(&tx, &original.id).map_err(failed)?;
             }
             session::insert(&tx, &replacement).map_err(failed)?;
+            if let Some(objective) =
+                crate::conversation_commands::goal(&tx, &original.id).map_err(failed)?
+            {
+                crate::conversation_commands::set_goal(&tx, &replacement.id, Some(&objective))
+                    .map_err(failed)?;
+            }
             session::copy_transcript(&tx, &original.id, &replacement.id, None).map_err(failed)?;
             let carried = session::transcript(&tx, &replacement.id, None, None).map_err(failed)?;
             let digest =
@@ -2389,6 +2447,12 @@ impl Service {
             let conn = self.conn();
             session::insert(&conn, &fork).map_err(failed)?;
             session::copy_transcript(&conn, id, &fork.id, after).map_err(failed)?;
+            if let Some(objective) =
+                crate::conversation_commands::goal(&conn, id).map_err(failed)?
+            {
+                crate::conversation_commands::set_goal(&conn, &fork.id, Some(&objective))
+                    .map_err(failed)?;
+            }
             if moved {
                 let carried = session::transcript(&conn, &fork.id, None, None).map_err(failed)?;
                 let digest = crate::handoff::digest(
@@ -2547,16 +2611,120 @@ impl Service {
 
     /// Send a follow-up to a session, queued if its agent is still working.
     fn send_message(&mut self, id: &SessionId, text: String) -> Result<Response, RpcError> {
+        use crate::conversation_commands::{self as conversation, Command};
         let stored = self.session(id)?;
+        let command = conversation::parse(&text);
+        match command {
+            Some(Command::ClearGoal) => {
+                conversation::set_goal(&self.conn(), id, None).map_err(failed)?;
+                return Ok(Response::Ack);
+            }
+            Some(Command::Goal(objective)) => {
+                if objective.is_empty() {
+                    return Err(RpcError::failed("/goal needs an objective"));
+                }
+                conversation::set_goal(&self.conn(), id, Some(objective)).map_err(failed)?;
+                return self.send_plain_message(id, objective.to_owned(), stored);
+            }
+            Some(Command::Side(question) | Command::Btw(question)) => {
+                let is_btw = matches!(command, Some(Command::Btw(_)));
+                if question.is_empty() && is_btw {
+                    return Err(RpcError::failed("/btw needs a question"));
+                }
+                let entries = session::transcript(&self.conn(), id, None, None).map_err(failed)?;
+                let digest =
+                    crate::handoff::digest(&entries, &stored.agent, crate::handoff::DEFAULT_BUDGET);
+                let instruction = if is_btw {
+                    "Answer this brief question using the main conversation as context. Do not change files or carry your answer back into the main conversation."
+                } else {
+                    "This is a connected side conversation. Use the main conversation as context, but keep this conversation's messages separate."
+                };
+                let preamble = format!("{instruction}\n\n{digest}");
+                if question.is_empty() {
+                    let now = now();
+                    let side = Session {
+                        id: SessionId(uuid::Uuid::new_v4().simple().to_string()),
+                        workspace: stored.workspace.clone(),
+                        agent: stored.agent.clone(),
+                        account: stored.account.clone(),
+                        model: stored.model.clone(),
+                        reasoning_effort: stored.reasoning_effort.clone(),
+                        service_tier: stored.service_tier.clone(),
+                        state: SessionState::Idle,
+                        title: Some("Side chat".into()),
+                        summary: None,
+                        vendor_session_id: None,
+                        access_mode: stored.access_mode,
+                        origin: None,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    let conn = self.conn();
+                    session::insert(&conn, &side).map_err(failed)?;
+                    session::set_handoff(&conn, &side.id, &preamble).map_err(failed)?;
+                    conversation::link_side(&conn, &side.id, id, "side").map_err(failed)?;
+                    self.events.emit(DaemonEvent::SessionStarted {
+                        session: Box::new(side.clone()),
+                    });
+                    return Ok(Response::Session { session: side });
+                }
+                let result = self.start_session_with_context(
+                    stored.workspace.clone(),
+                    &stored.agent,
+                    question.to_owned(),
+                    stored.model.clone(),
+                    stored.reasoning_effort.clone(),
+                    stored.service_tier.clone(),
+                    Some(stored.account.clone()),
+                    if is_btw {
+                        AccessMode::ReadOnly
+                    } else {
+                        stored.access_mode
+                    },
+                    None,
+                    Some(preamble),
+                    None,
+                )?;
+                if let Response::Session { session } = &result {
+                    conversation::link_side(
+                        &self.conn(),
+                        &session.id,
+                        id,
+                        if is_btw { "btw" } else { "side" },
+                    )
+                    .map_err(failed)?;
+                }
+                return Ok(result);
+            }
+            None => {}
+        }
+        self.send_plain_message(id, text, stored)
+    }
+
+    /// Send ordinary text after any Ginka-owned command has been handled.
+    fn send_plain_message(
+        &mut self,
+        id: &SessionId,
+        text: String,
+        stored: Session,
+    ) -> Result<Response, RpcError> {
+        use crate::conversation_commands as conversation;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
         // What a conversation moved from another agent still owes it: the
         // digest rides in front of the first prompt, once, and only while
         // the agent has no thread of its own to have read it in.
-        let preamble = match stored.vendor_session_id {
+        let mut preamble = match stored.vendor_session_id {
             None => session::handoff(&self.conn(), id).map_err(failed)?,
             Some(_) => None,
         };
+        if let Some(objective) = conversation::goal(&self.conn(), id).map_err(failed)? {
+            let instruction = goal_preamble(&objective);
+            preamble = Some(match preamble {
+                Some(prior) => format!("{prior}\n\n{instruction}"),
+                None => instruction,
+            });
+        }
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone())
             .with_reasoning_effort(stored.reasoning_effort.clone())
@@ -2576,9 +2744,19 @@ impl Service {
         ) {
             spec = spec.with_env(key, value);
         }
-        self.sessions
-            .send(id.clone(), driver, spec, stored.vendor_session_id)
-            .map_err(failed)?;
+        if stored.vendor_session_id.is_none()
+            && session::transcript(&self.conn(), id, None, Some(1))
+                .map_err(failed)?
+                .is_empty()
+        {
+            self.sessions
+                .start(id.clone(), driver, spec)
+                .map_err(failed)?;
+        } else {
+            self.sessions
+                .send(id.clone(), driver, spec, stored.vendor_session_id)
+                .map_err(failed)?;
+        }
         Ok(Response::Ack)
     }
 
@@ -3567,6 +3745,12 @@ fn account_error(error: crate::account::AccountError) -> RpcError {
         crate::account::AccountError::Unknown(_) => RpcError::not_found(error.to_string()),
         other => RpcError::failed(other.to_string()),
     }
+}
+
+fn goal_preamble(objective: &str) -> String {
+    format!(
+        "The conversation has a durable goal: {objective}\nWork toward this goal on this turn. Report concrete progress and remaining work. The goal stays active until the user sends /goal done."
+    )
 }
 
 fn failed(error: impl std::fmt::Display) -> RpcError {

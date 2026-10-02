@@ -96,6 +96,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0022_note_tags",
         include_str!("../../../db/migrations/0022_note_tags.sql"),
     ),
+    (
+        "0023_conversation_commands",
+        include_str!("../../../db/migrations/0023_conversation_commands.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

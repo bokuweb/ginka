@@ -96,6 +96,8 @@ enum Picker {
     Project,
     /// Which local branch the current workspace has checked out.
     Branch,
+    /// Which conversation in the current workspace is shown.
+    Conversation,
     /// Which agent runs the next prompt.
     Agent,
     /// Which of that agent's models it runs on.
@@ -537,6 +539,8 @@ pub struct Shell {
     /// has not been sent. Neither is an error — the window opens on it, and
     /// the first prompt is what turns it into a conversation.
     session: Option<SessionRow>,
+    /// Conversations in the selected workspace, including side questions.
+    workspace_sessions: Vec<ginka_protocol::model::Session>,
     /// Every registered project, for the sidebar's headings and the
     /// composer's project chip.
     projects: Vec<ProjectRow>,
@@ -1532,6 +1536,7 @@ impl Shell {
             layout: Layout::from_settings(&settings),
             link,
             transcript: Transcript::new(),
+            workspace_sessions: Vec::new(),
             transcript_of: None,
             transcript_search: None,
             prompt_outline_open: false,
@@ -5041,8 +5046,42 @@ impl Shell {
                 Some(session) => {
                     let sending = link.clone();
                     let text = text.clone();
-                    cx.background_spawn(async move { sending.send_message(&session, text).await })
+                    let parent = session.clone();
+                    let sent = cx
+                        .background_spawn(async move { sending.send_message(&session, text).await })
                         .await;
+                    this.update(cx, |this, cx| {
+                        match sent {
+                            Ok(Some(child)) => {
+                                if this.session.as_ref().and_then(|row| row.session.as_ref())
+                                    == Some(&parent)
+                                {
+                                    if let Some(row) = this.session.as_mut() {
+                                        row.select_session(&child);
+                                    }
+                                    this.workspace_sessions.push(child.clone());
+                                    this.transcript = Transcript::new();
+                                    this.transcript_of = Some(child.id.clone());
+                                    this.transcript_search = None;
+                                    this.session_state = Some(child.state);
+                                    let link = this.link.clone();
+                                    let child_id = child.id.clone();
+                                    cx.spawn(async move |this, cx| {
+                                        pull_transcript(&this, &link, child_id, cx).await.ok();
+                                    })
+                                    .detach();
+                                    this.refresh_queue(cx);
+                                }
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                this.submitted = false;
+                                this.queue_error = Some(error);
+                            }
+                        }
+                        cx.notify();
+                    })
+                    .ok();
                 }
                 None => {
                     let workspace = row.workspace.clone();
@@ -5068,8 +5107,9 @@ impl Shell {
                         Some(session) => {
                             this.update(cx, |this, cx| {
                                 if let Some(row) = this.session.as_mut() {
-                                    row.session = Some(session.id.clone());
+                                    row.select_session(&session);
                                 }
+                                this.workspace_sessions.push(session.clone());
                                 this.transcript = Transcript::new();
                                 this.transcript_of = Some(session.id);
                                 this.transcript_search = None;
@@ -6850,6 +6890,15 @@ impl Shell {
         entries.extend(ginka_ui::palette::transcript_entries(
             self.session.is_some() && palette.selected_text.is_some(),
         ));
+        entries.extend(self.workspace_sessions.iter().map(|session| {
+            let title = session.title.as_deref().unwrap_or(&session.id.0);
+            ginka_ui::palette::Entry {
+                id: format!("conversation:{}", session.id.0),
+                label: rust_i18n::t!("palette.conversation.switch", title = title).to_string(),
+                hint: Some(session.agent.clone()),
+                command: ginka_ui::palette::Command::SwitchConversation(session.id.clone()),
+            }
+        }));
         ginka_ui::palette::filter(entries, &palette.typed)
     }
 
@@ -6967,6 +7016,7 @@ impl Shell {
                 self.sidebar
                     .update(cx, |sidebar, cx| sidebar.select_workspace(&workspace, cx));
             }
+            Command::SwitchConversation(session) => self.choose_conversation(&session, cx),
         }
         cx.notify();
     }
@@ -10174,6 +10224,21 @@ impl Shell {
                 ));
                 rows
             }
+            Picker::Conversation => self
+                .workspace_sessions
+                .iter()
+                .map(|session| {
+                    let id = session.id.clone();
+                    self.picker_row(
+                        SharedString::from(format!("conversation:{}", id.0)),
+                        session.title.clone().unwrap_or_else(|| id.0.clone()),
+                        None,
+                        self.session.as_ref().and_then(|row| row.session.as_ref()) == Some(&id),
+                        cx.listener(move |this, _, _, cx| this.choose_conversation(&id, cx)),
+                        cx,
+                    )
+                })
+                .collect(),
             Picker::Agent => self.agent_rows(cx),
             Picker::Branch => unreachable!("the searchable branch panel returns above"),
             // The provider's logins, each with its headroom or its state:
@@ -10186,12 +10251,24 @@ impl Shell {
                 .iter()
                 .map(|command| {
                     let name = command.name.clone();
+                    let description = match command.name.as_str() {
+                        "goal" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.goal.description").to_string()
+                        }
+                        "side" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.side.description").to_string()
+                        }
+                        "btw" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.btw.description").to_string()
+                        }
+                        _ => command.description.clone(),
+                    };
                     self.picker_row(
                         SharedString::from(format!("command:{}", command.name)),
                         format!("/{}", command.name),
                         Some(match &command.argument_hint {
-                            Some(hint) => format!("{hint} · {}", command.description),
-                            None => command.description.clone(),
+                            Some(hint) => format!("{hint} · {description}"),
+                            None => description,
                         }),
                         false,
                         cx.listener(move |this, _, window, cx| {
@@ -11311,6 +11388,33 @@ impl Shell {
     ) {
         self.picker = None;
         self.start_new_chat(project, window, cx);
+    }
+
+    /// Show another conversation without changing its workspace.
+    fn choose_conversation(&mut self, id: &SessionId, cx: &mut Context<Self>) {
+        let Some(session) = self
+            .workspace_sessions
+            .iter()
+            .find(|session| &session.id == id)
+        else {
+            return;
+        };
+        if let Some(row) = self.session.as_mut() {
+            row.select_session(session);
+        }
+        self.transcript = Transcript::new();
+        self.transcript_of = Some(id.clone());
+        self.transcript_search = None;
+        self.session_state = Some(session.state);
+        self.picker = None;
+        let link = self.link.clone();
+        let session_id = id.clone();
+        cx.spawn(async move |this, cx| {
+            pull_transcript(&this, &link, session_id, cx).await.ok();
+        })
+        .detach();
+        self.refresh_queue(cx);
+        cx.notify();
     }
 
     /// Open a picker, or close it if it is the one already open.
@@ -12897,6 +13001,16 @@ impl Shell {
                             .text_color(tokens.colors().text_muted),
                     ),
             )
+            .children((self.workspace_sessions.len() > 1).then(|| {
+                Button::new("conversation-chip")
+                    .ghost()
+                    .h(px(22.))
+                    .px(px(6.))
+                    .label(rust_i18n::t!("composer.conversation.pick").to_string())
+                    .on_click(
+                        cx.listener(|this, _, _, cx| this.toggle_picker(Picker::Conversation, cx)),
+                    )
+            }))
             .child(
                 h_flex()
                     .gap_1()
@@ -13650,6 +13764,7 @@ async fn pull_rows(
             )
         })
         .map_err(|_| ())?;
+    let requested_workspace = showing.clone();
     let (
         rows,
         projects,
@@ -13659,6 +13774,7 @@ async fn pull_rows(
         plans,
         usage,
         checkpoints,
+        workspace_sessions,
         changes,
         staged_changes,
         comments,
@@ -13684,6 +13800,10 @@ async fn pull_rows(
             };
             let checkpoints = match &showing {
                 Some(workspace) => listing.checkpoints(workspace).await,
+                None => Vec::new(),
+            };
+            let workspace_sessions = match &showing {
+                Some(workspace) => listing.sessions(workspace.clone()).await,
                 None => Vec::new(),
             };
             let (changes, staged_changes, comments) = match (&showing, wants_changes) {
@@ -13719,6 +13839,7 @@ async fn pull_rows(
                 plans,
                 usage,
                 checkpoints,
+                workspace_sessions,
                 changes,
                 staged_changes,
                 comments,
@@ -13737,6 +13858,9 @@ async fn pull_rows(
         this.accounts = accounts;
         this.plans = plans;
         this.checkpoints = checkpoints;
+        if this.session.as_ref().map(|row| &row.workspace) == requested_workspace.as_ref() {
+            this.workspace_sessions = workspace_sessions;
+        }
         this.surfaces.update(cx, |surfaces, cx| {
             surfaces.set_checkpoints(this.checkpoints.clone(), cx)
         });
@@ -13797,7 +13921,7 @@ async fn pull_rows(
         this.refresh_quick_commands(cx);
         this.refresh_cron_jobs(cx);
         match this.sidebar.read(cx).selected_row().cloned() {
-            Some(row) => {
+            Some(mut row) => {
                 // The row a window opens on arrives here rather than through a
                 // selection, so its own arrangement is put back here; without
                 // it, the first switch away would save the bare defaults over
@@ -13806,9 +13930,22 @@ async fn pull_rows(
                     this.session.as_ref().map(|shown| &shown.workspace) != Some(&row.workspace);
                 if arrived {
                     this.remember_workspace_view(cx);
+                    this.workspace_sessions.clear();
                 }
                 this.target_project = Some(ProjectName(row.origin.to_string()));
                 let workspace = row.workspace.clone();
+                if !arrived
+                    && let Some(selected) = this
+                        .session
+                        .as_ref()
+                        .and_then(|shown| shown.session.as_ref())
+                    && let Some(session) = this
+                        .workspace_sessions
+                        .iter()
+                        .find(|session| &session.id == selected)
+                {
+                    row.select_session(session);
+                }
                 this.session = Some(row);
                 if arrived {
                     this.restore_workspace_view(&workspace, cx);
@@ -13816,7 +13953,10 @@ async fn pull_rows(
             }
             // Nothing selected is the home screen, which is where a window
             // opens and where "new chat" leaves it.
-            None if this.sidebar.read(cx).selection().is_none() => this.session = None,
+            None if this.sidebar.read(cx).selection().is_none() => {
+                this.session = None;
+                this.workspace_sessions.clear();
+            }
             // Selected but not listed yet: a workspace this window has just
             // made, which the next refresh will name.
             None => {}

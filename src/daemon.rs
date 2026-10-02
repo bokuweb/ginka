@@ -212,6 +212,20 @@ impl DaemonLink {
         }
     }
 
+    /// List conversations in one workspace, including side conversations.
+    pub async fn sessions(&self, workspace: WorkspaceId) -> Vec<Session> {
+        match self
+            .ask(Request::ListSessions {
+                workspace: Some(workspace),
+                origin: None,
+            })
+            .await
+        {
+            Some(Response::Sessions { sessions }) => sessions,
+            _ => Vec::new(),
+        }
+    }
+
     /// Find stored transcript entries in one workspace.
     pub async fn search_sessions(
         &self,
@@ -1044,12 +1058,22 @@ impl DaemonLink {
     }
 
     /// Send a follow-up to a running session.
-    pub async fn send_message(&self, session: &SessionId, text: String) {
-        self.ask(Request::SendMessage {
-            session: session.clone(),
-            text,
-        })
-        .await;
+    pub async fn send_message(
+        &self,
+        session: &SessionId,
+        text: String,
+    ) -> Result<Option<Session>, String> {
+        match self
+            .ask_result(Request::SendMessage {
+                session: session.clone(),
+                text,
+            })
+            .await?
+        {
+            Response::Ack => Ok(None),
+            Response::Session { session } => Ok(Some(session)),
+            other => Err(format!("unexpected answer {other:?}")),
+        }
     }
 
     /// Send the fork's first message and surface a refusal to the caller.

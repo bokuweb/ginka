@@ -1,13 +1,8 @@
 //! The commands a workspace offers after `/`.
 //!
-//! Read from the filesystem, where the agents themselves keep them:
-//! `.claude/commands/**.md` in the project and the same under the user's home.
-//! A command is a markdown file whose name is the command and whose frontmatter
-//! says what it does.
-//!
-//! waku also asks each vendor's CLI for its own list, which is per-vendor and
-//! changes with their versions. The files are the part every agent agrees on
-//! and the part a user can read, so they are the part worth having first.
+//! Ginka's built-in commands take priority. Additional commands are read from
+//! `.claude/commands/**.md` in the project and under the user's home. A file's
+//! name is the command and its frontmatter says what it does.
 
 use ginka_protocol::model::{CommandScope, SlashCommand};
 use std::path::{Path, PathBuf};
@@ -18,12 +13,32 @@ use std::path::{Path, PathBuf};
 /// directory tree, not a menu.
 const MAX_DEPTH: usize = 3;
 
-/// Every command a workspace offers, project first.
+/// Every command a workspace offers, built-ins first.
 ///
-/// A project command shadows a user one of the same name: the workspace's own
-/// definition is the specific one, and specificity wins.
+/// Built-ins shadow command files, and a project file shadows a user file of
+/// the same name.
 pub fn discover(worktree: &Path, home: Option<&Path>) -> Vec<SlashCommand> {
-    let mut found: Vec<SlashCommand> = Vec::new();
+    let mut found: Vec<SlashCommand> = [
+        (
+            "goal",
+            "Keep an objective across turns; /goal done clears it",
+            "<objective|done>",
+        ),
+        ("side", "Start a connected side conversation", "[question]"),
+        (
+            "btw",
+            "Ask a brief read-only question in a separate conversation",
+            "<question>",
+        ),
+    ]
+    .into_iter()
+    .map(|(name, description, hint)| SlashCommand {
+        name: name.to_owned(),
+        description: description.to_owned(),
+        scope: CommandScope::BuiltIn,
+        argument_hint: Some(hint.to_owned()),
+    })
+    .collect();
     collect(
         &worktree.join(".claude").join("commands"),
         CommandScope::Project,
@@ -37,7 +52,7 @@ pub fn discover(worktree: &Path, home: Option<&Path>) -> Vec<SlashCommand> {
         );
     }
 
-    // Project before user, then by name, and the first of each name wins.
+    // Built-in before project before user; the first of each name wins.
     found.sort_by(|left, right| {
         left.scope
             .cmp(&right.scope)
@@ -180,11 +195,10 @@ mod tests {
         );
 
         let found = discover(&worktree, None);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "review");
-        assert_eq!(found[0].description, "Review the diff");
-        assert_eq!(found[0].argument_hint.as_deref(), Some("<path>"));
-        assert_eq!(found[0].scope, CommandScope::Project);
+        let review = found.iter().find(|c| c.name == "review").unwrap();
+        assert_eq!(review.description, "Review the diff");
+        assert_eq!(review.argument_hint.as_deref(), Some("<path>"));
+        assert_eq!(review.scope, CommandScope::Project);
     }
 
     #[test]
@@ -196,8 +210,9 @@ mod tests {
             "# Run the tests\n\nand report what failed.\n",
         );
         let found = discover(&worktree, None);
-        assert_eq!(found[0].description, "Run the tests");
-        assert_eq!(found[0].argument_hint, None);
+        let command = found.iter().find(|c| c.name == "test").unwrap();
+        assert_eq!(command.description, "Run the tests");
+        assert_eq!(command.argument_hint, None);
     }
 
     #[test]
@@ -208,7 +223,11 @@ mod tests {
             &worktree.join(".claude/commands/frontend/fix.md"),
             "Fix it\n",
         );
-        assert_eq!(discover(&worktree, None)[0].name, "frontend/fix");
+        assert!(
+            discover(&worktree, None)
+                .iter()
+                .any(|c| c.name == "frontend/fix")
+        );
     }
 
     #[test]
@@ -224,7 +243,7 @@ mod tests {
 
         let found = discover(&worktree, Some(&home));
         let names: Vec<&str> = found.iter().map(|command| command.name.as_str()).collect();
-        assert_eq!(names, vec!["mine", "project"]);
+        assert_eq!(names, vec!["btw", "goal", "mine", "project", "side"]);
         assert_eq!(
             found.iter().find(|c| c.name == "mine").unwrap().scope,
             CommandScope::User
@@ -247,15 +266,19 @@ mod tests {
         );
 
         let found = discover(&worktree, Some(&home));
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].scope, CommandScope::Project);
-        assert_eq!(found[0].description, "The project's review");
+        let review = found.iter().find(|c| c.name == "review").unwrap();
+        assert_eq!(review.scope, CommandScope::Project);
+        assert_eq!(review.description, "The project's review");
     }
 
     #[test]
-    fn a_workspace_with_no_commands_offers_none_rather_than_failing() {
+    fn a_workspace_with_no_files_still_offers_builtin_commands() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(discover(&dir.path().join("nothing-here"), None).is_empty());
+        let names: Vec<_> = discover(&dir.path().join("nothing-here"), None)
+            .into_iter()
+            .map(|command| command.name)
+            .collect();
+        assert_eq!(names, ["btw", "goal", "side"]);
     }
 
     #[test]
@@ -298,7 +321,17 @@ mod tests {
         write(&worktree.join(".claude/commands/real.md"), "yes\n");
         write(&worktree.join(".claude/commands/notes.txt"), "no\n");
         let found = discover(&worktree, None);
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "real");
+        assert!(found.iter().any(|c| c.name == "real"));
+        assert!(!found.iter().any(|c| c.name == "notes"));
+    }
+
+    #[test]
+    fn builtin_commands_shadow_command_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let worktree = dir.path().join("repo");
+        write(&worktree.join(".claude/commands/goal.md"), "Replace it\n");
+        let found = discover(&worktree, None);
+        let goal = found.iter().find(|c| c.name == "goal").unwrap();
+        assert_eq!(goal.scope, CommandScope::BuiltIn);
     }
 }

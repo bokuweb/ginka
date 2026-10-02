@@ -8,8 +8,8 @@
 use crate::assets::icon;
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::{
-    AgentStatus, BranchStatus, Project, ProjectKind, PullRequest, PullRequestState, SessionState,
-    WorkspaceSummary,
+    AgentStatus, BranchStatus, Project, ProjectKind, PullRequest, PullRequestState, Session,
+    SessionState, WorkspaceSummary,
 };
 use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use gpui::SharedString;
@@ -400,6 +400,27 @@ pub fn pull_request_icon(state: PullRequestState) -> &'static str {
 }
 
 impl SessionRow {
+    /// Show one conversation in this workspace without changing its worktree metadata.
+    pub fn select_session(&mut self, session: &Session) {
+        debug_assert_eq!(self.workspace, session.workspace);
+        self.session = Some(session.id.clone());
+        self.title = session
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| title_for(&self.workspace.0))
+            .into();
+        self.account = Some(session.account.clone());
+        self.model = session.model.clone();
+        self.reasoning_effort = session.reasoning_effort.clone();
+        self.service_tier = session.service_tier.clone();
+        self.agent = Agent::from_id(&session.agent);
+        self.state = AgentState::from_session(session.state);
+        self.session_state = Some(session.state);
+    }
+
     /// Build a sidebar row from the daemon's summary of a workspace.
     ///
     /// A workspace with no session yet is still a row — that is how the user

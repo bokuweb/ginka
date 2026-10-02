@@ -308,7 +308,10 @@ active conversation. With nothing selected, the rail stands alone.
   signature rather than the filename, and every other file remains a filename
   chip. An attachment by itself is a sendable prompt; upload errors stay beside
   the chips. `@`
-  file mentions and `/` slash commands have an inline filtered menu. `↩`
+  file mentions and `/` slash commands have an inline filtered menu. Ginka's
+  `/goal` saves an objective carried into later turns, `/goal done` clears it,
+  `/side` opens a related conversation, and `/btw` opens a read-only aside.
+  Both aside commands select their new conversation after sending. `↩`
   sends, `⇧↩` is a newline; sending while busy enqueues when steering is not
   available. Those pending prompts appear as one compact card immediately
   above the composer, in dispatch order. Each row has a stable daemon-owned
@@ -332,7 +335,9 @@ active conversation. With nothing selected, the rail stands alone.
   ticket appears while the agent that raised it is still working, and a
   ticket started or dismissed from another window or `ginka tickets` leaves.
 - **Context bar** — a hairline strip under the composer: the project chip on
-  the left, branch chip on the right. The project is a chip rather than a label
+  the left, branch chip on the right. When a workspace has several conversations,
+  a conversation chip opens a picker for them; the command palette has the same
+  choices. The project is a chip rather than a label
   because it is a choice — it opens the same list the sidebar offers, plus
   *New project…* and *Work without a project*, so a chat can be aimed without
   going to the sidebar and a project can be registered from the middle of the

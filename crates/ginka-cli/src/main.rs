@@ -2357,6 +2357,7 @@ fn print(response: Response, patch: bool) {
                     "/{:<24} {:<8} {}",
                     command.name,
                     match command.scope {
+                        ginka_protocol::CommandScope::BuiltIn => "built-in",
                         ginka_protocol::CommandScope::Project => "project",
                         ginka_protocol::CommandScope::User => "user",
                     },
