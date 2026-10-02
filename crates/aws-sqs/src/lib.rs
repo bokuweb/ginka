@@ -1057,13 +1057,17 @@ mod tests {
 
     fn cli(response: &str, log: &std::path::Path) -> AwsCli {
         let script = log.with_extension("sh");
+        let pending = log.with_extension("sh.pending");
         let content = format!(
             "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf '%s' '{}'\n",
             log.display(),
             response
         );
-        std::fs::write(&script, content).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Publish the script after closing its writer; parallel CI tests can
+        // otherwise race exec with a write on Linux (ETXTBSY).
+        std::fs::write(&pending, content).unwrap();
+        std::fs::set_permissions(&pending, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::rename(&pending, &script).unwrap();
         AwsCli::new().with_executable(script)
     }
 
