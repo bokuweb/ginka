@@ -3849,3 +3849,138 @@ fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
 }
+
+#[test]
+fn a_branch_with_nothing_on_it_gets_no_written_pull_request() {
+    // The details are written off the request path, like a commit message;
+    // a branch with no commits since its base has nothing to describe, and
+    // says so through the same event a success would use.
+    let mut fixture = Fixture::new();
+    assert_eq!(
+        fixture.ask(Request::CreateGeneratedPullRequest {
+            workspace: fixture.workspace.clone(),
+            draft: true,
+            agent: Some("claude".into()),
+        }),
+        Response::Ack
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((url, error)) = fixture
+            .recorder
+            .all()
+            .into_iter()
+            .find_map(|event| match event {
+                DaemonEvent::PullRequestOpened { url, error, .. } => Some((url, error)),
+                _ => None,
+            })
+        {
+            assert_eq!(url, None);
+            let error = error.unwrap_or_default();
+            assert!(
+                error.contains("no commits") || error.contains("no branch named"),
+                "{error}"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "no answer arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn plan_runs_one_turn_read_only_and_the_next_goes_back_to_the_conversations_mode() {
+    // MonoCode's /plan: a turn to think in, without changing the mode the
+    // conversation was started with (N2 only forbids widening it).
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-plan"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "start".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    let told = spoken(&fixture.wait_for_said(&session.id, "start"));
+    assert!(told.contains("--full-auto"), "{told}");
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "/plan sketch the migration".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "sketch the migration"));
+    let planned = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(planned.contains("--sandbox read-only"), "{planned}");
+    assert!(!planned.contains("--full-auto"), "{planned}");
+    assert!(
+        planned.contains("Do not change any files"),
+        "the turn is told why it cannot write: {planned}"
+    );
+    assert!(
+        !fixture.transcript(&session.id).iter().any(
+            |entry| matches!(entry, TranscriptPayload::User { text } if text.starts_with("/plan"))
+        ),
+        "the command word is Ginka's, not part of the conversation"
+    );
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "now build it".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "now build it"));
+    let built = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(built.contains("--full-auto"), "{built}");
+    assert_eq!(
+        fixture.stored(&session.id).access_mode,
+        ginka_protocol::AccessMode::Auto
+    );
+}
+
+#[test]
+fn a_conversation_opened_with_plan_keeps_the_mode_it_was_asked_for() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-first"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "/plan the rewrite".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(session.access_mode, ginka_protocol::AccessMode::Auto);
+    let told = spoken(&fixture.wait_for_said(&session.id, "the rewrite"));
+    assert!(told.contains("--sandbox read-only"), "{told}");
+    assert!(!told.contains("--full-auto"), "{told}");
+}

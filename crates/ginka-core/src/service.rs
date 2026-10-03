@@ -1565,6 +1565,11 @@ impl Service {
                 agent,
                 staged,
             } => self.generate_commit_message(workspace, agent.as_deref(), staged),
+            Request::CreateGeneratedPullRequest {
+                workspace,
+                draft,
+                agent,
+            } => self.create_generated_pull_request(workspace, agent.as_deref(), draft),
             Request::ListBranches { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::Branches {
@@ -2122,7 +2127,19 @@ impl Service {
         origin: Option<SessionOrigin>,
     ) -> Result<Response, RpcError> {
         use crate::conversation_commands::Command;
+        // `/plan` on a new conversation: the conversation keeps the mode it
+        // was asked for, and only this first turn runs read-only.
+        let mut first_turn = None;
+        let mut prompt = prompt;
         let goal = match crate::conversation_commands::parse(&prompt) {
+            Some(Command::Plan(request)) => {
+                if request.is_empty() {
+                    return Err(RpcError::failed("/plan needs something to plan"));
+                }
+                prompt = request.to_owned();
+                first_turn = Some(AccessMode::ReadOnly);
+                None
+            }
             Some(Command::Goal(objective)) if !objective.is_empty() => Some(objective.to_owned()),
             Some(Command::Side(_) | Command::Btw(_)) => {
                 return Err(RpcError::failed(
@@ -2136,7 +2153,11 @@ impl Service {
             None => None,
         };
         let prompt = goal.clone().unwrap_or(prompt);
-        let preamble = goal.as_ref().map(|objective| goal_preamble(objective));
+        let preamble = match (&goal, first_turn) {
+            (Some(objective), _) => Some(goal_preamble(objective)),
+            (None, Some(_)) => Some(crate::conversation_commands::PLAN_INSTRUCTION.to_string()),
+            (None, None) => None,
+        };
         self.start_session_with_context(
             workspace,
             agent,
@@ -2149,6 +2170,7 @@ impl Service {
             origin,
             preamble,
             goal,
+            first_turn,
         )
     }
 
@@ -2167,6 +2189,7 @@ impl Service {
         origin: Option<SessionOrigin>,
         preamble: Option<String>,
         goal: Option<String>,
+        first_turn: Option<AccessMode>,
     ) -> Result<Response, RpcError> {
         let worktree = self.worktree(&workspace)?;
         let driver = self.driver(agent)?;
@@ -2218,7 +2241,12 @@ impl Service {
             .with_model(model)
             .with_reasoning_effort(reasoning_effort)
             .with_service_tier(service_tier)
-            .with_access_mode(access_mode)
+            // A narrower first turn (`/plan`) never widens what was asked.
+            .with_access_mode(
+                first_turn
+                    .filter(|mode| mode.is_narrower_than(access_mode))
+                    .unwrap_or(access_mode),
+            )
             .with_mcp_servers(self.mcp_servers(&worktree.path, &session.id));
         for (key, value) in crate::account::env_layer(
             &self.settings,
@@ -2629,6 +2657,20 @@ impl Service {
                 conversation::set_goal(&self.conn(), id, Some(objective)).map_err(failed)?;
                 return self.send_plain_message(id, objective.to_owned(), stored);
             }
+            Some(Command::Plan(request)) => {
+                if request.is_empty() {
+                    return Err(RpcError::failed("/plan needs something to plan"));
+                }
+                // Narrowing for one turn: the stored mode is not touched, so
+                // the next message runs as the conversation always has.
+                return self.send_turn(
+                    id,
+                    request.to_owned(),
+                    stored,
+                    Some(AccessMode::ReadOnly),
+                    Some(conversation::PLAN_INSTRUCTION),
+                );
+            }
             Some(Command::Side(question) | Command::Btw(question)) => {
                 let is_btw = matches!(command, Some(Command::Btw(_)));
                 if question.is_empty() && is_btw {
@@ -2687,6 +2729,7 @@ impl Service {
                     None,
                     Some(preamble),
                     None,
+                    None,
                 )?;
                 if let Response::Session { session } = &result {
                     conversation::link_side(
@@ -2711,6 +2754,20 @@ impl Service {
         text: String,
         stored: Session,
     ) -> Result<Response, RpcError> {
+        self.send_turn(id, text, stored, None, None)
+    }
+
+    /// Send a turn, optionally narrowed to `mode` and with `instruction`
+    /// ahead of the prompt — for this turn only. A wider mode than the
+    /// conversation's is never used: widening is the restart N2 reserves.
+    fn send_turn(
+        &mut self,
+        id: &SessionId,
+        text: String,
+        stored: Session,
+        mode: Option<AccessMode>,
+        instruction: Option<&str>,
+    ) -> Result<Response, RpcError> {
         use crate::conversation_commands as conversation;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
@@ -2728,13 +2785,24 @@ impl Service {
                 None => instruction,
             });
         }
+        if let Some(instruction) = instruction {
+            preamble = Some(match preamble {
+                Some(prior) => format!("{prior}\n\n{instruction}"),
+                None => instruction.to_string(),
+            });
+        }
+        let mode = match mode {
+            Some(narrower) if narrower.is_narrower_than(stored.access_mode) => narrower,
+            _ => stored.access_mode,
+        };
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone())
             .with_reasoning_effort(stored.reasoning_effort.clone())
             .with_service_tier(stored.service_tier.clone())
-            // The mode the conversation was started in: a resume that
-            // widened it would be the change N2 reserves for a new session.
-            .with_access_mode(stored.access_mode)
+            // The mode the conversation was started in, or a narrower one
+            // for this turn: a resume that widened it would be the change N2
+            // reserves for a new session.
+            .with_access_mode(mode)
             .with_preamble(preamble)
             .with_mcp_servers(self.mcp_servers(&worktree.path, id));
         // The same login the conversation started on: the vendor's thread
@@ -2983,6 +3051,62 @@ impl Service {
         git::restore_snapshot(&worktree.path, &checkpoint.commit).map_err(failed)?;
         self.events.emit(DaemonEvent::WorkspacesChanged {
             project: worktree.project.clone(),
+        });
+        Ok(Response::Ack)
+    }
+
+    /// Write a pull request's details on a cheap model and open it with them,
+    /// off the request path; the outcome is pushed as `PullRequestOpened`.
+    /// The agent and login are chosen as for a commit message.
+    fn create_generated_pull_request(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: Option<&str>,
+        draft: bool,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(&workspace)?;
+        let base = self.project(&worktree.project)?.default_branch;
+        let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+        let agent = agent
+            .map(str::to_string)
+            .or_else(|| latest.as_ref().map(|session| session.agent.clone()))
+            .unwrap_or_else(|| "claude".to_string());
+        let driver = self.driver(&agent)?;
+        let account = match latest.filter(|session| session.agent == driver.id()) {
+            Some(session) => session.account,
+            None => {
+                crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
+            }
+        };
+        let env = crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &account,
+            driver.home_variable(),
+        );
+        let events = self.events.clone();
+        let project = worktree.project.clone();
+        std::thread::spawn(move || {
+            let outcome = crate::pr_details::generate(driver.as_ref(), &worktree.path, &env, &base)
+                .and_then(|details| {
+                    git::create_pull_request_with(
+                        &worktree.path,
+                        draft,
+                        Some((&details.title, &details.body)),
+                    )
+                });
+            let (url, error) = match outcome {
+                Ok(url) => (Some(url), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            if url.is_some() {
+                events.emit(DaemonEvent::WorkspacesChanged { project });
+            }
+            events.emit(DaemonEvent::PullRequestOpened {
+                workspace,
+                url,
+                error,
+            });
         });
         Ok(Response::Ack)
     }

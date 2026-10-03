@@ -970,6 +970,9 @@ impl Shell {
                     this.open_turn(checkpoint.clone(), cx)
                 }
                 crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
+                crate::surfaces::SurfaceEvent::CreateGeneratedPullRequest => {
+                    this.create_generated_pull_request(cx)
+                }
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -1474,6 +1477,22 @@ impl Shell {
                         }
                         // The agent's commit message, for the box that asked
                         // for it — if it is still the workspace on screen.
+                        DaemonEvent::PullRequestOpened {
+                            workspace,
+                            url,
+                            error,
+                        } => this
+                            .update(cx, |this, cx| {
+                                if this.session.as_ref().map(|row| &row.workspace)
+                                    == Some(&workspace)
+                                {
+                                    let result = url.ok_or_else(|| error.unwrap_or_default());
+                                    this.surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_pull_request(result, cx)
+                                    });
+                                }
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
                             message,
@@ -3263,6 +3282,34 @@ impl Shell {
     }
 
     /// Push the branch and open a pull request for it (`gh pr create`).
+    /// Ask the daemon to have an agent write the pull request and open it.
+    /// Only a refusal to start comes back here; the outcome is the
+    /// `PullRequestOpened` event.
+    fn create_generated_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_pull_request(
+                    Err(rust_i18n::t!("surface.git.create_pr.no_workspace").to_string()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let started = cx
+                .background_spawn(
+                    async move { link.create_generated_pull_request(&workspace).await },
+                )
+                .await;
+            if let Err(error) = started {
+                surfaces.update(cx, |surfaces, cx| surfaces.set_pull_request(Err(error), cx));
+            }
+        })
+        .detach();
+    }
+
     fn create_pull_request(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             self.surfaces.update(cx, |surfaces, cx| {
@@ -10328,6 +10375,9 @@ impl Shell {
                         "btw" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
                             rust_i18n::t!("composer.command.btw.description").to_string()
                         }
+                        "plan" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.plan.description").to_string()
+                        }
                         _ => command.description.clone(),
                     };
                     self.picker_row(
@@ -11760,6 +11810,17 @@ impl Shell {
             (Some(headroom), _) => (Some(headroom.summary()), tokens.colors().text_secondary),
             (None, _) => (None, tokens.colors().text_secondary),
         };
+        // Near the wall, name a login with room — in words beside the
+        // number; switching stays the reader's click.
+        let note =
+            match ginka_ui::accounts::suggest_account(&self.accounts, &self.plans, account, now) {
+                Some(other) => Some(format!(
+                    "{} · {}",
+                    note.unwrap_or_default(),
+                    rust_i18n::t!("composer.account.suggest", account = other.label.clone())
+                )),
+                None => note,
+            };
         let label = account.label.clone();
 
         Some(

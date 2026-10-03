@@ -31,6 +31,9 @@ far is unreleased.
   hook refused to the agent.
 - Copy a terminal's context, scrollback included, and OSC 52 clipboard
   writes from programs in it.
+- `/plan` for one read-only planning turn; agent-written pull request
+  titles and descriptions; a suggested login with more room; a *new* mark
+  on conversations that finished out of sight.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

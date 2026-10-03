@@ -577,6 +577,9 @@ composer.command.side.description:
 composer.command.btw.description:
   en: Ask a brief read-only question in a separate conversation
   ja: 読み取り専用の短い質問を別の会話で行う
+composer.command.plan.description:
+  en: Run this turn read-only and ask for a plan; the next turn runs as before
+  ja: このターンだけ読み取り専用で計画を立てさせ、次のターンは元のモードに戻します
 composer.project.new:
   en: New project…
   ja: 新しいプロジェクト…
@@ -1743,3 +1746,15 @@ surface.git.fix_commit_tooltip:
 terminal.copy_context:
   en: Copy terminal context (last 400 lines, scrollback included)
   ja: ターミナルの文脈をコピー（スクロールバックを含む最後の400行）
+composer.account.suggest:
+  en: "%{account} has more room"
+  ja: "%{account} のほうが余裕があります"
+surface.git.create_pr_written:
+  en: Create PR, written by the agent
+  ja: エージェントが書いたPRを作成
+surface.git.create_pr_written_tooltip:
+  en: Push, then open a pull request whose title and description an agent wrote from this branch's commits and diff against the default branch
+  ja: プッシュしてから、このブランチのコミットとデフォルトブランチとの差分をもとにエージェントが書いたタイトルと説明でPRを作成します
+sidebar.unseen:
+  en: new
+  ja: 新着

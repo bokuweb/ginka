@@ -291,6 +291,9 @@ pub enum SurfaceEvent {
     OpenTurn(Checkpoint),
     /// Push the branch and open a pull request for it.
     CreatePullRequest,
+    /// Push and open a pull request whose title and description an agent
+    /// wrote from the branch's commits and diff.
+    CreateGeneratedPullRequest,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
@@ -1950,6 +1953,21 @@ impl SurfacePanel {
                         this.opening_pull_request = true;
                         this.pull_request = None;
                         cx.emit(SurfaceEvent::CreatePullRequest);
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("git-create-pr-written")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.create_pr_written").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.create_pr_written_tooltip").to_string())
+                    .disabled(self.opening_pull_request)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.opening_pull_request = true;
+                        this.pull_request = None;
+                        cx.emit(SurfaceEvent::CreateGeneratedPullRequest);
                         cx.notify();
                     })),
             )

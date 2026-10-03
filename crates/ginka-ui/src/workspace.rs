@@ -386,6 +386,9 @@ pub struct SessionRow {
     /// The latest session's own state, finer than [`SessionRow::state`]:
     /// the agents board tells a finished turn from one never started.
     pub session_state: Option<SessionState>,
+    /// When the latest session last changed, in Unix seconds — the clock
+    /// [`crate::seen::Seen`] measures "since the reader looked" by.
+    pub updated_at: Option<i64>,
 }
 
 /// The mark a pull request in `state` is drawn with: the same shapes GitHub
@@ -472,6 +475,7 @@ impl SessionRow {
                 .as_ref()
                 .map(|note| note.text.clone().into()),
             session_state: session.map(|session| session.state),
+            updated_at: session.map(|session| session.updated_at),
         }
     }
 
@@ -564,6 +568,7 @@ impl SessionRow {
             pull_request: None,
             status_note: None,
             session_state: None,
+            updated_at: None,
         }
     }
 

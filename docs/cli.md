@@ -262,6 +262,8 @@ Push a workspace's branch and open a pull request for it with `gh`, titled from 
 
 `ginka pr <WORKSPACE>`
 
+`--generate` has an agent write the title and description from the branch's commits and its diff against the default branch, instead of `gh --fill`; `--agent` picks which.
+
 ## `ginka notes`
 
 Markdown notes, kept by the daemon

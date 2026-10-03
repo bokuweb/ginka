@@ -1115,15 +1115,22 @@ pub fn is_object_name(text: &str) -> bool {
 /// open is not a failure — the reader wanted to get to it, and `gh` says where
 /// it is in its refusal — so that address is the answer too.
 pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
+    create_pull_request_with(worktree, draft, None)
+}
+
+/// [`create_pull_request`] with a title and body written beforehand (an
+/// agent's, `crate::pr_details`) instead of `--fill`.
+pub fn create_pull_request_with(
+    worktree: &Path,
+    draft: bool,
+    details: Option<(&str, &str)>,
+) -> Result<String> {
     push(worktree)?;
     let mut command = Command::new("gh");
     crate::tool_path::apply(&mut command);
     command
         .current_dir(worktree)
-        .args(["pr", "create", "--fill"]);
-    if draft {
-        command.arg("--draft");
-    }
+        .args(pr_create_args(draft, details));
     let output = command
         .output()
         .context("running gh: the GitHub CLI is what opens a pull request")?;
@@ -1136,6 +1143,24 @@ pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
         return Ok(url);
     }
     bail!("gh pr create failed: {}", complaint(&output))
+}
+
+/// The arguments `gh pr create` runs with. A written title and body go as
+/// the values of `--title` and `--body`, so text that happens to start with
+/// a dash is never read as an option; without them, `--fill`.
+pub fn pr_create_args(draft: bool, details: Option<(&str, &str)>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["pr".into(), "create".into()];
+    match details {
+        Some((title, body)) => {
+            args.extend(["--title".into(), title.to_string()]);
+            args.extend(["--body".into(), body.to_string()]);
+        }
+        None => args.push("--fill".into()),
+    }
+    if draft {
+        args.push("--draft".into());
+    }
+    args
 }
 
 /// The pull request address in what `gh` printed, if there is one.
@@ -2186,6 +2211,24 @@ prunable
                 pulled: false,
                 pushed: false
             }
+        );
+    }
+
+    #[test]
+    fn written_details_replace_fill_and_are_passed_as_separate_arguments() {
+        assert_eq!(pr_create_args(false, None), ["pr", "create", "--fill"]);
+        assert_eq!(
+            pr_create_args(true, Some(("--title is not an option", "body\n-x"))),
+            [
+                "pr",
+                "create",
+                "--title",
+                "--title is not an option",
+                "--body",
+                "body\n-x",
+                "--draft"
+            ],
+            "text that looks like a flag stays the value of the one before it"
         );
     }
 

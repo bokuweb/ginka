@@ -149,6 +149,8 @@ pub struct SessionSidebar {
     /// Whether the inbox has something unread. Known only once the GitHub
     /// client has been opened; the dot is never a guess.
     inbox_unread: bool,
+    /// Which finished conversations this window has not shown yet.
+    seen: ginka_ui::seen::Seen,
     /// Which sessions are listed, by what they are doing.
     status: ginka_ui::workspace::StatusFilter,
     /// The row whose actions are open: MonoCode's session menu, drawn under
@@ -182,6 +184,7 @@ impl SessionSidebar {
             local_paths,
             place: Place::Workspace,
             inbox_unread: false,
+            seen: ginka_ui::seen::Seen::default(),
             status: ginka_ui::workspace::StatusFilter::All,
             menu_for: None,
             project_menu_for: None,
@@ -225,7 +228,17 @@ impl SessionSidebar {
         // A row's title or state can change its height where the list is not
         // looking; the rows on screen are laid out again anyway.
         self.session_list.remeasure();
+        self.seen.observe(&rows);
         self.rows = rows;
+        // What is on screen is being read: its latest ending is seen.
+        if self.place == Place::Workspace
+            && let Some(row) = self
+                .selected
+                .as_ref()
+                .and_then(|selected| self.rows.iter().find(|row| &row.workspace == selected))
+        {
+            self.seen.mark_seen(row);
+        }
         match &self.selected {
             Some(selected) if !self.rows.iter().any(|row| &row.workspace == selected) => {
                 self.unlisted += 1;
@@ -362,6 +375,9 @@ impl SessionSidebar {
         }
         self.place = Place::Workspace;
         self.adopt_workspace(workspace.clone(), cx);
+        if let Some(row) = self.rows.iter().find(|row| &row.workspace == workspace) {
+            self.seen.mark_seen(row);
+        }
         cx.emit(SidebarEvent::Selected);
     }
 
@@ -944,6 +960,20 @@ impl SessionSidebar {
                                     .truncate()
                                     .child(row.title.clone())
                                     .into_any_element(),
+                            })
+                            .when(self.seen.is_unseen(row, self.selected.as_ref()), |this| {
+                                // A word, not a dot: "new" is not said by
+                                // colour alone (§6.4).
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .bg(tokens.colors().accent.opacity(0.18))
+                                        .text_xs()
+                                        .text_color(tokens.colors().accent)
+                                        .child(rust_i18n::t!("sidebar.unseen").to_string()),
+                                )
                             })
                             .children(self.pull_request_mark(index, row, cx))
                             .when(row.pinned, |this| {

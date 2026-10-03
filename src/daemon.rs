@@ -1446,6 +1446,21 @@ impl DaemonLink {
         }
     }
 
+    /// Have an agent write the pull request's details and open it; the
+    /// outcome arrives as `PullRequestOpened`.
+    pub async fn create_generated_pull_request(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<(), String> {
+        self.ask_result(Request::CreateGeneratedPullRequest {
+            workspace: workspace.clone(),
+            draft: false,
+            agent: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Ask the daemon one question and keep its refusal, for the callers
     /// that show one: a refused request is an answer, not a lost connection.
     /// Push the branch and open a pull request for it. The refusal is the

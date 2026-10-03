@@ -312,6 +312,14 @@ enum Command {
         /// Open it as a draft.
         #[arg(long)]
         draft: bool,
+        /// Have an agent write the title and description from the branch's
+        /// commits and diff, instead of `gh --fill`.
+        #[arg(long)]
+        generate: bool,
+        /// Which agent writes them: claude, codex. The workspace's latest
+        /// session's agent otherwise.
+        #[arg(long, requires = "generate")]
+        agent: Option<String>,
     },
     /// Markdown notes, kept by the daemon.
     #[command(subcommand)]
@@ -982,6 +990,12 @@ fn main() -> Result<()> {
             agent,
             ..
         } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        Command::Pr {
+            workspace,
+            draft,
+            generate: true,
+            agent,
+        } => pull_request_generated(&paths, &workspace, draft, agent, cli.json),
         Command::Workspace(WorkspaceCommand::Index { workspace }) => {
             workspace_index(&paths, &workspace)
         }
@@ -1539,7 +1553,9 @@ fn request_for(command: Command) -> Result<Request> {
                 _ => unreachable!("clap rejects conflicting diff sources"),
             },
         },
-        Command::Pr { workspace, draft } => Request::CreatePullRequest {
+        Command::Pr {
+            workspace, draft, ..
+        } => Request::CreatePullRequest {
             workspace: WorkspaceId(workspace),
             draft,
         },
@@ -1921,6 +1937,53 @@ fn request_for(command: Command) -> Result<Request> {
 ///
 /// The event stream is opened before the request is sent, so the answer
 /// cannot land in the gap between them.
+/// `ginka pr --generate`: ask, then wait for the pushed outcome and print
+/// the pull request's address.
+fn pull_request_generated(
+    paths: &Paths,
+    workspace: &str,
+    draft: bool,
+    agent: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let workspace = WorkspaceId(workspace.to_string());
+    let url = smol::block_on(async {
+        let client = connect(paths).await?;
+        let events = client.events();
+        client
+            .request(Request::CreateGeneratedPullRequest {
+                workspace: workspace.clone(),
+                draft,
+                agent,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        loop {
+            let event = events
+                .recv()
+                .await
+                .context("the daemon closed the connection before answering")?;
+            if let ginka_protocol::event::DaemonEvent::PullRequestOpened {
+                workspace: done,
+                url,
+                error,
+            } = event.payload
+                && done == workspace
+            {
+                break url.ok_or_else(|| {
+                    anyhow::anyhow!(error.unwrap_or_else(|| "no pull request was opened".into()))
+                });
+            }
+        }
+    })?;
+    if json {
+        println!("{}", serde_json::json!({ "url": url }));
+    } else {
+        println!("{url}");
+    }
+    Ok(())
+}
+
 fn commit_generated(
     paths: &Paths,
     workspace: &str,

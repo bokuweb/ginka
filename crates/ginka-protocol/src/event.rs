@@ -322,6 +322,15 @@ pub enum DaemonEvent {
         error: Option<String>,
     },
 
+    /// A pull request asked for with `CreateGeneratedPullRequest` was opened
+    /// — `url` — or could not be, and `error` says why. Pushed for the same
+    /// reason as `CommitMessageGenerated`.
+    PullRequestOpened {
+        workspace: WorkspaceId,
+        url: Option<String>,
+        error: Option<String>,
+    },
+
     /// A ticket was raised, started or dismissed in `workspace`. Clients
     /// re-read that workspace's tickets.
     TicketsChanged { workspace: WorkspaceId },

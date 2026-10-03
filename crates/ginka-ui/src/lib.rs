@@ -40,6 +40,7 @@ pub mod reports;
 pub mod resume;
 pub mod scheduled;
 pub mod search;
+pub mod seen;
 pub mod session_list;
 pub mod skills;
 pub mod split_diff;

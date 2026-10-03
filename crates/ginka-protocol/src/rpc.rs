@@ -568,6 +568,19 @@ pub enum Request {
         #[serde(default)]
         staged: bool,
     },
+    /// Have an agent write a pull request's title and description from the
+    /// branch's commits and its diff against the project's default branch,
+    /// then push and open it with them (Orca's AI pull request details).
+    /// Answers `Ack` at once; the result arrives as
+    /// `DaemonEvent::PullRequestOpened`. `agent` is chosen as for
+    /// `GenerateCommitMessage`.
+    CreateGeneratedPullRequest {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// The local branches of a workspace's repository, with which is checked
     /// out here and which are held by other worktrees.
     ListBranches { workspace: WorkspaceId },
