@@ -697,6 +697,19 @@ pub fn session_shortcuts(
     project: &ProjectName,
     query: &str,
 ) -> Vec<WorkspaceId> {
+    visible_sessions(rows, project, query)
+        .into_iter()
+        .take(9)
+        .collect()
+}
+
+/// Every session the list shows for `project` and `query`, in the list's
+/// order — what next/previous session steps through.
+pub fn visible_sessions(
+    rows: &[SessionRow],
+    project: &ProjectName,
+    query: &str,
+) -> Vec<WorkspaceId> {
     let mut visible = rows
         .iter()
         .filter(|row| !row.archived)
@@ -706,9 +719,29 @@ pub fn session_shortcuts(
     visible.sort_by_key(|row| row.attention_rank());
     visible
         .into_iter()
-        .take(9)
         .map(|row| row.workspace.clone())
         .collect()
+}
+
+/// The conversation before or after `current` in the list's own order —
+/// MonoCode's next/previous session — wrapping at the ends. With nothing
+/// selected, the first (or, going back, the last).
+pub fn adjacent_session(
+    visible: &[WorkspaceId],
+    current: Option<&WorkspaceId>,
+    forward: bool,
+) -> Option<WorkspaceId> {
+    if visible.is_empty() {
+        return None;
+    }
+    let count = visible.len();
+    let next = match current.and_then(|current| visible.iter().position(|id| id == current)) {
+        Some(at) if forward => (at + 1) % count,
+        Some(at) => (at + count - 1) % count,
+        None if forward => 0,
+        None => count - 1,
+    };
+    Some(visible[next].clone())
 }
 
 /// Which sessions the list shows, by what they are doing — MonoCode's
@@ -1343,5 +1376,34 @@ mod tests {
         for agent in [Agent::Claude, Agent::Codex, Agent::Gemini, Agent::OpenCode] {
             assert_eq!(Agent::from_id(agent.driver_id()), agent);
         }
+    }
+
+    #[test]
+    fn next_and_previous_session_walk_the_list_and_wrap() {
+        let ids: Vec<WorkspaceId> = ["a", "b", "c"]
+            .iter()
+            .map(|name| WorkspaceId(format!("p/{name}")))
+            .collect();
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[0]), true),
+            Some(ids[1].clone())
+        );
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[2]), true),
+            Some(ids[0].clone())
+        );
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[0]), false),
+            Some(ids[2].clone())
+        );
+        assert_eq!(adjacent_session(&ids, None, true), Some(ids[0].clone()));
+        assert_eq!(adjacent_session(&ids, None, false), Some(ids[2].clone()));
+        let gone = WorkspaceId("p/gone".into());
+        assert_eq!(
+            adjacent_session(&ids, Some(&gone), true),
+            Some(ids[0].clone()),
+            "a selection the list no longer shows starts from the top"
+        );
+        assert_eq!(adjacent_session(&[], None, true), None);
     }
 }

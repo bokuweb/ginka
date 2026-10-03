@@ -559,3 +559,5 @@ Four things are not in any library and are load-bearing for the product's identi
 ## 7. Accessibility
 
 AA contrast for all token pairs in both themes. Full keyboard traversal. Respect the system reduce-motion setting — when set, transitions become instant and the status glyph stops animating (it still changes colour and shape). Minimum hit target 28 px.
+
+Next and previous conversation are ⌥⌘↓ / ⌥⌘↑ (⇧⌥↓ / ⇧⌥↑ elsewhere), stepping through the session list as it is filtered and sorted, wrapping at the ends; the palette also offers *Close all tabs*.

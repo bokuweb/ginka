@@ -1797,3 +1797,15 @@ settings.mcp_servers.project:
 settings.mcp_servers.local:
   en: this project only
   ja: このプロジェクトのみ
+palette.session.next:
+  en: Next conversation
+  ja: 次の会話
+palette.session.previous:
+  en: Previous conversation
+  ja: 前の会話
+palette.tabs.close_all:
+  en: Close all tabs
+  ja: すべてのタブを閉じる
+sidebar.action.copy_id:
+  en: Copy conversation id
+  ja: 会話IDをコピー

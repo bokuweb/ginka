@@ -402,6 +402,26 @@ impl SessionSidebar {
         cx.emit(SidebarEvent::Selected);
     }
 
+    /// Select the conversation after (or before) the selected one in the
+    /// list as it is shown — filtered and sorted — wrapping at the ends.
+    pub fn select_adjacent(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project.clone() else {
+            return;
+        };
+        let rows: Vec<SessionRow> = self
+            .rows
+            .iter()
+            .filter(|row| self.status.admits(row.state))
+            .cloned()
+            .collect();
+        let visible = ginka_ui::workspace::visible_sessions(&rows, &project, &self.search_query);
+        if let Some(next) =
+            ginka_ui::workspace::adjacent_session(&visible, self.selected.as_ref(), forward)
+        {
+            self.select_workspace(&next, cx);
+        }
+    }
+
     /// Select one of the first nine rows currently visible in the session list.
     pub fn select_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
         let Some(project) = self.selected_project.as_ref() else {
@@ -1224,6 +1244,22 @@ impl SessionSidebar {
                 );
             }))
         });
+        // The id `ginka session …` and MCP take, for a reader driving this
+        // conversation from a terminal or another agent.
+        let copy_id = row.session.clone().map(|session| {
+            menu_item(
+                &tokens,
+                format!("copy-id:{key}"),
+                Icon::new(IconName::Copy),
+                rust_i18n::t!("sidebar.action.copy_id").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_for = None;
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(session.0.clone()));
+                cx.notify();
+            }))
+        });
         let pin = menu_item(
             &tokens,
             format!("pin:{key}"),
@@ -1285,7 +1321,11 @@ impl SessionSidebar {
         });
         floating_menu(
             &tokens,
-            resolve.into_iter().chain(rename).chain([pin, archive]),
+            resolve
+                .into_iter()
+                .chain(rename)
+                .chain(copy_id)
+                .chain([pin, archive]),
             cx.listener(|this, _, _, cx| {
                 this.menu_for = None;
                 cx.notify();

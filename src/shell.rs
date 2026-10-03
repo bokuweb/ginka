@@ -69,7 +69,10 @@ actions!(
         NewTab,
         CloseTab,
         NextTab,
-        PreviousTab
+        PreviousTab,
+        NextSession,
+        PreviousSession,
+        CloseAllTabs
     ]
 );
 
@@ -223,6 +226,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
+        // MonoCode's next/previous session, down and up the list.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-down", NextSession, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-up", PreviousSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-down", NextSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-up", PreviousSession, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -2723,6 +2735,27 @@ impl Shell {
         if let Some(index) = self.tabs.active_index() {
             self.close_tab(index, window, cx);
         }
+    }
+
+    /// Close every conversation tab and show the home screen.
+    fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.close_all() > 0 {
+            self.show_tab(None, window, cx);
+        }
+    }
+
+    fn on_close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_all_tabs(window, cx);
+    }
+
+    fn on_next_session(&mut self, _: &NextSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(true, cx));
+    }
+
+    fn on_previous_session(&mut self, _: &PreviousSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(false, cx));
     }
 
     fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -7259,6 +7292,9 @@ impl Shell {
             Command::TogglePromptOutline => {
                 self.prompt_outline_open = !self.prompt_outline_open;
             }
+            Command::NextSession => self.on_next_session(&NextSession, window, cx),
+            Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
+            Command::CloseAllTabs => self.close_all_tabs(window, cx),
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -14450,6 +14486,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_close_all_tabs))
+            .on_action(cx.listener(Self::on_next_session))
+            .on_action(cx.listener(Self::on_previous_session))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_previous_tab))
             .size_full()
