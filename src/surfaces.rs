@@ -134,7 +134,9 @@ pub struct SurfacePanel {
     ///
     /// One at a time: a review is read line by line, and two open boxes is a
     /// form, not a margin note.
-    commenting: Option<(String, Option<u32>, Entity<TextareaState>)>,
+    ///
+    /// The second line is where a shift-click range ends, when it is one.
+    commenting: Option<(String, Option<u32>, Option<u32>, Entity<TextareaState>)>,
     /// The paths that are staged for the next commit.
     ///
     /// Read separately from the changes themselves: the uncommitted diff is
@@ -298,6 +300,8 @@ pub enum SurfaceEvent {
     Comment {
         path: String,
         line: Option<u32>,
+        /// The last line of a shift-clicked range.
+        end_line: Option<u32>,
         text: String,
     },
     /// Send every waiting comment back to the agent.
@@ -2424,21 +2428,51 @@ impl SurfacePanel {
             }
         })
         .detach();
-        self.commenting = Some((path, line, state));
+        self.commenting = Some((path, line, None, state));
         cx.notify();
+    }
+
+    /// A click on a diff line: a new comment there, or — with shift held
+    /// while a comment is open on another line of the same file — that
+    /// comment stretched to cover both (Orca's multi-line comments).
+    fn click_line(
+        &mut self,
+        path: String,
+        anchor: Option<u32>,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if shift
+            && let Some(clicked) = anchor
+            && let Some((open_path, Some(start), end, _)) = self.commenting.as_mut()
+            && *open_path == path
+        {
+            let (low, high) = ginka_ui::comment_range::extend(*start, clicked);
+            *start = low;
+            *end = high;
+            cx.notify();
+            return;
+        }
+        self.comment_on(path, anchor, window, cx);
     }
 
     /// Hand a finished comment to the shell, which is the one holding the
     /// daemon.
     fn finish_comment(&mut self, text: String, cx: &mut Context<Self>) {
-        let Some((path, line, _)) = self.commenting.take() else {
+        let Some((path, line, end_line, _)) = self.commenting.take() else {
             return;
         };
         cx.notify();
         if text.is_empty() {
             return;
         }
-        cx.emit(SurfaceEvent::Comment { path, line, text });
+        cx.emit(SurfaceEvent::Comment {
+            path,
+            line,
+            end_line,
+            text,
+        });
     }
 
     /// The comments already left on a line, and the box for a new one.
@@ -2464,23 +2498,44 @@ impl SurfacePanel {
                     .bg(tokens.colors().row_hover())
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
-                    .child(comment.text.clone())
+                    .child(match (comment.line, comment.end_line) {
+                        (Some(start), Some(end)) => format!(
+                            "{} · {}",
+                            ginka_ui::comment_range::label(start, Some(end)),
+                            comment.text
+                        ),
+                        _ => comment.text.clone(),
+                    })
                     .into_any_element()
             })
             .collect();
 
-        if let Some((open_path, open_line, state)) = &self.commenting
+        if let Some((open_path, open_line, end_line, state)) = &self.commenting
             && open_path == path
             && *open_line == line
         {
             drawn.push(
-                div()
+                v_flex()
                     .w_full()
                     .px_2()
                     .py_1()
                     .ml_8()
+                    .gap_0p5()
                     .border_l_2()
                     .border_color(tokens.colors().accent)
+                    // Which lines it is about, and how to make it more.
+                    .children(open_line.map(|start| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(
+                                rust_i18n::t!(
+                                    "surface.git.comment_lines",
+                                    lines = ginka_ui::comment_range::label(start, *end_line)
+                                )
+                                .to_string(),
+                            )
+                    }))
                     .child(Textarea::new(state))
                     .into_any_element(),
             );
@@ -3147,9 +3202,17 @@ impl SurfacePanel {
                                         .gap_2()
                                         .cursor_pointer()
                                         .hover(|this| this.bg(tokens.colors().row_hover()))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.comment_on(path.clone(), anchor, window, cx)
-                                        }))
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                this.click_line(
+                                                    path.clone(),
+                                                    anchor,
+                                                    event.modifiers().shift,
+                                                    window,
+                                                    cx,
+                                                )
+                                            },
+                                        ))
                                         .font_family(mono.clone())
                                         .text_xs()
                                         .line_height(px(17.))
@@ -4686,8 +4749,8 @@ fn split_row(
             .when(line.kind == LineKind::Removed, |this| {
                 this.bg(tokens.colors().status_error.opacity(0.10))
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.comment_on(path.clone(), anchor, window, cx)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.click_line(path.clone(), anchor, event.modifiers().shift, window, cx)
             }))
             .child(
                 div()

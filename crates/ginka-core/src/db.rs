@@ -100,6 +100,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0023_conversation_commands",
         include_str!("../../../db/migrations/0023_conversation_commands.sql"),
     ),
+    (
+        "0024_review_comment_ranges",
+        include_str!("../../../db/migrations/0024_review_comment_ranges.sql"),
+    ),
+    (
+        "0025_cron_session_target",
+        include_str!("../../../db/migrations/0025_cron_session_target.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

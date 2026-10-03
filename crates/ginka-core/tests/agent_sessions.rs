@@ -2209,6 +2209,7 @@ fn a_review_goes_back_to_the_agent_as_one_message() {
             workspace: fixture.workspace.clone(),
             path: path.into(),
             line,
+            end_line: None,
             side: ginka_protocol::DiffSide::New,
             text: text.into(),
         });
@@ -3351,6 +3352,7 @@ fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
         id: None,
         project: ginka_protocol::ProjectName("comet".into()),
         workspace: Some(fixture.workspace.clone()),
+        session: None,
         name: "morning review".into(),
         schedule: "0 9 * * 1-5".into(),
         via: ginka_protocol::model::CronVia::Chat,
@@ -3983,4 +3985,89 @@ fn a_conversation_opened_with_plan_keeps_the_mode_it_was_asked_for() {
     let told = spoken(&fixture.wait_for_said(&session.id, "the rewrite"));
     assert!(told.contains("--sandbox read-only"), "{told}");
     assert!(!told.contains("--full-auto"), "{told}");
+}
+
+#[test]
+fn a_reminder_arrives_in_the_conversation_it_was_set_on() {
+    // MonoCode's session reminders: a scheduled prompt that continues an
+    // existing conversation rather than starting a new one.
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-remind"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-remind"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "deploy the service");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    let project =
+        ginka_protocol::ProjectName(fixture.workspace.0.split('/').next().unwrap().to_string());
+
+    // A shell job cannot be pointed at a conversation.
+    assert!(
+        fixture
+            .service
+            .handle(Request::SaveCronJob {
+                id: None,
+                project: project.clone(),
+                workspace: None,
+                session: Some(session.clone()),
+                name: "nonsense".into(),
+                schedule: "@hourly".into(),
+                via: ginka_protocol::model::CronVia::Terminal,
+                agent: None,
+                body: "true".into(),
+                precheck: None,
+                enabled: true,
+            })
+            .is_err()
+    );
+
+    let job = match fixture.ask(Request::SaveCronJob {
+        id: None,
+        project,
+        workspace: None,
+        session: Some(session.clone()),
+        name: "check back".into(),
+        schedule: "* * * * *".into(),
+        via: ginka_protocol::model::CronVia::Chat,
+        agent: None,
+        body: "Check whether the deploy finished.".into(),
+        precheck: None,
+        enabled: true,
+    }) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    };
+    assert_eq!(job.session.as_ref(), Some(&session));
+
+    let sessions_before = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => sessions.len(),
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture.transcript(&session).iter().any(|entry| {
+        matches!(entry, TranscriptPayload::User { text } if text == "Check whether the deploy finished.")
+    }) {
+        assert!(Instant::now() < deadline, "the reminder never arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => {
+            assert_eq!(
+                sessions.len(),
+                sessions_before,
+                "no new conversation was started"
+            )
+        }
+        other => panic!("expected sessions, got {other:?}"),
+    }
 }

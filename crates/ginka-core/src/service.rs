@@ -1395,6 +1395,7 @@ impl Service {
                 id,
                 project,
                 workspace,
+                session,
                 name,
                 schedule,
                 via,
@@ -1411,6 +1412,21 @@ impl Service {
                         "{workspace} is not a workspace of {project}"
                     )));
                 }
+                // A reminder continues a conversation of this project, on the
+                // agent that conversation already has.
+                let (workspace, agent) = match &session {
+                    Some(target) => {
+                        let stored = self.session(target)?;
+                        if stored.workspace.parts().map(|(owner, _)| owner) != Some(project.clone())
+                        {
+                            return Err(RpcError::failed(format!(
+                                "conversation {target} is not in {project}"
+                            )));
+                        }
+                        (Some(stored.workspace), Some(stored.agent))
+                    }
+                    None => (workspace, agent),
+                };
                 if let Some(agent) = &agent
                     && via == ginka_protocol::model::CronVia::Chat
                     && self.drivers.get(agent).is_none()
@@ -1420,6 +1436,7 @@ impl Service {
                 let draft = crate::cron::Draft {
                     project,
                     workspace,
+                    session,
                     name,
                     schedule,
                     via,
@@ -1655,6 +1672,7 @@ impl Service {
                 workspace,
                 path,
                 line,
+                end_line,
                 side,
                 text,
             } => {
@@ -1664,8 +1682,17 @@ impl Service {
                         "a comment with nothing in it says nothing",
                     ));
                 }
-                crate::comments::add(&self.conn(), &workspace, &path, line, side, &text, now())
-                    .map_err(failed)?;
+                crate::comments::add(
+                    &self.conn(),
+                    &workspace,
+                    &path,
+                    line,
+                    end_line,
+                    side,
+                    &text,
+                    now(),
+                )
+                .map_err(failed)?;
                 Ok(Response::Ack)
             }
             Request::ListReviewComments { workspace } => Ok(Response::ReviewComments {
@@ -3381,6 +3408,20 @@ impl Service {
         let record = |service: &Self, outcome: CronOutcome, detail: Option<&str>| {
             crate::cron::record_run(&service.conn(), job.id, now, outcome, detail)
         };
+        // A reminder goes into its conversation — queued behind a turn that
+        // is running, rather than skipped like an overlapping job: what the
+        // reader asked to be reminded of still needs saying.
+        if let Some(target) = &job.session {
+            let sent = self.handle(Request::QueueMessage {
+                session: target.clone(),
+                text: job.body.clone(),
+            });
+            let _ = match sent {
+                Ok(_) => record(self, CronOutcome::Started, Some(&target.0)),
+                Err(error) => record(self, CronOutcome::Failed, Some(&error.message)),
+            };
+            return;
+        }
         let workspace = match &job.workspace {
             Some(workspace) => Some(workspace.clone()),
             None => self.project_checkout(&job.project),

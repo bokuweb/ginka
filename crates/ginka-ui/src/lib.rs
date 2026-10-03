@@ -16,6 +16,7 @@ pub mod board;
 pub mod branches;
 pub mod browser;
 pub mod chrome;
+pub mod comment_range;
 pub mod composer;
 pub mod diff_filter;
 pub mod dock;

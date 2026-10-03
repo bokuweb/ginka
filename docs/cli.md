@@ -195,7 +195,7 @@ Show recent commits in a workspace, newest first
 
 Leave comments on a diff and send them back to the agent
 
-- `ginka review add` — Leave a comment on a file, and a line of it (`ginka review add <WORKSPACE> <PATH> <TEXT>`)
+- `ginka review add` — Leave a comment on a file, and a line of it (`ginka review add <WORKSPACE> <PATH> <TEXT>`). `--line N --end-line M` covers a range of lines
 - `ginka review list` — Every comment waiting, in reading order (`ginka review list <WORKSPACE>`)
 - `ginka review remove` — Take one comment back (`ginka review remove <COMMENT>`)
 - `ginka review send` — Send the batch to a session's agent as one message (`ginka review send <WORKSPACE> <SESSION>`)
@@ -316,7 +316,7 @@ The daemon's terminals in a workspace: open one, type into it, read what it prin
 Prompts and commands run on a cron schedule, on this machine's clock
 
 - `ginka cron list` — List scheduled jobs, with when each fires next and how it last went
-- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`). Use `--schedule <CRON>` for a recurring job or `--at <RFC3339>` for one firing with a time zone. `--precheck '<command>'` runs before a scheduled firing in the job's checkout; a non-zero exit skips it
+- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`). Use `--schedule <CRON>` for a recurring job or `--at <RFC3339>` for one firing with a time zone. `--precheck '<command>'` runs before a scheduled firing in the job's checkout; a non-zero exit skips it. `--prompt … --session <id>` sends the prompt into that existing conversation instead — a reminder, queued if it is busy
 - `ginka cron remove` — Forget a scheduled job and its history (`ginka cron remove <ID>`)
 - `ginka cron run` — Fire a job now, as its schedule would (`ginka cron run <ID>`)
 - `ginka cron runs` — A job's firings, most recent first (`ginka cron runs <ID>`)

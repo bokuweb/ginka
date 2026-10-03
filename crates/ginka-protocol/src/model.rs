@@ -617,6 +617,10 @@ pub struct ReviewComment {
     pub path: String,
     /// `None` is a comment on the file as a whole, which people write.
     pub line: Option<u32>,
+    /// The last line of a comment that covers several, after `line`;
+    /// `None` for a comment on one line or the whole file.
+    #[serde(default)]
+    pub end_line: Option<u32>,
     pub side: DiffSide,
     pub text: String,
     /// Unix seconds.
@@ -1434,6 +1438,10 @@ pub struct CronJob {
     pub id: i64,
     pub project: ProjectName,
     pub workspace: Option<WorkspaceId>,
+    /// The conversation a chat job continues, instead of starting a new
+    /// one each time — a reminder.
+    #[serde(default)]
+    pub session: Option<SessionId>,
     pub name: String,
     /// Five cron fields or `@daily` and the like on the daemon host's clock,
     /// or `@once <RFC3339 timestamp with time zone>` for one firing.

@@ -609,7 +609,8 @@ enum CronCommand {
         project: Option<String>,
     },
     /// Schedule a shell command (`--shell`) or a prompt for an agent
-    /// (`--prompt` with `--agent`).
+    /// (`--prompt` with `--agent`), or a reminder: a prompt sent into an
+    /// existing conversation (`--prompt` with `--session`).
     Add {
         project: String,
         name: String,
@@ -625,10 +626,14 @@ enum CronCommand {
         at: Option<String>,
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
-        #[arg(long, requires = "agent")]
-        prompt: Option<String>,
         #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "session")]
         agent: Option<String>,
+        /// Send the prompt into this conversation, by its id, instead of
+        /// starting a new one — a reminder. Its agent answers it.
+        #[arg(long, requires = "prompt", conflicts_with = "workspace")]
+        session: Option<String>,
         /// A workspace id; the project's own checkout when omitted.
         #[arg(long)]
         workspace: Option<String>,
@@ -952,6 +957,9 @@ enum ReviewCommand {
         /// The line it is about. Omitted, the comment is about the file.
         #[arg(long)]
         line: Option<u32>,
+        /// The last line of a range that starts at `--line`.
+        #[arg(long, requires = "line")]
+        end_line: Option<u32>,
     },
     /// Every comment waiting, in reading order.
     List { workspace: String },
@@ -1436,10 +1444,12 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             text,
             line,
+            end_line,
         }) => Request::AddReviewComment {
             workspace: WorkspaceId(workspace),
             path,
             line,
+            end_line,
             side: ginka_protocol::DiffSide::New,
             text,
         },
@@ -1663,10 +1673,14 @@ fn request_for(command: Command) -> Result<Request> {
             shell,
             prompt,
             agent,
+            session,
             workspace,
             precheck,
             disabled,
         }) => {
+            if prompt.is_some() && agent.is_none() && session.is_none() {
+                anyhow::bail!("a scheduled prompt needs --agent, or --session to continue one");
+            }
             let (via, body) = match (shell, prompt) {
                 (Some(shell), _) => (ginka_protocol::model::CronVia::Terminal, shell),
                 (None, Some(prompt)) => (ginka_protocol::model::CronVia::Chat, prompt),
@@ -1676,6 +1690,7 @@ fn request_for(command: Command) -> Result<Request> {
                 id: None,
                 project: ProjectName(project),
                 workspace: workspace.map(WorkspaceId),
+                session: session.map(ginka_protocol::SessionId),
                 name,
                 schedule: at.map_or_else(
                     || schedule.expect("clap requires --schedule or --at"),

@@ -523,6 +523,7 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
             id: None,
             project: ginka_protocol::ProjectName("comet".into()),
             workspace: None,
+            session: None,
             name: "nightly".into(),
             schedule: "@daily".into(),
             via: ginka_protocol::model::CronVia::Terminal,
@@ -533,6 +534,7 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
         }),
         json!({
             "method": "save_cron_job", "id": null, "project": "comet", "workspace": null,
+            "session": null,
             "name": "nightly", "schedule": "@daily", "via": "terminal", "agent": null,
             "body": "cargo test", "precheck": null, "enabled": true
         })

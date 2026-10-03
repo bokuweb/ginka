@@ -938,9 +938,12 @@ impl Shell {
                     then,
                     amend,
                 } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
-                crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
-                    this.leave_comment(path.clone(), *line, text.clone(), cx)
-                }
+                crate::surfaces::SurfaceEvent::Comment {
+                    path,
+                    line,
+                    end_line,
+                    text,
+                } => this.leave_comment(path.clone(), *line, *end_line, text.clone(), cx),
                 crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
@@ -2553,6 +2556,7 @@ impl Shell {
             id: Some(job.id),
             project: job.project,
             workspace: job.workspace,
+            session: None,
             name: job.name,
             schedule: job.schedule,
             via: job.via,
@@ -4573,6 +4577,7 @@ impl Shell {
         &mut self,
         path: String,
         line: Option<u32>,
+        end_line: Option<u32>,
         text: String,
         cx: &mut Context<Self>,
     ) {
@@ -4584,7 +4589,8 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let comments = cx
                 .background_spawn(async move {
-                    link.add_comment(&workspace, &path, line, text).await;
+                    link.add_comment(&workspace, &path, line, end_line, text)
+                        .await;
                     link.comments(&workspace).await
                 })
                 .await;

@@ -659,10 +659,16 @@ pub enum Request {
     ///
     /// Orca's loop: marking the three places that are wrong is a better way to
     /// tell an agent what to fix than re-prompting it from scratch.
+    ///
+    /// `end_line` makes it cover `line..=end_line` (Orca's multi-line
+    /// comments); refused when it comes before `line` or has none to start
+    /// from.
     AddReviewComment {
         workspace: WorkspaceId,
         path: String,
         line: Option<u32>,
+        #[serde(default)]
+        end_line: Option<u32>,
         side: DiffSide,
         text: String,
     },
@@ -784,6 +790,10 @@ pub enum Request {
         id: Option<i64>,
         project: ProjectName,
         workspace: Option<WorkspaceId>,
+        /// A chat job's conversation to continue instead of starting one
+        /// (a reminder). Must be a conversation in `project`.
+        #[serde(default)]
+        session: Option<SessionId>,
         name: String,
         schedule: String,
         via: crate::model::CronVia,

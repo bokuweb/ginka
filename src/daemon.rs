@@ -872,12 +872,14 @@ impl DaemonLink {
         workspace: &WorkspaceId,
         path: &str,
         line: Option<u32>,
+        end_line: Option<u32>,
         text: String,
     ) {
         self.ask(Request::AddReviewComment {
             workspace: workspace.clone(),
             path: path.to_string(),
             line,
+            end_line,
             side: ginka_protocol::DiffSide::New,
             text,
         })

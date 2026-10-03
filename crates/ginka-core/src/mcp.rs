@@ -603,6 +603,7 @@ pub fn tools() -> Vec<Tool> {
                     "via": {"type": "string", "enum": ["chat", "terminal"]},
                     "agent": {"type": "string"},
                     "body": {"type": "string"},
+                    "session": {"type": "string", "description": "A chat job's existing conversation to send the prompt into, instead of starting one — a reminder; its agent answers"},
                     "precheck": {"type": "string", "description": "A shell command run in the checkout before each scheduled firing; a non-zero exit skips that firing"},
                     "enabled": {"type": "boolean"},
                 },
@@ -1159,6 +1160,7 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             id: arguments.get("id").and_then(Value::as_i64),
             project: ProjectName(text("project")?),
             workspace: text("workspace").ok().map(WorkspaceId),
+            session: maybe("session").map(SessionId),
             name: text("name")?,
             schedule: text("schedule")?,
             via: ginka_protocol::model::CronVia::parse(&text("via")?)

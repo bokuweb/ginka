@@ -1758,3 +1758,6 @@ surface.git.create_pr_written_tooltip:
 sidebar.unseen:
   en: new
   ja: 新着
+surface.git.comment_lines:
+  en: "Lines %{lines} — shift-click another line to cover a range"
+  ja: "%{lines} 行目 — Shift+クリックで範囲を広げられます"

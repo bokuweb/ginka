@@ -36,27 +36,42 @@ fn side_from(value: &str) -> DiffSide {
 }
 
 /// Leave a comment.
+///
+/// `end_line` makes it cover `line..=end_line`; it must not come before
+/// `line`, needs one to start from, and a range of one line is stored as
+/// that line.
+#[allow(clippy::too_many_arguments)]
 pub fn add(
     conn: &Connection,
     workspace: &WorkspaceId,
     path: &str,
     line: Option<u32>,
+    end_line: Option<u32>,
     side: DiffSide,
     text: &str,
     now: i64,
 ) -> Result<ReviewComment> {
+    let end_line = match (line, end_line) {
+        (_, None) => None,
+        (None, Some(_)) => anyhow::bail!("a range of lines needs a line to start from"),
+        (Some(start), Some(end)) if end < start => {
+            anyhow::bail!("a range of lines cannot end ({end}) before it starts ({start})")
+        }
+        (Some(start), Some(end)) => (end > start).then_some(end),
+    };
     let comment = ReviewComment {
         id: uuid::Uuid::new_v4().simple().to_string(),
         workspace: workspace.clone(),
         path: path.to_string(),
         line,
+        end_line,
         side,
         text: text.trim().to_string(),
         created_at: now,
     };
     conn.execute(
-        "INSERT INTO review_comments (id, workspace_id, path, line, side, text, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT INTO review_comments (id, workspace_id, path, line, side, text, created_at, end_line)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
         rusqlite::params![
             comment.id,
             comment.workspace.0,
@@ -65,6 +80,7 @@ pub fn add(
             side_str(comment.side),
             comment.text,
             comment.created_at,
+            comment.end_line,
         ],
     )?;
     Ok(comment)
@@ -76,7 +92,7 @@ pub fn add(
 /// therefore the order the agent should be given them in.
 pub fn list(conn: &Connection, workspace: &WorkspaceId) -> Result<Vec<ReviewComment>> {
     let mut statement = conn.prepare(
-        "SELECT id, workspace_id, path, line, side, text, created_at
+        "SELECT id, workspace_id, path, line, side, text, created_at, end_line
            FROM review_comments
           WHERE workspace_id = ?1
           ORDER BY path, line, created_at",
@@ -87,6 +103,7 @@ pub fn list(conn: &Connection, workspace: &WorkspaceId) -> Result<Vec<ReviewComm
             workspace: WorkspaceId(row.get(1)?),
             path: row.get(2)?,
             line: row.get(3)?,
+            end_line: row.get(7)?,
             side: side_from(&row.get::<_, String>(4)?),
             text: row.get(5)?,
             created_at: row.get(6)?,
@@ -132,11 +149,15 @@ pub fn compose(comments: &[ReviewComment]) -> String {
             current = &comment.path;
             message.push_str(&format!("{}\n", comment.path));
         }
-        match comment.line {
-            Some(line) => {
+        match (comment.line, comment.end_line) {
+            (Some(line), Some(end)) => message.push_str(&format!(
+                "  {}:{line}-{end} — {}\n",
+                comment.path, comment.text
+            )),
+            (Some(line), None) => {
                 message.push_str(&format!("  {}:{line} — {}\n", comment.path, comment.text))
             }
-            None => message.push_str(&format!("  {} — {}\n", comment.path, comment.text)),
+            (None, _) => message.push_str(&format!("  {} — {}\n", comment.path, comment.text)),
         }
     }
     message
@@ -157,6 +178,7 @@ mod tests {
             workspace: workspace(),
             path: path.into(),
             line,
+            end_line: None,
             side: DiffSide::New,
             text: text.into(),
             created_at: 0,
@@ -173,6 +195,7 @@ mod tests {
             &workspace(),
             "src/main.rs",
             Some(80),
+            None,
             DiffSide::New,
             "later",
             2,
@@ -183,6 +206,7 @@ mod tests {
             &workspace(),
             "src/main.rs",
             Some(12),
+            None,
             DiffSide::New,
             "earlier",
             1,
@@ -193,6 +217,7 @@ mod tests {
             &workspace(),
             "README.md",
             Some(1),
+            None,
             DiffSide::New,
             "first file",
             3,
@@ -215,6 +240,75 @@ mod tests {
     }
 
     #[test]
+    fn a_comment_can_span_lines_and_reads_as_a_range() {
+        // Orca's multi-line comments: "these six lines are one mistake".
+        let conn = db::open_in_memory().unwrap();
+        add(
+            &conn,
+            &workspace(),
+            "src/parse.rs",
+            Some(12),
+            Some(18),
+            DiffSide::New,
+            "this loop is the same as the one above",
+            1,
+        )
+        .unwrap();
+        let listed = list(&conn, &workspace()).unwrap();
+        assert_eq!((listed[0].line, listed[0].end_line), (Some(12), Some(18)));
+        assert!(
+            compose(&listed).contains("src/parse.rs:12-18 — this loop is the same"),
+            "{}",
+            compose(&listed)
+        );
+    }
+
+    #[test]
+    fn a_range_must_run_forward_from_a_line() {
+        let conn = db::open_in_memory().unwrap();
+        assert!(
+            add(
+                &conn,
+                &workspace(),
+                "a.rs",
+                Some(18),
+                Some(12),
+                DiffSide::New,
+                "x",
+                1
+            )
+            .is_err()
+        );
+        assert!(
+            add(
+                &conn,
+                &workspace(),
+                "a.rs",
+                None,
+                Some(12),
+                DiffSide::New,
+                "x",
+                1
+            )
+            .is_err(),
+            "a range needs somewhere to start"
+        );
+        // A range of one line is just that line.
+        let one = add(
+            &conn,
+            &workspace(),
+            "a.rs",
+            Some(7),
+            Some(7),
+            DiffSide::New,
+            "x",
+            1,
+        )
+        .unwrap();
+        assert_eq!(one.end_line, None);
+    }
+
+    #[test]
     fn a_comment_on_a_whole_file_is_allowed() {
         // People write "this file should not exist".
         let conn = db::open_in_memory().unwrap();
@@ -222,6 +316,7 @@ mod tests {
             &conn,
             &workspace(),
             "junk.rs",
+            None,
             None,
             DiffSide::New,
             "delete this",
@@ -239,6 +334,7 @@ mod tests {
             &workspace(),
             "a.rs",
             Some(1),
+            None,
             DiffSide::New,
             "mine",
             1,
@@ -249,6 +345,7 @@ mod tests {
             &WorkspaceId("comet/other".into()),
             "b.rs",
             Some(1),
+            None,
             DiffSide::New,
             "theirs",
             1,
@@ -265,6 +362,7 @@ mod tests {
             &workspace(),
             "a.rs",
             Some(1),
+            None,
             DiffSide::New,
             "keep",
             1,
@@ -275,6 +373,7 @@ mod tests {
             &workspace(),
             "a.rs",
             Some(2),
+            None,
             DiffSide::New,
             "oops",
             1,

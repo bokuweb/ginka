@@ -10,7 +10,7 @@
 use anyhow::{Result, bail};
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, TimeZone, Timelike, Utc};
 use ginka_protocol::model::{CronJob, CronOutcome, CronRun, CronVia};
-use ginka_protocol::{ProjectName, WorkspaceId};
+use ginka_protocol::{ProjectName, SessionId, WorkspaceId};
 use rusqlite::{Connection, OptionalExtension as _};
 
 /// The parsed schedule, stored in the existing column for both kinds of job.
@@ -231,6 +231,8 @@ fn field(text: &str, name: &str, low: u32, high: u32) -> Result<u64> {
 pub struct Draft {
     pub project: ProjectName,
     pub workspace: Option<WorkspaceId>,
+    /// The conversation a chat job continues; the caller has checked it.
+    pub session: Option<SessionId>,
     pub name: String,
     pub schedule: String,
     pub via: CronVia,
@@ -247,8 +249,7 @@ pub struct LastStarted {
     pub terminal: Option<String>,
 }
 
-const COLUMNS: &str =
-    "id, project, workspace, name, schedule, via, agent, body, enabled, checked_at, precheck";
+const COLUMNS: &str = "id, project, workspace, name, schedule, via, agent, body, enabled, checked_at, precheck, session";
 
 /// Every job, or one project's, by name.
 pub fn list(conn: &Connection, project: Option<&ProjectName>) -> Result<Vec<CronJob>> {
@@ -308,10 +309,14 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
         ),
         CronVia::Terminal => None,
     };
+    if draft.session.is_some() && draft.via != CronVia::Chat {
+        bail!("only a prompt can be sent to a conversation; a shell job runs in a terminal");
+    }
     let workspace = draft
         .workspace
         .as_ref()
         .map(|workspace| workspace.0.clone());
+    let session = draft.session.as_ref().map(|session| session.0.clone());
     let precheck = draft
         .precheck
         .as_deref()
@@ -322,7 +327,7 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
             let changed = conn.execute(
                 "UPDATE cron_jobs SET project = ?1, workspace = ?2, name = ?3, schedule = ?4,
                         via = ?5, agent = ?6, body = ?7, enabled = ?8, checked_at = ?9,
-                        precheck = ?11
+                        precheck = ?11, session = ?12
                   WHERE id = ?10",
                 rusqlite::params![
                     draft.project.0,
@@ -336,6 +341,7 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
                     now,
                     id,
                     precheck,
+                    session,
                 ],
             )?;
             if changed == 0 {
@@ -346,8 +352,8 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
         None => {
             conn.execute(
                 "INSERT INTO cron_jobs (project, workspace, name, schedule, via, agent, body,
-                                        enabled, checked_at, precheck)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                        enabled, checked_at, precheck, session)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 rusqlite::params![
                     draft.project.0,
                     workspace,
@@ -359,6 +365,7 @@ pub fn save(conn: &Connection, id: Option<i64>, draft: &Draft, now: i64) -> Resu
                     draft.enabled,
                     now,
                     precheck,
+                    session,
                 ],
             )?;
             conn.last_insert_rowid()
@@ -499,6 +506,7 @@ fn row_to_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<(CronJob, i64)> {
             id: row.get(0)?,
             project: ProjectName(row.get(1)?),
             workspace: row.get::<_, Option<String>>(2)?.map(WorkspaceId),
+            session: row.get::<_, Option<String>>(11)?.map(SessionId),
             name: row.get(3)?,
             schedule: row.get(4)?,
             via: CronVia::parse(&row.get::<_, String>(5)?).unwrap_or(CronVia::Terminal),
@@ -638,6 +646,7 @@ mod tests {
             &Draft {
                 project: ProjectName("comet".into()),
                 workspace: None,
+                session: None,
                 name: "reminder".into(),
                 schedule: "@once 2026-09-28T09:30:00+09:00".into(),
                 via: CronVia::Terminal,
@@ -676,6 +685,7 @@ mod tests {
             &Draft {
                 project: ProjectName("comet".into()),
                 workspace: None,
+                session: None,
                 name: "reminder".into(),
                 schedule: "@once 2026-09-28T09:30:00+09:00".into(),
                 via: CronVia::Terminal,
