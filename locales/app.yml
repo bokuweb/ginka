@@ -577,6 +577,9 @@ composer.command.side.description:
 composer.command.btw.description:
   en: Ask a brief read-only question in a separate conversation
   ja: 読み取り専用の短い質問を別の会話で行う
+composer.command.plan.description:
+  en: Run this turn read-only and ask for a plan; the next turn runs as before
+  ja: このターンだけ読み取り専用で計画を立てさせ、次のターンは元のモードに戻します
 composer.project.new:
   en: New project…
   ja: 新しいプロジェクト…
@@ -1725,3 +1728,99 @@ board.empty:
 board.conflicted:
   en: Stopped on conflicts
   ja: コンフリクトで停止中
+surface.git.push_lease:
+  en: Force push…
+  ja: 強制プッシュ…
+surface.git.push_lease.confirm:
+  en: Replace the remote branch
+  ja: リモートのブランチを置き換える
+surface.git.push_lease_tooltip:
+  en: Push rewritten history (after an amend or a rebase) with --force-with-lease. It is refused if someone pushed since your last fetch.
+  ja: amend や rebase で書き換えた履歴を --force-with-lease でプッシュします。最後の fetch 以降に誰かがプッシュしていれば拒否されます。
+surface.git.fix_commit:
+  en: Ask the agent to fix it
+  ja: エージェントに直させる
+surface.git.fix_commit_tooltip:
+  en: Send what git and its hooks said, the staged files and the message to this workspace's conversation, to fix without skipping the hooks
+  ja: git とフックの出力、ステージ済みのファイル、メッセージをこのワークスペースの会話に送り、フックを飛ばさずに直させます
+terminal.copy_context:
+  en: Copy terminal context (last 400 lines, scrollback included)
+  ja: ターミナルの文脈をコピー（スクロールバックを含む最後の400行）
+composer.account.suggest:
+  en: "%{account} has more room"
+  ja: "%{account} のほうが余裕があります"
+surface.git.create_pr_written:
+  en: Create PR, written by the agent
+  ja: エージェントが書いたPRを作成
+surface.git.create_pr_written_tooltip:
+  en: Push, then open a pull request whose title and description an agent wrote from this branch's commits and diff against the default branch
+  ja: プッシュしてから、このブランチのコミットとデフォルトブランチとの差分をもとにエージェントが書いたタイトルと説明でPRを作成します
+sidebar.unseen:
+  en: new
+  ja: 新着
+surface.git.comment_lines:
+  en: "Lines %{lines} — shift-click another line to cover a range"
+  ja: "%{lines} 行目 — Shift+クリックで範囲を広げられます"
+cli.checks.none:
+  en: "no checks have reported on this pull request"
+  ja: "このプルリクエストにはまだチェック結果がありません"
+surface.git.fix_checks:
+  en: Fix failing checks
+  ja: 失敗したチェックを直させる
+surface.git.fix_checks_tooltip:
+  en: Send the pull request's failing checks, with their log links, to this workspace's conversation to fix
+  ja: プルリクエストの失敗したチェックをログのリンク付きでこのワークスペースの会話に送り、直させます
+sidebar.action.mute_hours:
+  en: "Mute notifications for %{hours}h"
+  ja: "通知を %{hours} 時間ミュート"
+sidebar.action.mute_forever:
+  en: Mute notifications until I turn them back on
+  ja: 通知を解除するまでミュート
+sidebar.action.unmute:
+  en: Turn notifications back on
+  ja: 通知のミュートを解除
+cli.mcp_servers.none:
+  en: "no MCP servers are configured for Claude Code or Codex"
+  ja: "Claude Code にも Codex にも MCP サーバーは設定されていません"
+settings.mcp_servers:
+  en: MCP servers configured in the agents
+  ja: エージェントに設定済みの MCP サーバー
+settings.mcp_servers.none:
+  en: Neither Claude Code nor Codex has an MCP server configured.
+  ja: Claude Code にも Codex にも MCP サーバーは設定されていません。
+settings.mcp_servers.user:
+  en: every project
+  ja: すべてのプロジェクト
+settings.mcp_servers.project:
+  en: this repository
+  ja: このリポジトリ
+settings.mcp_servers.local:
+  en: this project only
+  ja: このプロジェクトのみ
+palette.session.next:
+  en: Next conversation
+  ja: 次の会話
+palette.session.previous:
+  en: Previous conversation
+  ja: 前の会話
+palette.tabs.close_all:
+  en: Close all tabs
+  ja: すべてのタブを閉じる
+sidebar.action.copy_id:
+  en: Copy conversation id
+  ja: 会話IDをコピー
+cli.image_diff.none:
+  en: "(no image)"
+  ja: "（画像なし）"
+surface.git.show_images:
+  en: Show the images
+  ja: 画像を表示
+surface.git.image_before:
+  en: Before
+  ja: 変更前
+surface.git.image_after:
+  en: After
+  ja: 変更後
+surface.git.image_missing:
+  en: No image on this side
+  ja: こちら側に画像はありません

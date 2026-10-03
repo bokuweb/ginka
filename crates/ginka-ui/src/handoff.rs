@@ -37,6 +37,71 @@ pub fn fork_targets<'a>(agents: &'a [AgentStatus], current: &str) -> Vec<&'a Age
         .collect()
 }
 
+/// Somewhere a conversation can be forked to: another agent on its default
+/// model, or — when there is no other agent — another model of this one.
+#[derive(Clone, Copy, Debug)]
+pub struct ForkTarget<'a> {
+    pub agent: &'a AgentStatus,
+    /// `None` is the agent's own default.
+    pub model: Option<&'a ginka_protocol::provider::ProviderModel>,
+}
+
+impl ForkTarget<'_> {
+    /// What the target's button says: the agent, and the model when it is
+    /// a model of the same agent that is being chosen.
+    pub fn label(&self) -> String {
+        match self.model {
+            Some(model) => format!("{} · {}", self.agent.display_name, model.label),
+            None => self.agent.display_name.clone(),
+        }
+    }
+}
+
+/// Where a conversation on `current` (running `current_model`, or the
+/// provider's default when `None`) can be forked to.
+///
+/// Every other ready agent comes first and alone when there is one: another
+/// vendor is the stronger second opinion, and three actions per target per
+/// model would make a menu nobody reads. With no other agent ready, the
+/// current one's other models are offered instead (MonoCode 0.3.0), never the
+/// model that wrote the answer.
+pub fn model_fork_targets<'a>(
+    agents: &'a [AgentStatus],
+    current: &str,
+    current_model: Option<&str>,
+) -> Vec<ForkTarget<'a>> {
+    let others: Vec<ForkTarget<'a>> = fork_targets(agents, current)
+        .into_iter()
+        .map(|agent| ForkTarget { agent, model: None })
+        .collect();
+    if !others.is_empty() {
+        return others;
+    }
+    let Some(agent) = agents
+        .iter()
+        .find(|agent| agent.id == current && agent.is_ready())
+    else {
+        return Vec::new();
+    };
+    let answering = current_model.map(str::to_string).or_else(|| {
+        agent
+            .models
+            .iter()
+            .find(|model| model.is_default)
+            .or_else(|| agent.models.first())
+            .map(|model| model.id.clone())
+    });
+    agent
+        .models
+        .iter()
+        .filter(|model| Some(&model.id) != answering.as_ref())
+        .map(|model| ForkTarget {
+            agent,
+            model: Some(model),
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +142,87 @@ mod tests {
     fn a_conversation_with_no_alternative_cli_has_no_fork_target() {
         let agents = [agent("claude", true, Some(true))];
         assert!(fork_targets(&agents, "claude").is_empty());
+    }
+
+    fn with_models(mut status: AgentStatus, models: &[(&str, bool)]) -> AgentStatus {
+        status.models = models
+            .iter()
+            .map(|(id, is_default)| {
+                let mut model =
+                    ginka_protocol::provider::ProviderModel::new(*id, id.to_uppercase());
+                model.is_default = *is_default;
+                model
+            })
+            .collect();
+        status
+    }
+
+    fn labels(targets: &[ForkTarget<'_>]) -> Vec<(String, Option<String>)> {
+        targets
+            .iter()
+            .map(|target| {
+                (
+                    target.agent.id.clone(),
+                    target.model.map(|model| model.id.clone()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_lone_provider_offers_its_other_models_instead() {
+        // MonoCode 0.3.0: with one provider signed in, a second opinion is
+        // still worth having from another of its models.
+        let agents = [with_models(
+            agent("claude", true, Some(true)),
+            &[("opus", true), ("sonnet", false), ("haiku", false)],
+        )];
+        assert_eq!(
+            labels(&model_fork_targets(&agents, "claude", Some("opus"))),
+            vec![
+                ("claude".into(), Some("sonnet".into())),
+                ("claude".into(), Some("haiku".into())),
+            ],
+            "the model that wrote the answer is not asked to review it"
+        );
+        assert_eq!(
+            labels(&model_fork_targets(&agents, "claude", None)),
+            vec![
+                ("claude".into(), Some("sonnet".into())),
+                ("claude".into(), Some("haiku".into())),
+            ],
+            "no recorded model means the provider's default answered"
+        );
+    }
+
+    #[test]
+    fn another_ready_provider_is_preferred_over_another_model() {
+        let agents = [
+            with_models(
+                agent("claude", true, Some(true)),
+                &[("opus", true), ("sonnet", false)],
+            ),
+            agent("codex", true, None),
+        ];
+        assert_eq!(
+            labels(&model_fork_targets(&agents, "claude", Some("opus"))),
+            vec![("codex".into(), None)],
+            "a different vendor is the stronger second opinion, and the menu stays short"
+        );
+    }
+
+    #[test]
+    fn a_lone_provider_with_one_model_has_nothing_to_offer() {
+        let agents = [with_models(
+            agent("claude", true, Some(true)),
+            &[("opus", true)],
+        )];
+        assert!(model_fork_targets(&agents, "claude", Some("opus")).is_empty());
+        let signed_out = [with_models(
+            agent("claude", true, Some(false)),
+            &[("opus", true), ("sonnet", false)],
+        )];
+        assert!(model_fork_targets(&signed_out, "claude", Some("opus")).is_empty());
     }
 
     #[test]

@@ -45,6 +45,8 @@ pub fn save_request(
         id: editing.map(|job| job.id),
         project,
         workspace: form.workspace,
+        // Settings does not set reminders; editing one keeps its target.
+        session: editing.and_then(|job| job.session.clone()),
         name: form.name,
         schedule: form.schedule,
         via: form.via,
@@ -72,6 +74,7 @@ mod tests {
             id: 42,
             project: project.clone(),
             workspace: Some(workspace.clone()),
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Chat,
@@ -96,7 +99,7 @@ mod tests {
             Some("codex".into()),
         );
         assert!(matches!(request, Request::SaveCronJob {
-            id: Some(42), project: p, workspace: Some(w), name, schedule,
+            id: Some(42), project: p, workspace: Some(w), session: None, name, schedule,
             via: CronVia::Chat, agent: Some(agent), body,
             precheck: Some(precheck), enabled: false,
         } if p == project && w == workspace && name == "Review open PRs"
@@ -121,6 +124,7 @@ mod tests {
         );
         assert!(matches!(request, Request::SaveCronJob {
             id: None, workspace: None, agent: Some(agent),
+            session: None,
             precheck: None, enabled: true, ..
         } if agent == "codex"));
     }
@@ -132,6 +136,7 @@ mod tests {
             id: 9,
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -187,6 +192,7 @@ mod tests {
             id: 7,
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -248,6 +254,7 @@ mod tests {
             id: 7,
             project: project.clone(),
             workspace: Some(WorkspaceId("shop-old".into())),
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -281,6 +288,7 @@ mod tests {
             Request::SaveCronJob {
                 id: Some(7),
                 workspace: None,
+                session: None,
                 ..
             }
         ));

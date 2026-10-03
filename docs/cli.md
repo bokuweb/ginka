@@ -183,6 +183,8 @@ Show what has changed in a workspace
 
 `ginka changes <WORKSPACE>`
 
+`--branch [BASE]` shows everything the branch did since it left `BASE` (the project's default branch when omitted): its commits and uncommitted work.
+
 ## `ginka history`
 
 Show recent commits in a workspace, newest first
@@ -193,7 +195,7 @@ Show recent commits in a workspace, newest first
 
 Leave comments on a diff and send them back to the agent
 
-- `ginka review add` — Leave a comment on a file, and a line of it (`ginka review add <WORKSPACE> <PATH> <TEXT>`)
+- `ginka review add` — Leave a comment on a file, and a line of it (`ginka review add <WORKSPACE> <PATH> <TEXT>`). `--line N --end-line M` covers a range of lines
 - `ginka review list` — Every comment waiting, in reading order (`ginka review list <WORKSPACE>`)
 - `ginka review remove` — Take one comment back (`ginka review remove <COMMENT>`)
 - `ginka review send` — Send the batch to a session's agent as one message (`ginka review send <WORKSPACE> <SESSION>`)
@@ -222,6 +224,24 @@ Throw away a file's uncommitted work
 
 `ginka revert <WORKSPACE> <PATH>`
 
+## `ginka image-diff`
+
+Write a changed image as it was and as it is to `before.*` and `after.*` — uncommitted by default, `--staged`, or what one `--commit` did
+
+`ginka image-diff <WORKSPACE> <PATH> [--staged] [--commit <ID>] [--out-dir <DIR>]`
+
+## `ginka mcp-servers`
+
+The MCP servers Claude Code and Codex are configured with outside Ginka; `--workspace` adds that repository's `.mcp.json` and that project's own
+
+`ginka mcp-servers [--workspace <WORKSPACE>]`
+
+## `ginka checks`
+
+The checks on the workspace branch's pull request, read with `gh`; `--fix` hands the failing ones to the workspace's agent
+
+`ginka checks <WORKSPACE> [--fix] [--agent <AGENT>]`
+
 ## `ginka resolve`
 
 Hand a stopped merge, rebase or cherry-pick's conflicts to an agent to resolve and finish
@@ -238,7 +258,9 @@ Commit a workspace's work. `--amend` folds it into the last commit instead — k
 
 Push a workspace's branch, setting an upstream if it has none
 
-`ginka push <WORKSPACE>`
+`ginka push <WORKSPACE> [--force-with-lease]`
+
+`--force-with-lease` pushes rewritten history (after an amend or a rebase), refused if the remote moved since the last fetch.
 
 ## `ginka pull`
 
@@ -257,6 +279,8 @@ Bring a workspace branch level with its remote: publish it if it was never pushe
 Push a workspace's branch and open a pull request for it with `gh`, titled from its commits. Prints the pull request's address
 
 `ginka pr <WORKSPACE>`
+
+`--generate` has an agent write the title and description from the branch's commits and its diff against the default branch, instead of `gh --fill`; `--agent` picks which.
 
 ## `ginka notes`
 
@@ -310,7 +334,7 @@ The daemon's terminals in a workspace: open one, type into it, read what it prin
 Prompts and commands run on a cron schedule, on this machine's clock
 
 - `ginka cron list` — List scheduled jobs, with when each fires next and how it last went
-- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`). Use `--schedule <CRON>` for a recurring job or `--at <RFC3339>` for one firing with a time zone. `--precheck '<command>'` runs before a scheduled firing in the job's checkout; a non-zero exit skips it
+- `ginka cron add` — Schedule a shell command (`--shell`) or a prompt for an agent (`--prompt` with `--agent`). Use `--schedule <CRON>` for a recurring job or `--at <RFC3339>` for one firing with a time zone. `--precheck '<command>'` runs before a scheduled firing in the job's checkout; a non-zero exit skips it. `--prompt … --session <id>` sends the prompt into that existing conversation instead — a reminder, queued if it is busy
 - `ginka cron remove` — Forget a scheduled job and its history (`ginka cron remove <ID>`)
 - `ginka cron run` — Fire a job now, as its schedule would (`ginka cron run <ID>`)
 - `ginka cron runs` — A job's firings, most recent first (`ginka cron runs <ID>`)

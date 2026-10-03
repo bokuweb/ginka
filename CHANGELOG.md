@@ -25,6 +25,25 @@ far is unreleased.
 - A merge or rebase stopped on conflicts is handed to the agent in one step.
 - An Agents board: every agent across projects, by what it needs from you.
 - The account picker names each login's email, organisation and plan.
+- A second opinion from another model of the same provider when it is the
+  only one signed in.
+- Diff a branch against its base; force-push with a lease; hand a commit a
+  hook refused to the agent.
+- Copy a terminal's context, scrollback included, and OSC 52 clipboard
+  writes from programs in it.
+- `/plan` for one read-only planning turn; agent-written pull request
+  titles and descriptions; a suggested login with more room; a *new* mark
+  on conversations that finished out of sight.
+- Review comments over a range of lines; reminders sent into an existing
+  conversation.
+- A pull request's checks, and the failing ones handed to the agent; editor
+  autosave that never writes over a file an agent changed.
+- Mute a project's notifications for a few hours or until turned back on.
+- See the MCP servers Claude Code and Codex are configured with.
+- Step to the next or previous conversation, close all tabs, and copy a
+  conversation's id from its row.
+- Rebind or free keyboard shortcuts in `keymap.json`.
+- See a changed image as it was beside as it is.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

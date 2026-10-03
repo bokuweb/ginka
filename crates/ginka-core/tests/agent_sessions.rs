@@ -2209,6 +2209,7 @@ fn a_review_goes_back_to_the_agent_as_one_message() {
             workspace: fixture.workspace.clone(),
             path: path.into(),
             line,
+            end_line: None,
             side: ginka_protocol::DiffSide::New,
             text: text.into(),
         });
@@ -3351,6 +3352,7 @@ fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
         id: None,
         project: ginka_protocol::ProjectName("comet".into()),
         workspace: Some(fixture.workspace.clone()),
+        session: None,
         name: "morning review".into(),
         schedule: "0 9 * * 1-5".into(),
         via: ginka_protocol::model::CronVia::Chat,
@@ -3770,5 +3772,302 @@ fn conflicts_go_to_the_conversation_that_made_the_branch() {
             "the agent was never asked"
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-hook"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-hook"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "write the parser");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let path = fixture.workspace_path();
+    let hooks = std::path::PathBuf::from(support::git(
+        &path,
+        &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+    ));
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'lint: trailing whitespace in parser.rs' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(path.join("parser.rs"), "fn parse() {} \n").unwrap();
+
+    let refused = fixture
+        .service
+        .handle(Request::Commit {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            all: true,
+            amend: false,
+        })
+        .unwrap_err();
+    assert!(
+        refused.message.contains("trailing whitespace in parser.rs"),
+        "the refusal carries what the hook said: {refused:?}"
+    );
+
+    match fixture
+        .service
+        .handle(Request::FixCommitFailure {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            output: refused.message.clone(),
+            agent: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session: answered } => assert_eq!(answered.id, session),
+        other => panic!("expected the session, got {other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let asked = fixture.transcript(&session).iter().any(|entry| {
+            matches!(entry, TranscriptPayload::User { text }
+                if text.starts_with("A commit in this worktree was refused")
+                    && text.contains("- parser.rs")
+                    && text.contains("Add the parser")
+                    && text.contains("trailing whitespace in parser.rs"))
+        });
+        if asked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was never asked"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_branch_with_nothing_on_it_gets_no_written_pull_request() {
+    // The details are written off the request path, like a commit message;
+    // a branch with no commits since its base has nothing to describe, and
+    // says so through the same event a success would use.
+    let mut fixture = Fixture::new();
+    assert_eq!(
+        fixture.ask(Request::CreateGeneratedPullRequest {
+            workspace: fixture.workspace.clone(),
+            draft: true,
+            agent: Some("claude".into()),
+        }),
+        Response::Ack
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((url, error)) = fixture
+            .recorder
+            .all()
+            .into_iter()
+            .find_map(|event| match event {
+                DaemonEvent::PullRequestOpened { url, error, .. } => Some((url, error)),
+                _ => None,
+            })
+        {
+            assert_eq!(url, None);
+            let error = error.unwrap_or_default();
+            assert!(
+                error.contains("no commits") || error.contains("no branch named"),
+                "{error}"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "no answer arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn plan_runs_one_turn_read_only_and_the_next_goes_back_to_the_conversations_mode() {
+    // MonoCode's /plan: a turn to think in, without changing the mode the
+    // conversation was started with (N2 only forbids widening it).
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-plan"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "start".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    let told = spoken(&fixture.wait_for_said(&session.id, "start"));
+    assert!(told.contains("--full-auto"), "{told}");
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "/plan sketch the migration".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "sketch the migration"));
+    let planned = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(planned.contains("--sandbox read-only"), "{planned}");
+    assert!(!planned.contains("--full-auto"), "{planned}");
+    assert!(
+        planned.contains("Do not change any files"),
+        "the turn is told why it cannot write: {planned}"
+    );
+    assert!(
+        !fixture.transcript(&session.id).iter().any(
+            |entry| matches!(entry, TranscriptPayload::User { text } if text.starts_with("/plan"))
+        ),
+        "the command word is Ginka's, not part of the conversation"
+    );
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "now build it".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "now build it"));
+    let built = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(built.contains("--full-auto"), "{built}");
+    assert_eq!(
+        fixture.stored(&session.id).access_mode,
+        ginka_protocol::AccessMode::Auto
+    );
+}
+
+#[test]
+fn a_conversation_opened_with_plan_keeps_the_mode_it_was_asked_for() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-first"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "/plan the rewrite".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(session.access_mode, ginka_protocol::AccessMode::Auto);
+    let told = spoken(&fixture.wait_for_said(&session.id, "the rewrite"));
+    assert!(told.contains("--sandbox read-only"), "{told}");
+    assert!(!told.contains("--full-auto"), "{told}");
+}
+
+#[test]
+fn a_reminder_arrives_in_the_conversation_it_was_set_on() {
+    // MonoCode's session reminders: a scheduled prompt that continues an
+    // existing conversation rather than starting a new one.
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-remind"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-remind"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "deploy the service");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    let project =
+        ginka_protocol::ProjectName(fixture.workspace.0.split('/').next().unwrap().to_string());
+
+    // A shell job cannot be pointed at a conversation.
+    assert!(
+        fixture
+            .service
+            .handle(Request::SaveCronJob {
+                id: None,
+                project: project.clone(),
+                workspace: None,
+                session: Some(session.clone()),
+                name: "nonsense".into(),
+                schedule: "@hourly".into(),
+                via: ginka_protocol::model::CronVia::Terminal,
+                agent: None,
+                body: "true".into(),
+                precheck: None,
+                enabled: true,
+            })
+            .is_err()
+    );
+
+    let job = match fixture.ask(Request::SaveCronJob {
+        id: None,
+        project,
+        workspace: None,
+        session: Some(session.clone()),
+        name: "check back".into(),
+        schedule: "* * * * *".into(),
+        via: ginka_protocol::model::CronVia::Chat,
+        agent: None,
+        body: "Check whether the deploy finished.".into(),
+        precheck: None,
+        enabled: true,
+    }) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    };
+    assert_eq!(job.session.as_ref(), Some(&session));
+
+    let sessions_before = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => sessions.len(),
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture.transcript(&session).iter().any(|entry| {
+        matches!(entry, TranscriptPayload::User { text } if text == "Check whether the deploy finished.")
+    }) {
+        assert!(Instant::now() < deadline, "the reminder never arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => {
+            assert_eq!(
+                sessions.len(),
+                sessions_before,
+                "no new conversation was started"
+            )
+        }
+        other => panic!("expected sessions, got {other:?}"),
     }
 }

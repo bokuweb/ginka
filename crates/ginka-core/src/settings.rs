@@ -38,6 +38,10 @@ pub struct AppSettings {
     /// The conversations open as tabs across the centre column, by
     /// workspace id, left to right. Restored where the workspace still exists.
     pub open_tabs: Vec<String>,
+    /// Projects whose desktop notifications are muted, by name, with the
+    /// Unix second the mute ends — `i64::MAX` until it is lifted. A mute
+    /// that has run out is simply ignored.
+    pub muted_projects: BTreeMap<String, i64>,
 }
 
 impl Default for AppSettings {
@@ -63,6 +67,7 @@ impl Default for AppSettings {
             notifications: true,
             notification_sounds: true,
             open_tabs: Vec::new(),
+            muted_projects: BTreeMap::new(),
         }
     }
 }

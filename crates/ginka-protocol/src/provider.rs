@@ -79,6 +79,18 @@ impl AccessMode {
         }
     }
 
+    /// Whether this mode allows strictly less than `other`: read-only is
+    /// narrower than ask, which is narrower than auto. A turn may run
+    /// narrower than its conversation; never wider (N2).
+    pub fn is_narrower_than(self, other: Self) -> bool {
+        let rank = |mode: Self| match mode {
+            Self::ReadOnly => 0,
+            Self::Ask => 1,
+            Self::Auto => 2,
+        };
+        rank(self) < rank(other)
+    }
+
     /// Read [`AccessMode::as_str`] back, with the underscore spelling and the
     /// vendors' nearest words accepted too: a flag typed by hand should not
     /// fail on a hyphen.

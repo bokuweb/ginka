@@ -69,7 +69,10 @@ actions!(
         NewTab,
         CloseTab,
         NextTab,
-        PreviousTab
+        PreviousTab,
+        NextSession,
+        PreviousSession,
+        CloseAllTabs
     ]
 );
 
@@ -149,6 +152,43 @@ struct CronForm {
 
 const CONTEXT: &str = "Shell";
 
+/// Apply the reader's `keymap.json` over the defaults [`init`] bound
+/// (`ginka_ui::keymap`): each entry binds its keys to a named action in the
+/// shell's context, or frees them with `NoAction`.
+pub fn apply_keymap(cx: &mut App, overrides: &[ginka_ui::keymap::Override]) {
+    let bindings: Vec<KeyBinding> = overrides
+        .iter()
+        .map(|entry| {
+            let keys = entry.keys.as_str();
+            let context = Some(CONTEXT);
+            match entry.action.as_deref() {
+                None => KeyBinding::new(keys, gpui::NoAction, context),
+                Some("toggle_sidebar") => KeyBinding::new(keys, ToggleSidebar, context),
+                Some("toggle_right_panel") => KeyBinding::new(keys, ToggleRightPanel, context),
+                Some("toggle_terminal_dock") => KeyBinding::new(keys, ToggleTerminalDock, context),
+                Some("toggle_palette") => KeyBinding::new(keys, TogglePalette, context),
+                Some("search_everywhere") => KeyBinding::new(keys, SearchEverywhere, context),
+                Some("find_transcript") => KeyBinding::new(keys, FindTranscript, context),
+                Some("next_surface") => KeyBinding::new(keys, NextSurface, context),
+                Some("previous_surface") => KeyBinding::new(keys, PreviousSurface, context),
+                Some("new_tab") => KeyBinding::new(keys, NewTab, context),
+                Some("close_tab") => KeyBinding::new(keys, CloseTab, context),
+                Some("close_all_tabs") => KeyBinding::new(keys, CloseAllTabs, context),
+                Some("next_tab") => KeyBinding::new(keys, NextTab, context),
+                Some("previous_tab") => KeyBinding::new(keys, PreviousTab, context),
+                Some("next_session") => KeyBinding::new(keys, NextSession, context),
+                Some("previous_session") => KeyBinding::new(keys, PreviousSession, context),
+                Some("navigate_back") => KeyBinding::new(keys, NavigateBack, context),
+                Some("navigate_forward") => KeyBinding::new(keys, NavigateForward, context),
+                Some("open_settings") => KeyBinding::new(keys, OpenSettings, context),
+                // `ginka_ui::keymap::parse` refused anything else.
+                Some(_) => KeyBinding::new(keys, gpui::NoAction, context),
+            }
+        })
+        .collect();
+    cx.bind_keys(bindings);
+}
+
 /// Bind the panel toggles.
 ///
 /// The chords follow VS Code, because that is the muscle memory everyone using
@@ -223,6 +263,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
+        // MonoCode's next/previous session, down and up the list.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-down", NextSession, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-up", PreviousSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-down", NextSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-up", PreviousSession, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -309,6 +358,10 @@ const TERMINAL_TEXT: f32 = 11.5;
 
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 15.5;
+
+/// How many lines "Copy context" takes from a terminal: enough for a build
+/// or test failure and its cause, not a whole session's log.
+const TERMINAL_CONTEXT_LINES: usize = 400;
 
 /// Width of one monospace cell in the terminal grid: 0.6 of the text size,
 /// the advance of the system monospace faces.
@@ -574,6 +627,8 @@ pub struct Shell {
     agents: Vec<AgentStatus>,
     /// Provider settings from the daemon, shown in Settings.
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
+    /// The MCP servers the agent CLIs are configured with, for Settings.
+    mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
     /// The provider executable editor, when open in Settings.
     provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
@@ -856,7 +911,12 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
         });
-        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone(), local_paths));
+        let muted = settings.muted_projects.clone();
+        let sidebar = cx.new(|cx| {
+            let mut sidebar = SessionSidebar::new(rows, sidebar_search.clone(), local_paths);
+            sidebar.set_muted(muted, cx);
+            sidebar
+        });
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx, local_paths));
 
         let sidebar_search_changed =
@@ -934,15 +994,83 @@ impl Shell {
                     then,
                     amend,
                 } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
-                crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
-                    this.leave_comment(path.clone(), *line, text.clone(), cx)
-                }
+                crate::surfaces::SurfaceEvent::Comment {
+                    path,
+                    line,
+                    end_line,
+                    text,
+                } => this.leave_comment(path.clone(), *line, *end_line, text.clone(), cx),
                 crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
+                crate::surfaces::SurfaceEvent::PushWithLease => {
+                    this.sync_git(RemoteAction::PushWithLease, cx)
+                }
+                crate::surfaces::SurfaceEvent::LoadImageDiff {
+                    path,
+                    old_path,
+                    staged,
+                } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, surfaces) = (this.link.clone(), this.surfaces.clone());
+                        let (path, old_path, staged) = (path.clone(), old_path.clone(), *staged);
+                        cx.spawn(async move |_, cx| {
+                            let asked = path.clone();
+                            let (before, after) = cx
+                                .background_spawn(async move {
+                                    link.image_diff(&workspace, &asked, old_path, staged).await
+                                })
+                                .await;
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_image_diff(staged, path, before, after, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::FixChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |this, cx| {
+                            let sent = cx
+                                .background_spawn(async move { link.fix_checks(&workspace).await })
+                                .await;
+                            match sent {
+                                // Nothing failed, or no pull request: say so
+                                // where the button was.
+                                Err(error) => {
+                                    surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_git_sync_result(Some(error), cx)
+                                    });
+                                }
+                                Ok(()) => {
+                                    this.update(cx, |this, cx| {
+                                        this.after_row_change(async { Ok(()) }, cx)
+                                    })
+                                    .ok();
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::FixCommit { message, output } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, message, output) =
+                            (this.link.clone(), message.clone(), output.clone());
+                        this.after_row_change(
+                            async move { link.fix_commit(&workspace, message, output).await },
+                            cx,
+                        );
+                    }
+                }
                 crate::surfaces::SurfaceEvent::Sync => this.sync_git(RemoteAction::Sync, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
@@ -952,6 +1080,9 @@ impl Shell {
                     this.open_turn(checkpoint.clone(), cx)
                 }
                 crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
+                crate::surfaces::SurfaceEvent::CreateGeneratedPullRequest => {
+                    this.create_generated_pull_request(cx)
+                }
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -1064,6 +1195,25 @@ impl Shell {
                             async move { link.resolve_conflicts(&workspace).await },
                             cx,
                         );
+                    }
+                    SidebarEvent::MuteProject { project, until } => {
+                        match until {
+                            Some(until) => {
+                                this.settings
+                                    .muted_projects
+                                    .insert(project.0.clone(), *until);
+                            }
+                            None => {
+                                this.settings.muted_projects.remove(&project.0);
+                            }
+                        }
+                        // Gone mutes are dropped as the map is written.
+                        let now = chrono::Utc::now().timestamp();
+                        this.settings.muted_projects.retain(|_, until| *until > now);
+                        this.save_settings();
+                        let muted = this.settings.muted_projects.clone();
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_muted(muted, cx));
                     }
                     SidebarEvent::LabelProject { project, label } => {
                         let (link, project, label) =
@@ -1456,6 +1606,22 @@ impl Shell {
                         }
                         // The agent's commit message, for the box that asked
                         // for it — if it is still the workspace on screen.
+                        DaemonEvent::PullRequestOpened {
+                            workspace,
+                            url,
+                            error,
+                        } => this
+                            .update(cx, |this, cx| {
+                                if this.session.as_ref().map(|row| &row.workspace)
+                                    == Some(&workspace)
+                                {
+                                    let result = url.ok_or_else(|| error.unwrap_or_default());
+                                    this.surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_pull_request(result, cx)
+                                    });
+                                }
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
                             message,
@@ -1478,6 +1644,11 @@ impl Shell {
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
                                 if this.terminals.feed(&terminal, &data) {
+                                    // A program's own yank (OSC 52), from
+                                    // live output only.
+                                    if let Some(text) = this.terminals.take_clipboard(&terminal) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
                                     this.refresh_terminal_search(&terminal, cx);
                                     cx.notify();
                                 }
@@ -1542,6 +1713,7 @@ impl Shell {
             prompt_outline_open: false,
             agents: Vec::new(),
             provider_settings: Vec::new(),
+            mcp_servers: Vec::new(),
             provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -2511,6 +2683,7 @@ impl Shell {
             id: Some(job.id),
             project: job.project,
             workspace: job.workspace,
+            session: None,
             name: job.name,
             schedule: job.schedule,
             via: job.via,
@@ -2622,6 +2795,27 @@ impl Shell {
         if let Some(index) = self.tabs.active_index() {
             self.close_tab(index, window, cx);
         }
+    }
+
+    /// Close every conversation tab and show the home screen.
+    fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.close_all() > 0 {
+            self.show_tab(None, window, cx);
+        }
+    }
+
+    fn on_close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_all_tabs(window, cx);
+    }
+
+    fn on_next_session(&mut self, _: &NextSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(true, cx));
+    }
+
+    fn on_previous_session(&mut self, _: &PreviousSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(false, cx));
     }
 
     fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2977,7 +3171,7 @@ impl Shell {
                     let after = match (&committed, then) {
                         (Err(_), _) | (Ok(_), CommitThen::Nothing) => None,
                         (Ok(_), CommitThen::Push) => {
-                            Some(link.push(&workspace).await.map(|_| None))
+                            Some(link.push(&workspace, false).await.map(|_| None))
                         }
                         (Ok(_), CommitThen::PullRequest) => {
                             Some(link.create_pull_request(&workspace).await.map(Some))
@@ -3013,14 +3207,20 @@ impl Shell {
             let outcome = cx
                 .background_spawn(async move {
                     match action {
-                        RemoteAction::Push => link.push(&workspace).await,
+                        RemoteAction::Push => link.push(&workspace, false).await,
+                        RemoteAction::PushWithLease => link.push(&workspace, true).await,
                         RemoteAction::Pull => link.pull(&workspace).await,
                         RemoteAction::Sync => link.sync(&workspace).await,
                     }
                 })
                 .await;
-            surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_git_sync_result(outcome.err(), cx)
+            surfaces.update(cx, |surfaces, cx| match action {
+                RemoteAction::Push | RemoteAction::PushWithLease => surfaces.set_push_result(
+                    outcome.err(),
+                    action == RemoteAction::PushWithLease,
+                    cx,
+                ),
+                _ => surfaces.set_git_sync_result(outcome.err(), cx),
             });
         })
         .detach();
@@ -3234,6 +3434,34 @@ impl Shell {
     }
 
     /// Push the branch and open a pull request for it (`gh pr create`).
+    /// Ask the daemon to have an agent write the pull request and open it.
+    /// Only a refusal to start comes back here; the outcome is the
+    /// `PullRequestOpened` event.
+    fn create_generated_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_pull_request(
+                    Err(rust_i18n::t!("surface.git.create_pr.no_workspace").to_string()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let started = cx
+                .background_spawn(
+                    async move { link.create_generated_pull_request(&workspace).await },
+                )
+                .await;
+            if let Err(error) = started {
+                surfaces.update(cx, |surfaces, cx| surfaces.set_pull_request(Err(error), cx));
+            }
+        })
+        .detach();
+    }
+
     fn create_pull_request(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             self.surfaces.update(cx, |surfaces, cx| {
@@ -4105,7 +4333,7 @@ impl Shell {
                     .await;
                 if let Some(history) = history {
                     this.update(cx, |this, cx| {
-                        this.terminals.feed(&terminal, &history);
+                        this.terminals.feed_replay(&terminal, &history);
                         cx.notify();
                     })
                     .ok();
@@ -4224,6 +4452,20 @@ impl Shell {
                 .map(|tab| tab.screen.text())
                 .filter(|text| !text.is_empty())
         }) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Copy the last [`TERMINAL_CONTEXT_LINES`] lines of the active
+    /// terminal, scrollback included — what explains the error on screen is
+    /// usually what scrolled off it.
+    fn copy_terminal_context(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.context_text(TERMINAL_CONTEXT_LINES))
+            .filter(|text| !text.is_empty())
+        {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -4483,6 +4725,7 @@ impl Shell {
         &mut self,
         path: String,
         line: Option<u32>,
+        end_line: Option<u32>,
         text: String,
         cx: &mut Context<Self>,
     ) {
@@ -4494,7 +4737,8 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let comments = cx
                 .background_spawn(async move {
-                    link.add_comment(&workspace, &path, line, text).await;
+                    link.add_comment(&workspace, &path, line, end_line, text)
+                        .await;
                     link.comments(&workspace).await
                 })
                 .await;
@@ -5201,12 +5445,24 @@ impl Shell {
         notable: ginka_ui::notify::Notable,
         cx: &mut Context<Self>,
     ) {
-        let title = self
+        let row = self
             .sidebar
             .read(cx)
             .rows()
             .iter()
             .find(|row| row.session.as_ref() == Some(session))
+            .cloned();
+        // A muted project stays quiet until its mute runs out.
+        if let Some(row) = &row
+            && ginka_ui::notify::muted(
+                &self.settings.muted_projects,
+                &row.origin,
+                chrono::Utc::now().timestamp(),
+            )
+        {
+            return;
+        }
+        let title = row
             .map(|row| row.title.to_string())
             .unwrap_or_else(|| "Ginka".to_string());
         let script = ginka_ui::notify::applescript_with_sound(
@@ -5274,7 +5530,8 @@ impl Shell {
                     self.inbox = Some(inbox);
                 }
             }
-            Place::Settings | Place::Workspace | Place::Board => {}
+            Place::Settings => self.refresh_mcp_servers(cx),
+            Place::Workspace | Place::Board => {}
         }
         let _ = window;
         cx.notify();
@@ -5285,6 +5542,24 @@ impl Shell {
             sidebar.set_place(crate::sidebar::Place::Settings, cx)
         });
         self.open_place(crate::sidebar::Place::Settings, window, cx);
+    }
+
+    /// Read the MCP servers the agent CLIs are configured with, for the
+    /// settings page: the user's, and the workspace on screen's project's.
+    fn refresh_mcp_servers(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        cx.spawn(async move |this, cx| {
+            let servers = cx
+                .background_spawn(async move { link.mcp_servers(workspace).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.mcp_servers = servers;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The settings page: appearance and language. `docs/ui.md` §3.7.
@@ -5373,6 +5648,71 @@ impl Shell {
             .into_any_element();
         let quick_section = self.quick_settings(cx);
         let cron_section = self.cron_settings(cx);
+        // MonoCode's Settings → MCP, read-only: what each agent CLI is
+        // configured with beside what Ginka hands it.
+        let mcp_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.mcp_servers").to_string()),
+            )
+            .when(self.mcp_servers.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("settings.mcp_servers.none").to_string()),
+                )
+            })
+            .children(self.mcp_servers.iter().map(|server| {
+                let scope = match server.scope {
+                    ginka_protocol::model::McpScope::User => {
+                        rust_i18n::t!("settings.mcp_servers.user").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Project => {
+                        rust_i18n::t!("settings.mcp_servers.project").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Local => {
+                        rust_i18n::t!("settings.mcp_servers.local").to_string()
+                    }
+                };
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .text_size(px(12.5))
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(server.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(format!("{} · {scope}", server.provider)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(server.target.clone().unwrap_or_default()),
+                    )
+            }));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -5637,6 +5977,7 @@ impl Shell {
                             ))
                             .child(quick_section)
                             .child(provider_section)
+                            .child(mcp_section)
                             .child(cron_section),
                     ),
             )
@@ -6977,6 +7318,7 @@ impl Shell {
                 self.open_terminal_search(window, cx);
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
+            Command::CopyTerminalContext => self.copy_terminal_context(cx),
             Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
             Command::QuoteTranscriptSelection => {
                 if let Some(selection) = selected_text {
@@ -7010,6 +7352,9 @@ impl Shell {
             Command::TogglePromptOutline => {
                 self.prompt_outline_open = !self.prompt_outline_open;
             }
+            Command::NextSession => self.on_next_session(&NextSession, window, cx),
+            Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
+            Command::CloseAllTabs => self.close_all_tabs(window, cx),
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -8315,8 +8660,20 @@ impl Shell {
     }
 
     /// Copy the conversation through `after` onto another agent and show it.
-    fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
-        self.fork_from_as(after, agent, ginka_ui::handoff::ForkAction::Continue, cx);
+    fn fork_from(
+        &mut self,
+        after: u64,
+        agent: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_from_as(
+            after,
+            agent,
+            model,
+            ginka_ui::handoff::ForkAction::Continue,
+            cx,
+        );
     }
 
     /// Whether a fan-out can start from here: a project to cut worktrees in,
@@ -8914,6 +9271,7 @@ impl Shell {
         &mut self,
         after: u64,
         agent: String,
+        model: Option<String>,
         action: ginka_ui::handoff::ForkAction,
         cx: &mut Context<Self>,
     ) {
@@ -8937,7 +9295,7 @@ impl Shell {
             let result = cx
                 .background_spawn(async move {
                     let fork = requesting
-                        .fork_session(&session, after, agent)
+                        .fork_session(&session, after, agent, model)
                         .await
                         .map_err(|error| {
                             rust_i18n::t!("transcript.fork.failed", error = error).to_string()
@@ -9021,7 +9379,12 @@ impl Shell {
             .as_ref()
             .map(|row| row.agent.driver_id())
             .unwrap_or_default();
-        let targets = ginka_ui::handoff::fork_targets(&self.agents, current_agent);
+        let current_model = self.session.as_ref().and_then(|row| row.model.clone());
+        let targets = ginka_ui::handoff::model_fork_targets(
+            &self.agents,
+            current_agent,
+            current_model.as_deref(),
+        );
         let has_targets = !targets.is_empty();
         let (fork_open, fork_busy, fork_error) = self
             .forking
@@ -9048,9 +9411,11 @@ impl Shell {
                     "transcript.build",
                 ),
             ] {
-                let id = agent.id.clone();
+                let id = agent.agent.id.clone();
+                let model = agent.model.map(|model| model.id.clone());
+                let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
                 action_buttons.push(
-                    Button::new(SharedString::from(format!("{button_id}-{turn}-{id}")))
+                    Button::new(SharedString::from(format!("{button_id}-{turn}-{key}")))
                         // The toolkit draws a button's hover itself; a second
                         // one trips its debug assertion.
                         .ghost()
@@ -9063,17 +9428,19 @@ impl Shell {
                         .when(!fork_busy, |this| {
                             this.cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.fork_from_as(seq, id.clone(), action, cx)
+                                    this.fork_from_as(seq, id.clone(), model.clone(), action, cx)
                                 }))
                         })
-                        .child(rust_i18n::t!(label, agent = agent.display_name.clone()).to_string())
+                        .child(rust_i18n::t!(label, agent = agent.label()).to_string())
                         .into_any_element(),
                 );
             }
         }
-        let target_buttons = targets.into_iter().map(|agent| {
-            let id = agent.id.clone();
-            Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+        let target_buttons = targets.into_iter().map(|target| {
+            let id = target.agent.id.clone();
+            let model = target.model.map(|model| model.id.clone());
+            let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
+            Button::new(SharedString::from(format!("fork-{turn}-{key}")))
                 // The toolkit draws a button's hover itself; a second
                 // one trips its debug assertion.
                 .ghost()
@@ -9084,11 +9451,12 @@ impl Shell {
                 .text_xs()
                 .text_color(tokens.colors().text_primary)
                 .when(!fork_busy, |this| {
-                    this.cursor_pointer().on_click(
-                        cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
-                    )
+                    this.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.fork_from(seq, id.clone(), model.clone(), cx)
+                        }))
                 })
-                .child(agent.display_name.clone())
+                .child(target.label())
                 .into_any_element()
         });
         let rule = || {
@@ -10260,6 +10628,9 @@ impl Shell {
                         }
                         "btw" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
                             rust_i18n::t!("composer.command.btw.description").to_string()
+                        }
+                        "plan" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.plan.description").to_string()
                         }
                         _ => command.description.clone(),
                     };
@@ -11693,6 +12064,17 @@ impl Shell {
             (Some(headroom), _) => (Some(headroom.summary()), tokens.colors().text_secondary),
             (None, _) => (None, tokens.colors().text_secondary),
         };
+        // Near the wall, name a login with room — in words beside the
+        // number; switching stays the reader's click.
+        let note =
+            match ginka_ui::accounts::suggest_account(&self.accounts, &self.plans, account, now) {
+                Some(other) => Some(format!(
+                    "{} · {}",
+                    note.unwrap_or_default(),
+                    rust_i18n::t!("composer.account.suggest", account = other.label.clone())
+                )),
+                None => note,
+            };
         let label = account.label.clone();
 
         Some(
@@ -14061,8 +14443,20 @@ impl Render for Shell {
         // reveal has walked out so far.
         self.write_a_little_more(window);
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            // Whether the branch has an open pull request whose checks the
+            // Git surface can offer to fix.
+            let open_pull_request = self.session.as_ref().is_some_and(|row| {
+                row.pull_request.as_ref().is_some_and(|pull_request| {
+                    matches!(
+                        pull_request.state,
+                        ginka_protocol::model::PullRequestState::Open
+                            | ginka_protocol::model::PullRequestState::Draft
+                    )
+                })
+            });
             self.surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_workspace(workspace, window, cx)
+                surfaces.set_workspace(workspace, window, cx);
+                surfaces.set_open_pull_request(open_pull_request);
             });
         }
         // Copied out: the headers below bind listeners through `cx`, and a
@@ -14152,6 +14546,9 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_close_all_tabs))
+            .on_action(cx.listener(Self::on_next_session))
+            .on_action(cx.listener(Self::on_previous_session))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_previous_tab))
             .size_full()
@@ -14544,10 +14941,11 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
 }
 
 /// What the Git surface asks of the workspace's remote.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoteAction {
     Pull,
     Push,
+    PushWithLease,
     Sync,
 }
 

@@ -995,6 +995,15 @@ impl Service {
                             }
                         }
                     }
+                    ChangeSource::Branch { base } => {
+                        let base = match base {
+                            Some(base) => base.clone(),
+                            None => self.project(&worktree.project)?.default_branch,
+                        };
+                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
+                        git::changes_since_with_context(&worktree.path, &fork, context_lines)
+                            .map_err(failed)?
+                    }
                     other => git::changes_with_context(&worktree.path, other, context_lines)
                         .map_err(failed)?,
                 };
@@ -1107,9 +1116,16 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
-            Request::Push { workspace } => {
+            Request::Push {
+                workspace,
+                force_with_lease,
+            } => {
                 let worktree = self.worktree(&workspace)?;
-                git::push(&worktree.path).map_err(failed)?;
+                if force_with_lease {
+                    git::push_with_lease(&worktree.path).map_err(failed)?;
+                } else {
+                    git::push(&worktree.path).map_err(failed)?;
+                }
                 self.events.emit(DaemonEvent::WorkspacesChanged {
                     project: worktree.project.clone(),
                 });
@@ -1379,6 +1395,7 @@ impl Service {
                 id,
                 project,
                 workspace,
+                session,
                 name,
                 schedule,
                 via,
@@ -1395,6 +1412,21 @@ impl Service {
                         "{workspace} is not a workspace of {project}"
                     )));
                 }
+                // A reminder continues a conversation of this project, on the
+                // agent that conversation already has.
+                let (workspace, agent) = match &session {
+                    Some(target) => {
+                        let stored = self.session(target)?;
+                        if stored.workspace.parts().map(|(owner, _)| owner) != Some(project.clone())
+                        {
+                            return Err(RpcError::failed(format!(
+                                "conversation {target} is not in {project}"
+                            )));
+                        }
+                        (Some(stored.workspace), Some(stored.agent))
+                    }
+                    None => (workspace, agent),
+                };
                 if let Some(agent) = &agent
                     && via == ginka_protocol::model::CronVia::Chat
                     && self.drivers.get(agent).is_none()
@@ -1404,6 +1436,7 @@ impl Service {
                 let draft = crate::cron::Draft {
                     project,
                     workspace,
+                    session,
                     name,
                     schedule,
                     via,
@@ -1549,6 +1582,11 @@ impl Service {
                 agent,
                 staged,
             } => self.generate_commit_message(workspace, agent.as_deref(), staged),
+            Request::CreateGeneratedPullRequest {
+                workspace,
+                draft,
+                agent,
+            } => self.create_generated_pull_request(workspace, agent.as_deref(), draft),
             Request::ListBranches { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::Branches {
@@ -1634,6 +1672,7 @@ impl Service {
                 workspace,
                 path,
                 line,
+                end_line,
                 side,
                 text,
             } => {
@@ -1643,8 +1682,17 @@ impl Service {
                         "a comment with nothing in it says nothing",
                     ));
                 }
-                crate::comments::add(&self.conn(), &workspace, &path, line, side, &text, now())
-                    .map_err(failed)?;
+                crate::comments::add(
+                    &self.conn(),
+                    &workspace,
+                    &path,
+                    line,
+                    end_line,
+                    side,
+                    &text,
+                    now(),
+                )
+                .map_err(failed)?;
                 Ok(Response::Ack)
             }
             Request::ListReviewComments { workspace } => Ok(Response::ReviewComments {
@@ -1665,34 +1713,60 @@ impl Service {
                     )));
                 }
                 let prompt = crate::conflicts::prompt(&conflicts);
-                let latest =
-                    session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
-                match latest
-                    .filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent))
-                {
-                    // The conversation that did the work knows why it did it,
-                    // which is most of resolving a conflict well.
-                    Some(latest) => {
-                        self.handle(Request::QueueMessage {
-                            session: latest.id.clone(),
-                            text: prompt,
-                        })?;
-                        Ok(Response::Session {
-                            session: self.session(&latest.id)?,
-                        })
-                    }
-                    None => self.handle(Request::StartSession {
-                        workspace,
-                        agent: agent.unwrap_or_else(|| "claude".to_string()),
-                        prompt,
-                        model: None,
-                        reasoning_effort: None,
-                        service_tier: None,
-                        account: None,
-                        access_mode: None,
-                        origin: None,
-                    }),
+                self.hand_to_agent(workspace, agent, prompt)
+            }
+            Request::ImageDiff {
+                workspace,
+                source,
+                path,
+                old_path,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let (before, after) =
+                    crate::image_diff::sides(&worktree.path, &source, &path, old_path.as_deref())
+                        .map_err(failed)?;
+                Ok(Response::ImageDiff { before, after })
+            }
+            Request::ListMcpServers { workspace } => {
+                let project = match &workspace {
+                    Some(workspace) => Some(self.worktree(workspace)?.path),
+                    None => None,
+                };
+                let home = dirs::home_dir()
+                    .ok_or_else(|| RpcError::failed("there is no home directory to read"))?;
+                Ok(Response::McpServers {
+                    servers: crate::mcp_inventory::discover(&home, project.as_deref()),
+                })
+            }
+            Request::PullRequestChecks { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::Checks {
+                    checks: crate::checks::read(&worktree.path).map_err(failed)?,
+                })
+            }
+            Request::FixFailingChecks { workspace, agent } => {
+                let worktree = self.worktree(&workspace)?;
+                let checks = crate::checks::read(&worktree.path).map_err(failed)?;
+                let Some(prompt) = crate::checks::fix_prompt(&checks) else {
+                    return Err(RpcError::failed(format!(
+                        "no check on {workspace}'s pull request has failed"
+                    )));
+                };
+                self.hand_to_agent(workspace, agent, prompt)
+            }
+            Request::FixCommitFailure {
+                workspace,
+                message,
+                output,
+                agent,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                if output.trim().is_empty() {
+                    return Err(RpcError::failed("there is no failure to hand over"));
                 }
+                let staged = crate::commit_failure::staged_paths(&worktree.path).map_err(failed)?;
+                let prompt = crate::commit_failure::prompt(&message, &output, &staged);
+                self.hand_to_agent(workspace, agent, prompt)
             }
             Request::SendReviewComments { workspace, session } => {
                 let comments = crate::comments::list(&self.conn(), &workspace).map_err(failed)?;
@@ -2119,7 +2193,19 @@ impl Service {
         origin: Option<SessionOrigin>,
     ) -> Result<Response, RpcError> {
         use crate::conversation_commands::Command;
+        // `/plan` on a new conversation: the conversation keeps the mode it
+        // was asked for, and only this first turn runs read-only.
+        let mut first_turn = None;
+        let mut prompt = prompt;
         let goal = match crate::conversation_commands::parse(&prompt) {
+            Some(Command::Plan(request)) => {
+                if request.is_empty() {
+                    return Err(RpcError::failed("/plan needs something to plan"));
+                }
+                prompt = request.to_owned();
+                first_turn = Some(AccessMode::ReadOnly);
+                None
+            }
             Some(Command::Goal(objective)) if !objective.is_empty() => Some(objective.to_owned()),
             Some(Command::Side(_) | Command::Btw(_)) => {
                 return Err(RpcError::failed(
@@ -2133,7 +2219,11 @@ impl Service {
             None => None,
         };
         let prompt = goal.clone().unwrap_or(prompt);
-        let preamble = goal.as_ref().map(|objective| goal_preamble(objective));
+        let preamble = match (&goal, first_turn) {
+            (Some(objective), _) => Some(goal_preamble(objective)),
+            (None, Some(_)) => Some(crate::conversation_commands::PLAN_INSTRUCTION.to_string()),
+            (None, None) => None,
+        };
         self.start_session_with_context(
             workspace,
             agent,
@@ -2146,6 +2236,7 @@ impl Service {
             origin,
             preamble,
             goal,
+            first_turn,
         )
     }
 
@@ -2164,6 +2255,7 @@ impl Service {
         origin: Option<SessionOrigin>,
         preamble: Option<String>,
         goal: Option<String>,
+        first_turn: Option<AccessMode>,
     ) -> Result<Response, RpcError> {
         let worktree = self.worktree(&workspace)?;
         let driver = self.driver(agent)?;
@@ -2215,7 +2307,12 @@ impl Service {
             .with_model(model)
             .with_reasoning_effort(reasoning_effort)
             .with_service_tier(service_tier)
-            .with_access_mode(access_mode)
+            // A narrower first turn (`/plan`) never widens what was asked.
+            .with_access_mode(
+                first_turn
+                    .filter(|mode| mode.is_narrower_than(access_mode))
+                    .unwrap_or(access_mode),
+            )
             .with_mcp_servers(self.mcp_servers(&worktree.path, &session.id));
         for (key, value) in crate::account::env_layer(
             &self.settings,
@@ -2626,6 +2723,20 @@ impl Service {
                 conversation::set_goal(&self.conn(), id, Some(objective)).map_err(failed)?;
                 return self.send_plain_message(id, objective.to_owned(), stored);
             }
+            Some(Command::Plan(request)) => {
+                if request.is_empty() {
+                    return Err(RpcError::failed("/plan needs something to plan"));
+                }
+                // Narrowing for one turn: the stored mode is not touched, so
+                // the next message runs as the conversation always has.
+                return self.send_turn(
+                    id,
+                    request.to_owned(),
+                    stored,
+                    Some(AccessMode::ReadOnly),
+                    Some(conversation::PLAN_INSTRUCTION),
+                );
+            }
             Some(Command::Side(question) | Command::Btw(question)) => {
                 let is_btw = matches!(command, Some(Command::Btw(_)));
                 if question.is_empty() && is_btw {
@@ -2684,6 +2795,7 @@ impl Service {
                     None,
                     Some(preamble),
                     None,
+                    None,
                 )?;
                 if let Response::Session { session } = &result {
                     conversation::link_side(
@@ -2708,6 +2820,20 @@ impl Service {
         text: String,
         stored: Session,
     ) -> Result<Response, RpcError> {
+        self.send_turn(id, text, stored, None, None)
+    }
+
+    /// Send a turn, optionally narrowed to `mode` and with `instruction`
+    /// ahead of the prompt — for this turn only. A wider mode than the
+    /// conversation's is never used: widening is the restart N2 reserves.
+    fn send_turn(
+        &mut self,
+        id: &SessionId,
+        text: String,
+        stored: Session,
+        mode: Option<AccessMode>,
+        instruction: Option<&str>,
+    ) -> Result<Response, RpcError> {
         use crate::conversation_commands as conversation;
         let worktree = self.worktree(&stored.workspace)?;
         let driver = self.driver(&stored.agent)?;
@@ -2725,13 +2851,24 @@ impl Service {
                 None => instruction,
             });
         }
+        if let Some(instruction) = instruction {
+            preamble = Some(match preamble {
+                Some(prior) => format!("{prior}\n\n{instruction}"),
+                None => instruction.to_string(),
+            });
+        }
+        let mode = match mode {
+            Some(narrower) if narrower.is_narrower_than(stored.access_mode) => narrower,
+            _ => stored.access_mode,
+        };
         let mut spec = SessionSpec::new(&worktree.path, self.expand_attachments(&text))
             .with_model(stored.model.clone())
             .with_reasoning_effort(stored.reasoning_effort.clone())
             .with_service_tier(stored.service_tier.clone())
-            // The mode the conversation was started in: a resume that
-            // widened it would be the change N2 reserves for a new session.
-            .with_access_mode(stored.access_mode)
+            // The mode the conversation was started in, or a narrower one
+            // for this turn: a resume that widened it would be the change N2
+            // reserves for a new session.
+            .with_access_mode(mode)
             .with_preamble(preamble)
             .with_mcp_servers(self.mcp_servers(&worktree.path, id));
         // The same login the conversation started on: the vendor's thread
@@ -2984,6 +3121,62 @@ impl Service {
         Ok(Response::Ack)
     }
 
+    /// Write a pull request's details on a cheap model and open it with them,
+    /// off the request path; the outcome is pushed as `PullRequestOpened`.
+    /// The agent and login are chosen as for a commit message.
+    fn create_generated_pull_request(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: Option<&str>,
+        draft: bool,
+    ) -> Result<Response, RpcError> {
+        let worktree = self.worktree(&workspace)?;
+        let base = self.project(&worktree.project)?.default_branch;
+        let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+        let agent = agent
+            .map(str::to_string)
+            .or_else(|| latest.as_ref().map(|session| session.agent.clone()))
+            .unwrap_or_else(|| "claude".to_string());
+        let driver = self.driver(&agent)?;
+        let account = match latest.filter(|session| session.agent == driver.id()) {
+            Some(session) => session.account,
+            None => {
+                crate::account::resolve(&self.settings, driver.id(), None).map_err(account_error)?
+            }
+        };
+        let env = crate::account::env_layer(
+            &self.settings,
+            &self.paths,
+            &account,
+            driver.home_variable(),
+        );
+        let events = self.events.clone();
+        let project = worktree.project.clone();
+        std::thread::spawn(move || {
+            let outcome = crate::pr_details::generate(driver.as_ref(), &worktree.path, &env, &base)
+                .and_then(|details| {
+                    git::create_pull_request_with(
+                        &worktree.path,
+                        draft,
+                        Some((&details.title, &details.body)),
+                    )
+                });
+            let (url, error) = match outcome {
+                Ok(url) => (Some(url), None),
+                Err(error) => (None, Some(format!("{error:#}"))),
+            };
+            if url.is_some() {
+                events.emit(DaemonEvent::WorkspacesChanged { project });
+            }
+            events.emit(DaemonEvent::PullRequestOpened {
+                workspace,
+                url,
+                error,
+            });
+        });
+        Ok(Response::Ack)
+    }
+
     /// Write a commit message for a workspace on a thread of its own, and
     /// push it when it lands (§3.3 N9).
     ///
@@ -3065,6 +3258,41 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
+    /// Give `prompt` to the workspace's latest conversation — queued if it is
+    /// working — or, when `agent` names another or there is none, to a new
+    /// conversation on that agent. The conversation that did the work knows
+    /// why it did it, which is most of fixing what went wrong with it.
+    fn hand_to_agent(
+        &mut self,
+        workspace: WorkspaceId,
+        agent: Option<String>,
+        prompt: String,
+    ) -> Result<Response, RpcError> {
+        let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
+        match latest.filter(|latest| agent.as_ref().is_none_or(|agent| *agent == latest.agent)) {
+            Some(latest) => {
+                self.handle(Request::QueueMessage {
+                    session: latest.id.clone(),
+                    text: prompt,
+                })?;
+                Ok(Response::Session {
+                    session: self.session(&latest.id)?,
+                })
+            }
+            None => self.handle(Request::StartSession {
+                workspace,
+                agent: agent.unwrap_or_else(|| "claude".to_string()),
+                prompt,
+                model: None,
+                reasoning_effort: None,
+                service_tier: None,
+                account: None,
+                access_mode: None,
+                origin: None,
+            }),
+        }
+    }
+
     fn session(&self, id: &SessionId) -> Result<Session, RpcError> {
         session::get(&self.conn(), id)
             .map_err(failed)?
@@ -3219,6 +3447,20 @@ impl Service {
         let record = |service: &Self, outcome: CronOutcome, detail: Option<&str>| {
             crate::cron::record_run(&service.conn(), job.id, now, outcome, detail)
         };
+        // A reminder goes into its conversation — queued behind a turn that
+        // is running, rather than skipped like an overlapping job: what the
+        // reader asked to be reminded of still needs saying.
+        if let Some(target) = &job.session {
+            let sent = self.handle(Request::QueueMessage {
+                session: target.clone(),
+                text: job.body.clone(),
+            });
+            let _ = match sent {
+                Ok(_) => record(self, CronOutcome::Started, Some(&target.0)),
+                Err(error) => record(self, CronOutcome::Failed, Some(&error.message)),
+            };
+            return;
+        }
         let workspace = match &job.workspace {
             Some(workspace) => Some(workspace.clone()),
             None => self.project_checkout(&job.project),

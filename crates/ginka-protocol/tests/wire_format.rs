@@ -523,6 +523,7 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
             id: None,
             project: ginka_protocol::ProjectName("comet".into()),
             workspace: None,
+            session: None,
             name: "nightly".into(),
             schedule: "@daily".into(),
             via: ginka_protocol::model::CronVia::Terminal,
@@ -533,6 +534,7 @@ fn a_scheduled_job_says_how_it_runs_in_words() {
         }),
         json!({
             "method": "save_cron_job", "id": null, "project": "comet", "workspace": null,
+            "session": null,
             "name": "nightly", "schedule": "@daily", "via": "terminal", "agent": null,
             "body": "cargo test", "precheck": null, "enabled": true
         })
@@ -578,5 +580,34 @@ fn a_setting_is_changed_by_its_key_and_a_json_value() {
             value: "false".into(),
         }),
         json!({"method": "update_daemon_settings", "key": "keep_awake", "value": "false"})
+    );
+}
+
+#[test]
+fn a_branch_diff_names_its_base_or_leaves_it_to_the_project() {
+    use ginka_protocol::model::ChangeSource;
+    assert_eq!(
+        serde_json::to_value(ChangeSource::Branch {
+            base: Some("main".into())
+        })
+        .unwrap(),
+        json!({"against": "branch", "base": "main"})
+    );
+    let defaulted: ChangeSource = serde_json::from_value(json!({"against": "branch"})).unwrap();
+    assert_eq!(defaulted, ChangeSource::Branch { base: None });
+}
+
+#[test]
+fn a_check_says_its_state_in_a_word() {
+    use ginka_protocol::model::{CheckRun, CheckState};
+    assert_eq!(
+        serde_json::to_value(CheckRun {
+            name: "test".into(),
+            workflow: Some("CI".into()),
+            state: CheckState::Failed,
+            link: None,
+        })
+        .unwrap(),
+        json!({"name": "test", "workflow": "CI", "state": "failed", "link": null})
     );
 }

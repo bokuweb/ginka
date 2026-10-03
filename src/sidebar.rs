@@ -73,6 +73,12 @@ pub enum SidebarEvent {
         project: ProjectName,
         label: String,
     },
+    /// Mute a project's notifications until a Unix second (`i64::MAX` for
+    /// until lifted), or lift the mute with `None`.
+    MuteProject {
+        project: ProjectName,
+        until: Option<i64>,
+    },
     /// Put a project at another place in the rail.
     MoveProject {
         project: ProjectName,
@@ -149,6 +155,10 @@ pub struct SessionSidebar {
     /// Whether the inbox has something unread. Known only once the GitHub
     /// client has been opened; the dot is never a guess.
     inbox_unread: bool,
+    /// Which finished conversations this window has not shown yet.
+    seen: ginka_ui::seen::Seen,
+    /// Projects whose notifications are muted, and until when.
+    muted: std::collections::BTreeMap<String, i64>,
     /// Which sessions are listed, by what they are doing.
     status: ginka_ui::workspace::StatusFilter,
     /// The row whose actions are open: MonoCode's session menu, drawn under
@@ -182,6 +192,8 @@ impl SessionSidebar {
             local_paths,
             place: Place::Workspace,
             inbox_unread: false,
+            seen: ginka_ui::seen::Seen::default(),
+            muted: std::collections::BTreeMap::new(),
             status: ginka_ui::workspace::StatusFilter::All,
             menu_for: None,
             project_menu_for: None,
@@ -225,7 +237,17 @@ impl SessionSidebar {
         // A row's title or state can change its height where the list is not
         // looking; the rows on screen are laid out again anyway.
         self.session_list.remeasure();
+        self.seen.observe(&rows);
         self.rows = rows;
+        // What is on screen is being read: its latest ending is seen.
+        if self.place == Place::Workspace
+            && let Some(row) = self
+                .selected
+                .as_ref()
+                .and_then(|selected| self.rows.iter().find(|row| &row.workspace == selected))
+        {
+            self.seen.mark_seen(row);
+        }
         match &self.selected {
             Some(selected) if !self.rows.iter().any(|row| &row.workspace == selected) => {
                 self.unlisted += 1;
@@ -237,6 +259,18 @@ impl SessionSidebar {
             _ => self.unlisted = 0,
         }
         cx.notify();
+    }
+
+    /// Which projects' notifications are muted, for the project menus.
+    pub fn set_muted(
+        &mut self,
+        muted: std::collections::BTreeMap<String, i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.muted != muted {
+            self.muted = muted;
+            cx.notify();
+        }
     }
 
     /// Replace the projects after a refresh.
@@ -362,7 +396,30 @@ impl SessionSidebar {
         }
         self.place = Place::Workspace;
         self.adopt_workspace(workspace.clone(), cx);
+        if let Some(row) = self.rows.iter().find(|row| &row.workspace == workspace) {
+            self.seen.mark_seen(row);
+        }
         cx.emit(SidebarEvent::Selected);
+    }
+
+    /// Select the conversation after (or before) the selected one in the
+    /// list as it is shown — filtered and sorted — wrapping at the ends.
+    pub fn select_adjacent(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some(project) = self.selected_project.clone() else {
+            return;
+        };
+        let rows: Vec<SessionRow> = self
+            .rows
+            .iter()
+            .filter(|row| self.status.admits(row.state))
+            .cloned()
+            .collect();
+        let visible = ginka_ui::workspace::visible_sessions(&rows, &project, &self.search_query);
+        if let Some(next) =
+            ginka_ui::workspace::adjacent_session(&visible, self.selected.as_ref(), forward)
+        {
+            self.select_workspace(&next, cx);
+        }
     }
 
     /// Select one of the first nine rows currently visible in the session list.
@@ -642,6 +699,56 @@ impl SessionSidebar {
                         });
                     })),
                 );
+            }
+            // MonoCode's per-project mute: a choice of how long, or the way
+            // back once it is on.
+            let now = chrono::Utc::now().timestamp();
+            if ginka_ui::notify::muted(&self.muted, &project.0, now) {
+                let unmute = project.clone();
+                items.push(
+                    menu_item(
+                        &tokens,
+                        format!("project-unmute:{}", project.0),
+                        Icon::new(IconName::Bell),
+                        rust_i18n::t!("sidebar.action.unmute").to_string(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::MuteProject {
+                            project: unmute.clone(),
+                            until: None,
+                        });
+                    })),
+                );
+            } else {
+                for choice in ginka_ui::notify::MuteFor::CHOICES {
+                    let mute = project.clone();
+                    let label = match choice {
+                        ginka_ui::notify::MuteFor::Hours(hours) => {
+                            rust_i18n::t!("sidebar.action.mute_hours", hours = hours).to_string()
+                        }
+                        ginka_ui::notify::MuteFor::UntilResumed => {
+                            rust_i18n::t!("sidebar.action.mute_forever").to_string()
+                        }
+                    };
+                    items.push(
+                        menu_item(
+                            &tokens,
+                            format!("project-mute:{}:{choice:?}", project.0),
+                            Icon::new(IconName::Bell),
+                            label,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.project_menu_for = None;
+                            cx.emit(SidebarEvent::MuteProject {
+                                project: mute.clone(),
+                                until: Some(choice.until(chrono::Utc::now().timestamp())),
+                            });
+                        })),
+                    );
+                }
             }
             floating_menu(
                 &tokens,
@@ -945,6 +1052,20 @@ impl SessionSidebar {
                                     .child(row.title.clone())
                                     .into_any_element(),
                             })
+                            .when(self.seen.is_unseen(row, self.selected.as_ref()), |this| {
+                                // A word, not a dot: "new" is not said by
+                                // colour alone (§6.4).
+                                this.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .rounded(px(tokens.radius.control()))
+                                        .bg(tokens.colors().accent.opacity(0.18))
+                                        .text_xs()
+                                        .text_color(tokens.colors().accent)
+                                        .child(rust_i18n::t!("sidebar.unseen").to_string()),
+                                )
+                            })
                             .children(self.pull_request_mark(index, row, cx))
                             .when(row.pinned, |this| {
                                 this.child(
@@ -1123,6 +1244,22 @@ impl SessionSidebar {
                 );
             }))
         });
+        // The id `ginka session …` and MCP take, for a reader driving this
+        // conversation from a terminal or another agent.
+        let copy_id = row.session.clone().map(|session| {
+            menu_item(
+                &tokens,
+                format!("copy-id:{key}"),
+                Icon::new(IconName::Copy),
+                rust_i18n::t!("sidebar.action.copy_id").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                this.menu_for = None;
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(session.0.clone()));
+                cx.notify();
+            }))
+        });
         let pin = menu_item(
             &tokens,
             format!("pin:{key}"),
@@ -1184,7 +1321,11 @@ impl SessionSidebar {
         });
         floating_menu(
             &tokens,
-            resolve.into_iter().chain(rename).chain([pin, archive]),
+            resolve
+                .into_iter()
+                .chain(rename)
+                .chain(copy_id)
+                .chain([pin, archive]),
             cx.listener(|this, _, _, cx| {
                 this.menu_for = None;
                 cx.notify();

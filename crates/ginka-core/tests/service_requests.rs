@@ -1750,6 +1750,7 @@ fn terminal_job(project: &ProjectName, schedule: &str, body: &str) -> Request {
         id: None,
         project: project.clone(),
         workspace: None,
+        session: None,
         name: "nightly".into(),
         schedule: schedule.into(),
         via: ginka_protocol::model::CronVia::Terminal,
@@ -1774,6 +1775,7 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
             id: None,
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: ginka_protocol::model::CronVia::Chat,
@@ -1797,6 +1799,7 @@ fn a_scheduled_job_is_checked_when_it_is_written() {
             id: Some(job.id),
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "nightly".into(),
             schedule: "@daily".into(),
             via: ginka_protocol::model::CronVia::Terminal,
@@ -1838,6 +1841,7 @@ fn editing_a_scheduled_job_keeps_its_runs_and_rechecks_its_schedule() {
             id: Some(job.id),
             project,
             workspace: None,
+            session: None,
             name: "follow up".into(),
             schedule: schedule.clone(),
             via: ginka_protocol::model::CronVia::Terminal,
@@ -2559,5 +2563,76 @@ fn a_failing_precheck_skips_the_firing_and_says_why() {
     while !marker.is_file() {
         assert!(std::time::Instant::now() < deadline, "the job never ran");
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_branch_diff_reads_everything_since_it_left_its_base() {
+    // Orca's "compare against the base branch": what the whole branch did,
+    // committed or not, measured from where it forked.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "feature".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let path = workspace.worktree.path.clone();
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        assert!(
+            std::process::Command::new("git")
+                .args(["-c", "commit.gpgsign=false"])
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?}"
+        );
+    };
+    std::fs::write(path.join("committed.txt"), "one\n").unwrap();
+    git(&path, &["add", "-A"]);
+    git(&path, &["commit", "-q", "-m", "on the branch"]);
+    std::fs::write(path.join("pending.txt"), "two\n").unwrap();
+    // The base moves on after the fork; that is not the branch's work.
+    std::fs::write(fixture.repo().join("upstream.txt"), "later\n").unwrap();
+    git(&fixture.repo(), &["add", "-A"]);
+    git(&fixture.repo(), &["commit", "-q", "-m", "base moved"]);
+
+    for base in [None, Some("main".to_string())] {
+        let changes = match fixture.ask(Request::WorkspaceChanges {
+            workspace: workspace.id(),
+            source: ChangeSource::Branch { base: base.clone() },
+            context_lines: None,
+        }) {
+            Response::Changes { changes } => changes,
+            other => panic!("expected changes, got {other:?}"),
+        };
+        let mut paths: Vec<_> = changes
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        paths.sort();
+        assert_eq!(paths, ["committed.txt", "pending.txt"], "base {base:?}");
+    }
+
+    for hostile in ["--output=/tmp/ginka-pwned", "main..HEAD", "no-such-branch"] {
+        assert!(
+            fixture
+                .service
+                .handle(Request::WorkspaceChanges {
+                    workspace: workspace.id(),
+                    source: ChangeSource::Branch {
+                        base: Some(hostile.into()),
+                    },
+                    context_lines: None,
+                })
+                .is_err(),
+            "{hostile} is refused"
+        );
     }
 }

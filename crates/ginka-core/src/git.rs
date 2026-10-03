@@ -584,8 +584,10 @@ pub fn changes_with_context(
             args.extend(common);
             git(worktree, &args)?
         }
-        ChangeSource::SinceCheckpoint { .. } | ChangeSource::Turn { .. } => {
-            unreachable!("a checkpoint is resolved to a commit before this is called")
+        ChangeSource::SinceCheckpoint { .. }
+        | ChangeSource::Turn { .. }
+        | ChangeSource::Branch { .. } => {
+            unreachable!("a checkpoint or a base is resolved to a commit before this is called")
         }
         ChangeSource::Commit { commit } => {
             anyhow::ensure!(is_object_name(commit), "{commit:?} is not a commit id");
@@ -775,6 +777,40 @@ pub fn changes_since_with_context(
         ],
     )?;
     Ok(crate::diff::parse(&patch))
+}
+
+/// Where the worktree's branch left `base`: their merge base.
+///
+/// `base` must be a local branch or a remote-tracking branch, resolved
+/// through its full ref name, so nothing a client sends is read as an option,
+/// a range or a revision expression.
+pub fn fork_point(worktree: &Path, base: &str) -> Result<String> {
+    let plain = !base.is_empty()
+        && !base.starts_with('-')
+        && !base.contains("..")
+        && base
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '-' | '_' | '.'));
+    anyhow::ensure!(plain, "{base:?} is not a branch name");
+    let resolved = [format!("refs/heads/{base}"), format!("refs/remotes/{base}")]
+        .into_iter()
+        .find_map(|name| {
+            git(
+                worktree,
+                &[
+                    "rev-parse",
+                    "--verify",
+                    "--quiet",
+                    &format!("{name}^{{commit}}"),
+                ],
+            )
+            .ok()
+            .filter(|commit| !commit.trim().is_empty())
+        })
+        .ok_or_else(|| anyhow::anyhow!("no branch named {base}"))?;
+    let fork = git(worktree, &["merge-base", resolved.trim(), "HEAD"])
+        .with_context(|| format!("{base} and this branch share no history"))?;
+    Ok(fork.trim().to_string())
 }
 
 /// Compare the two saved snapshots of a completed turn without reading the
@@ -1046,6 +1082,23 @@ pub fn push(worktree: &Path) -> Result<String> {
     }
 }
 
+/// Push a branch whose history was rewritten — an amend or a rebase after a
+/// push — replacing what the remote has only if it is still what this clone
+/// last fetched (`--force-with-lease`).
+///
+/// Never a fallback for [`push`]: overwriting a remote branch is a decision,
+/// so it is its own request. A branch never pushed has nothing to lease
+/// against and is refused; a plain push publishes it.
+pub fn push_with_lease(worktree: &Path) -> Result<String> {
+    current_branch(worktree).context("a detached HEAD has no branch to push")?;
+    let status = branch_status(worktree)?;
+    anyhow::ensure!(
+        !status.untracked_branch,
+        "this branch has never been pushed; push it first"
+    );
+    git(worktree, &["push", "--force-with-lease"])
+}
+
 /// Whether `text` is a hexadecimal object name, abbreviated or not.
 ///
 /// The only shape a client may name a commit in. A ref or a revision
@@ -1062,15 +1115,22 @@ pub fn is_object_name(text: &str) -> bool {
 /// open is not a failure — the reader wanted to get to it, and `gh` says where
 /// it is in its refusal — so that address is the answer too.
 pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
+    create_pull_request_with(worktree, draft, None)
+}
+
+/// [`create_pull_request`] with a title and body written beforehand (an
+/// agent's, `crate::pr_details`) instead of `--fill`.
+pub fn create_pull_request_with(
+    worktree: &Path,
+    draft: bool,
+    details: Option<(&str, &str)>,
+) -> Result<String> {
     push(worktree)?;
     let mut command = Command::new("gh");
     crate::tool_path::apply(&mut command);
     command
         .current_dir(worktree)
-        .args(["pr", "create", "--fill"]);
-    if draft {
-        command.arg("--draft");
-    }
+        .args(pr_create_args(draft, details));
     let output = command
         .output()
         .context("running gh: the GitHub CLI is what opens a pull request")?;
@@ -1083,6 +1143,24 @@ pub fn create_pull_request(worktree: &Path, draft: bool) -> Result<String> {
         return Ok(url);
     }
     bail!("gh pr create failed: {}", complaint(&output))
+}
+
+/// The arguments `gh pr create` runs with. A written title and body go as
+/// the values of `--title` and `--body`, so text that happens to start with
+/// a dash is never read as an option; without them, `--fill`.
+pub fn pr_create_args(draft: bool, details: Option<(&str, &str)>) -> Vec<String> {
+    let mut args: Vec<String> = vec!["pr".into(), "create".into()];
+    match details {
+        Some((title, body)) => {
+            args.extend(["--title".into(), title.to_string()]);
+            args.extend(["--body".into(), body.to_string()]);
+        }
+        None => args.push("--fill".into()),
+    }
+    if draft {
+        args.push("--draft".into());
+    }
+    args
 }
 
 /// The pull request address in what `gh` printed, if there is one.
@@ -2133,6 +2211,71 @@ prunable
                 pulled: false,
                 pushed: false
             }
+        );
+    }
+
+    #[test]
+    fn written_details_replace_fill_and_are_passed_as_separate_arguments() {
+        assert_eq!(pr_create_args(false, None), ["pr", "create", "--fill"]);
+        assert_eq!(
+            pr_create_args(true, Some(("--title is not an option", "body\n-x"))),
+            [
+                "pr",
+                "create",
+                "--title",
+                "--title is not an option",
+                "--body",
+                "body\n-x",
+                "--draft"
+            ],
+            "text that looks like a flag stays the value of the one before it"
+        );
+    }
+
+    #[test]
+    fn a_rewritten_branch_goes_up_with_a_lease_and_only_over_what_was_last_seen() {
+        // Orca's force-push-with-lease: explicit, never a plain push's
+        // fallback, and refused when the remote moved since the last fetch.
+        let dir = tempfile::tempdir().unwrap();
+        let (local, peer) = with_remote(dir.path());
+        commit_file(&local, "mine.txt");
+        push(&local).unwrap();
+        amend(&local, "reworded", false).unwrap_err(); // pushed: plain amend refuses
+        git(&local, &["commit", "--amend", "-qm", "reworded"]).unwrap();
+
+        assert!(
+            push(&local).is_err(),
+            "a plain push of rewritten history is refused"
+        );
+        push_with_lease(&local).unwrap();
+        assert_eq!(
+            git(&local, &["rev-parse", "HEAD"]).unwrap(),
+            git(&peer, &["ls-remote", "origin", "refs/heads/main"])
+                .unwrap()
+                .split_whitespace()
+                .next()
+                .unwrap()
+                .to_string(),
+            "the remote now has the rewritten commit"
+        );
+
+        // Someone else pushes; this clone has not fetched it.
+        git(&peer, &["pull", "-q", "--rebase=false"]).unwrap_or_default();
+        git(&peer, &["fetch", "-q", "origin"]).unwrap();
+        git(&peer, &["reset", "-q", "--hard", "origin/main"]).unwrap();
+        commit_file(&peer, "theirs.txt");
+        git(&peer, &["push", "-q", "origin", "main"]).unwrap();
+        git(&local, &["commit", "--amend", "-qm", "reworded again"]).unwrap();
+        let refused = push_with_lease(&local).unwrap_err().to_string();
+        assert!(
+            refused.contains("stale info") || refused.contains("rejected"),
+            "{refused}"
+        );
+        assert!(
+            git(&peer, &["ls-remote", "origin", "refs/heads/main"])
+                .unwrap()
+                .starts_with(&git(&peer, &["rev-parse", "HEAD"]).unwrap()),
+            "their commit is still there"
         );
     }
 

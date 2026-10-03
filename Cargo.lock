@@ -2975,6 +2975,7 @@ name = "ginka-ui"
 version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
+ "base64 0.22.1",
  "bgpui-kit",
  "ginka-core",
  "ginka-protocol",

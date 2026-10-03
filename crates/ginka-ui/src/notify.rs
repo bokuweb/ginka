@@ -109,8 +109,64 @@ fn quote(text: &str) -> String {
     format!("\"{escaped}\"")
 }
 
+/// How long a project's notifications are muted for — MonoCode's per-project
+/// mute.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MuteFor {
+    /// This many hours from now.
+    Hours(u32),
+    /// Until the reader unmutes it.
+    UntilResumed,
+}
+
+impl MuteFor {
+    /// The choices a project's menu offers, in order.
+    pub const CHOICES: [MuteFor; 4] = [
+        MuteFor::Hours(1),
+        MuteFor::Hours(4),
+        MuteFor::Hours(8),
+        MuteFor::UntilResumed,
+    ];
+
+    /// When a mute chosen at `now` ends, in Unix seconds; `i64::MAX` for
+    /// one that lasts until it is lifted.
+    pub fn until(self, now: i64) -> i64 {
+        match self {
+            Self::Hours(hours) => now.saturating_add(i64::from(hours) * 3_600),
+            Self::UntilResumed => i64::MAX,
+        }
+    }
+}
+
+/// Whether `project`'s notifications are muted at `now`. A mute that has
+/// run out is not one, so nothing has to come along and clear it.
+pub fn muted(mutes: &std::collections::BTreeMap<String, i64>, project: &str, now: i64) -> bool {
+    mutes.get(project).is_some_and(|until| now < *until)
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_muted_project_is_quiet_until_its_mute_runs_out() {
+        let now = 1_000;
+        let mut mutes = std::collections::BTreeMap::new();
+        mutes.insert("comet".to_string(), MuteFor::Hours(1).until(now));
+        mutes.insert("forever".to_string(), MuteFor::UntilResumed.until(now));
+        assert!(muted(&mutes, "comet", now));
+        assert!(muted(&mutes, "comet", now + 3_599));
+        assert!(
+            !muted(&mutes, "comet", now + 3_600),
+            "an hour later it speaks again"
+        );
+        assert!(muted(&mutes, "forever", i64::MAX - 1));
+        assert!(
+            !muted(&mutes, "other", now),
+            "only the project that was muted"
+        );
+        assert_eq!(MuteFor::Hours(8).until(0), 8 * 3_600);
+    }
+
     use super::*;
 
     #[test]

@@ -108,6 +108,29 @@ pub fn save_state(file: &FileContent, editor_text: &str) -> SaveState {
     }
 }
 
+/// How long typing must pause before a dirty buffer saves itself.
+pub const AUTOSAVE_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether a buffer should save itself now — MonoCode's autosave.
+///
+/// Only a dirty, savable buffer whose last edit is [`AUTOSAVE_AFTER`] old,
+/// and never while the daemon has refused its last save as stale: that
+/// file changed on disk (an agent wrote it), and writing over it unasked is
+/// exactly what the revision check is there to stop. Nor while a save is
+/// already on its way.
+pub fn autosave_due(
+    state: SaveState,
+    last_edit: Option<std::time::Instant>,
+    now: std::time::Instant,
+    conflicted: bool,
+    saving: bool,
+) -> bool {
+    state == SaveState::Dirty
+        && !conflicted
+        && !saving
+        && last_edit.is_some_and(|edited| now.duration_since(edited) >= AUTOSAVE_AFTER)
+}
+
 /// Pick the rich presentation supported by a complete file.
 pub fn preview_kind(file: &FileContent) -> Option<PreviewKind> {
     if file.truncated {
@@ -615,6 +638,50 @@ mod tests {
 
         assert!(tabs.paths().is_empty());
         assert_eq!(tabs.active(), None);
+    }
+
+    #[test]
+    fn a_buffer_saves_itself_after_a_pause_but_never_over_a_conflict() {
+        let start = std::time::Instant::now();
+        let later = start + AUTOSAVE_AFTER;
+        let soon = start + AUTOSAVE_AFTER / 2;
+        assert!(autosave_due(
+            SaveState::Dirty,
+            Some(start),
+            later,
+            false,
+            false
+        ));
+        assert!(
+            !autosave_due(SaveState::Dirty, Some(start), soon, false, false),
+            "still typing"
+        );
+        assert!(!autosave_due(
+            SaveState::Clean,
+            Some(start),
+            later,
+            false,
+            false
+        ));
+        assert!(!autosave_due(
+            SaveState::ReadOnly,
+            Some(start),
+            later,
+            false,
+            false
+        ));
+        assert!(
+            !autosave_due(SaveState::Dirty, Some(start), later, true, false),
+            "a file an agent changed on disk is not written over unasked"
+        );
+        assert!(!autosave_due(
+            SaveState::Dirty,
+            Some(start),
+            later,
+            false,
+            true
+        ));
+        assert!(!autosave_due(SaveState::Dirty, None, later, false, false));
     }
 
     #[test]

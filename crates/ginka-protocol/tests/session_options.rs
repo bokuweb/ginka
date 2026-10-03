@@ -105,3 +105,11 @@ fn a_model_can_carry_efforts_and_tiers() {
     assert!(!model.supports_reasoning_effort("ultra"));
     assert!(model.supports_service_tier("fast"));
 }
+
+#[test]
+fn a_turn_may_narrow_its_mode_but_never_widen_it() {
+    assert!(AccessMode::ReadOnly.is_narrower_than(AccessMode::Auto));
+    assert!(AccessMode::Ask.is_narrower_than(AccessMode::Auto));
+    assert!(!AccessMode::Auto.is_narrower_than(AccessMode::ReadOnly));
+    assert!(!AccessMode::Ask.is_narrower_than(AccessMode::Ask));
+}

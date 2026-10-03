@@ -408,7 +408,15 @@ pub enum Request {
         path: String,
     },
     /// Push a workspace's branch, setting an upstream if it has none.
-    Push { workspace: WorkspaceId },
+    ///
+    /// `force_with_lease` replaces rewritten history on the remote — after
+    /// an amend or a rebase — only if the remote is still what was last
+    /// fetched. It is never what a plain push falls back to.
+    Push {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        force_with_lease: bool,
+    },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull { workspace: WorkspaceId },
     /// Bring a workspace branch level with its remote in one action: publish
@@ -560,6 +568,19 @@ pub enum Request {
         #[serde(default)]
         staged: bool,
     },
+    /// Have an agent write a pull request's title and description from the
+    /// branch's commits and its diff against the project's default branch,
+    /// then push and open it with them (Orca's AI pull request details).
+    /// Answers `Ack` at once; the result arrives as
+    /// `DaemonEvent::PullRequestOpened`. `agent` is chosen as for
+    /// `GenerateCommitMessage`.
+    CreateGeneratedPullRequest {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        draft: bool,
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// The local branches of a workspace's repository, with which is checked
     /// out here and which are held by other worktrees.
     ListBranches { workspace: WorkspaceId },
@@ -611,6 +632,36 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// A changed image as it was and as it is under `source` (Orca's image
+    /// diff). Each side is sent only when it is a recognised image within
+    /// the preview limit. Sources measured from a checkpoint or a base are
+    /// refused for now.
+    ImageDiff {
+        workspace: WorkspaceId,
+        source: crate::model::ChangeSource,
+        path: String,
+        #[serde(default)]
+        old_path: Option<String>,
+    },
+    /// The MCP servers the agent CLIs are configured with outside Ginka —
+    /// the user's, and with `workspace` that repository's and that
+    /// project's own (MonoCode's Settings → MCP). Read-only.
+    ListMcpServers {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+    },
+    /// The checks of the pull request open from a workspace's branch, read
+    /// with `gh pr checks` (Orca's checks view).
+    PullRequestChecks { workspace: WorkspaceId },
+    /// Hand the failing checks of the workspace's pull request to an agent
+    /// to fix — Orca's "Fix broken checks". Routed like `ResolveConflicts`;
+    /// refused when nothing failed. Answers with the conversation.
+    FixFailingChecks {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        agent: Option<String>,
+    },
+
     /// Hand a worktree's conflicts — a merge, rebase or cherry-pick that
     /// stopped on them — to an agent to resolve and finish: Orca's "Resolve
     /// with AI". Refused when nothing is conflicted. Answers with the
@@ -623,14 +674,31 @@ pub enum Request {
         #[serde(default)]
         agent: Option<String>,
     },
+    /// Hand a refused commit to an agent to fix — Orca's "Fix with AI":
+    /// `output` is what git and its hooks said (the `Commit` error), and
+    /// `message` the message it was going to use. The daemon adds the staged
+    /// files. Routed like [`Request::ResolveConflicts`].
+    FixCommitFailure {
+        workspace: WorkspaceId,
+        message: String,
+        output: String,
+        #[serde(default)]
+        agent: Option<String>,
+    },
     /// Leave a comment on a line of the diff.
     ///
     /// Orca's loop: marking the three places that are wrong is a better way to
     /// tell an agent what to fix than re-prompting it from scratch.
+    ///
+    /// `end_line` makes it cover `line..=end_line` (Orca's multi-line
+    /// comments); refused when it comes before `line` or has none to start
+    /// from.
     AddReviewComment {
         workspace: WorkspaceId,
         path: String,
         line: Option<u32>,
+        #[serde(default)]
+        end_line: Option<u32>,
         side: DiffSide,
         text: String,
     },
@@ -752,6 +820,10 @@ pub enum Request {
         id: Option<i64>,
         project: ProjectName,
         workspace: Option<WorkspaceId>,
+        /// A chat job's conversation to continue instead of starting one
+        /// (a reminder). Must be a conversation in `project`.
+        #[serde(default)]
+        session: Option<SessionId>,
         name: String,
         schedule: String,
         via: crate::model::CronVia,
@@ -946,6 +1018,19 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    /// The two sides of a changed image; `None` where there is no image.
+    ImageDiff {
+        before: Option<crate::model::FileImage>,
+        after: Option<crate::model::FileImage>,
+    },
+    /// MCP servers configured outside Ginka, by provider and scope.
+    McpServers {
+        servers: Vec<crate::model::McpServerEntry>,
+    },
+    /// A pull request's checks, in the order `gh` lists them.
+    Checks {
+        checks: Vec<crate::model::CheckRun>,
     },
     Changes {
         changes: Changes,

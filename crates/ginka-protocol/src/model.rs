@@ -617,6 +617,10 @@ pub struct ReviewComment {
     pub path: String,
     /// `None` is a comment on the file as a whole, which people write.
     pub line: Option<u32>,
+    /// The last line of a comment that covers several, after `line`;
+    /// `None` for a comment on one line or the whole file.
+    #[serde(default)]
+    pub end_line: Option<u32>,
     pub side: DiffSide,
     pub text: String,
     /// Unix seconds.
@@ -827,6 +831,15 @@ pub enum ChangeSource {
     /// handed to git as an argument, and anything that could be read as an
     /// option or a revision expression is refused before it gets there.
     Commit { commit: String },
+    /// Everything the branch did since it left `base` — its commits and
+    /// whatever is not committed yet — measured from their merge base, so
+    /// later commits on the base are not counted (Orca's base-branch diff).
+    /// `None` is the project's default branch. `base` must name a branch or
+    /// remote-tracking branch; anything else is refused before git runs.
+    Branch {
+        #[serde(default)]
+        base: Option<String>,
+    },
 }
 
 /// How one file changed.
@@ -1081,6 +1094,57 @@ pub struct WorkspaceSummary {
     /// MCP, or by a person — and when. Orca's worktree comment.
     #[serde(default)]
     pub status_note: Option<StatusNote>,
+}
+
+/// An MCP server an agent CLI is configured with, outside Ginka.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    pub name: String,
+    /// Whose configuration names it: `claude`, `codex`.
+    pub provider: String,
+    pub scope: McpScope,
+    /// The command it runs, or the address it is reached at — never its
+    /// arguments or environment, which can carry tokens.
+    pub target: Option<String>,
+}
+
+/// Where an MCP server is configured.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpScope {
+    /// For every project, in the user's own configuration.
+    User,
+    /// Checked into the repository (`.mcp.json`).
+    Project,
+    /// For this project only, in the user's configuration.
+    Local,
+}
+
+/// One check on a pull request, as `gh pr checks` reports it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    /// The workflow it belongs to, when it is an Actions job.
+    pub workflow: Option<String>,
+    pub state: CheckState,
+    /// Where its log is.
+    pub link: Option<String>,
+}
+
+/// Where a check stands.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Passed,
+    Failed,
+    /// Queued or running — or a state this build does not know.
+    Pending,
+    Skipped,
+    Cancelled,
 }
 
 /// A short, free-text line saying where a workspace's work stands.
@@ -1425,6 +1489,10 @@ pub struct CronJob {
     pub id: i64,
     pub project: ProjectName,
     pub workspace: Option<WorkspaceId>,
+    /// The conversation a chat job continues, instead of starting a new
+    /// one each time — a reminder.
+    #[serde(default)]
+    pub session: Option<SessionId>,
     pub name: String,
     /// Five cron fields or `@daily` and the like on the daemon host's clock,
     /// or `@once <RFC3339 timestamp with time zone>` for one firing.

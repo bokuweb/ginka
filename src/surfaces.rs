@@ -42,12 +42,23 @@ use std::time::Duration;
 /// reports every step of a drag.
 const ARRANGEMENT_SETTLES: Duration = Duration::from_millis(400);
 
+/// A comment being written in the Git surface: its file, the line it starts
+/// on, where a shift-clicked range ends, and its text box.
+type OpenComment = (String, Option<u32>, Option<u32>, Entity<TextareaState>);
+
 struct FileBuffer {
     workspace: WorkspaceId,
     file: FileContent,
     editor: Option<Entity<EditorState>>,
     complaint: Option<SharedString>,
     previewing: bool,
+    /// When the reader last typed in it, for autosave.
+    last_edit: Option<std::time::Instant>,
+    /// A save is on its way to the daemon.
+    saving: bool,
+    /// The daemon refused the last save — the file changed on disk — so it
+    /// is not saved again without the reader.
+    conflicted: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -116,6 +127,19 @@ pub struct SurfacePanel {
     pull_request: Option<(SharedString, bool)>,
     /// A pull request is being opened.
     opening_pull_request: bool,
+    /// The last plain push was refused, so overwriting the remote with a
+    /// lease is offered — and `true` in the second field once the reader has
+    /// asked once and must confirm.
+    lease_push: Option<bool>,
+    /// The complaint on screen is a refused commit, which the agent can be
+    /// asked to fix.
+    commit_refused: bool,
+    /// The workspace's branch has an open pull request, so its checks can
+    /// be handed to the agent.
+    open_pull_request: bool,
+    /// Changed images read for a side-by-side look, by staged-ness and
+    /// path: the image before and after (Orca's image diff).
+    image_diffs: HashMap<(bool, String), (Option<String>, Option<String>)>,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -127,7 +151,9 @@ pub struct SurfacePanel {
     ///
     /// One at a time: a review is read line by line, and two open boxes is a
     /// form, not a margin note.
-    commenting: Option<(String, Option<u32>, Entity<TextareaState>)>,
+    ///
+    /// The second line is where a shift-click range ends, when it is one.
+    commenting: Option<OpenComment>,
     /// The paths that are staged for the next commit.
     ///
     /// Read separately from the changes themselves: the uncommitted diff is
@@ -269,6 +295,21 @@ pub enum SurfaceEvent {
     Sync,
     /// Push the workspace branch, creating its upstream when needed.
     Push,
+    /// Replace the remote branch with rewritten history, if the remote is
+    /// still what was last fetched. Offered only after a plain push failed.
+    PushWithLease,
+    /// Hand a refused commit — what git and its hooks said, and the message
+    /// it was going to use — to the workspace's agent to fix.
+    FixCommit { message: String, output: String },
+    /// Hand the failing checks of the branch's pull request to the agent.
+    FixChecks,
+    /// Read a changed image's two sides, from the staged or the unstaged
+    /// changes.
+    LoadImageDiff {
+        path: String,
+        old_path: Option<String>,
+        staged: bool,
+    },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
     /// Read what one commit did; it comes back through
@@ -278,10 +319,15 @@ pub enum SurfaceEvent {
     OpenTurn(Checkpoint),
     /// Push the branch and open a pull request for it.
     CreatePullRequest,
+    /// Push and open a pull request whose title and description an agent
+    /// wrote from the branch's commits and diff.
+    CreateGeneratedPullRequest,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
         line: Option<u32>,
+        /// The last line of a shift-clicked range.
+        end_line: Option<u32>,
         text: String,
     },
     /// Send every waiting comment back to the agent.
@@ -461,6 +507,10 @@ impl SurfacePanel {
             commit_view: None,
             pull_request: None,
             opening_pull_request: false,
+            lease_push: None,
+            commit_refused: false,
+            open_pull_request: false,
+            image_diffs: HashMap::new(),
             expanded: None,
             split: false,
             comments: Vec::new(),
@@ -786,8 +836,10 @@ impl SurfacePanel {
             });
             let lsp = crate::lsp::EditorLspBinding::default();
             let lsp_for_changes = lsp.clone();
-            cx.subscribe(&editor, move |_, editor, event: &InputEvent, cx| {
+            let edited_path = file.path.clone();
+            cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.note_edit(&edited_path, cx);
                     let text = editor.read(cx).value().to_string();
                     let (version, server) = lsp_for_changes.change_target();
                     if let Some(server) = server {
@@ -835,6 +887,9 @@ impl SurfacePanel {
             editor,
             complaint: None,
             previewing: false,
+            last_edit: None,
+            saving: false,
+            conflicted: false,
         });
         let path = self
             .file_buffers
@@ -896,8 +951,65 @@ impl SurfacePanel {
         {
             buffer.file = file;
             buffer.complaint = None;
+            buffer.saving = false;
+            buffer.conflicted = false;
             cx.notify();
         }
+    }
+
+    /// The reader typed in `path`: autosave it once typing pauses for
+    /// [`ginka_ui::editor::AUTOSAVE_AFTER`] (MonoCode's autosave).
+    fn note_edit(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        buffer.last_edit = Some(std::time::Instant::now());
+        let path = path.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(ginka_ui::editor::AUTOSAVE_AFTER)
+                .await;
+            this.update(cx, |this, cx| this.autosave(&path, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Save `path` if [`ginka_ui::editor::autosave_due`] says so — the timer
+    /// of an earlier keystroke finds the buffer still being typed in, and
+    /// does nothing.
+    fn autosave(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        let Some(editor) = buffer.editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        let state = save_state(&buffer.file, &text);
+        if !ginka_ui::editor::autosave_due(
+            state,
+            buffer.last_edit,
+            std::time::Instant::now(),
+            buffer.conflicted,
+            buffer.saving,
+        ) {
+            return;
+        }
+        buffer.saving = true;
+        cx.emit(SurfaceEvent::SaveFile {
+            workspace: buffer.workspace.clone(),
+            path: buffer.file.path.clone(),
+            text,
+            expected_revision: buffer.file.revision.clone(),
+        });
     }
 
     /// Keep the editor intact and explain why its save was refused.
@@ -914,6 +1026,10 @@ impl SurfacePanel {
             .find(|buffer| &buffer.workspace == workspace && buffer.file.path == path)
         {
             buffer.complaint = Some(error.into());
+            buffer.saving = false;
+            // Not saved over by itself again: a manual save is the reader
+            // deciding to.
+            buffer.conflicted = true;
             cx.notify();
         }
     }
@@ -1043,6 +1159,7 @@ impl SurfacePanel {
     /// Say why a commit did not happen, or clear it once one did.
     pub fn set_commit_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = self.complaint.is_some();
         if self.complaint.is_none() {
             // It went in; the message belongs to the commit now.
             self.message = None;
@@ -1053,7 +1170,41 @@ impl SurfacePanel {
     /// Show a remote-sync error without disturbing a commit message draft.
     pub fn set_git_sync_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = false;
         cx.notify();
+    }
+
+    /// A changed image's two sides arrived, as `data:` URLs.
+    pub fn set_image_diff(
+        &mut self,
+        staged: bool,
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_diffs.insert((staged, path), (before, after));
+        cx.notify();
+    }
+
+    /// Whether the workspace's branch has an open pull request.
+    pub fn set_open_pull_request(&mut self, open: bool) {
+        self.open_pull_request = open;
+    }
+
+    /// Say how a push went: a refused plain push offers the lease push,
+    /// anything that went through takes the offer away.
+    pub fn set_push_result(
+        &mut self,
+        complaint: Option<String>,
+        with_lease: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.lease_push = match (&complaint, with_lease) {
+            (Some(_), false) => Some(false),
+            _ => None,
+        };
+        self.set_git_sync_result(complaint, cx);
     }
 
     /// Show what a commit did. `changes` is `None` while it is being read; a
@@ -1419,6 +1570,8 @@ impl SurfacePanel {
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
             self.changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -1427,6 +1580,8 @@ impl SurfacePanel {
     pub fn set_staged_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.staged_changes != changes {
             self.staged_changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -1879,6 +2034,29 @@ impl SurfacePanel {
                     .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
             )
+            .children(self.lease_push.map(|armed| {
+                // Two activations, like discarding a file: overwriting a
+                // remote branch is not undone from here.
+                Button::new("git-push-lease")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(if armed {
+                        rust_i18n::t!("surface.git.push_lease.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.push_lease").to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.push_lease_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if armed {
+                            this.lease_push = None;
+                            cx.emit(SurfaceEvent::PushWithLease);
+                        } else {
+                            this.lease_push = Some(true);
+                        }
+                        cx.notify();
+                    }))
+            }))
             .child(
                 Button::new("git-create-pr")
                     .ghost()
@@ -1895,6 +2073,34 @@ impl SurfacePanel {
                         this.opening_pull_request = true;
                         this.pull_request = None;
                         cx.emit(SurfaceEvent::CreatePullRequest);
+                        cx.notify();
+                    })),
+            )
+            .when(self.open_pull_request, |row| {
+                // Orca's "Fix broken checks": what failed, and where its log
+                // is, goes to the agent; nothing is sent when all is green.
+                row.child(
+                    Button::new("git-fix-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_checks_tooltip").to_string())
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::FixChecks))),
+                )
+            })
+            .child(
+                Button::new("git-create-pr-written")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.create_pr_written").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.create_pr_written_tooltip").to_string())
+                    .disabled(self.opening_pull_request)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.opening_pull_request = true;
+                        this.pull_request = None;
+                        cx.emit(SurfaceEvent::CreateGeneratedPullRequest);
                         cx.notify();
                     })),
             )
@@ -2351,21 +2557,51 @@ impl SurfacePanel {
             }
         })
         .detach();
-        self.commenting = Some((path, line, state));
+        self.commenting = Some((path, line, None, state));
         cx.notify();
+    }
+
+    /// A click on a diff line: a new comment there, or — with shift held
+    /// while a comment is open on another line of the same file — that
+    /// comment stretched to cover both (Orca's multi-line comments).
+    fn click_line(
+        &mut self,
+        path: String,
+        anchor: Option<u32>,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if shift
+            && let Some(clicked) = anchor
+            && let Some((open_path, Some(start), end, _)) = self.commenting.as_mut()
+            && *open_path == path
+        {
+            let (low, high) = ginka_ui::comment_range::extend(*start, clicked);
+            *start = low;
+            *end = high;
+            cx.notify();
+            return;
+        }
+        self.comment_on(path, anchor, window, cx);
     }
 
     /// Hand a finished comment to the shell, which is the one holding the
     /// daemon.
     fn finish_comment(&mut self, text: String, cx: &mut Context<Self>) {
-        let Some((path, line, _)) = self.commenting.take() else {
+        let Some((path, line, end_line, _)) = self.commenting.take() else {
             return;
         };
         cx.notify();
         if text.is_empty() {
             return;
         }
-        cx.emit(SurfaceEvent::Comment { path, line, text });
+        cx.emit(SurfaceEvent::Comment {
+            path,
+            line,
+            end_line,
+            text,
+        });
     }
 
     /// The comments already left on a line, and the box for a new one.
@@ -2391,23 +2627,44 @@ impl SurfacePanel {
                     .bg(tokens.colors().row_hover())
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
-                    .child(comment.text.clone())
+                    .child(match (comment.line, comment.end_line) {
+                        (Some(start), Some(end)) => format!(
+                            "{} · {}",
+                            ginka_ui::comment_range::label(start, Some(end)),
+                            comment.text
+                        ),
+                        _ => comment.text.clone(),
+                    })
                     .into_any_element()
             })
             .collect();
 
-        if let Some((open_path, open_line, state)) = &self.commenting
+        if let Some((open_path, open_line, end_line, state)) = &self.commenting
             && open_path == path
             && *open_line == line
         {
             drawn.push(
-                div()
+                v_flex()
                     .w_full()
                     .px_2()
                     .py_1()
                     .ml_8()
+                    .gap_0p5()
                     .border_l_2()
                     .border_color(tokens.colors().accent)
+                    // Which lines it is about, and how to make it more.
+                    .children(open_line.map(|start| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(
+                                rust_i18n::t!(
+                                    "surface.git.comment_lines",
+                                    lines = ginka_ui::comment_range::label(start, *end_line)
+                                )
+                                .to_string(),
+                            )
+                    }))
                     .child(Textarea::new(state))
                     .into_any_element(),
             );
@@ -2443,6 +2700,35 @@ impl SurfacePanel {
                     .text_color(tokens.colors().status_error)
                     .child(why)
             }))
+            .when(self.commit_refused, |this| {
+                // Orca's "Fix with AI": the hook said what is wrong, and the
+                // agent that wrote the code is the one to fix it.
+                this.child(
+                    Button::new("commit-fix-with-agent")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_commit").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_commit_tooltip").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(output) = this.complaint.clone() else {
+                                return;
+                            };
+                            let message = this
+                                .message
+                                .as_ref()
+                                .map(|state| state.read(cx).value().to_string())
+                                .unwrap_or_default();
+                            this.commit_refused = false;
+                            this.complaint = None;
+                            cx.emit(SurfaceEvent::FixCommit {
+                                message,
+                                output: output.to_string(),
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .child(match open {
                 Some(state) => v_flex()
                     .w_full()
@@ -2922,14 +3208,86 @@ impl SurfacePanel {
                     .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .text_color(tokens.colors().text_muted)
-                        .child(rust_i18n::t!("surface.git.binary").to_string()),
-                )
+                match self.image_diffs.get(&(staged, file.path.clone())).cloned() {
+                    // Orca's image diff: as it was beside as it is.
+                    Some((before, after)) => this.child(
+                        h_flex().w_full().px_3().py_2().gap_3().children(
+                            [
+                                (
+                                    rust_i18n::t!("surface.git.image_before").to_string(),
+                                    before,
+                                ),
+                                (rust_i18n::t!("surface.git.image_after").to_string(), after),
+                            ]
+                            .into_iter()
+                            .map(|(label, url)| {
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(label),
+                                    )
+                                    .child(match url {
+                                        Some(url) => div()
+                                            .h(px(180.))
+                                            .rounded(px(tokens.radius.row))
+                                            .bg(tokens.colors().bg_surface)
+                                            .child(
+                                                img(SharedString::from(url))
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Contain),
+                                            )
+                                            .into_any_element(),
+                                        None => div()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(
+                                                rust_i18n::t!("surface.git.image_missing")
+                                                    .to_string(),
+                                            )
+                                            .into_any_element(),
+                                    })
+                            }),
+                        ),
+                    ),
+                    None => {
+                        let (path, old_path) = (file.path.clone(), file.old_path.clone());
+                        this.child(
+                            h_flex()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(rust_i18n::t!("surface.git.binary").to_string()),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "show-images:{staged}:{}",
+                                        file.path
+                                    )))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .label(rust_i18n::t!("surface.git.show_images").to_string())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(SurfaceEvent::LoadImageDiff {
+                                            path: path.clone(),
+                                            old_path: old_path.clone(),
+                                            staged,
+                                        })
+                                    })),
+                                ),
+                        )
+                    }
+                }
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
@@ -3045,9 +3403,17 @@ impl SurfacePanel {
                                         .gap_2()
                                         .cursor_pointer()
                                         .hover(|this| this.bg(tokens.colors().row_hover()))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.comment_on(path.clone(), anchor, window, cx)
-                                        }))
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                this.click_line(
+                                                    path.clone(),
+                                                    anchor,
+                                                    event.modifiers().shift,
+                                                    window,
+                                                    cx,
+                                                )
+                                            },
+                                        ))
                                         .font_family(mono.clone())
                                         .text_xs()
                                         .line_height(px(17.))
@@ -4584,8 +4950,8 @@ fn split_row(
             .when(line.kind == LineKind::Removed, |this| {
                 this.bg(tokens.colors().status_error.opacity(0.10))
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.comment_on(path.clone(), anchor, window, cx)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.click_line(path.clone(), anchor, event.modifiers().shift, window, cx)
             }))
             .child(
                 div()

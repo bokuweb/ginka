@@ -181,6 +181,16 @@ enum Command {
         /// Show what one commit did, by the id `history` prints.
         #[arg(long, conflicts_with_all = ["since", "turn", "staged", "unstaged"])]
         commit: Option<String>,
+        /// Show everything the branch did since it left BASE — its commits
+        /// and uncommitted work. Without BASE, the project's default branch.
+        #[arg(
+            long,
+            value_name = "BASE",
+            num_args = 0..=1,
+            default_missing_value = "",
+            conflicts_with_all = ["since", "turn", "staged", "unstaged", "commit"]
+        )]
+        branch: Option<String>,
         /// Print the diff itself rather than a summary.
         #[arg(long)]
         patch: bool,
@@ -241,6 +251,42 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Write a changed image's two sides to files, to look at side by side.
+    ImageDiff {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The image, relative to the worktree root.
+        path: String,
+        /// Compare what is staged instead of everything uncommitted.
+        #[arg(long, conflicts_with = "commit")]
+        staged: bool,
+        /// What one commit did to it, by the id `history` prints.
+        #[arg(long)]
+        commit: Option<String>,
+        /// Where to write `before.*` and `after.*`; the current directory
+        /// when omitted.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+    },
+    /// The MCP servers Claude Code and Codex are configured with outside
+    /// Ginka, and with `--workspace` that repository's own.
+    McpServers {
+        #[arg(long)]
+        workspace: Option<String>,
+    },
+    /// The checks on the workspace branch's pull request; `--fix` hands
+    /// the failing ones to an agent.
+    Checks {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Send the failing checks to the workspace's latest conversation
+        /// (or `--agent`) to fix.
+        #[arg(long)]
+        fix: bool,
+        /// With `--fix`, start a new conversation on this agent instead.
+        #[arg(long, requires = "fix")]
+        agent: Option<String>,
+    },
     /// Hand a stopped merge, rebase or cherry-pick's conflicts to an agent
     /// to resolve and finish.
     Resolve {
@@ -278,6 +324,10 @@ enum Command {
     Push {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
+        /// Replace rewritten history on the remote (after an amend or a
+        /// rebase), only if the remote is still what was last fetched.
+        #[arg(long)]
+        force_with_lease: bool,
     },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
     Pull {
@@ -298,6 +348,14 @@ enum Command {
         /// Open it as a draft.
         #[arg(long)]
         draft: bool,
+        /// Have an agent write the title and description from the branch's
+        /// commits and diff, instead of `gh --fill`.
+        #[arg(long)]
+        generate: bool,
+        /// Which agent writes them: claude, codex. The workspace's latest
+        /// session's agent otherwise.
+        #[arg(long, requires = "generate")]
+        agent: Option<String>,
     },
     /// Markdown notes, kept by the daemon.
     #[command(subcommand)]
@@ -580,6 +638,9 @@ enum TerminalCommand {
 }
 
 #[derive(Subcommand)]
+// `Add` carries every field a job has; the arguments are parsed once per run,
+// so boxing it would cost every match for memory no one holds.
+#[allow(clippy::large_enum_variant)]
 enum CronCommand {
     /// List scheduled jobs, with when each fires next and how it last went.
     List {
@@ -587,7 +648,8 @@ enum CronCommand {
         project: Option<String>,
     },
     /// Schedule a shell command (`--shell`) or a prompt for an agent
-    /// (`--prompt` with `--agent`).
+    /// (`--prompt` with `--agent`), or a reminder: a prompt sent into an
+    /// existing conversation (`--prompt` with `--session`).
     Add {
         project: String,
         name: String,
@@ -603,10 +665,14 @@ enum CronCommand {
         at: Option<String>,
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
-        #[arg(long, requires = "agent")]
-        prompt: Option<String>,
         #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long, conflicts_with = "session")]
         agent: Option<String>,
+        /// Send the prompt into this conversation, by its id, instead of
+        /// starting a new one — a reminder. Its agent answers it.
+        #[arg(long, requires = "prompt", conflicts_with = "workspace")]
+        session: Option<String>,
         /// A workspace id; the project's own checkout when omitted.
         #[arg(long)]
         workspace: Option<String>,
@@ -930,6 +996,9 @@ enum ReviewCommand {
         /// The line it is about. Omitted, the comment is about the file.
         #[arg(long)]
         line: Option<u32>,
+        /// The last line of a range that starts at `--line`.
+        #[arg(long, requires = "line")]
+        end_line: Option<u32>,
     },
     /// Every comment waiting, in reading order.
     List { workspace: String },
@@ -968,6 +1037,12 @@ fn main() -> Result<()> {
             agent,
             ..
         } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        Command::Pr {
+            workspace,
+            draft,
+            generate: true,
+            agent,
+        } => pull_request_generated(&paths, &workspace, draft, agent, cli.json),
         Command::Workspace(WorkspaceCommand::Index { workspace }) => {
             workspace_index(&paths, &workspace)
         }
@@ -979,6 +1054,14 @@ fn main() -> Result<()> {
                 Command::Notes(NotesCommand::Show { id }) => Some(id.clone()),
                 _ => None,
             };
+            let image_out = match &command {
+                Command::ImageDiff { out_dir, .. } => Some(
+                    out_dir
+                        .clone()
+                        .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                ),
+                _ => None,
+            };
             let request = request_for(command)?;
             let response = smol::block_on(async {
                 let client = connect(&paths).await?;
@@ -987,6 +1070,12 @@ fn main() -> Result<()> {
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))
             })?;
+            if let (Some(dir), Response::ImageDiff { before, after }) = (&image_out, &response)
+                && !cli.json
+            {
+                write_image_sides(dir, before.as_ref(), after.as_ref())?;
+                return Ok(());
+            }
             let response = match (showing_note, response) {
                 (Some(id), Response::Notes { notes }) => {
                     let note = notes
@@ -1009,6 +1098,32 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Write a changed image's sides as `before.<ext>` and `after.<ext>` in
+/// `dir`, printing each path, or saying a side has no image.
+fn write_image_sides(
+    dir: &std::path::Path,
+    before: Option<&ginka_protocol::model::FileImage>,
+    after: Option<&ginka_protocol::model::FileImage>,
+) -> Result<()> {
+    use base64::Engine as _;
+    std::fs::create_dir_all(dir)?;
+    for (name, side) in [("before", before), ("after", after)] {
+        match side {
+            Some(image) => {
+                let extension = image.media_type.rsplit('/').next().unwrap_or("img");
+                let path = dir.join(format!("{name}.{extension}"));
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data_base64)
+                    .context("the daemon sent an image that is not base64")?;
+                std::fs::write(&path, bytes)?;
+                println!("{name}\t{}", path.display());
+            }
+            None => println!("{name}\t{}", rust_i18n::t!("cli.image_diff.none")),
+        }
+    }
+    Ok(())
 }
 
 /// Speak MCP on stdin and stdout until the agent closes them.
@@ -1408,10 +1523,12 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             text,
             line,
+            end_line,
         }) => Request::AddReviewComment {
             workspace: WorkspaceId(workspace),
             path,
             line,
+            end_line,
             side: ginka_protocol::DiffSide::New,
             text,
         },
@@ -1456,6 +1573,40 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             header,
         },
+        Command::ImageDiff {
+            workspace,
+            path,
+            staged,
+            commit,
+            ..
+        } => Request::ImageDiff {
+            workspace: WorkspaceId(workspace),
+            source: match (staged, commit) {
+                (_, Some(commit)) => ChangeSource::Commit { commit },
+                (true, None) => ChangeSource::Staged,
+                (false, None) => ChangeSource::Uncommitted,
+            },
+            path,
+            old_path: None,
+        },
+        Command::McpServers { workspace } => Request::ListMcpServers {
+            workspace: workspace.map(WorkspaceId),
+        },
+        Command::Checks {
+            workspace,
+            fix: false,
+            ..
+        } => Request::PullRequestChecks {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Checks {
+            workspace,
+            fix: true,
+            agent,
+        } => Request::FixFailingChecks {
+            workspace: WorkspaceId(workspace),
+            agent,
+        },
         Command::Resolve { workspace, agent } => Request::ResolveConflicts {
             workspace: WorkspaceId(workspace),
             agent,
@@ -1480,8 +1631,12 @@ fn request_for(command: Command) -> Result<Request> {
             all: !staged,
             amend,
         },
-        Command::Push { workspace } => Request::Push {
+        Command::Push {
+            workspace,
+            force_with_lease,
+        } => Request::Push {
             workspace: WorkspaceId(workspace),
+            force_with_lease,
         },
         Command::Pull { workspace } => Request::Pull {
             workspace: WorkspaceId(workspace),
@@ -1496,12 +1651,16 @@ fn request_for(command: Command) -> Result<Request> {
             since,
             turn,
             commit,
+            branch,
             context,
             ..
         } => Request::WorkspaceChanges {
             workspace: WorkspaceId(workspace),
             context_lines: Some(context),
             source: match (staged, unstaged, since, turn) {
+                _ if branch.is_some() => ChangeSource::Branch {
+                    base: branch.filter(|base| !base.is_empty()),
+                },
                 _ if commit.is_some() => ChangeSource::Commit {
                     commit: commit.unwrap_or_default(),
                 },
@@ -1517,7 +1676,9 @@ fn request_for(command: Command) -> Result<Request> {
                 _ => unreachable!("clap rejects conflicting diff sources"),
             },
         },
-        Command::Pr { workspace, draft } => Request::CreatePullRequest {
+        Command::Pr {
+            workspace, draft, ..
+        } => Request::CreatePullRequest {
             workspace: WorkspaceId(workspace),
             draft,
         },
@@ -1625,10 +1786,14 @@ fn request_for(command: Command) -> Result<Request> {
             shell,
             prompt,
             agent,
+            session,
             workspace,
             precheck,
             disabled,
         }) => {
+            if prompt.is_some() && agent.is_none() && session.is_none() {
+                anyhow::bail!("a scheduled prompt needs --agent, or --session to continue one");
+            }
             let (via, body) = match (shell, prompt) {
                 (Some(shell), _) => (ginka_protocol::model::CronVia::Terminal, shell),
                 (None, Some(prompt)) => (ginka_protocol::model::CronVia::Chat, prompt),
@@ -1638,6 +1803,7 @@ fn request_for(command: Command) -> Result<Request> {
                 id: None,
                 project: ProjectName(project),
                 workspace: workspace.map(WorkspaceId),
+                session: session.map(ginka_protocol::SessionId),
                 name,
                 schedule: at.map_or_else(
                     || schedule.expect("clap requires --schedule or --at"),
@@ -1899,6 +2065,53 @@ fn request_for(command: Command) -> Result<Request> {
 ///
 /// The event stream is opened before the request is sent, so the answer
 /// cannot land in the gap between them.
+/// `ginka pr --generate`: ask, then wait for the pushed outcome and print
+/// the pull request's address.
+fn pull_request_generated(
+    paths: &Paths,
+    workspace: &str,
+    draft: bool,
+    agent: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let workspace = WorkspaceId(workspace.to_string());
+    let url = smol::block_on(async {
+        let client = connect(paths).await?;
+        let events = client.events();
+        client
+            .request(Request::CreateGeneratedPullRequest {
+                workspace: workspace.clone(),
+                draft,
+                agent,
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        loop {
+            let event = events
+                .recv()
+                .await
+                .context("the daemon closed the connection before answering")?;
+            if let ginka_protocol::event::DaemonEvent::PullRequestOpened {
+                workspace: done,
+                url,
+                error,
+            } = event.payload
+                && done == workspace
+            {
+                break url.ok_or_else(|| {
+                    anyhow::anyhow!(error.unwrap_or_else(|| "no pull request was opened".into()))
+                });
+            }
+        }
+    })?;
+    if json {
+        println!("{}", serde_json::json!({ "url": url }));
+    } else {
+        println!("{url}");
+    }
+    Ok(())
+}
+
 fn commit_generated(
     paths: &Paths,
     workspace: &str,
@@ -2220,6 +2433,54 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        // Written to files by `write_image_sides` before printing; here only
+        // when there was nowhere to write them.
+        Response::ImageDiff { before, after } => {
+            for (name, side) in [("before", before), ("after", after)] {
+                println!(
+                    "{name}\t{}",
+                    side.map(|image| image.media_type)
+                        .unwrap_or_else(|| rust_i18n::t!("cli.image_diff.none").to_string())
+                );
+            }
+        }
+        Response::McpServers { servers } => {
+            if servers.is_empty() {
+                println!("{}", rust_i18n::t!("cli.mcp_servers.none"));
+            }
+            for server in servers {
+                let scope = match server.scope {
+                    ginka_protocol::model::McpScope::User => "user",
+                    ginka_protocol::model::McpScope::Project => "project",
+                    ginka_protocol::model::McpScope::Local => "local",
+                };
+                println!(
+                    "{}\t{}\t{scope}\t{}",
+                    server.provider,
+                    server.name,
+                    server.target.unwrap_or_default()
+                );
+            }
+        }
+        Response::Checks { checks } => {
+            if checks.is_empty() {
+                println!("{}", rust_i18n::t!("cli.checks.none"));
+            }
+            for check in checks {
+                let state = match check.state {
+                    ginka_protocol::model::CheckState::Passed => "pass",
+                    ginka_protocol::model::CheckState::Failed => "FAIL",
+                    ginka_protocol::model::CheckState::Pending => "pending",
+                    ginka_protocol::model::CheckState::Skipped => "skipped",
+                    ginka_protocol::model::CheckState::Cancelled => "cancelled",
+                };
+                let name = match &check.workflow {
+                    Some(workflow) => format!("{workflow} / {}", check.name),
+                    None => check.name.clone(),
+                };
+                println!("{state}\t{name}\t{}", check.link.unwrap_or_default());
+            }
+        }
         Response::History { commits } => {
             for commit in commits {
                 println!(
