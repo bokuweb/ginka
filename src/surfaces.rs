@@ -137,6 +137,9 @@ pub struct SurfacePanel {
     /// The workspace's branch has an open pull request, so its checks can
     /// be handed to the agent.
     open_pull_request: bool,
+    /// Changed images read for a side-by-side look, by staged-ness and
+    /// path: the image before and after (Orca's image diff).
+    image_diffs: HashMap<(bool, String), (Option<String>, Option<String>)>,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -300,6 +303,13 @@ pub enum SurfaceEvent {
     FixCommit { message: String, output: String },
     /// Hand the failing checks of the branch's pull request to the agent.
     FixChecks,
+    /// Read a changed image's two sides, from the staged or the unstaged
+    /// changes.
+    LoadImageDiff {
+        path: String,
+        old_path: Option<String>,
+        staged: bool,
+    },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
     /// Read what one commit did; it comes back through
@@ -500,6 +510,7 @@ impl SurfacePanel {
             lease_push: None,
             commit_refused: false,
             open_pull_request: false,
+            image_diffs: HashMap::new(),
             expanded: None,
             split: false,
             comments: Vec::new(),
@@ -1163,6 +1174,19 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// A changed image's two sides arrived, as `data:` URLs.
+    pub fn set_image_diff(
+        &mut self,
+        staged: bool,
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_diffs.insert((staged, path), (before, after));
+        cx.notify();
+    }
+
     /// Whether the workspace's branch has an open pull request.
     pub fn set_open_pull_request(&mut self, open: bool) {
         self.open_pull_request = open;
@@ -1546,6 +1570,8 @@ impl SurfacePanel {
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
             self.changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -1554,6 +1580,8 @@ impl SurfacePanel {
     pub fn set_staged_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.staged_changes != changes {
             self.staged_changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -3180,14 +3208,86 @@ impl SurfacePanel {
                     .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .text_color(tokens.colors().text_muted)
-                        .child(rust_i18n::t!("surface.git.binary").to_string()),
-                )
+                match self.image_diffs.get(&(staged, file.path.clone())).cloned() {
+                    // Orca's image diff: as it was beside as it is.
+                    Some((before, after)) => this.child(
+                        h_flex().w_full().px_3().py_2().gap_3().children(
+                            [
+                                (
+                                    rust_i18n::t!("surface.git.image_before").to_string(),
+                                    before,
+                                ),
+                                (rust_i18n::t!("surface.git.image_after").to_string(), after),
+                            ]
+                            .into_iter()
+                            .map(|(label, url)| {
+                                v_flex()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .gap_1()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(label),
+                                    )
+                                    .child(match url {
+                                        Some(url) => div()
+                                            .h(px(180.))
+                                            .rounded(px(tokens.radius.row))
+                                            .bg(tokens.colors().bg_surface)
+                                            .child(
+                                                img(SharedString::from(url))
+                                                    .size_full()
+                                                    .object_fit(ObjectFit::Contain),
+                                            )
+                                            .into_any_element(),
+                                        None => div()
+                                            .text_xs()
+                                            .text_color(tokens.colors().text_muted)
+                                            .child(
+                                                rust_i18n::t!("surface.git.image_missing")
+                                                    .to_string(),
+                                            )
+                                            .into_any_element(),
+                                    })
+                            }),
+                        ),
+                    ),
+                    None => {
+                        let (path, old_path) = (file.path.clone(), file.old_path.clone());
+                        this.child(
+                            h_flex()
+                                .px_3()
+                                .py_2()
+                                .gap_2()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_muted)
+                                        .child(rust_i18n::t!("surface.git.binary").to_string()),
+                                )
+                                .child(
+                                    Button::new(SharedString::from(format!(
+                                        "show-images:{staged}:{}",
+                                        file.path
+                                    )))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .label(rust_i18n::t!("surface.git.show_images").to_string())
+                                    .on_click(cx.listener(move |_, _, _, cx| {
+                                        cx.emit(SurfaceEvent::LoadImageDiff {
+                                            path: path.clone(),
+                                            old_path: old_path.clone(),
+                                            staged,
+                                        })
+                                    })),
+                                ),
+                        )
+                    }
+                }
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {

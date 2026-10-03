@@ -632,6 +632,17 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// A changed image as it was and as it is under `source` (Orca's image
+    /// diff). Each side is sent only when it is a recognised image within
+    /// the preview limit. Sources measured from a checkpoint or a base are
+    /// refused for now.
+    ImageDiff {
+        workspace: WorkspaceId,
+        source: crate::model::ChangeSource,
+        path: String,
+        #[serde(default)]
+        old_path: Option<String>,
+    },
     /// The MCP servers the agent CLIs are configured with outside Ginka —
     /// the user's, and with `workspace` that repository's and that
     /// project's own (MonoCode's Settings → MCP). Read-only.
@@ -1007,6 +1018,11 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    /// The two sides of a changed image; `None` where there is no image.
+    ImageDiff {
+        before: Option<crate::model::FileImage>,
+        after: Option<crate::model::FileImage>,
     },
     /// MCP servers configured outside Ginka, by provider and scope.
     McpServers {

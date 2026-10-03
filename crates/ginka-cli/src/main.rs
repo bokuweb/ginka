@@ -251,6 +251,23 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// Write a changed image's two sides to files, to look at side by side.
+    ImageDiff {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The image, relative to the worktree root.
+        path: String,
+        /// Compare what is staged instead of everything uncommitted.
+        #[arg(long, conflicts_with = "commit")]
+        staged: bool,
+        /// What one commit did to it, by the id `history` prints.
+        #[arg(long)]
+        commit: Option<String>,
+        /// Where to write `before.*` and `after.*`; the current directory
+        /// when omitted.
+        #[arg(long)]
+        out_dir: Option<std::path::PathBuf>,
+    },
     /// The MCP servers Claude Code and Codex are configured with outside
     /// Ginka, and with `--workspace` that repository's own.
     McpServers {
@@ -1037,6 +1054,14 @@ fn main() -> Result<()> {
                 Command::Notes(NotesCommand::Show { id }) => Some(id.clone()),
                 _ => None,
             };
+            let image_out = match &command {
+                Command::ImageDiff { out_dir, .. } => Some(
+                    out_dir
+                        .clone()
+                        .unwrap_or_else(|| std::path::PathBuf::from(".")),
+                ),
+                _ => None,
+            };
             let request = request_for(command)?;
             let response = smol::block_on(async {
                 let client = connect(&paths).await?;
@@ -1045,6 +1070,12 @@ fn main() -> Result<()> {
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))
             })?;
+            if let (Some(dir), Response::ImageDiff { before, after }) = (&image_out, &response)
+                && !cli.json
+            {
+                write_image_sides(dir, before.as_ref(), after.as_ref())?;
+                return Ok(());
+            }
             let response = match (showing_note, response) {
                 (Some(id), Response::Notes { notes }) => {
                     let note = notes
@@ -1067,6 +1098,32 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// Write a changed image's sides as `before.<ext>` and `after.<ext>` in
+/// `dir`, printing each path, or saying a side has no image.
+fn write_image_sides(
+    dir: &std::path::Path,
+    before: Option<&ginka_protocol::model::FileImage>,
+    after: Option<&ginka_protocol::model::FileImage>,
+) -> Result<()> {
+    use base64::Engine as _;
+    std::fs::create_dir_all(dir)?;
+    for (name, side) in [("before", before), ("after", after)] {
+        match side {
+            Some(image) => {
+                let extension = image.media_type.rsplit('/').next().unwrap_or("img");
+                let path = dir.join(format!("{name}.{extension}"));
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(&image.data_base64)
+                    .context("the daemon sent an image that is not base64")?;
+                std::fs::write(&path, bytes)?;
+                println!("{name}\t{}", path.display());
+            }
+            None => println!("{name}\t{}", rust_i18n::t!("cli.image_diff.none")),
+        }
+    }
+    Ok(())
 }
 
 /// Speak MCP on stdin and stdout until the agent closes them.
@@ -1515,6 +1572,22 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId(workspace),
             path,
             header,
+        },
+        Command::ImageDiff {
+            workspace,
+            path,
+            staged,
+            commit,
+            ..
+        } => Request::ImageDiff {
+            workspace: WorkspaceId(workspace),
+            source: match (staged, commit) {
+                (_, Some(commit)) => ChangeSource::Commit { commit },
+                (true, None) => ChangeSource::Staged,
+                (false, None) => ChangeSource::Uncommitted,
+            },
+            path,
+            old_path: None,
         },
         Command::McpServers { workspace } => Request::ListMcpServers {
             workspace: workspace.map(WorkspaceId),
@@ -2360,6 +2433,17 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        // Written to files by `write_image_sides` before printing; here only
+        // when there was nowhere to write them.
+        Response::ImageDiff { before, after } => {
+            for (name, side) in [("before", before), ("after", after)] {
+                println!(
+                    "{name}\t{}",
+                    side.map(|image| image.media_type)
+                        .unwrap_or_else(|| rust_i18n::t!("cli.image_diff.none").to_string())
+                );
+            }
+        }
         Response::McpServers { servers } => {
             if servers.is_empty() {
                 println!("{}", rust_i18n::t!("cli.mcp_servers.none"));

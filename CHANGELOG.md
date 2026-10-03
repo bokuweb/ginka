@@ -43,6 +43,7 @@ far is unreleased.
 - Step to the next or previous conversation, close all tabs, and copy a
   conversation's id from its row.
 - Rebind or free keyboard shortcuts in `keymap.json`.
+- See a changed image as it was beside as it is.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

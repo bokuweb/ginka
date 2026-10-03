@@ -1009,6 +1009,29 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::PushWithLease => {
                     this.sync_git(RemoteAction::PushWithLease, cx)
                 }
+                crate::surfaces::SurfaceEvent::LoadImageDiff {
+                    path,
+                    old_path,
+                    staged,
+                } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, surfaces) = (this.link.clone(), this.surfaces.clone());
+                        let (path, old_path, staged) = (path.clone(), old_path.clone(), *staged);
+                        cx.spawn(async move |_, cx| {
+                            let asked = path.clone();
+                            let (before, after) = cx
+                                .background_spawn(async move {
+                                    link.image_diff(&workspace, &asked, old_path, staged).await
+                                })
+                                .await;
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_image_diff(staged, path, before, after, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
                 crate::surfaces::SurfaceEvent::FixChecks => {
                     if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
                     {

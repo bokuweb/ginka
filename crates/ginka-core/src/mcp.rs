@@ -529,6 +529,21 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_image_diff",
+            description: "A changed image as it was and as it is — uncommitted by default, `staged`, or what one `commit` did — each side base64 with its media type, or null where there is none or it is not a previewable image.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "path": {"type": "string"},
+                    "old_path": {"type": "string"},
+                    "staged": {"type": "boolean"},
+                    "commit": {"type": "string"},
+                },
+                "required": ["workspace", "path"],
+            }),
+        },
+        Tool {
             name: "ginka_mcp_servers",
             description: "The MCP servers Claude Code and Codex are configured with outside Ginka — user-wide, and with `workspace` that repository's .mcp.json and that project's own — by name, provider, scope and command or URL. Read-only; arguments and environments are never shown.",
             schema: json!({
@@ -1158,6 +1173,18 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
             header: text("header")?,
+        },
+        "ginka_image_diff" => Request::ImageDiff {
+            workspace: WorkspaceId(text("workspace")?),
+            source: if flag("staged") {
+                ginka_protocol::model::ChangeSource::Staged
+            } else if let Some(commit) = maybe("commit") {
+                ginka_protocol::model::ChangeSource::Commit { commit }
+            } else {
+                ginka_protocol::model::ChangeSource::Uncommitted
+            },
+            path: text("path")?,
+            old_path: maybe("old_path"),
         },
         "ginka_mcp_servers" => Request::ListMcpServers {
             workspace: maybe("workspace").map(WorkspaceId),

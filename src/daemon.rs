@@ -1582,6 +1582,41 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// A changed image's two sides as `data:` URLs, from the staged or the
+    /// unstaged changes. A side that is not a previewable image is `None`.
+    pub async fn image_diff(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        old_path: Option<String>,
+        staged: bool,
+    ) -> (Option<String>, Option<String>) {
+        let source = if staged {
+            ginka_protocol::model::ChangeSource::Staged
+        } else {
+            ginka_protocol::model::ChangeSource::Unstaged
+        };
+        match self
+            .ask(Request::ImageDiff {
+                workspace: workspace.clone(),
+                source,
+                path: path.to_string(),
+                old_path,
+            })
+            .await
+        {
+            Some(Response::ImageDiff { before, after }) => {
+                let url = |image: Option<ginka_protocol::model::FileImage>| {
+                    image.map(|image| {
+                        format!("data:{};base64,{}", image.media_type, image.data_base64)
+                    })
+                };
+                (url(before), url(after))
+            }
+            _ => (None, None),
+        }
+    }
+
     /// The MCP servers the agent CLIs are configured with outside Ginka.
     pub async fn mcp_servers(
         &self,

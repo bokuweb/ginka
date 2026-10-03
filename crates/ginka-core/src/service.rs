@@ -1715,6 +1715,18 @@ impl Service {
                 let prompt = crate::conflicts::prompt(&conflicts);
                 self.hand_to_agent(workspace, agent, prompt)
             }
+            Request::ImageDiff {
+                workspace,
+                source,
+                path,
+                old_path,
+            } => {
+                let worktree = self.worktree(&workspace)?;
+                let (before, after) =
+                    crate::image_diff::sides(&worktree.path, &source, &path, old_path.as_deref())
+                        .map_err(failed)?;
+                Ok(Response::ImageDiff { before, after })
+            }
             Request::ListMcpServers { workspace } => {
                 let project = match &workspace {
                     Some(workspace) => Some(self.worktree(workspace)?.path),

@@ -224,6 +224,12 @@ Throw away a file's uncommitted work
 
 `ginka revert <WORKSPACE> <PATH>`
 
+## `ginka image-diff`
+
+Write a changed image as it was and as it is to `before.*` and `after.*` — uncommitted by default, `--staged`, or what one `--commit` did
+
+`ginka image-diff <WORKSPACE> <PATH> [--staged] [--commit <ID>] [--out-dir <DIR>]`
+
 ## `ginka mcp-servers`
 
 The MCP servers Claude Code and Codex are configured with outside Ginka; `--workspace` adds that repository's `.mcp.json` and that project's own

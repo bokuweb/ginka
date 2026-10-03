@@ -34,6 +34,7 @@ pub mod files;
 pub mod git;
 pub mod handoff;
 pub mod i18n;
+pub mod image_diff;
 pub mod logging;
 pub mod lsp;
 pub mod mcp;

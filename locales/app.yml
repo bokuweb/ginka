@@ -1809,3 +1809,18 @@ palette.tabs.close_all:
 sidebar.action.copy_id:
   en: Copy conversation id
   ja: 会話IDをコピー
+cli.image_diff.none:
+  en: "(no image)"
+  ja: "（画像なし）"
+surface.git.show_images:
+  en: Show the images
+  ja: 画像を表示
+surface.git.image_before:
+  en: Before
+  ja: 変更前
+surface.git.image_after:
+  en: After
+  ja: 変更後
+surface.git.image_missing:
+  en: No image on this side
+  ja: こちら側に画像はありません
