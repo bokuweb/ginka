@@ -1070,6 +1070,26 @@ impl Shell {
                         .detach();
                     }
                 }
+                crate::surfaces::SurfaceEvent::LoadChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |_, cx| {
+                            let read = {
+                                let workspace = workspace.clone();
+                                cx.background_spawn(async move {
+                                    link.pull_request_checks(&workspace).await
+                                })
+                                .await
+                            };
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_checks(&workspace, read, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
                 crate::surfaces::SurfaceEvent::FixChecks => {
                     if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
                     {

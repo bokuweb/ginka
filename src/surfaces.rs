@@ -24,6 +24,7 @@ use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{
     BasePanel, DockArea, DockEvent, DockLayout, Panel, PanelControl, PanelEvent, panel_handle,
@@ -137,6 +138,11 @@ pub struct SurfacePanel {
     /// The workspace's branch has an open pull request, so its checks can
     /// be handed to the agent.
     open_pull_request: bool,
+    /// The pull request's checks are listed under the remote actions.
+    checks_open: bool,
+    /// Its checks, failures first, or why they could not be read; `None`
+    /// while they are being read.
+    checks: Option<Result<Vec<ginka_protocol::model::CheckRun>, SharedString>>,
     /// The file being opened was picked with a single click, so it goes in
     /// the preview tab.
     preview_next: bool,
@@ -306,6 +312,9 @@ pub enum SurfaceEvent {
     FixCommit { message: String, output: String },
     /// Hand the failing checks of the branch's pull request to the agent.
     FixChecks,
+    /// Read the checks of the branch's pull request; they come back
+    /// through [`Surfaces::set_checks`].
+    LoadChecks,
     /// Read a changed image's two sides under the change source it is
     /// shown in: staged, unstaged, a commit or a turn.
     LoadImageDiff {
@@ -513,6 +522,8 @@ impl SurfacePanel {
             lease_push: None,
             commit_refused: false,
             open_pull_request: false,
+            checks_open: false,
+            checks: None,
             preview_next: false,
             image_diffs: HashMap::new(),
             expanded: None,
@@ -1318,6 +1329,25 @@ impl SurfacePanel {
         self.open_pull_request = open;
     }
 
+    /// The checks read for `workspace`'s pull request, or why they could
+    /// not be. Dropped when the reader has moved to another workspace since.
+    pub fn set_checks(
+        &mut self,
+        workspace: &WorkspaceId,
+        checks: Result<Vec<ginka_protocol::model::CheckRun>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_workspace.as_ref() != Some(workspace) {
+            return;
+        }
+        self.checks = Some(
+            checks
+                .map(|checks| ginka_ui::checks::ordered(&checks))
+                .map_err(SharedString::from),
+        );
+        cx.notify();
+    }
+
     /// Say how a push went: a refused plain push offers the lease push,
     /// anything that went through takes the offer away.
     pub fn set_push_result(
@@ -1600,6 +1630,9 @@ impl SurfacePanel {
         if self.browser_workspace.as_ref() == Some(&workspace) {
             return;
         }
+        // Another workspace, another pull request.
+        self.checks_open = false;
+        self.checks = None;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = window;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1906,6 +1939,7 @@ impl SurfacePanel {
                 .flex_1()
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
+                .children(self.git_checks(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .when(self.turns_open, |this| this.child(self.git_turns(cx)))
                 .child(self.diff_filter_input(cx))
@@ -1941,6 +1975,7 @@ impl SurfacePanel {
             .overflow_y_scroll()
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
+            .children(self.git_checks(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
             .when(self.turns_open, |this| this.child(self.git_turns(cx)))
             .child(self.diff_filter_input(cx))
@@ -2125,6 +2160,7 @@ impl SurfacePanel {
         let tokens = Tokens::global(cx).clone();
         let history_open = self.history_open;
         let turns_open = self.turns_open;
+        let checks_open = self.checks_open;
         h_flex()
             .w_full()
             .px_3()
@@ -2214,6 +2250,23 @@ impl SurfacePanel {
                         .tooltip(rust_i18n::t!("surface.git.fix_checks_tooltip").to_string())
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::FixChecks))),
                 )
+                .child(
+                    Button::new("git-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .selected(checks_open)
+                        .label(rust_i18n::t!("surface.git.checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.checks_tooltip").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.checks_open = !checks_open;
+                            if this.checks_open {
+                                this.checks = None;
+                                cx.emit(SurfaceEvent::LoadChecks);
+                            }
+                            cx.notify();
+                        })),
+                )
             })
             .child(
                 Button::new("git-create-pr-written")
@@ -2257,6 +2310,80 @@ impl SurfacePanel {
                         cx.notify();
                     })),
             )
+    }
+
+    /// The pull request's checks, failures first, under a line that sums
+    /// them up; a check with a log opens it.
+    fn git_checks(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if !(self.checks_open && self.open_pull_request) {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let body = v_flex()
+            .id("git-checks-list")
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_0p5()
+            .text_xs()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle);
+        Some(match &self.checks {
+            None => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.loading").to_string()),
+            Some(Err(error)) => body
+                .text_color(tokens.colors().status_error)
+                .child(error.clone()),
+            Some(Ok(checks)) if checks.is_empty() => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.none").to_string()),
+            Some(Ok(checks)) => body
+                .children(ginka_ui::checks::summary(checks).map(|summary| {
+                    div()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(summary)
+                }))
+                .children(checks.iter().enumerate().map(|(index, check)| {
+                    let failed = matches!(
+                        check.state,
+                        ginka_protocol::model::CheckState::Failed
+                            | ginka_protocol::model::CheckState::Cancelled
+                    );
+                    let link = check.link.clone();
+                    h_flex()
+                        .id(("git-check", index))
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(84.))
+                                .flex_shrink_0()
+                                .text_color(if failed {
+                                    tokens.colors().status_error
+                                } else {
+                                    tokens.colors().text_muted
+                                })
+                                .child(ginka_ui::checks::label(check.state)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if link.is_some() {
+                                    tokens.colors().accent
+                                } else {
+                                    tokens.colors().text_secondary
+                                })
+                                .child(ginka_ui::checks::title(check)),
+                        )
+                        .when_some(link, |row, url| {
+                            row.cursor_pointer()
+                                .on_click(move |_, _, cx| cx.open_url(&url))
+                        })
+                })),
+        })
     }
 
     /// Where the last pull request is, or why it could not be opened: a link

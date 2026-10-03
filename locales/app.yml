@@ -1887,3 +1887,42 @@ palette.board:
 cli.commit.handed_over:
   en: "the commit was refused; conversation %{session} has been asked to fix it"
   ja: "コミットが拒否されたので、会話 %{session} に修正を依頼しました"
+checks.count.failed:
+  en: "%{n} failed"
+  ja: "失敗 %{n}"
+checks.count.cancelled:
+  en: "%{n} cancelled"
+  ja: "中止 %{n}"
+checks.count.running:
+  en: "%{n} running"
+  ja: "実行中 %{n}"
+checks.count.passed:
+  en: "%{n} passed"
+  ja: "成功 %{n}"
+checks.state.failed:
+  en: failed
+  ja: 失敗
+checks.state.cancelled:
+  en: cancelled
+  ja: 中止
+checks.state.running:
+  en: running
+  ja: 実行中
+checks.state.passed:
+  en: passed
+  ja: 成功
+checks.state.skipped:
+  en: skipped
+  ja: スキップ
+surface.git.checks:
+  en: Checks
+  ja: チェック
+surface.git.checks_tooltip:
+  en: List the pull request's checks, failures first; a check with a log opens it
+  ja: プルリクエストのチェックを失敗から順に一覧します。ログがあるチェックはクリックで開きます
+surface.git.checks.loading:
+  en: Reading the checks…
+  ja: チェックを読み込み中…
+surface.git.checks.none:
+  en: This pull request has no checks.
+  ja: このプルリクエストにはチェックがありません。

@@ -1686,6 +1686,23 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// The checks of the pull request open from the workspace's branch, or
+    /// why they could not be read (`gh` missing, signed out, no pull request).
+    pub async fn pull_request_checks(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<Vec<ginka_protocol::model::CheckRun>, String> {
+        match self
+            .ask_result(Request::PullRequestChecks {
+                workspace: workspace.clone(),
+            })
+            .await?
+        {
+            Response::Checks { checks } => Ok(checks),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
     /// Hand a refused commit to the workspace's latest conversation.
     pub async fn fix_commit(
         &self,

@@ -73,7 +73,7 @@ since. A changed image can be shown as it was beside as it is.
 
 When something stops the work, the agent can be asked to sort it out:
 *Ask the agent to fix it* after a commit hook refuses, *Fix failing checks*
-while the pull request's checks are red, and *Resolve conflicts with the
+while the pull request's checks are red (*Checks* lists them, failures first), and *Resolve conflicts with the
 agent* on a row stopped mid-merge. After an amend or rebase of pushed work,
 a refused push offers *Force push…* with a lease.
 

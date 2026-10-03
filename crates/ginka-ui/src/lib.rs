@@ -15,6 +15,7 @@ pub mod assets;
 pub mod board;
 pub mod branches;
 pub mod browser;
+pub mod checks;
 pub mod chrome;
 pub mod comment_range;
 pub mod composer;
