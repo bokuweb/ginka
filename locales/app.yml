@@ -1125,6 +1125,9 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.amended:
+  en: "amended the last commit, now %{commit}"
+  ja: "直前のコミットを修正しました（%{commit}）"
 cli.cron.off:
   en: "off"
   ja: "停止中"

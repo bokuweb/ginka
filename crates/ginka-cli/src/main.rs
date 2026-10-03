@@ -1092,6 +1092,7 @@ fn main() -> Result<()> {
                 Command::Notes(NotesCommand::Show { id }) => Some(id.clone()),
                 _ => None,
             };
+            let amending = matches!(command, Command::Commit { amend: true, .. });
             let image_out = match &command {
                 Command::ImageDiff { out_dir, .. } => Some(
                     out_dir
@@ -1108,6 +1109,16 @@ fn main() -> Result<()> {
                     .await
                     .map_err(|error| anyhow::anyhow!("{error}"))
             })?;
+            // An amend answers like a commit; say which one happened.
+            if let (true, Response::Committed { commit }) = (amending, &response)
+                && !cli.json
+            {
+                println!(
+                    "{}",
+                    rust_i18n::t!("cli.amended", commit = &commit[..commit.len().min(12)])
+                );
+                return Ok(());
+            }
             if let (Some(dir), Response::ImageDiff { before, after }) = (&image_out, &response)
                 && !cli.json
             {
@@ -3524,8 +3535,17 @@ fn print_cron_job(job: &ginka_protocol::model::CronJob) {
         .as_ref()
         .map(|run| run.outcome.as_str())
         .unwrap_or("-");
+    // What decides whether it fires, and where a reminder goes, are part of
+    // the job: without them a listing reads as a different job.
+    let mut extra = String::new();
+    if let Some(precheck) = &job.precheck {
+        extra.push_str(&format!("  if `{precheck}`"));
+    }
+    if let Some(session) = &job.session {
+        extra.push_str(&format!("  → {}", session.0));
+    }
     println!(
-        "{}  {:<16} {:<8} {:<12} {:<20} next {}  last {}  {}",
+        "{}  {:<16} {:<8} {:<12} {:<20} next {}  last {}  {}{}",
         job.id,
         job.schedule,
         job.via.as_str(),
@@ -3533,7 +3553,8 @@ fn print_cron_job(job: &ginka_protocol::model::CronJob) {
         job.name,
         next,
         last,
-        job.body.replace(['\r', '\n'], " ")
+        job.body.replace(['\r', '\n'], " "),
+        extra
     );
 }
 
