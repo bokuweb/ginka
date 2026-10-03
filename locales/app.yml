@@ -1929,6 +1929,33 @@ checks.state.skipped:
 surface.git.comment_remove:
   en: Take this comment back
   ja: このコメントを取り消す
+settings.daemon:
+  en: Daemon
+  ja: デーモン
+settings.daemon.keep_awake:
+  en: Keep the Mac awake while an agent works
+  ja: エージェントの作業中は Mac をスリープさせない
+settings.daemon.keep_awake.help:
+  en: Lets the machine sleep again once the agent has finished. macOS only.
+  ja: エージェントが終わると再びスリープできます。macOS のみ。
+settings.daemon.resume_after_limit:
+  en: Resume after a usage limit resets
+  ja: 利用上限がリセットされたら再開する
+settings.daemon.resume_after_limit.help:
+  en: Holds the queue when a turn hits a limit with a known reset time, and lets it go then.
+  ja: リセット時刻が分かる上限に当たったらキューを止め、リセット時に再開します。
+settings.daemon.fetch_rates:
+  en: Fetch the public rate table
+  ja: 公開料金表を取得する
+settings.daemon.fetch_rates.help:
+  en: At most daily, to price turns a vendor does not. Off, costs are only what vendors report.
+  ja: ベンダーが料金を返さないターンの見積もりに、最大1日1回取得します。オフならベンダー報告分のみ。
+settings.daemon.scan_vendor_logs:
+  en: Count agents run outside Ginka
+  ja: Ginka 外で動いたエージェントも集計する
+settings.daemon.scan_vendor_logs.help:
+  en: Reads Claude Code's and Codex's own session logs, read only, so Reports covers the whole plan.
+  ja: Claude Code と Codex のセッションログを読み取り専用で読み、レポートにプラン全体を反映します。
 surface.git.checks:
   en: Checks
   ja: チェック

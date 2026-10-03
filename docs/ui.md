@@ -494,6 +494,12 @@ an immediate enable/disable control. Edit path opens a focused executable field;
 Save applies the trimmed path, Use automatic clears the override, and errors stay
 beside the field. The daemon owns these settings; the window, CLI and MCP use the
 same request to set or clear an executable override.
+The Daemon section offers the daemon's own switches — keep the Mac awake while
+an agent works, resume after a usage limit resets, fetch the public rate table,
+count agents run outside Ginka — each an on/off control with a line saying what
+it does (`ginka_ui::daemon_settings`). A change goes through the same
+`UpdateDaemonSettings` as `ginka settings set`; the page then reads the settings
+back, so it shows what the daemon took, and a refusal shows as a notice.
 
 ## 4. Component mapping
 

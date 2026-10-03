@@ -645,6 +645,8 @@ pub struct Shell {
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
     /// The MCP servers the agent CLIs are configured with, for Settings.
     mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
+    /// The daemon's on/off settings the page offers, as last read.
+    daemon_toggles: Vec<(&'static str, bool)>,
     /// The last update check's answer, and whether one is on its way.
     agent_updates: Option<Vec<ginka_protocol::model::AgentUpdate>>,
     checking_updates: bool,
@@ -1804,6 +1806,7 @@ impl Shell {
             agents: Vec::new(),
             provider_settings: Vec::new(),
             mcp_servers: Vec::new(),
+            daemon_toggles: Vec::new(),
             agent_updates: None,
             checking_updates: false,
             provider_program: None,
@@ -5805,6 +5808,45 @@ impl Shell {
             .ok();
         })
         .detach();
+        self.refresh_daemon_toggles(cx);
+    }
+
+    /// Read the daemon's on/off settings for the settings page.
+    fn refresh_daemon_toggles(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let json = cx
+                .background_spawn(async move { link.daemon_settings().await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.daemon_toggles = ginka_ui::daemon_settings::toggles(&json);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Flip one of the daemon's settings, then read them back: what the page
+    /// shows is what the daemon took, and a refusal says why.
+    fn set_daemon_toggle(&mut self, key: &'static str, on: bool, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let set = cx
+                .background_spawn(async move {
+                    link.update_daemon_setting(key, ginka_ui::daemon_settings::value(on))
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = set {
+                    this.show_notice(error, cx);
+                }
+                this.refresh_daemon_toggles(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The settings page: appearance and language. `docs/ui.md` §3.7.
@@ -5979,6 +6021,71 @@ impl Shell {
                     })
             }))
             .child(self.mcp_add_form(cx));
+        // The daemon's own switches, the ones `ginka settings set` flips.
+        let daemon_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.daemon").to_string()),
+            )
+            .children(self.daemon_toggles.iter().map(|&(key, on)| {
+                let control = h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().bg_surface)
+                    .children(
+                        [(true, "settings.on"), (false, "settings.off")]
+                            .into_iter()
+                            .map(|(value, label)| {
+                                choice(
+                                    format!("daemon:{key}:{value}"),
+                                    rust_i18n::t!(label).to_string(),
+                                    on == value,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if on != value {
+                                            this.set_daemon_toggle(key, value, cx);
+                                        }
+                                    },
+                                ))
+                            }),
+                    );
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(tokens.colors().text_primary)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}")).to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}.help"))
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(control)
+            }));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -6289,6 +6396,7 @@ impl Shell {
                             ))
                             .child(quick_section)
                             .child(provider_section)
+                            .child(daemon_section)
                             .child(mcp_section)
                             .child(cron_section),
                     ),

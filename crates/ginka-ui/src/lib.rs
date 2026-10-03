@@ -19,6 +19,7 @@ pub mod checks;
 pub mod chrome;
 pub mod comment_range;
 pub mod composer;
+pub mod daemon_settings;
 pub mod diff_filter;
 pub mod dock;
 pub mod editor;

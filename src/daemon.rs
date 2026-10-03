@@ -150,6 +150,26 @@ impl DaemonLink {
         }
     }
 
+    /// The daemon's settings document, with secrets left out; empty when
+    /// the daemon cannot be reached.
+    pub async fn daemon_settings(&self) -> String {
+        match self.ask(Request::DaemonSettings).await {
+            Some(Response::DaemonSettings { json }) => json,
+            _ => String::new(),
+        }
+    }
+
+    /// Change one daemon setting to a JSON value; the refusal is the
+    /// daemon's own words.
+    pub async fn update_daemon_setting(&self, key: &str, value: String) -> Result<(), String> {
+        self.ask_result(Request::UpdateDaemonSettings {
+            key: key.to_string(),
+            value,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Persist an executable edit using the same provider settings request as CLI and MCP.
     pub async fn update_provider_settings(&self, request: Request) -> Result<(), String> {
         match self.ask_result(request).await? {
