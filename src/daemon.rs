@@ -886,6 +886,11 @@ impl DaemonLink {
         .await;
     }
 
+    /// Take one waiting review comment back.
+    pub async fn remove_comment(&self, comment: String) {
+        self.ask(Request::RemoveReviewComment { comment }).await;
+    }
+
     /// The comments waiting in a workspace, in reading order.
     pub async fn comments(&self, workspace: &WorkspaceId) -> Vec<ReviewComment> {
         match self

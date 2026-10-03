@@ -344,6 +344,8 @@ pub enum SurfaceEvent {
     },
     /// Send every waiting comment back to the agent.
     SendReview,
+    /// Take a waiting review comment back before it is sent.
+    RemoveComment { id: String },
     /// Look for files whose path matches this.
     FindFiles(String),
     /// Read a file and show it.
@@ -2873,8 +2875,10 @@ impl SurfacePanel {
             .iter()
             .filter(|comment| comment.path == path && comment.line == line)
             .map(|comment| {
-                div()
+                let id = comment.id.clone();
+                h_flex()
                     .w_full()
+                    .gap_2()
                     .px_3()
                     .py_1()
                     .ml_8()
@@ -2883,14 +2887,32 @@ impl SurfacePanel {
                     .bg(tokens.colors().row_hover())
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
-                    .child(match (comment.line, comment.end_line) {
-                        (Some(start), Some(end)) => format!(
-                            "{} · {}",
-                            ginka_ui::comment_range::label(start, Some(end)),
-                            comment.text
-                        ),
-                        _ => comment.text.clone(),
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(match (comment.line, comment.end_line) {
+                                (Some(start), Some(end)) => format!(
+                                    "{} · {}",
+                                    ginka_ui::comment_range::label(start, Some(end)),
+                                    comment.text
+                                ),
+                                _ => comment.text.clone(),
+                            }),
+                    )
+                    .child(
+                        // Taken back before it is sent: a comment that turned
+                        // out wrong should not reach the agent.
+                        Button::new(SharedString::from(format!("remove-comment:{}", comment.id)))
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(rust_i18n::t!("surface.git.comment_remove").to_string())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SurfaceEvent::RemoveComment { id: id.clone() })
+                            })),
+                    )
                     .into_any_element()
             })
             .collect();

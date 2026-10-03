@@ -1037,6 +1037,9 @@ impl Shell {
                     text,
                 } => this.leave_comment(path.clone(), *line, *end_line, text.clone(), cx),
                 crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+                crate::surfaces::SurfaceEvent::RemoveComment { id } => {
+                    this.remove_comment(id.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
@@ -4869,6 +4872,25 @@ impl Shell {
                 .background_spawn(async move {
                     link.add_comment(&workspace, &path, line, end_line, text)
                         .await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
+    /// Take a waiting comment back.
+    fn remove_comment(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.remove_comment(id).await;
                     link.comments(&workspace).await
                 })
                 .await;

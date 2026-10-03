@@ -1926,6 +1926,9 @@ checks.state.passed:
 checks.state.skipped:
   en: skipped
   ja: スキップ
+surface.git.comment_remove:
+  en: Take this comment back
+  ja: このコメントを取り消す
 surface.git.checks:
   en: Checks
   ja: チェック

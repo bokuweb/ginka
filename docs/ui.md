@@ -388,6 +388,8 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Split diff** — each changes section has *Unified | Split*. Split puts the
   old file on the left and the new on the right, a removed line beside the
   line that replaced it; either side is clickable for a review comment.
+  A waiting comment carries an × that takes it back before the review is
+  sent.
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
   (in place), *Move up*, *Move down*, the notification mutes and *Remove from
   Ginka*, which asks again and forgets the project while its folder stays on
