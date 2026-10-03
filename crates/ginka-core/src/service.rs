@@ -681,6 +681,47 @@ impl Service {
                     })
                 }))
             }
+            // Every window asks on its polling interval, and each worktree
+            // is a `git status`: with a few large repositories that is long
+            // enough to stall every other request. The worktrees are listed
+            // under the lock, read without it, and summed up under it again.
+            Request::ListWorkspaces { project } => {
+                let listed = (|| {
+                    let projects = match project {
+                        Some(name) => vec![self.project(&name)?],
+                        None => self.projects()?,
+                    };
+                    let mut worktrees = Vec::new();
+                    for project in &projects {
+                        registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
+                        worktrees.extend(
+                            project::list_worktrees(&self.conn(), &project.name).map_err(failed)?,
+                        );
+                    }
+                    Ok(worktrees)
+                })();
+                let worktrees = match listed {
+                    Ok(worktrees) => worktrees,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                Step::Away(Box::new(move || {
+                    let read: Vec<(Worktree, GitState)> = worktrees
+                        .into_iter()
+                        .map(|worktree| {
+                            let state = GitState::read(&worktree.path);
+                            (worktree, state)
+                        })
+                        .collect();
+                    Box::new(move |service: &mut Service| {
+                        Ok(Response::Workspaces {
+                            workspaces: read
+                                .into_iter()
+                                .map(|(worktree, state)| service.summarize_with(worktree, state))
+                                .collect(),
+                        })
+                    })
+                }))
+            }
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -788,6 +829,7 @@ impl Service {
             | Request::CreatePullRequest { .. }
             | Request::PullRequestChecks { .. }
             | Request::FixFailingChecks { .. }
+            | Request::ListWorkspaces { .. }
             | Request::WorkspaceFiles { .. }
             | Request::SearchContent { .. }
             | Request::SearchProject { .. } => self.handle(request),
@@ -832,25 +874,6 @@ impl Service {
                 Ok(Response::Ack)
             }
 
-            Request::ListWorkspaces { project } => {
-                let projects = match project {
-                    Some(name) => vec![self.project(&name)?],
-                    None => self.projects()?,
-                };
-                let mut workspaces = Vec::new();
-                for project in &projects {
-                    registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
-                    // Bound to a local first: a guard taken in a `for`'s
-                    // iterator expression lives for the whole loop body, and
-                    // `summarize` needs the connection too.
-                    let worktrees =
-                        project::list_worktrees(&self.conn(), &project.name).map_err(failed)?;
-                    for worktree in worktrees {
-                        workspaces.push(self.summarize(worktree));
-                    }
-                }
-                Ok(Response::Workspaces { workspaces })
-            }
             Request::CreateWorkspace {
                 project,
                 branch,
@@ -3993,8 +4016,18 @@ impl Service {
     /// has been deleted under us reports a default status rather than failing
     /// the whole listing.
     fn summarize(&self, worktree: Worktree) -> WorkspaceSummary {
-        let status = git::branch_status(&worktree.path).unwrap_or_default();
-        let last_commit_at = git::last_commit_time(&worktree.path);
+        let state = GitState::read(&worktree.path);
+        self.summarize_with(worktree, state)
+    }
+
+    /// A workspace's summary from what git said about it, read beforehand
+    /// and possibly without the service held.
+    fn summarize_with(&self, worktree: Worktree, state: GitState) -> WorkspaceSummary {
+        let GitState {
+            status,
+            last_commit_at,
+            indexed,
+        } = state;
         let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
             .unwrap_or_default();
         let queued = session
@@ -4003,7 +4036,7 @@ impl Service {
             .unwrap_or(0);
         let id = worktree.workspace_id();
         WorkspaceSummary {
-            indexed: crate::tools::is_indexed(&worktree.path),
+            indexed,
             worktree,
             status,
             session,
@@ -4011,6 +4044,24 @@ impl Service {
             queued,
             pull_request: self.pull_requests.get(&id).cloned(),
             status_note: project::status_note(&self.conn(), &id).unwrap_or_default(),
+        }
+    }
+}
+
+/// What a workspace summary needs from the worktree itself: everything that
+/// takes a subprocess or a disk read, so it can be read off the lock.
+struct GitState {
+    status: ginka_protocol::model::BranchStatus,
+    last_commit_at: Option<i64>,
+    indexed: bool,
+}
+
+impl GitState {
+    fn read(worktree: &std::path::Path) -> Self {
+        Self {
+            status: git::branch_status(worktree).unwrap_or_default(),
+            last_commit_at: git::last_commit_time(worktree),
+            indexed: crate::tools::is_indexed(worktree),
         }
     }
 }

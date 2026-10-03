@@ -2822,3 +2822,48 @@ fn a_merge_leaves_the_service_free_while_its_hooks_run() {
             .contains(&DaemonEvent::WorkspacesChanged { project })
     );
 }
+
+#[test]
+fn listing_workspaces_leaves_the_service_free_while_git_reads_them() {
+    // Every window lists workspaces on its polling interval, and each one is
+    // a `git status`; on a large repository that is long enough to hold up
+    // every other request. A filesystem monitor that waits stands in for a
+    // slow status.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-status".into(),
+        base: None,
+    });
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let (served, listed) = served_while_held(
+        fixture.service,
+        Request::ListWorkspaces {
+            project: Some(project),
+        },
+        (started, release),
+    );
+
+    assert!(
+        served,
+        "the service stayed locked while git read the worktrees"
+    );
+    match listed {
+        Ok(Response::Workspaces { workspaces }) => {
+            assert!(
+                workspaces
+                    .iter()
+                    .any(|workspace| workspace.worktree.branch == "slow-status")
+            )
+        }
+        other => panic!("expected workspaces, got {other:?}"),
+    }
+}
