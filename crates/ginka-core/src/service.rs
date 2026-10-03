@@ -149,6 +149,29 @@ fn search_worktrees(
     Ok((files, matches))
 }
 
+/// Each worktree's git status, or `None` where git could not say.
+fn read_statuses(
+    worktrees: Vec<(WorkspaceId, std::path::PathBuf)>,
+) -> Vec<(WorkspaceId, Option<ginka_protocol::model::BranchStatus>)> {
+    worktrees
+        .into_iter()
+        .map(|(id, path)| (id, git::branch_status(&path).ok()))
+        .collect()
+}
+
+/// [`Service::poll_statuses`] for a service shared between connections: the
+/// worktrees are listed under the lock, their statuses read without it.
+pub fn poll_statuses_shared(service: &Mutex<Service>) {
+    let lock = || {
+        service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    let worktrees = lock().status_plan();
+    let read = read_statuses(worktrees);
+    lock().take_statuses(read);
+}
+
 /// Answer a request for a service shared between connections, holding its
 /// lock only while state is read or written.
 ///
@@ -822,6 +845,23 @@ impl Service {
                 prompt,
                 attempts,
             } => self.fan_out(project, &branch_prefix, base, prompt, attempts),
+            // The post-checkout hook runs for as long as it likes.
+            Request::CheckoutBranch {
+                workspace,
+                branch,
+                create,
+            } => self.away_in(
+                &workspace,
+                move |path| git::checkout(path, &branch, create),
+                |service, worktree, _| {
+                    // The workspace keeps its id; only its live branch moved,
+                    // and the next listing reconciles that against git.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -931,6 +971,7 @@ impl Service {
             | Request::FixFailingChecks { .. }
             | Request::CreateWorkspace { .. }
             | Request::FanOut { .. }
+            | Request::CheckoutBranch { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
             | Request::WorkspaceHistory { .. }
@@ -1817,20 +1858,6 @@ impl Service {
                 Ok(Response::Branches {
                     branches: git::list_branches(&worktree.path).map_err(failed)?,
                 })
-            }
-            Request::CheckoutBranch {
-                workspace,
-                branch,
-                create,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                git::checkout(&worktree.path, &branch, create).map_err(failed)?;
-                // The workspace keeps its id; only its live branch moved, and
-                // the next listing reconciles that against git.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
             }
             Request::ListSkills { project } => {
                 let catalog = self.skills(project.as_ref())?;
@@ -4414,29 +4441,43 @@ impl Service {
     /// and a push per workspace per minute would be a push that clients learn
     /// to ignore.
     pub fn poll_statuses(&mut self) {
+        let worktrees = self.status_plan();
+        let read = read_statuses(worktrees);
+        self.take_statuses(read);
+    }
+
+    /// The worktrees whose status the poller reads.
+    fn status_plan(&self) -> Vec<(WorkspaceId, std::path::PathBuf)> {
         let Ok(projects) = self.projects() else {
-            return;
+            return Vec::new();
         };
+        projects
+            .iter()
+            .filter_map(|project| project::list_worktrees(&self.conn(), &project.name).ok())
+            .flatten()
+            .map(|worktree| (worktree.workspace_id(), worktree.path))
+            .collect()
+    }
+
+    /// Keep the statuses read, announcing the ones that changed.
+    fn take_statuses(
+        &mut self,
+        read: Vec<(WorkspaceId, Option<ginka_protocol::model::BranchStatus>)>,
+    ) {
         let mut seen = std::collections::HashSet::new();
-        for project in projects {
-            let Ok(worktrees) = project::list_worktrees(&self.conn(), &project.name) else {
+        for (id, status) in read {
+            seen.insert(id.clone());
+            let Some(status) = status else {
                 continue;
             };
-            for worktree in worktrees {
-                let id = worktree.workspace_id();
-                seen.insert(id.clone());
-                let Ok(status) = git::branch_status(&worktree.path) else {
-                    continue;
-                };
-                if self.statuses.get(&id) == Some(&status) {
-                    continue;
-                }
-                self.statuses.insert(id.clone(), status);
-                self.events.emit(DaemonEvent::WorkspaceStatusChanged {
-                    workspace: id,
-                    status,
-                });
+            if self.statuses.get(&id) == Some(&status) {
+                continue;
             }
+            self.statuses.insert(id.clone(), status);
+            self.events.emit(DaemonEvent::WorkspaceStatusChanged {
+                workspace: id,
+                status,
+            });
         }
         // A workspace that is gone is not worth remembering the status of.
         self.statuses.retain(|id, _| seen.contains(id));

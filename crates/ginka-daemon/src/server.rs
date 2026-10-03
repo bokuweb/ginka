@@ -378,9 +378,6 @@ impl Daemon {
                                 service.reload_settings_if_changed();
                                 service.sync();
                             }
-                            if status {
-                                service.poll_statuses();
-                            }
                             if cron {
                                 service.resume_limited_queues(chrono_now());
                                 service.take_due_cron_now()
@@ -388,6 +385,11 @@ impl Daemon {
                                 Vec::new()
                             }
                         };
+                        // A `git status` per worktree, read without the
+                        // service held.
+                        if status {
+                            ginka_core::service::poll_statuses_shared(&service);
+                        }
                         // A precheck can take up to a minute; requests are
                         // served meanwhile, and the lock is taken back only
                         // to fire.

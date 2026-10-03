@@ -2943,3 +2943,86 @@ fn creating_a_workspace_leaves_the_service_free_while_git_checks_it_out() {
             .contains(&DaemonEvent::WorkspacesChanged { project })
     );
 }
+
+#[test]
+fn polling_statuses_leaves_the_service_free_while_git_reads_them() {
+    // The daemon's own tick reads every worktree's status; requests must
+    // not wait for it.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "slow-poll".into(),
+        base: None,
+    });
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+    let recorder = fixture.recorder.clone();
+    recorder.taken();
+
+    let service = Arc::new(Mutex::new(fixture.service));
+    let polling = {
+        let service = service.clone();
+        std::thread::spawn(move || ginka_core::service::poll_statuses_shared(&service))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "git never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            served = service.handle(Request::ListProjects).is_ok();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    polling.join().unwrap();
+
+    assert!(
+        served,
+        "the service stayed locked while the poller read git"
+    );
+    assert!(
+        recorder
+            .taken()
+            .iter()
+            .any(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. })),
+        "what the poller read is still announced"
+    );
+}
+
+#[test]
+fn switching_branches_leaves_the_service_free_while_the_hook_runs() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "slow-switch".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let hook = held_hook(&fixture, "post-checkout");
+
+    let (served, switched) = served_while_held(
+        fixture.service,
+        Request::CheckoutBranch {
+            workspace,
+            branch: "elsewhere".into(),
+            create: true,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(matches!(switched, Ok(Response::Ack)), "{switched:?}");
+}
