@@ -73,6 +73,11 @@ pub enum SidebarEvent {
         project: ProjectName,
         label: String,
     },
+    /// Write a workspace's status note, or clear it with `None`.
+    SetStatusNote {
+        workspace: WorkspaceId,
+        note: Option<String>,
+    },
     /// Mute a project's notifications until a Unix second (`i64::MAX` for
     /// until lifted), or lift the mute with `None`.
     MuteProject {
@@ -170,6 +175,8 @@ pub struct SessionSidebar {
     labelling: Option<(ProjectName, Entity<InputState>)>,
     /// The conversation being renamed, and the field its title is typed in.
     renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
+    /// The workspace whose status note is being written, and its field.
+    noting: Option<(WorkspaceId, Entity<InputState>)>,
 }
 
 impl SessionSidebar {
@@ -199,6 +206,7 @@ impl SessionSidebar {
             project_menu_for: None,
             labelling: None,
             renaming: None,
+            noting: None,
         }
     }
 
@@ -1001,6 +1009,12 @@ impl SessionSidebar {
             .filter(|(renaming, _, _)| renaming == &row.workspace)
             .map(|(_, _, field)| field.clone());
 
+        let note_field = self
+            .noting
+            .as_ref()
+            .filter(|(noting, _)| noting == &row.workspace)
+            .map(|(_, field)| field.clone());
+
         let menu_workspace = row.workspace.clone();
 
         v_flex()
@@ -1168,17 +1182,20 @@ impl SessionSidebar {
                                 })),
                         )
                     })
-                    .children(row.status_note.clone().map(|note| {
-                        // What the agent says it is doing, in its own words;
-                        // the title says what it was asked.
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .italic()
-                            .text_color(tokens.colors().text_muted)
-                            .truncate()
-                            .child(note)
-                    })),
+                    .map(|this| match note_field {
+                        Some(field) => this.child(ginka_ui::field::input(&field)),
+                        None => this.children(row.status_note.clone().map(|note| {
+                            // What the agent says it is doing, in its own
+                            // words; the title says what it was asked.
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .italic()
+                                .text_color(tokens.colors().text_muted)
+                                .truncate()
+                                .child(note)
+                        })),
+                    }),
             )
     }
 
@@ -1217,6 +1234,47 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Start writing a workspace's status note, with the current one in a
+    /// focused field. Enter saves; an empty field clears the note.
+    fn start_note(
+        &mut self,
+        workspace: WorkspaceId,
+        note: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("sidebar.note.placeholder").to_string());
+            if let Some(note) = &note {
+                state.set_value(note.to_string(), window, cx);
+            }
+            state
+        });
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let text = field.read(cx).value().trim().to_string();
+                if let Some((workspace, _)) = this.noting.take() {
+                    cx.emit(SidebarEvent::SetStatusNote {
+                        workspace,
+                        note: (!text.is_empty()).then_some(text),
+                    });
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.noting = None;
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.menu_for = None;
+        self.noting = Some((workspace, field));
+        cx.notify();
+    }
+
     /// The row's actions, under it while its menu is open.
     fn row_actions(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
@@ -1244,6 +1302,22 @@ impl SessionSidebar {
                 );
             }))
         });
+        // The same note an agent writes over MCP: the reader's own word on
+        // where this workspace stands.
+        let note = {
+            let workspace = row.workspace.clone();
+            let current = row.status_note.clone();
+            menu_item(
+                &tokens,
+                format!("note:{key}"),
+                Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN),
+                rust_i18n::t!("sidebar.action.note").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.start_note(workspace.clone(), current.clone(), window, cx);
+            }))
+        };
         // The id `ginka session …` and MCP take, for a reader driving this
         // conversation from a terminal or another agent.
         let copy_id = row.session.clone().map(|session| {
@@ -1324,6 +1398,7 @@ impl SessionSidebar {
             resolve
                 .into_iter()
                 .chain(rename)
+                .chain([note])
                 .chain(copy_id)
                 .chain([pin, archive]),
             cx.listener(|this, _, _, cx| {

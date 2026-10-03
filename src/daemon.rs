@@ -1206,6 +1206,20 @@ impl DaemonLink {
             .map(|_| ())
     }
 
+    /// A scheduled job's latest firings, newest first.
+    pub async fn cron_runs(&self, id: i64, limit: u32) -> Vec<ginka_protocol::model::CronRun> {
+        match self
+            .ask(Request::CronRuns {
+                id,
+                limit: Some(limit),
+            })
+            .await
+        {
+            Some(Response::CronRuns { runs }) => runs,
+            _ => Vec::new(),
+        }
+    }
+
     /// Forget a quick command.
     pub async fn remove_quick_command(&self, id: String) {
         self.ask(Request::RemoveQuickCommand { id }).await;
@@ -1767,6 +1781,21 @@ impl DaemonLink {
         self.ask_result(Request::RenameSession {
             session: session.clone(),
             title,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Write a workspace's status note, or clear it with `None`.
+    pub async fn set_status_note(
+        &self,
+        workspace: &WorkspaceId,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceStatus {
+            workspace: Some(workspace.clone()),
+            path: None,
+            note,
         })
         .await
         .map(|_| ())

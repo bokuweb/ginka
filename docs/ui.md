@@ -159,7 +159,8 @@ active conversation. With nothing selected, the rail stands alone.
   a lit place outranks it. The rail cannot be closed while a place other than
   a project is showing: there would be nothing on screen to get back from.
 - **Row menu** — a `…` on each session row opens its actions under it:
-  *Rename* (the title becomes a field; ↩ keeps it), *Pin* / *Unpin*
+  *Rename* (the title becomes a field; ↩ keeps it), *Status note…* (the
+  note line becomes a field; ↩ writes it, an empty field clears it), *Pin* / *Unpin*
   (pinned rows lead the list and carry a star) and *Archive*. Archived rows
   offer *Restore*. A row with prompts waiting says how many.
 - **Status filter** — a chip beside the session search cycles *All*,
@@ -389,7 +390,9 @@ Dragging across the terminal grid selects exact character cells in either direct
   (in place), *Move up* and *Move down*.
 - **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
   schedule, name, execution scope, what runs, when it next fires and how it last went, with
-  *Pause*, *Edit*, *Run now* and *Remove*. *Edit* fills the form below; saving
+  *Pause*, *Edit*, *Run now*, *History* and *Remove*. *History* lists the
+  job's latest 20 firings under its row — when, how it went, how long a
+  finished run took and the first line of why a run failed. *Edit* fills the form below; saving
   updates the same job and keeps its run history. The form chooses the project
   checkout or an active workspace for new and existing jobs, and can
   set or clear an optional precheck command; a non-zero exit skips a scheduled

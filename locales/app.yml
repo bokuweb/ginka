@@ -1176,6 +1176,12 @@ settings.cron.resume:
 settings.cron.run:
   en: "Run now"
   ja: "今すぐ実行"
+settings.cron.history:
+  en: History
+  ja: 履歴
+settings.cron.no_runs:
+  en: It has not run yet.
+  ja: まだ実行されていません。
 settings.cron.edit:
   en: "Edit"
   ja: "編集"
@@ -1542,6 +1548,12 @@ sidebar.action.move_down:
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
+sidebar.action.note:
+  en: Status note…
+  ja: ステータスメモ…
+sidebar.note.placeholder:
+  en: Where this stands — empty clears it
+  ja: いまの状況（空にすると消えます）
 sidebar.action.pin:
   en: Pin
   ja: ピン留め

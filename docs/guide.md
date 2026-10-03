@@ -40,7 +40,7 @@ repository or a plain folder. Then type what you want done and press Enter.
 The conversation runs in a worktree on a branch of its own, so the agent's
 changes stay apart from yours. The sidebar lists every workspace; a row says
 whether its agent is working, waiting for you, or done, shows the line of
-status the agent last wrote, and says *new* when it finished while you were
+status the agent last wrote — or you did, from the row's *Status note…* — and says *new* when it finished while you were
 elsewhere. **Agents** in the rail is a board of every agent across projects,
 by what it needs from you. ⌥⌘↓ / ⌥⌘↑ step through the list.
 
@@ -109,7 +109,8 @@ into the branch your project is on first.
 cron schedule, in a workspace or the project's own checkout. A run is
 skipped while the previous one is still going, or when its precheck — a
 shell command — exits non-zero. `--session` makes a prompt a reminder in an
-existing conversation instead of a new one.
+existing conversation instead of a new one. *History* on a job (or
+`ginka cron runs`) shows how its latest firings went.
 
 ## What it cost
 

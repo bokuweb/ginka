@@ -31,6 +31,7 @@ use ginka_ui::workspace::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::TextSelection;
+use gpui_component::Selectable as _;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -836,6 +837,8 @@ pub struct Shell {
     quick_form: QuickForm,
     /// The scheduled jobs of the project on screen.
     cron_jobs: Vec<ginka_protocol::model::CronJob>,
+    /// The job whose run history is open, and its firings, newest first.
+    cron_history: Option<(i64, Vec<ginka_protocol::model::CronRun>)>,
     cron_form: CronForm,
     mcp_form: McpForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
@@ -1262,6 +1265,14 @@ impl Shell {
                         let (link, project, index) = (this.link.clone(), project.clone(), *index);
                         this.after_row_change(
                             async move { link.move_project(&project, index).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::SetStatusNote { workspace, note } => {
+                        let (link, workspace, note) =
+                            (this.link.clone(), workspace.clone(), note.clone());
+                        this.after_row_change(
+                            async move { link.set_status_note(&workspace, note).await },
                             cx,
                         );
                     }
@@ -1851,6 +1862,7 @@ impl Shell {
             quick_menu_open: false,
             quick_form,
             cron_jobs: Vec::new(),
+            cron_history: None,
             cron_form,
             mcp_form,
             #[cfg(feature = "github")]
@@ -2610,6 +2622,33 @@ impl Shell {
                     Err(error) => this.cron_form.error = Some(error),
                 }
                 this.refresh_cron_jobs(cx);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Open a job's run history under its row, or close it if it is open.
+    fn toggle_cron_history(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self
+            .cron_history
+            .as_ref()
+            .is_some_and(|(open, _)| *open == id)
+        {
+            self.cron_history = None;
+            cx.notify();
+            return;
+        }
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let runs = cx
+                .background_spawn(async move {
+                    link.cron_runs(id, ginka_ui::scheduled::HISTORY_LIMIT).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.cron_history = Some((id, runs));
                 cx.notify();
             })
             .ok();
@@ -6555,17 +6594,21 @@ impl Shell {
                     .as_ref()
                     .map(|run| run.outcome.as_str().to_string())
                     .unwrap_or_default();
+                let history = self
+                    .cron_history
+                    .as_ref()
+                    .filter(|(open, _)| *open == id)
+                    .map(|(_, runs)| runs.clone());
+                let history_open = history.is_some();
                 let scope = job.workspace.as_ref().map_or_else(
                     || rust_i18n::t!("settings.cron.project_checkout").to_string(),
                     |workspace| workspace.0.clone(),
                 );
-                h_flex()
+                let row = h_flex()
                     .w_full()
                     .py_1p5()
                     .gap_3()
                     .items_center()
-                    .border_b_1()
-                    .border_color(tokens.colors().border_subtle)
                     .child(
                         div()
                             .w(px(110.))
@@ -6638,6 +6681,16 @@ impl Shell {
                             })),
                     )
                     .child(
+                        Button::new(SharedString::from(format!("cron-history-{id}")))
+                            .ghost()
+                            .compact()
+                            .selected(history_open)
+                            .label(rust_i18n::t!("settings.cron.history").to_string())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_cron_history(id, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("cron-remove-{id}")))
                             .ghost()
                             .compact()
@@ -6654,7 +6707,34 @@ impl Shell {
                                     cx,
                                 )
                             })),
-                    )
+                    );
+                v_flex()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(row)
+                    .children(history.map(|runs| {
+                        v_flex()
+                            .w_full()
+                            .pl(px(110.))
+                            .pb_1p5()
+                            .gap_0p5()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .when(runs.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.cron.no_runs").to_string())
+                            })
+                            .children(runs.iter().map(|run| {
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .when(
+                                        run.outcome == ginka_protocol::model::CronOutcome::Failed,
+                                        |this| this.text_color(tokens.colors().status_error),
+                                    )
+                                    .child(ginka_ui::scheduled::run_line(run, now))
+                            }))
+                    }))
                     .into_any_element()
             })
             .collect();
