@@ -152,6 +152,43 @@ struct CronForm {
 
 const CONTEXT: &str = "Shell";
 
+/// Apply the reader's `keymap.json` over the defaults [`init`] bound
+/// (`ginka_ui::keymap`): each entry binds its keys to a named action in the
+/// shell's context, or frees them with `NoAction`.
+pub fn apply_keymap(cx: &mut App, overrides: &[ginka_ui::keymap::Override]) {
+    let bindings: Vec<KeyBinding> = overrides
+        .iter()
+        .map(|entry| {
+            let keys = entry.keys.as_str();
+            let context = Some(CONTEXT);
+            match entry.action.as_deref() {
+                None => KeyBinding::new(keys, gpui::NoAction, context),
+                Some("toggle_sidebar") => KeyBinding::new(keys, ToggleSidebar, context),
+                Some("toggle_right_panel") => KeyBinding::new(keys, ToggleRightPanel, context),
+                Some("toggle_terminal_dock") => KeyBinding::new(keys, ToggleTerminalDock, context),
+                Some("toggle_palette") => KeyBinding::new(keys, TogglePalette, context),
+                Some("search_everywhere") => KeyBinding::new(keys, SearchEverywhere, context),
+                Some("find_transcript") => KeyBinding::new(keys, FindTranscript, context),
+                Some("next_surface") => KeyBinding::new(keys, NextSurface, context),
+                Some("previous_surface") => KeyBinding::new(keys, PreviousSurface, context),
+                Some("new_tab") => KeyBinding::new(keys, NewTab, context),
+                Some("close_tab") => KeyBinding::new(keys, CloseTab, context),
+                Some("close_all_tabs") => KeyBinding::new(keys, CloseAllTabs, context),
+                Some("next_tab") => KeyBinding::new(keys, NextTab, context),
+                Some("previous_tab") => KeyBinding::new(keys, PreviousTab, context),
+                Some("next_session") => KeyBinding::new(keys, NextSession, context),
+                Some("previous_session") => KeyBinding::new(keys, PreviousSession, context),
+                Some("navigate_back") => KeyBinding::new(keys, NavigateBack, context),
+                Some("navigate_forward") => KeyBinding::new(keys, NavigateForward, context),
+                Some("open_settings") => KeyBinding::new(keys, OpenSettings, context),
+                // `ginka_ui::keymap::parse` refused anything else.
+                Some(_) => KeyBinding::new(keys, gpui::NoAction, context),
+            }
+        })
+        .collect();
+    cx.bind_keys(bindings);
+}
+
 /// Bind the panel toggles.
 ///
 /// The chords follow VS Code, because that is the muscle memory everyone using

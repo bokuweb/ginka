@@ -28,6 +28,7 @@ pub mod file_tree;
 pub mod graph;
 pub mod handoff;
 pub mod home;
+pub mod keymap;
 pub mod layout;
 pub mod markup;
 pub mod models;

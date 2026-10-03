@@ -77,6 +77,18 @@ fn main() -> Result<()> {
         }
         gpui_component::init(cx);
         shell::init(cx);
+        // The reader's own shortcuts, over the defaults; a file that cannot
+        // be used whole is not used at all, and says why in the log.
+        match std::fs::read_to_string(paths.root().join("keymap.json")) {
+            Ok(text) => match ginka_ui::keymap::parse(&text) {
+                Ok(overrides) => shell::apply_keymap(cx, &overrides),
+                Err(error) => tracing::warn!(%error, "keymap.json was not applied"),
+            },
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!(%error, "keymap.json could not be read")
+            }
+            Err(_) => {}
+        }
         ginka_ui::theme::apply(ginka_ui::Mode::Dark, cx);
         #[cfg(feature = "github")]
         {
