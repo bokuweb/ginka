@@ -1744,6 +1744,27 @@ impl Service {
                     servers: crate::mcp_inventory::discover(&home, project.as_deref()),
                 })
             }
+            Request::AddMcpServer { workspace, spec } => {
+                let args = crate::mcp_inventory::add_args(&spec).map_err(RpcError::failed)?;
+                self.run_vendor_mcp(&spec.provider, workspace.as_ref(), spec.scope, &args)?;
+                Ok(Response::Ack)
+            }
+            Request::RemoveMcpServer {
+                workspace,
+                provider,
+                name,
+                scope,
+            } => {
+                let args = crate::mcp_inventory::remove_args(&provider, &name, scope)
+                    .map_err(RpcError::failed)?;
+                self.run_vendor_mcp(
+                    &provider,
+                    workspace.as_ref(),
+                    scope.unwrap_or(ginka_protocol::model::McpScope::User),
+                    &args,
+                )?;
+                Ok(Response::Ack)
+            }
             Request::PullRequestChecks { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::Checks {
@@ -3296,6 +3317,56 @@ impl Service {
             Ok(by_agent) => crate::attribution::mark(files, &by_agent),
             Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
         }
+    }
+
+    /// Run `provider`'s own CLI with `args` (`mcp add …` / `mcp remove …`),
+    /// with the binary Ginka is configured to use for it. Project and local
+    /// scopes are a project's, so they run in `workspace`'s worktree and
+    /// need one; user scope runs in the home directory. The vendor's own
+    /// refusal is the answer when it refuses.
+    fn run_vendor_mcp(
+        &self,
+        provider: &str,
+        workspace: Option<&WorkspaceId>,
+        scope: ginka_protocol::model::McpScope,
+        args: &[String],
+    ) -> Result<(), RpcError> {
+        let driver = self.driver(provider)?;
+        let dir = match (scope, workspace) {
+            (ginka_protocol::model::McpScope::User, _) => {
+                dirs::home_dir().ok_or_else(|| RpcError::failed("there is no home directory"))?
+            }
+            (_, Some(workspace)) => self.worktree(workspace)?.path,
+            (_, None) => {
+                return Err(RpcError::failed(
+                    "a project or local MCP server needs the workspace whose project it is for",
+                ));
+            }
+        };
+        let mut command = std::process::Command::new(driver.program());
+        crate::tool_path::apply(&mut command);
+        let output = command
+            .args(args)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| {
+                RpcError::failed(format!("could not run {}: {error}", driver.program()))
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let said = String::from_utf8_lossy(&output.stderr);
+        let said = said.trim();
+        let said = if said.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            said.to_string()
+        };
+        Err(RpcError::failed(format!(
+            "{} refused: {said}",
+            driver.program()
+        )))
     }
 
     /// Give `prompt` to the workspace's latest conversation — queued if it is

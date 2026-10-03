@@ -31,6 +31,7 @@ pub mod home;
 pub mod keymap;
 pub mod layout;
 pub mod markup;
+pub mod mcp_servers;
 pub mod models;
 pub mod motion;
 pub mod navigation;

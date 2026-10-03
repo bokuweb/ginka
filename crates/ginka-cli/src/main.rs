@@ -271,8 +271,10 @@ enum Command {
     /// The MCP servers Claude Code and Codex are configured with outside
     /// Ginka, and with `--workspace` that repository's own.
     McpServers {
-        #[arg(long)]
+        #[arg(long, global = true)]
         workspace: Option<String>,
+        #[command(subcommand)]
+        action: Option<McpServersAction>,
     },
     /// The checks on the workspace branch's pull request; `--fix` hands
     /// the failing ones to an agent.
@@ -983,6 +985,34 @@ enum SessionCommand {
     },
 }
 
+/// Changing the MCP servers an agent CLI is configured with, through that
+/// CLI.
+#[derive(Subcommand)]
+enum McpServersAction {
+    /// Add a server: `--url <URL>`, or the command after `--`.
+    Add {
+        /// claude or codex.
+        provider: String,
+        name: String,
+        /// user (every project), project (the workspace's `.mcp.json`) or
+        /// local (this project, for you only). Codex has user only.
+        #[arg(long, default_value = "user")]
+        scope: String,
+        #[arg(long, conflicts_with = "command")]
+        url: Option<String>,
+        /// The program and its arguments, after `--`.
+        #[arg(last = true, required_unless_present = "url")]
+        command: Vec<String>,
+    },
+    /// Remove a server.
+    Remove {
+        provider: String,
+        name: String,
+        #[arg(long)]
+        scope: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum ReviewCommand {
     /// Leave a comment on a file, and a line of it.
@@ -1589,8 +1619,53 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             old_path: None,
         },
-        Command::McpServers { workspace } => Request::ListMcpServers {
+        Command::McpServers {
+            workspace,
+            action: None,
+        } => Request::ListMcpServers {
             workspace: workspace.map(WorkspaceId),
+        },
+        Command::McpServers {
+            workspace,
+            action:
+                Some(McpServersAction::Add {
+                    provider,
+                    name,
+                    scope,
+                    url,
+                    command,
+                }),
+        } => Request::AddMcpServer {
+            workspace: workspace.map(WorkspaceId),
+            spec: ginka_protocol::model::McpServerSpec {
+                name,
+                provider,
+                scope: mcp_scope(&scope)?,
+                target: match url {
+                    Some(url) => ginka_protocol::model::McpTarget::Url { url },
+                    None => {
+                        let mut command = command.into_iter();
+                        ginka_protocol::model::McpTarget::Command {
+                            program: command.next().unwrap_or_default(),
+                            args: command.collect(),
+                        }
+                    }
+                },
+            },
+        },
+        Command::McpServers {
+            workspace,
+            action:
+                Some(McpServersAction::Remove {
+                    provider,
+                    name,
+                    scope,
+                }),
+        } => Request::RemoveMcpServer {
+            workspace: workspace.map(WorkspaceId),
+            provider,
+            name,
+            scope: scope.as_deref().map(mcp_scope).transpose()?,
         },
         Command::Checks {
             workspace,
@@ -2065,6 +2140,16 @@ fn request_for(command: Command) -> Result<Request> {
 ///
 /// The event stream is opened before the request is sent, so the answer
 /// cannot land in the gap between them.
+/// Read a scope word: user, project or local.
+fn mcp_scope(word: &str) -> Result<ginka_protocol::model::McpScope> {
+    Ok(match word {
+        "user" => ginka_protocol::model::McpScope::User,
+        "project" => ginka_protocol::model::McpScope::Project,
+        "local" => ginka_protocol::model::McpScope::Local,
+        other => anyhow::bail!("{other} is not a scope: user, project or local"),
+    })
+}
+
 /// `ginka pr --generate`: ask, then wait for the pushed outcome and print
 /// the pull request's address.
 fn pull_request_generated(

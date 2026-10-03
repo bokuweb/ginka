@@ -13,7 +13,7 @@
 //!   the table names and their `command` are read, line by line, so no TOML
 //!   parser is linked for two keys.
 
-use ginka_protocol::model::{McpScope, McpServerEntry};
+use ginka_protocol::model::{McpScope, McpServerEntry, McpServerSpec, McpTarget};
 use serde_json::Value;
 use std::path::Path;
 
@@ -110,8 +110,241 @@ pub fn codex_servers(text: &str) -> Vec<McpServerEntry> {
     found
 }
 
+/// The vendor CLI invocation that adds `spec` to its own configuration:
+/// `claude mcp add` or `codex mcp add`, so each vendor's file format stays
+/// the vendor's business. Environment variables are never passed — they are
+/// where tokens go, and those belong to the vendor's own prompt.
+///
+/// Refuses a name that is not plain, a scope Codex does not have (it keeps
+/// servers per user only), and an empty command or a non-HTTP(S) URL.
+pub fn add_args(spec: &McpServerSpec) -> Result<Vec<String>, String> {
+    check_name(&spec.name)?;
+    let mut args: Vec<String> = vec!["mcp".into(), "add".into()];
+    match spec.provider.as_str() {
+        "claude" => {
+            args.extend(["--scope".into(), scope_word(spec.scope).into()]);
+            match &spec.target {
+                McpTarget::Url { url } => {
+                    check_url(url)?;
+                    args.extend([
+                        "--transport".into(),
+                        "http".into(),
+                        spec.name.clone(),
+                        url.clone(),
+                    ]);
+                }
+                McpTarget::Command {
+                    program,
+                    args: rest,
+                } => {
+                    check_program(program)?;
+                    args.extend([spec.name.clone(), "--".into(), program.clone()]);
+                    args.extend(rest.iter().cloned());
+                }
+            }
+        }
+        "codex" => {
+            if spec.scope != McpScope::User {
+                return Err("Codex keeps MCP servers per user only".into());
+            }
+            args.push(spec.name.clone());
+            match &spec.target {
+                McpTarget::Url { url } => {
+                    check_url(url)?;
+                    args.extend(["--url".into(), url.clone()]);
+                }
+                McpTarget::Command {
+                    program,
+                    args: rest,
+                } => {
+                    check_program(program)?;
+                    args.extend(["--".into(), program.clone()]);
+                    args.extend(rest.iter().cloned());
+                }
+            }
+        }
+        other => return Err(format!("{other} has no MCP configuration Ginka can write")),
+    }
+    Ok(args)
+}
+
+/// The vendor CLI invocation that removes `name` from `provider`'s
+/// configuration, from `scope` when given (Claude Code otherwise removes it
+/// from wherever it is).
+pub fn remove_args(
+    provider: &str,
+    name: &str,
+    scope: Option<McpScope>,
+) -> Result<Vec<String>, String> {
+    check_name(name)?;
+    let mut args: Vec<String> = vec!["mcp".into(), "remove".into()];
+    match provider {
+        "claude" => {
+            if let Some(scope) = scope {
+                args.extend(["--scope".into(), scope_word(scope).into()]);
+            }
+        }
+        "codex" => {
+            if scope.is_some_and(|scope| scope != McpScope::User) {
+                return Err("Codex keeps MCP servers per user only".into());
+            }
+        }
+        other => return Err(format!("{other} has no MCP configuration Ginka can write")),
+    }
+    args.push(name.to_string());
+    Ok(args)
+}
+
+fn scope_word(scope: McpScope) -> &'static str {
+    match scope {
+        McpScope::User => "user",
+        McpScope::Project => "project",
+        McpScope::Local => "local",
+    }
+}
+
+fn check_name(name: &str) -> Result<(), String> {
+    let plain = !name.is_empty()
+        && !name.starts_with('-')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if plain {
+        Ok(())
+    } else {
+        Err(format!("{name:?} is not a plain server name"))
+    }
+}
+
+fn check_program(program: &str) -> Result<(), String> {
+    if program.trim().is_empty() {
+        Err("an MCP server needs a command to run".into())
+    } else {
+        Ok(())
+    }
+}
+
+fn check_url(url: &str) -> Result<(), String> {
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(())
+    } else {
+        Err(format!("{url:?} is not an HTTP address"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+
+    fn spec(provider: &str, scope: McpScope, target: McpTarget) -> McpServerSpec {
+        McpServerSpec {
+            name: "docs".into(),
+            provider: provider.into(),
+            scope,
+            target,
+        }
+    }
+
+    #[test]
+    fn adding_speaks_each_vendors_own_command_line() {
+        let command = McpTarget::Command {
+            program: "npx".into(),
+            args: vec!["-y".into(), "docs-mcp".into()],
+        };
+        assert_eq!(
+            add_args(&spec("claude", McpScope::Project, command.clone())).unwrap(),
+            [
+                "mcp", "add", "--scope", "project", "docs", "--", "npx", "-y", "docs-mcp"
+            ]
+        );
+        assert_eq!(
+            add_args(&spec(
+                "claude",
+                McpScope::User,
+                McpTarget::Url {
+                    url: "https://docs.example/mcp".into()
+                }
+            ))
+            .unwrap(),
+            [
+                "mcp",
+                "add",
+                "--scope",
+                "user",
+                "--transport",
+                "http",
+                "docs",
+                "https://docs.example/mcp"
+            ]
+        );
+        assert_eq!(
+            add_args(&spec("codex", McpScope::User, command)).unwrap(),
+            ["mcp", "add", "docs", "--", "npx", "-y", "docs-mcp"]
+        );
+        assert_eq!(
+            add_args(&spec(
+                "codex",
+                McpScope::User,
+                McpTarget::Url {
+                    url: "https://docs.example/mcp".into()
+                }
+            ))
+            .unwrap(),
+            ["mcp", "add", "docs", "--url", "https://docs.example/mcp"]
+        );
+    }
+
+    #[test]
+    fn what_a_vendor_cannot_hold_or_a_name_that_is_not_plain_is_refused() {
+        let command = McpTarget::Command {
+            program: "x".into(),
+            args: Vec::new(),
+        };
+        assert!(add_args(&spec("codex", McpScope::Project, command.clone())).is_err());
+        assert!(add_args(&spec("gemini", McpScope::User, command.clone())).is_err());
+        let mut bad = spec("claude", McpScope::User, command);
+        bad.name = "--scope".into();
+        assert!(add_args(&bad).is_err());
+        assert!(
+            add_args(&spec(
+                "claude",
+                McpScope::User,
+                McpTarget::Url {
+                    url: "file:///etc/passwd".into()
+                }
+            ))
+            .is_err()
+        );
+        assert!(
+            add_args(&spec(
+                "claude",
+                McpScope::User,
+                McpTarget::Command {
+                    program: " ".into(),
+                    args: Vec::new()
+                }
+            ))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn removing_names_the_scope_only_where_the_vendor_has_one() {
+        assert_eq!(
+            remove_args("claude", "docs", Some(McpScope::Local)).unwrap(),
+            ["mcp", "remove", "--scope", "local", "docs"]
+        );
+        assert_eq!(
+            remove_args("claude", "docs", None).unwrap(),
+            ["mcp", "remove", "docs"]
+        );
+        assert_eq!(
+            remove_args("codex", "docs", Some(McpScope::User)).unwrap(),
+            ["mcp", "remove", "docs"]
+        );
+        assert!(remove_args("codex", "docs", Some(McpScope::Project)).is_err());
+        assert!(remove_args("claude", "-rf", None).is_err());
+    }
+
     use super::*;
 
     fn names(found: &[McpServerEntry]) -> Vec<(String, String, McpScope, Option<String>)> {

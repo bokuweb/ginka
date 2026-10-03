@@ -1114,6 +1114,28 @@ pub struct McpServerEntry {
     pub target: Option<String>,
 }
 
+/// An MCP server to add to an agent CLI's configuration.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub name: String,
+    /// Whose configuration it goes into: `claude`, `codex`.
+    pub provider: String,
+    pub scope: McpScope,
+    pub target: McpTarget,
+}
+
+/// How an MCP server is reached.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpTarget {
+    /// A program the agent starts and speaks to over stdio.
+    Command { program: String, args: Vec<String> },
+    /// A streamable HTTP server.
+    Url { url: String },
+}
+
 /// Where an MCP server is configured.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

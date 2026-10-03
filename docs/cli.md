@@ -236,6 +236,9 @@ The MCP servers Claude Code and Codex are configured with outside Ginka; `--work
 
 `ginka mcp-servers [--workspace <WORKSPACE>]`
 
+- `ginka mcp-servers add` — Add a server through the vendor's own CLI (`ginka mcp-servers add <PROVIDER> <NAME> [--scope user|project|local] (--url <URL> | -- <COMMAND>...)`); project and local scopes need `--workspace`. Environment variables are not passed: set those with the vendor's CLI
+- `ginka mcp-servers remove` — Remove one (`ginka mcp-servers remove <PROVIDER> <NAME> [--scope <SCOPE>]`)
+
 ## `ginka checks`
 
 The checks on the workspace branch's pull request, read with `gh`; `--fix` hands the failing ones to the workspace's agent

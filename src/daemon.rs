@@ -1617,6 +1617,36 @@ impl DaemonLink {
         }
     }
 
+    /// Add an MCP server through its vendor's CLI; the vendor's refusal is
+    /// the error.
+    pub async fn add_mcp_server(
+        &self,
+        workspace: Option<WorkspaceId>,
+        spec: ginka_protocol::model::McpServerSpec,
+    ) -> Result<(), String> {
+        self.ask_result(Request::AddMcpServer { workspace, spec })
+            .await
+            .map(|_| ())
+    }
+
+    /// Remove an MCP server through its vendor's CLI.
+    pub async fn remove_mcp_server(
+        &self,
+        workspace: Option<WorkspaceId>,
+        provider: String,
+        name: String,
+        scope: Option<ginka_protocol::model::McpScope>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::RemoveMcpServer {
+            workspace,
+            provider,
+            name,
+            scope,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// The MCP servers the agent CLIs are configured with outside Ginka.
     pub async fn mcp_servers(
         &self,

@@ -1830,3 +1830,18 @@ surface.git.by_agent:
 surface.files.preview_tab:
   en: "%{name} (preview)"
   ja: "%{name}（プレビュー）"
+settings.mcp_servers.name:
+  en: Name
+  ja: 名前
+settings.mcp_servers.target:
+  en: "https://… or a command, e.g. npx -y some-mcp"
+  ja: "https://… またはコマンド（例: npx -y some-mcp）"
+settings.mcp_servers.add:
+  en: Add
+  ja: 追加
+settings.mcp_servers.remove:
+  en: Remove
+  ja: 削除
+settings.mcp_servers.remove_confirm:
+  en: Remove it
+  ja: 本当に削除
