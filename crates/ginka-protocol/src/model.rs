@@ -884,6 +884,11 @@ pub struct DiffLine {
     /// of it. Byte ranges into `text`, in order and not overlapping.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Span>,
+    /// For an added line in a diff of the worktree: whether an agent's
+    /// turn wrote it (`true`) or a person did (`false`). Absent where it
+    /// was not worked out — other sources, and context or removed lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<bool>,
 }
 
 /// A range of bytes in a line.
@@ -1107,6 +1112,43 @@ pub struct McpServerEntry {
     /// The command it runs, or the address it is reached at — never its
     /// arguments or environment, which can carry tokens.
     pub target: Option<String>,
+}
+
+/// Whether a newer release of an agent CLI is out.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUpdate {
+    /// The driver id: `claude`, `codex`, …
+    pub agent: String,
+    /// What the probe read from the installed CLI.
+    pub installed: Option<String>,
+    /// The latest published version, when the registry could be read.
+    pub latest: Option<String>,
+    pub update_available: bool,
+    /// The command that updates it, for the reader to run.
+    pub command: String,
+}
+
+/// An MCP server to add to an agent CLI's configuration.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    pub name: String,
+    /// Whose configuration it goes into: `claude`, `codex`.
+    pub provider: String,
+    pub scope: McpScope,
+    pub target: McpTarget,
+}
+
+/// How an MCP server is reached.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpTarget {
+    /// A program the agent starts and speaks to over stdio.
+    Command { program: String, args: Vec<String> },
+    /// A streamable HTTP server.
+    Url { url: String },
 }
 
 /// Where an MCP server is configured.

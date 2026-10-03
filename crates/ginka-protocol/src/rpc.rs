@@ -86,6 +86,11 @@ pub enum Request {
         note: Option<String>,
     },
 
+    /// Ask npm for the latest release of each installed agent CLI and say
+    /// which are behind (MonoCode's update check). Only when asked: Ginka
+    /// does not phone home. Answers `Ack`; the result arrives as
+    /// `DaemonEvent::AgentUpdatesChecked`. Nothing is installed.
+    CheckAgentUpdates,
     /// Which agents this machine has, and whether they are usable.
     ///
     /// Probing runs each vendor's CLI, so this is a request rather than
@@ -649,6 +654,26 @@ pub enum Request {
     ListMcpServers {
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+    },
+    /// Add an MCP server to an agent CLI's own configuration, through that
+    /// CLI (`claude mcp add`, `codex mcp add`). A project or local scope
+    /// needs `workspace`, whose project it is written for. Not offered over
+    /// MCP: an agent must not be able to install itself a server.
+    AddMcpServer {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+        spec: crate::model::McpServerSpec,
+    },
+    /// Remove an MCP server from an agent CLI's configuration, through that
+    /// CLI. `scope` narrows where; `workspace` is needed for a project or
+    /// local one.
+    RemoveMcpServer {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+        provider: String,
+        name: String,
+        #[serde(default)]
+        scope: Option<crate::model::McpScope>,
     },
     /// The checks of the pull request open from a workspace's branch, read
     /// with `gh pr checks` (Orca's checks view).

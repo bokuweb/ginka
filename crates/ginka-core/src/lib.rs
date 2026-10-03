@@ -6,7 +6,9 @@
 
 pub mod account;
 pub mod agent;
+pub mod agent_updates;
 pub mod attachment;
+pub mod attribution;
 pub mod blob;
 pub mod browser;
 pub mod browser_history;

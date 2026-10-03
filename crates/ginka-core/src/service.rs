@@ -642,6 +642,24 @@ impl Service {
                 Ok(Response::Ack)
             }
 
+            Request::CheckAgentUpdates => {
+                let agents = self.agents();
+                let events = self.events.clone();
+                // The registry is the network: never under the service's
+                // lock, and a slow answer only delays its own event.
+                std::thread::spawn(move || {
+                    let updates = crate::agent_updates::check(&agents, |url| {
+                        Ok(ureq::get(url)
+                            .call()?
+                            .body_mut()
+                            .with_config()
+                            .limit(256 * 1024)
+                            .read_to_string()?)
+                    });
+                    events.emit(DaemonEvent::AgentUpdatesChecked { updates });
+                });
+                Ok(Response::Ack)
+            }
             Request::ListAgents => Ok(Response::Agents {
                 agents: self.agents(),
             }),
@@ -1007,6 +1025,12 @@ impl Service {
                     other => git::changes_with_context(&worktree.path, other, context_lines)
                         .map_err(failed)?,
                 };
+                let mut files = files;
+                // Orca's line attribution, for diffs of the worktree: which
+                // added lines the turns since the last commit wrote.
+                if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
+                    self.attribute(&workspace, &worktree.path, &mut files);
+                }
                 Ok(Response::Changes {
                     changes: Changes { source, files },
                 })
@@ -1737,6 +1761,27 @@ impl Service {
                 Ok(Response::McpServers {
                     servers: crate::mcp_inventory::discover(&home, project.as_deref()),
                 })
+            }
+            Request::AddMcpServer { workspace, spec } => {
+                let args = crate::mcp_inventory::add_args(&spec).map_err(RpcError::failed)?;
+                self.run_vendor_mcp(&spec.provider, workspace.as_ref(), spec.scope, &args)?;
+                Ok(Response::Ack)
+            }
+            Request::RemoveMcpServer {
+                workspace,
+                provider,
+                name,
+                scope,
+            } => {
+                let args = crate::mcp_inventory::remove_args(&provider, &name, scope)
+                    .map_err(RpcError::failed)?;
+                self.run_vendor_mcp(
+                    &provider,
+                    workspace.as_ref(),
+                    scope.unwrap_or(ginka_protocol::model::McpScope::User),
+                    &args,
+                )?;
+                Ok(Response::Ack)
             }
             Request::PullRequestChecks { workspace } => {
                 let worktree = self.worktree(&workspace)?;
@@ -3258,6 +3303,90 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
+    /// Mark which added lines in `files` the workspace's recent turns wrote
+    /// (`crate::attribution`). Only turns since the last commit count — an
+    /// older turn's lines are in the commit, not the diff — and at most the
+    /// newest [`ATTRIBUTION_TURNS`], so a long session does not make every
+    /// refresh re-read its whole history. Failing to work it out leaves the
+    /// lines unmarked rather than failing the diff.
+    fn attribute(
+        &self,
+        workspace: &WorkspaceId,
+        path: &std::path::Path,
+        files: &mut [ginka_protocol::model::FileChange],
+    ) {
+        let since = git::last_commit_time(path).unwrap_or(i64::MIN);
+        let conn = self.conn();
+        let Ok(checkpoints) = checkpoint::list(&conn, workspace) else {
+            return;
+        };
+        let turns: Vec<(String, String)> = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.has_turn_start && checkpoint.created_at >= since)
+            .take(ATTRIBUTION_TURNS)
+            .filter_map(|checkpoint| {
+                checkpoint::turn_commits(&conn, &checkpoint.id)
+                    .ok()
+                    .flatten()
+            })
+            .collect();
+        drop(conn);
+        match crate::attribution::turn_added_lines(path, &turns) {
+            Ok(by_agent) => crate::attribution::mark(files, &by_agent),
+            Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+        }
+    }
+
+    /// Run `provider`'s own CLI with `args` (`mcp add …` / `mcp remove …`),
+    /// with the binary Ginka is configured to use for it. Project and local
+    /// scopes are a project's, so they run in `workspace`'s worktree and
+    /// need one; user scope runs in the home directory. The vendor's own
+    /// refusal is the answer when it refuses.
+    fn run_vendor_mcp(
+        &self,
+        provider: &str,
+        workspace: Option<&WorkspaceId>,
+        scope: ginka_protocol::model::McpScope,
+        args: &[String],
+    ) -> Result<(), RpcError> {
+        let driver = self.driver(provider)?;
+        let dir = match (scope, workspace) {
+            (ginka_protocol::model::McpScope::User, _) => {
+                dirs::home_dir().ok_or_else(|| RpcError::failed("there is no home directory"))?
+            }
+            (_, Some(workspace)) => self.worktree(workspace)?.path,
+            (_, None) => {
+                return Err(RpcError::failed(
+                    "a project or local MCP server needs the workspace whose project it is for",
+                ));
+            }
+        };
+        let mut command = std::process::Command::new(driver.program());
+        crate::tool_path::apply(&mut command);
+        let output = command
+            .args(args)
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|error| {
+                RpcError::failed(format!("could not run {}: {error}", driver.program()))
+            })?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let said = String::from_utf8_lossy(&output.stderr);
+        let said = said.trim();
+        let said = if said.is_empty() {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        } else {
+            said.to_string()
+        };
+        Err(RpcError::failed(format!(
+            "{} refused: {said}",
+            driver.program()
+        )))
+    }
+
     /// Give `prompt` to the workspace's latest conversation — queued if it is
     /// working — or, when `agent` names another or there is none, to a new
     /// conversation on that agent. The conversation that did the work knows
@@ -3666,6 +3795,9 @@ impl Service {
         }
     }
 }
+
+/// How many recent turns line attribution reads at most.
+const ATTRIBUTION_TURNS: usize = 20;
 
 /// A scheduled job a tick owes a firing, and the probe to run before it.
 #[derive(Debug, Clone)]

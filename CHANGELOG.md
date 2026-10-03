@@ -44,6 +44,11 @@ far is unreleased.
   conversation's id from its row.
 - Rebind or free keyboard shortcuts in `keymap.json`.
 - See a changed image as it was beside as it is.
+- Lines an agent wrote are marked in the diff until someone edits them.
+- Preview tabs: a single click in the file tree reuses one tab.
+- Add and remove Claude Code's and Codex's MCP servers through their own
+  CLIs.
+- Check, on request, whether a newer agent CLI is out.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

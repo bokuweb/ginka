@@ -52,7 +52,9 @@ Manage workspaces, which are git worktrees
 
 Report which agent CLIs this machine has, and whether they are usable
 
-`ginka agents`
+`ginka agents [--check-updates]`
+
+`--check-updates` asks npm for each installed agent CLI's latest release and prints the command that updates it; nothing is installed.
 
 ## `ginka account`
 
@@ -235,6 +237,9 @@ Write a changed image as it was and as it is to `before.*` and `after.*` — unc
 The MCP servers Claude Code and Codex are configured with outside Ginka; `--workspace` adds that repository's `.mcp.json` and that project's own
 
 `ginka mcp-servers [--workspace <WORKSPACE>]`
+
+- `ginka mcp-servers add` — Add a server through the vendor's own CLI (`ginka mcp-servers add <PROVIDER> <NAME> [--scope user|project|local] (--url <URL> | -- <COMMAND>...)`); project and local scopes need `--workspace`. Environment variables are not passed: set those with the vendor's CLI
+- `ginka mcp-servers remove` — Remove one (`ginka mcp-servers remove <PROVIDER> <NAME> [--scope <SCOPE>]`)
 
 ## `ginka checks`
 

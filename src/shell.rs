@@ -150,6 +150,19 @@ struct CronForm {
     error: Option<String>,
 }
 
+/// The settings page's MCP server form: what to add, and which row's
+/// removal is waiting for its second click.
+struct McpForm {
+    name: Entity<InputState>,
+    /// A URL, or a command line split the way a shell would.
+    target: Entity<InputState>,
+    provider: &'static str,
+    scope: ginka_protocol::model::McpScope,
+    /// The `(provider, name, scope)` armed for removal.
+    removing: Option<(String, String, ginka_protocol::model::McpScope)>,
+    error: Option<String>,
+}
+
 const CONTEXT: &str = "Shell";
 
 /// Apply the reader's `keymap.json` over the defaults [`init`] bound
@@ -629,6 +642,9 @@ pub struct Shell {
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
     /// The MCP servers the agent CLIs are configured with, for Settings.
     mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
+    /// The last update check's answer, and whether one is on its way.
+    agent_updates: Option<Vec<ginka_protocol::model::AgentUpdate>>,
+    checking_updates: bool,
     /// The provider executable editor, when open in Settings.
     provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
@@ -819,6 +835,7 @@ pub struct Shell {
     /// The scheduled jobs of the project on screen.
     cron_jobs: Vec<ginka_protocol::model::CronJob>,
     cron_form: CronForm,
+    mcp_form: McpForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -895,6 +912,20 @@ impl Shell {
             workspace: None,
             chat: false,
             editing: None,
+            error: None,
+        };
+        let mcp_form = McpForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.mcp_servers.name").to_string())
+            }),
+            target: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.mcp_servers.target").to_string())
+            }),
+            provider: "claude",
+            scope: ginka_protocol::model::McpScope::User,
+            removing: None,
             error: None,
         };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
@@ -1622,6 +1653,13 @@ impl Shell {
                                 }
                             })
                             .map_err(|_| ()),
+                        DaemonEvent::AgentUpdatesChecked { updates } => this
+                            .update(cx, |this, cx| {
+                                this.checking_updates = false;
+                                this.agent_updates = Some(updates);
+                                cx.notify();
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
                             message,
@@ -1714,6 +1752,8 @@ impl Shell {
             agents: Vec::new(),
             provider_settings: Vec::new(),
             mcp_servers: Vec::new(),
+            agent_updates: None,
+            checking_updates: false,
             provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -1808,6 +1848,7 @@ impl Shell {
             quick_form,
             cron_jobs: Vec::new(),
             cron_form,
+            mcp_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -5544,6 +5585,96 @@ impl Shell {
         self.open_place(crate::sidebar::Place::Settings, window, cx);
     }
 
+    /// Add the server the settings form describes, through the vendor's CLI,
+    /// then read the list again.
+    fn add_mcp_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.mcp_form.name.read(cx).value().trim().to_string();
+        let target = self.mcp_form.target.read(cx).value().trim().to_string();
+        let target = ginka_ui::mcp_servers::target(&target);
+        let spec = ginka_protocol::model::McpServerSpec {
+            name,
+            provider: self.mcp_form.provider.to_string(),
+            scope: self.mcp_form.scope,
+            target,
+        };
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        let link = self.link.clone();
+        let (name_field, target_field) = (self.mcp_form.name.clone(), self.mcp_form.target.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let added = cx
+                .background_spawn(async move { link.add_mcp_server(workspace, spec).await })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match added {
+                    Ok(()) => {
+                        this.mcp_form.error = None;
+                        for field in [&name_field, &target_field] {
+                            field.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                    }
+                    Err(error) => this.mcp_form.error = Some(error),
+                }
+                this.refresh_mcp_servers(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove a listed server through the vendor's CLI — on the second
+    /// click, since the first only arms it.
+    fn remove_mcp_server(
+        &mut self,
+        server: &ginka_protocol::model::McpServerEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (server.provider.clone(), server.name.clone(), server.scope);
+        if self.mcp_form.removing.as_ref() != Some(&key) {
+            self.mcp_form.removing = Some(key);
+            cx.notify();
+            return;
+        }
+        self.mcp_form.removing = None;
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        let link = self.link.clone();
+        let (provider, name, scope) = key;
+        cx.spawn(async move |this, cx| {
+            let removed = cx
+                .background_spawn(async move {
+                    link.remove_mcp_server(workspace, provider, name, Some(scope))
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.mcp_form.error = removed.err();
+                this.refresh_mcp_servers(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask the daemon to check npm for newer agent CLIs; the answer comes
+    /// back as `AgentUpdatesChecked`.
+    fn check_agent_updates(&mut self, cx: &mut Context<Self>) {
+        self.checking_updates = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let asked = cx
+                .background_spawn(async move { link.check_agent_updates().await })
+                .await;
+            if asked.is_err() {
+                this.update(cx, |this, cx| {
+                    this.checking_updates = false;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// Read the MCP servers the agent CLIs are configured with, for the
     /// settings page: the user's, and the workspace on screen's project's.
     fn refresh_mcp_servers(&mut self, cx: &mut Context<Self>) {
@@ -5712,7 +5843,28 @@ impl Shell {
                             .truncate()
                             .child(server.target.clone().unwrap_or_default()),
                     )
-            }));
+                    .child({
+                        let armed = self.mcp_form.removing.as_ref()
+                            == Some(&(server.provider.clone(), server.name.clone(), server.scope));
+                        let server = server.clone();
+                        Button::new(SharedString::from(format!(
+                            "mcp-remove:{}:{}:{:?}",
+                            server.provider, server.name, server.scope
+                        )))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(if armed {
+                            rust_i18n::t!("settings.mcp_servers.remove_confirm").to_string()
+                        } else {
+                            rust_i18n::t!("settings.mcp_servers.remove").to_string()
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.remove_mcp_server(&server, cx)),
+                        )
+                    })
+            }))
+            .child(self.mcp_add_form(cx));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -5722,6 +5874,52 @@ impl Shell {
                     .text_size(px(11.5))
                     .text_color(tokens.colors().text_muted)
                     .child(rust_i18n::t!("settings.providers").to_string()),
+            )
+            // MonoCode's update check, on request only: the answer names
+            // the command, and nothing is installed from here.
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("check-agent-updates")
+                            .ghost()
+                            .compact()
+                            .small()
+                            .disabled(self.checking_updates)
+                            .label(if self.checking_updates {
+                                rust_i18n::t!("settings.updates.checking").to_string()
+                            } else {
+                                rust_i18n::t!("settings.updates.check").to_string()
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.check_agent_updates(cx))),
+                    )
+                    .children(self.agent_updates.as_ref().map(|updates| {
+                        let behind: Vec<String> = updates
+                            .iter()
+                            .filter(|update| update.update_available)
+                            .map(|update| {
+                                rust_i18n::t!(
+                                    "settings.updates.available",
+                                    agent = update.agent.clone(),
+                                    installed = update.installed.clone().unwrap_or_default(),
+                                    latest = update.latest.clone().unwrap_or_default(),
+                                    command = update.command.clone()
+                                )
+                                .to_string()
+                            })
+                            .collect();
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .when(behind.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.updates.none").to_string())
+                            })
+                            .children(behind)
+                    })),
             )
             .children(self.provider_settings.iter().map(|setting| {
                 let provider = setting.provider;
@@ -5981,6 +6179,108 @@ impl Shell {
                             .child(cron_section),
                     ),
             )
+    }
+
+    /// The form under the MCP server list: which agent, which scope, a name
+    /// and a URL or command line. Environment variables are left to the
+    /// vendor's own CLI, because that is where tokens go.
+    fn mcp_add_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let chip = |id: String, label: String, on: bool| {
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py_0p5()
+                .rounded(px(5.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        use ginka_protocol::model::McpScope;
+        let scopes: &[McpScope] = if self.mcp_form.provider == "codex" {
+            &[McpScope::User]
+        } else {
+            &[McpScope::User, McpScope::Project, McpScope::Local]
+        };
+        v_flex()
+            .w_full()
+            .pt_2()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(["claude", "codex"].into_iter().map(|provider| {
+                        chip(
+                            format!("mcp-provider:{provider}"),
+                            provider.to_string(),
+                            self.mcp_form.provider == provider,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mcp_form.provider = provider;
+                            if provider == "codex" {
+                                this.mcp_form.scope = McpScope::User;
+                            }
+                            cx.notify();
+                        }))
+                    }))
+                    .child(div().w(px(12.)))
+                    .children(scopes.iter().map(|scope| {
+                        let scope = *scope;
+                        let label = match scope {
+                            McpScope::User => rust_i18n::t!("settings.mcp_servers.user"),
+                            McpScope::Project => rust_i18n::t!("settings.mcp_servers.project"),
+                            McpScope::Local => rust_i18n::t!("settings.mcp_servers.local"),
+                        }
+                        .to_string();
+                        chip(
+                            format!("mcp-scope:{scope:?}"),
+                            label,
+                            self.mcp_form.scope == scope,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mcp_form.scope = scope;
+                            cx.notify();
+                        }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .child(ginka_ui::field::input(&self.mcp_form.name)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.mcp_form.target)),
+                    )
+                    .child(
+                        Button::new("mcp-add")
+                            .compact()
+                            .small()
+                            .label(rust_i18n::t!("settings.mcp_servers.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_mcp_server(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.mcp_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
     }
 
     /// The settings page's quick commands: the project's and the global ones,

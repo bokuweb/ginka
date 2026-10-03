@@ -126,6 +126,7 @@ pub fn parse(patch: &str) -> Vec<FileChange> {
             old_line: old,
             new_line: new,
             words: Vec::new(),
+            by_agent: None,
         });
     }
 
