@@ -4071,3 +4071,91 @@ fn a_reminder_arrives_in_the_conversation_it_was_set_on() {
         other => panic!("expected sessions, got {other:?}"),
     }
 }
+
+#[test]
+fn mcp_servers_are_changed_by_the_vendors_own_cli_in_the_right_place() {
+    // The command line is the vendor's (`claude mcp add …`), run with the
+    // binary Ginka is configured to use, in the worktree for a project
+    // scope; the vendor's refusal is the error.
+    let mut fixture = Fixture::new();
+    let log = fixture.path("vendor-cli.log");
+    let fake = fixture.path("fake-claude.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ \"$3\" = \"refused\" ] || [ \"$5\" = \"refused\" ]; then echo 'already exists' >&2; exit 1; fi\necho \"$PWD|$*\" >> '{}'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut drivers = Registry::with_defaults();
+    drivers.insert(Arc::new(ClaudeDriver::with_program(fake.to_string_lossy())));
+    fixture.service = Service::new(
+        fixture.paths.clone(),
+        db::open(&fixture.db_path).unwrap(),
+        fixture.recorder.clone(),
+    )
+    .with_drivers(drivers);
+
+    let spec = |name: &str, scope| ginka_protocol::model::McpServerSpec {
+        name: name.into(),
+        provider: "claude".into(),
+        scope,
+        target: ginka_protocol::model::McpTarget::Command {
+            program: "npx".into(),
+            args: vec!["-y".into(), "docs-mcp".into()],
+        },
+    };
+    fixture.ask(Request::AddMcpServer {
+        workspace: Some(fixture.workspace.clone()),
+        spec: spec("docs", ginka_protocol::model::McpScope::Project),
+    });
+    fixture.ask(Request::RemoveMcpServer {
+        workspace: Some(fixture.workspace.clone()),
+        provider: "claude".into(),
+        name: "docs".into(),
+        scope: Some(ginka_protocol::model::McpScope::Project),
+    });
+    let worktree = fixture.workspace_path();
+    let lines: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap();
+    let (cwd, args) = lines[0].split_once('|').unwrap();
+    assert_eq!(canonical(std::path::Path::new(cwd)), canonical(&worktree));
+    assert_eq!(args, "mcp add --scope project docs -- npx -y docs-mcp");
+    assert_eq!(
+        lines[1].split_once('|').unwrap().1,
+        "mcp remove --scope project docs"
+    );
+
+    // A project scope with no workspace has nowhere to be written.
+    let homeless = fixture
+        .service
+        .handle(Request::AddMcpServer {
+            workspace: None,
+            spec: spec("docs", ginka_protocol::model::McpScope::Project),
+        })
+        .unwrap_err();
+    assert!(
+        homeless.message.contains("needs the workspace"),
+        "{homeless:?}"
+    );
+
+    // The vendor's refusal is what the reader sees.
+    let refused = fixture
+        .service
+        .handle(Request::AddMcpServer {
+            workspace: Some(fixture.workspace.clone()),
+            spec: spec("refused", ginka_protocol::model::McpScope::Project),
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("already exists"), "{refused:?}");
+}
