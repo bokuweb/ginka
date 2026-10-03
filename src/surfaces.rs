@@ -1864,7 +1864,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_primary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.show(surface, cx)))
     }
@@ -3703,7 +3703,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_secondary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .child(
                 div()
@@ -5378,11 +5378,11 @@ impl Panel for SurfaceTab {
             .gap(px(6.))
             .items_center()
             .child(ginka_ui::chrome::tab_icon(self.surface.icon(), active, cx))
-            .child(ginka_ui::chrome::tab_label(self.surface.label()))
+            .child(ginka_ui::chrome::tab_label(self.surface.title()))
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.surface.label().into())
+        Some(self.surface.title().into())
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

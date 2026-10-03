@@ -273,9 +273,11 @@ fn previous_terminal_shortcut() -> &'static str {
 pub struct Entry {
     /// Stable across a filter, so a view can key an element by it.
     pub id: String,
+    /// What the line says, already localized; the text the filter matches against.
     pub label: String,
     /// The keystroke that does the same thing, or where the entry leads.
     pub hint: Option<String>,
+    /// What choosing the line does.
     pub command: Command,
 }
 

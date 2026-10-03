@@ -1974,3 +1974,21 @@ surface.git.checks.loading:
 surface.git.checks.none:
   en: This pull request has no checks.
   ja: このプルリクエストにはチェックがありません。
+surface.name.terminal:
+  en: Terminal
+  ja: ターミナル
+surface.name.git:
+  en: Git
+  ja: Git
+surface.name.files:
+  en: Files
+  ja: ファイル
+surface.name.browser:
+  en: Browser
+  ja: ブラウザ
+surface.name.reports:
+  en: Reports
+  ja: レポート
+surface.name.skills:
+  en: Skills
+  ja: スキル

@@ -217,6 +217,7 @@ fn numeric_suffix(value: &str) -> (Option<&str>, Option<u32>) {
 /// One character on the screen, with how it should be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenCell {
+    /// The character drawn; a space for an empty cell.
     pub text: char,
     /// Whether this grid column only occupies the second half of a wide glyph.
     pub wide_spacer: bool,
@@ -224,8 +225,11 @@ pub struct ScreenCell {
     pub foreground: Option<TerminalColor>,
     /// `None` means the terminal's own background.
     pub background: Option<TerminalColor>,
+    /// Drawn in the bold weight.
     pub bold: bool,
+    /// Drawn in the italic style.
     pub italic: bool,
+    /// Drawn with an underline.
     pub underline: bool,
     /// Whether the cursor is sitting on this cell.
     pub cursor: bool,
@@ -241,7 +245,9 @@ pub struct ScreenCell {
 /// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalColor {
+    /// A palette index the theme resolves: 0–15 are the named ANSI colours, higher ones the 256-colour palette.
     Named(u8),
+    /// An exact 24-bit colour the program asked for.
     Rgb(u8, u8, u8),
 }
 
@@ -381,10 +387,12 @@ impl TerminalScreen {
         }
     }
 
+    /// Visible screen height in rows; never zero.
     pub fn rows(&self) -> u16 {
         self.rows
     }
 
+    /// Visible screen width in columns; never zero.
     pub fn cols(&self) -> u16 {
         self.cols
     }
@@ -774,8 +782,11 @@ fn colour(from: Color) -> Option<TerminalColor> {
 
 /// One shell in the dock: what it is called, and the screen it draws on.
 pub struct TerminalTab {
+    /// The daemon's id for the pty this tab draws.
     pub id: TerminalId,
+    /// The tab's label, as the daemon last reported it.
     pub title: String,
+    /// The local emulator the pty's output is fed into.
     pub screen: TerminalScreen,
 }
 
@@ -804,6 +815,7 @@ pub struct TerminalTabs {
 }
 
 impl TerminalTabs {
+    /// An empty strip with no tabs.
     pub fn new() -> Self {
         Self::default()
     }
@@ -813,6 +825,7 @@ impl TerminalTabs {
         &self.tabs
     }
 
+    /// Whether no shell is open in the dock.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
@@ -832,6 +845,7 @@ impl TerminalTabs {
         self.tabs.get(self.active)
     }
 
+    /// The tab in front, mutably, to feed it output or resize it.
     pub fn active_mut(&mut self) -> Option<&mut TerminalTab> {
         self.tabs.get_mut(self.active)
     }
