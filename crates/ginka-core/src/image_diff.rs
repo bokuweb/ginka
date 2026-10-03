@@ -22,8 +22,9 @@ enum Side {
 
 /// The image before and after `path` changed under `source`. A side that
 /// does not exist (an added or deleted file) or is not a previewable image
-/// is `None`. Sources measured from a checkpoint or a base are not covered
-/// yet and are refused.
+/// is `None`. Sources measured from a checkpoint or a base name commits the
+/// caller has to look up first; it resolves them and calls
+/// [`sides_between`] instead.
 pub fn sides(
     worktree: &Path,
     source: &ChangeSource,
@@ -61,6 +62,43 @@ pub fn sides(
         other => bail!("an image diff is not available for {other:?} yet"),
     };
     Ok((read(worktree, &old, before)?, read(worktree, &new, path)?))
+}
+
+/// The image at `from` and at `to` — a commit each, or the worktree when
+/// `to` is `None`: what a turn changed (its start and end snapshots), or
+/// what has happened since a checkpoint or a branch's fork point. Both ids
+/// must be object names.
+pub fn sides_between(
+    worktree: &Path,
+    from: &str,
+    to: Option<&str>,
+    path: &str,
+    old_path: Option<&str>,
+) -> Result<(Option<FileImage>, Option<FileImage>)> {
+    let before = old_path.unwrap_or(path);
+    if !safe_path(path) || !safe_path(before) {
+        bail!("{path:?} is not a path inside the worktree");
+    }
+    for id in std::iter::once(from).chain(to) {
+        anyhow::ensure!(crate::git::is_object_name(id), "{id:?} is not a commit id");
+    }
+    let new = match to {
+        Some(to) => Side::Object(format!("{to}:{path}")),
+        None => Side::Worktree,
+    };
+    Ok((
+        read(worktree, &Side::Object(format!("{from}:{before}")), before)?,
+        read(worktree, &new, path)?,
+    ))
+}
+
+/// A path inside the worktree that cannot be read as an option.
+fn safe_path(path: &str) -> bool {
+    !path.is_empty()
+        && !path.starts_with('-')
+        && Path::new(path)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
 fn read(worktree: &Path, side: &Side, path: &str) -> Result<Option<FileImage>> {
@@ -183,6 +221,46 @@ mod tests {
         )
         .unwrap();
         assert!(old.is_some() && new.is_some());
+    }
+
+    #[test]
+    fn between_two_snapshots_or_a_snapshot_and_the_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        git(repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("logo.png"), png(b"one")).unwrap();
+        git(repo, &["add", "-A"]);
+        git(repo, &["commit", "-qm", "one"]);
+        let rev = |repo: &Path| {
+            String::from_utf8(
+                Command::new("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(repo)
+                    .output()
+                    .unwrap()
+                    .stdout,
+            )
+            .unwrap()
+            .trim()
+            .to_string()
+        };
+        let first = rev(repo);
+        std::fs::write(repo.join("logo.png"), png(b"two")).unwrap();
+        git(repo, &["commit", "-qam", "two"]);
+        let second = rev(repo);
+        std::fs::write(repo.join("logo.png"), png(b"three")).unwrap();
+
+        let (a, b) = sides_between(repo, &first, Some(&second), "logo.png", None).unwrap();
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert_ne!(a.data_base64, b.data_base64);
+        let (_, now) = sides_between(repo, &first, None, "logo.png", None).unwrap();
+        assert_ne!(
+            now.unwrap().data_base64,
+            b.data_base64,
+            "None is the worktree"
+        );
+        assert!(sides_between(repo, "HEAD~1", None, "logo.png", None).is_err());
+        assert!(sides_between(repo, &first, None, "../x.png", None).is_err());
     }
 
     #[test]

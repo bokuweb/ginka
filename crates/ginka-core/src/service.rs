@@ -69,6 +69,9 @@ pub struct Service {
     /// Filled by the daemon's poller from `gh`, never by a listing: the
     /// sidebar must not wait on the network to draw.
     pull_requests: std::collections::HashMap<WorkspaceId, ginka_protocol::model::PullRequest>,
+    /// What each recent turn added, for line attribution — read once per
+    /// turn, since its snapshots never change.
+    turn_lines: crate::attribution::TurnLinesCache,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -156,6 +159,7 @@ impl Service {
             drivers: Arc::new(Registry::with_defaults()),
             statuses: std::collections::HashMap::new(),
             pull_requests: std::collections::HashMap::new(),
+            turn_lines: Default::default(),
             agents: None,
             settings,
             accounts: None,
@@ -1746,9 +1750,48 @@ impl Service {
                 old_path,
             } => {
                 let worktree = self.worktree(&workspace)?;
-                let (before, after) =
-                    crate::image_diff::sides(&worktree.path, &source, &path, old_path.as_deref())
-                        .map_err(failed)?;
+                let old_path = old_path.as_deref();
+                // Sources that name a checkpoint or a base are resolved to
+                // commits here, where the database and the project are.
+                let between = |from: &str, to: Option<&str>| {
+                    crate::image_diff::sides_between(&worktree.path, from, to, &path, old_path)
+                        .map_err(failed)
+                };
+                let (before, after) = match &source {
+                    ChangeSource::Turn { checkpoint } => {
+                        let pair = checkpoint::turn_commits(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "checkpoint {} has no saved turn start",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        between(&pair.0, Some(&pair.1))?
+                    }
+                    ChangeSource::SinceCheckpoint { checkpoint } => {
+                        let stored = checkpoint::get(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {}",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        between(&stored.commit, None)?
+                    }
+                    ChangeSource::Branch { base } => {
+                        let base = match base {
+                            Some(base) => base.clone(),
+                            None => self.project(&worktree.project)?.default_branch,
+                        };
+                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
+                        between(&fork, None)?
+                    }
+                    other => crate::image_diff::sides(&worktree.path, other, &path, old_path)
+                        .map_err(failed)?,
+                };
                 Ok(Response::ImageDiff { before, after })
             }
             Request::ListMcpServers { workspace } => {
@@ -3310,7 +3353,7 @@ impl Service {
     /// refresh re-read its whole history. Failing to work it out leaves the
     /// lines unmarked rather than failing the diff.
     fn attribute(
-        &self,
+        &mut self,
         workspace: &WorkspaceId,
         path: &std::path::Path,
         files: &mut [ginka_protocol::model::FileChange],
@@ -3331,7 +3374,8 @@ impl Service {
             })
             .collect();
         drop(conn);
-        match crate::attribution::turn_added_lines(path, &turns) {
+        let read = |start: &str, end: &str| crate::attribution::turn_lines(path, start, end);
+        match self.turn_lines.added_lines(&turns, read) {
             Ok(by_agent) => crate::attribution::mark(files, &by_agent),
             Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
         }

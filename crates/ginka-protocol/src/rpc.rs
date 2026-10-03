@@ -639,8 +639,8 @@ pub enum Request {
 
     /// A changed image as it was and as it is under `source` (Orca's image
     /// diff). Each side is sent only when it is a recognised image within
-    /// the preview limit. Sources measured from a checkpoint or a base are
-    /// refused for now.
+    /// the preview limit. Every source is covered: a turn's two snapshots,
+    /// a checkpoint or a branch's fork point against the worktree.
     ImageDiff {
         workspace: WorkspaceId,
         source: crate::model::ChangeSource,

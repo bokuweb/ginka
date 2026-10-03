@@ -21,19 +21,76 @@ pub fn turn_added_lines(
 ) -> Result<HashMap<String, Vec<String>>> {
     let mut added: HashMap<String, Vec<String>> = HashMap::new();
     for (start, end) in turns {
-        for file in crate::git::changes_between_with_context(worktree, start, end, 0)? {
-            let lines = added.entry(file.path.clone()).or_default();
-            for hunk in &file.hunks {
-                lines.extend(
-                    hunk.lines
-                        .iter()
-                        .filter(|line| line.kind == LineKind::Added)
-                        .map(|line| line.text.trim_end().to_string()),
-                );
-            }
+        merge(&mut added, &turn_lines(worktree, start, end)?);
+    }
+    Ok(added)
+}
+
+/// The lines one turn added, by file: its start snapshot against its end.
+pub fn turn_lines(worktree: &Path, start: &str, end: &str) -> Result<TurnLines> {
+    let mut added: TurnLines = HashMap::new();
+    for file in crate::git::changes_between_with_context(worktree, start, end, 0)? {
+        let lines = added.entry(file.path.clone()).or_default();
+        for hunk in &file.hunks {
+            lines.extend(
+                hunk.lines
+                    .iter()
+                    .filter(|line| line.kind == LineKind::Added)
+                    .map(|line| line.text.trim_end().to_string()),
+            );
         }
     }
     Ok(added)
+}
+
+/// Lines added, by file.
+pub type TurnLines = HashMap<String, Vec<String>>;
+
+fn merge(into: &mut TurnLines, from: &TurnLines) {
+    for (path, lines) in from {
+        into.entry(path.clone())
+            .or_default()
+            .extend(lines.iter().cloned());
+    }
+}
+
+/// What each turn added, kept by its snapshot pair.
+///
+/// A turn's start and end snapshots never change, so neither does what it
+/// added: reading it once is enough. Without this, every refresh of a
+/// worktree diff would run one `git diff` per recent turn — on the Git
+/// surface's own polling beat.
+#[derive(Debug, Default)]
+pub struct TurnLinesCache {
+    by_turn: HashMap<(String, String), TurnLines>,
+}
+
+impl TurnLinesCache {
+    /// Turns kept before the cache starts over. Snapshot pairs are small,
+    /// but a daemon that runs for weeks should not grow without bound.
+    pub const CAPACITY: usize = 512;
+
+    /// The lines `turns` added together, reading with `read` only the turns
+    /// not seen before.
+    pub fn added_lines(
+        &mut self,
+        turns: &[(String, String)],
+        mut read: impl FnMut(&str, &str) -> Result<TurnLines>,
+    ) -> Result<TurnLines> {
+        if self.by_turn.len() + turns.len() > Self::CAPACITY {
+            self.by_turn.clear();
+        }
+        let mut added = TurnLines::new();
+        for (start, end) in turns {
+            let key = (start.clone(), end.clone());
+            if !self.by_turn.contains_key(&key) {
+                let lines = read(start, end)?;
+                self.by_turn.insert(key.clone(), lines);
+            }
+            merge(&mut added, &self.by_turn[&key]);
+        }
+        Ok(added)
+    }
 }
 
 /// Mark every added line in `files` as the agent's or a person's, from the
@@ -142,6 +199,47 @@ mod tests {
                 ("// mine".to_string(), Some(false)),
             ]
         );
+    }
+
+    #[test]
+    fn a_turn_is_read_once_however_often_the_diff_is() {
+        let mut cache = TurnLinesCache::default();
+        let reads = std::cell::Cell::new(0);
+        let turns = vec![
+            ("s1".to_string(), "e1".to_string()),
+            ("s2".to_string(), "e2".to_string()),
+        ];
+        let read = |start: &str, _end: &str| {
+            reads.set(reads.get() + 1);
+            let mut lines = TurnLines::new();
+            lines.insert("a.rs".into(), vec![format!("from {start}")]);
+            Ok(lines)
+        };
+        let first = cache.added_lines(&turns, read).unwrap();
+        let again = cache.added_lines(&turns, read).unwrap();
+        assert_eq!(first, again);
+        assert_eq!(first["a.rs"], vec!["from s1", "from s2"]);
+        assert_eq!(reads.get(), 2, "the second refresh read nothing");
+
+        let more = vec![("s3".to_string(), "e3".to_string())];
+        cache.added_lines(&more, read).unwrap();
+        assert_eq!(reads.get(), 3, "only the new turn is read");
+    }
+
+    #[test]
+    fn the_cache_starts_over_rather_than_growing_without_bound() {
+        let mut cache = TurnLinesCache::default();
+        let turns: Vec<(String, String)> = (0..TurnLinesCache::CAPACITY)
+            .map(|i| (format!("s{i}"), format!("e{i}")))
+            .collect();
+        cache
+            .added_lines(&turns, |_, _| Ok(TurnLines::new()))
+            .unwrap();
+        assert_eq!(cache.by_turn.len(), TurnLinesCache::CAPACITY);
+        cache
+            .added_lines(&[("x".into(), "y".into())], |_, _| Ok(TurnLines::new()))
+            .unwrap();
+        assert_eq!(cache.by_turn.len(), 1);
     }
 
     #[test]

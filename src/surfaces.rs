@@ -140,9 +140,9 @@ pub struct SurfacePanel {
     /// The file being opened was picked with a single click, so it goes in
     /// the preview tab.
     preview_next: bool,
-    /// Changed images read for a side-by-side look, by staged-ness and
+    /// Changed images read for a side-by-side look, by change source and
     /// path: the image before and after (Orca's image diff).
-    image_diffs: HashMap<(bool, String), (Option<String>, Option<String>)>,
+    image_diffs: HashMap<(String, String), (Option<String>, Option<String>)>,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -306,12 +306,12 @@ pub enum SurfaceEvent {
     FixCommit { message: String, output: String },
     /// Hand the failing checks of the branch's pull request to the agent.
     FixChecks,
-    /// Read a changed image's two sides, from the staged or the unstaged
-    /// changes.
+    /// Read a changed image's two sides under the change source it is
+    /// shown in: staged, unstaged, a commit or a turn.
     LoadImageDiff {
         path: String,
         old_path: Option<String>,
-        staged: bool,
+        source: ginka_protocol::model::ChangeSource,
     },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
@@ -834,6 +834,9 @@ impl SurfacePanel {
         let mode = *mode;
         self.opening = None;
         let Some(file) = file else {
+            // A failed read opens nothing, so the preview it was for is not
+            // left waiting to catch the next, unrelated open.
+            self.preview_next = false;
             self.definition = None;
             cx.notify();
             return;
@@ -1206,14 +1209,108 @@ impl SurfacePanel {
     /// A changed image's two sides arrived, as `data:` URLs.
     pub fn set_image_diff(
         &mut self,
-        staged: bool,
+        source: &ginka_protocol::model::ChangeSource,
         path: String,
         before: Option<String>,
         after: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.image_diffs.insert((staged, path), (before, after));
+        self.image_diffs
+            .insert((image_source_key(source), path), (before, after));
         cx.notify();
+    }
+
+    /// A binary file's expanded row: its images side by side once read,
+    /// and until then the word "binary" and a way to read them (Orca's image
+    /// diff). `source` is the change the row is shown under.
+    fn image_diff_view(
+        &self,
+        file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let key = (image_source_key(source), file.path.clone());
+        match self.image_diffs.get(&key).cloned() {
+            Some((before, after)) => h_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .children(
+                    [
+                        (
+                            rust_i18n::t!("surface.git.image_before").to_string(),
+                            before,
+                        ),
+                        (rust_i18n::t!("surface.git.image_after").to_string(), after),
+                    ]
+                    .into_iter()
+                    .map(|(label, url)| {
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(label),
+                            )
+                            .child(match url {
+                                Some(url) => div()
+                                    .h(px(180.))
+                                    .rounded(px(tokens.radius.row))
+                                    .bg(tokens.colors().bg_surface)
+                                    .child(
+                                        img(SharedString::from(url))
+                                            .size_full()
+                                            .object_fit(ObjectFit::Contain),
+                                    )
+                                    .into_any_element(),
+                                None => div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("surface.git.image_missing").to_string())
+                                    .into_any_element(),
+                            })
+                    }),
+                )
+                .into_any_element(),
+            None => {
+                let (path, old_path, source) =
+                    (file.path.clone(), file.old_path.clone(), source.clone());
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.binary").to_string()),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "show-images:{}:{}",
+                            key.0, file.path
+                        )))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.show_images").to_string())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::LoadImageDiff {
+                                path: path.clone(),
+                                old_path: old_path.clone(),
+                                source: source.clone(),
+                            })
+                        })),
+                    )
+                    .into_any_element()
+            }
+        }
     }
 
     /// Whether the workspace's branch has an open pull request.
@@ -2497,7 +2594,10 @@ impl SurfacePanel {
                         .files
                         .iter()
                         .filter(|file| self.diff_filter.matches(file))
-                        .map(|file| self.file_row_read_only(file, cx).into_any_element()),
+                        .map(|file| {
+                            self.file_row_read_only(file, &changes.source, cx)
+                                .into_any_element()
+                        }),
                 );
                 rows
             }
@@ -3056,8 +3156,11 @@ impl SurfacePanel {
     fn file_row_read_only(
         &self,
         file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let image_view = (file.binary && self.expanded.as_deref() == Some(file.path.as_str()))
+            .then(|| self.image_diff_view(file, source, cx));
         let tokens = Tokens::global(cx).clone();
         let expanded = self.expanded.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
@@ -3116,6 +3219,7 @@ impl SurfacePanel {
                             .child(format!("-{}", file.removed)),
                     ),
             )
+            .children(image_view)
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
                     v_flex()
@@ -3237,86 +3341,12 @@ impl SurfacePanel {
                     .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
-                match self.image_diffs.get(&(staged, file.path.clone())).cloned() {
-                    // Orca's image diff: as it was beside as it is.
-                    Some((before, after)) => this.child(
-                        h_flex().w_full().px_3().py_2().gap_3().children(
-                            [
-                                (
-                                    rust_i18n::t!("surface.git.image_before").to_string(),
-                                    before,
-                                ),
-                                (rust_i18n::t!("surface.git.image_after").to_string(), after),
-                            ]
-                            .into_iter()
-                            .map(|(label, url)| {
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(tokens.colors().text_muted)
-                                            .child(label),
-                                    )
-                                    .child(match url {
-                                        Some(url) => div()
-                                            .h(px(180.))
-                                            .rounded(px(tokens.radius.row))
-                                            .bg(tokens.colors().bg_surface)
-                                            .child(
-                                                img(SharedString::from(url))
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Contain),
-                                            )
-                                            .into_any_element(),
-                                        None => div()
-                                            .text_xs()
-                                            .text_color(tokens.colors().text_muted)
-                                            .child(
-                                                rust_i18n::t!("surface.git.image_missing")
-                                                    .to_string(),
-                                            )
-                                            .into_any_element(),
-                                    })
-                            }),
-                        ),
-                    ),
-                    None => {
-                        let (path, old_path) = (file.path.clone(), file.old_path.clone());
-                        this.child(
-                            h_flex()
-                                .px_3()
-                                .py_2()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(tokens.colors().text_muted)
-                                        .child(rust_i18n::t!("surface.git.binary").to_string()),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "show-images:{staged}:{}",
-                                        file.path
-                                    )))
-                                    .ghost()
-                                    .compact()
-                                    .small()
-                                    .label(rust_i18n::t!("surface.git.show_images").to_string())
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(SurfaceEvent::LoadImageDiff {
-                                            path: path.clone(),
-                                            old_path: old_path.clone(),
-                                            staged,
-                                        })
-                                    })),
-                                ),
-                        )
-                    }
-                }
+                let source = if staged {
+                    ginka_protocol::model::ChangeSource::Staged
+                } else {
+                    ginka_protocol::model::ChangeSource::Unstaged
+                };
+                this.child(self.image_diff_view(file, &source, cx))
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
@@ -5028,6 +5058,12 @@ fn split_row(
         .child(div().w(px(1.)).h_full().bg(tokens.colors().border_subtle))
         .child(side(row.right, false, cx))
         .into_any_element()
+}
+
+/// How a change source keys the image-diff cache: its debug form, which
+/// names the kind and the commit, checkpoint or base it is measured from.
+fn image_source_key(source: &ginka_protocol::model::ChangeSource) -> String {
+    format!("{source:?}")
 }
 
 /// One line of a diff, with the parts that actually changed marked.

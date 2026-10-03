@@ -1043,21 +1043,23 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::LoadImageDiff {
                     path,
                     old_path,
-                    staged,
+                    source,
                 } => {
                     if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
                     {
                         let (link, surfaces) = (this.link.clone(), this.surfaces.clone());
-                        let (path, old_path, staged) = (path.clone(), old_path.clone(), *staged);
+                        let (path, old_path, source) =
+                            (path.clone(), old_path.clone(), source.clone());
                         cx.spawn(async move |_, cx| {
-                            let asked = path.clone();
+                            let (asked, asked_source) = (path.clone(), source.clone());
                             let (before, after) = cx
                                 .background_spawn(async move {
-                                    link.image_diff(&workspace, &asked, old_path, staged).await
+                                    link.image_diff(&workspace, &asked, old_path, asked_source)
+                                        .await
                                 })
                                 .await;
                             surfaces.update(cx, |surfaces, cx| {
-                                surfaces.set_image_diff(staged, path, before, after, cx)
+                                surfaces.set_image_diff(&source, path, before, after, cx)
                             });
                         })
                         .detach();

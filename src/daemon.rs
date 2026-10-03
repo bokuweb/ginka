@@ -1582,20 +1582,15 @@ impl DaemonLink {
         .map(|_| ())
     }
 
-    /// A changed image's two sides as `data:` URLs, from the staged or the
-    /// unstaged changes. A side that is not a previewable image is `None`.
+    /// A changed image's two sides as `data:` URLs under `source`. A side
+    /// that is not a previewable image is `None`.
     pub async fn image_diff(
         &self,
         workspace: &WorkspaceId,
         path: &str,
         old_path: Option<String>,
-        staged: bool,
+        source: ginka_protocol::model::ChangeSource,
     ) -> (Option<String>, Option<String>) {
-        let source = if staged {
-            ginka_protocol::model::ChangeSource::Staged
-        } else {
-            ginka_protocol::model::ChangeSource::Unstaged
-        };
         match self
             .ask(Request::ImageDiff {
                 workspace: workspace.clone(),
