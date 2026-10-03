@@ -63,12 +63,63 @@ enum Step {
     Away(Box<dyn FnOnce() -> Finish + Send>),
 }
 
+/// Search a project's worktrees for paths and lines matching `query`, up
+/// to `limit` of each across all of them, in the order given.
+fn search_worktrees(
+    worktrees: &[Worktree],
+    query: &str,
+    limit: Option<u32>,
+) -> Result<(
+    Vec<ginka_protocol::model::WorkspaceFileMatch>,
+    Vec<ginka_protocol::model::WorkspaceContentMatch>,
+)> {
+    let limit = limit
+        .map(|limit| limit as usize)
+        .unwrap_or(crate::files::DEFAULT_LIMIT);
+    let mut remaining_files = limit;
+    let mut remaining_matches = limit;
+    let mut files = Vec::new();
+    let mut matches = Vec::new();
+    for worktree in worktrees {
+        if remaining_files == 0 && remaining_matches == 0 {
+            break;
+        }
+        let workspace = worktree.workspace_id();
+        if remaining_files > 0 {
+            let paths = crate::files::list(&worktree.path)?;
+            let found = crate::files::search(&paths, query, remaining_files);
+            remaining_files = remaining_files.saturating_sub(found.len());
+            files.extend(
+                found
+                    .into_iter()
+                    .map(|file| ginka_protocol::model::WorkspaceFileMatch {
+                        workspace: workspace.clone(),
+                        path: file.path,
+                    }),
+            );
+        }
+        let found = crate::files::search_content(&worktree.path, query, remaining_matches)?;
+        remaining_matches = remaining_matches.saturating_sub(found.len());
+        matches.extend(
+            found
+                .into_iter()
+                .map(|hit| ginka_protocol::model::WorkspaceContentMatch {
+                    workspace: workspace.clone(),
+                    path: hit.path,
+                    line: hit.line,
+                    text: hit.text,
+                }),
+        );
+    }
+    Ok((files, matches))
+}
+
 /// Answer a request for a service shared between connections, holding its
 /// lock only while state is read or written.
 ///
 /// A push, a pull, a sync, opening a pull request and reading its checks
-/// wait on a remote for as long as it takes, and a commit or a merge on the
-/// project's hooks; the service is unlocked for that wait, so every other window and command is still answered. What the
+/// wait on a remote for as long as it takes, a commit or a merge on the
+/// project's hooks, and a search on the size of the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
 /// wait found is recorded under the lock again.
 pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
     let lock = || {
@@ -572,6 +623,64 @@ impl Service {
                     })
                 }))
             }
+            // Searching walks and reads the whole worktree, which in a large
+            // repository is long enough to stall every other client — and the
+            // reader is typing, so it is asked again on every keystroke.
+            Request::WorkspaceFiles {
+                workspace,
+                query,
+                limit,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    let paths = crate::files::list(path)?;
+                    Ok(crate::files::search(
+                        &paths,
+                        query.as_deref().unwrap_or_default(),
+                        limit
+                            .map(|limit| limit as usize)
+                            .unwrap_or(crate::files::DEFAULT_LIMIT),
+                    ))
+                },
+                |_, _, files| Ok(Response::Files { files }),
+            ),
+            Request::SearchContent {
+                workspace,
+                query,
+                limit,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    let limit = limit
+                        .map(|limit| limit as usize)
+                        .unwrap_or(crate::files::DEFAULT_LIMIT);
+                    crate::files::search_content(path, &query, limit)
+                },
+                |_, _, matches| Ok(Response::Matches { matches }),
+            ),
+            Request::SearchProject {
+                project,
+                query,
+                limit,
+            } => {
+                let planned = self
+                    .project(&project)
+                    .and_then(|_| project::list_worktrees(&self.conn(), &project).map_err(failed));
+                let worktrees: Vec<Worktree> = match planned {
+                    Ok(worktrees) => worktrees
+                        .into_iter()
+                        .filter(|worktree| !worktree.archived)
+                        .collect(),
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                Step::Away(Box::new(move || {
+                    let found = search_worktrees(&worktrees, &query, limit);
+                    Box::new(move |_: &mut Service| {
+                        let (files, matches) = found.map_err(failed)?;
+                        Ok(Response::WorkspaceMatches { files, matches })
+                    })
+                }))
+            }
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -678,7 +787,10 @@ impl Service {
             | Request::Sync { .. }
             | Request::CreatePullRequest { .. }
             | Request::PullRequestChecks { .. }
-            | Request::FixFailingChecks { .. } => self.handle(request),
+            | Request::FixFailingChecks { .. }
+            | Request::WorkspaceFiles { .. }
+            | Request::SearchContent { .. }
+            | Request::SearchProject { .. } => self.handle(request),
 
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
@@ -1686,23 +1798,6 @@ impl Service {
                 Ok(Response::Ack)
             }
             Request::MessageSession { from, to, text } => self.message_session(&from, &to, &text),
-            Request::WorkspaceFiles {
-                workspace,
-                query,
-                limit,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let paths = crate::files::list(&worktree.path).map_err(failed)?;
-                Ok(Response::Files {
-                    files: crate::files::search(
-                        &paths,
-                        query.as_deref().unwrap_or_default(),
-                        limit
-                            .map(|limit| limit as usize)
-                            .unwrap_or(crate::files::DEFAULT_LIMIT),
-                    ),
-                })
-            }
             Request::SlashCommands { workspace, query } => {
                 let worktree = self.worktree(&workspace)?;
                 // The user's own commands live in their home, which is theirs
@@ -2039,68 +2134,6 @@ impl Service {
                     .open(&workspace, &worktree.path, rows, cols)
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
-            }
-            Request::SearchContent {
-                workspace,
-                query,
-                limit,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let limit = limit
-                    .map(|limit| limit as usize)
-                    .unwrap_or(crate::files::DEFAULT_LIMIT);
-                Ok(Response::Matches {
-                    matches: crate::files::search_content(&worktree.path, &query, limit)
-                        .map_err(failed)?,
-                })
-            }
-            Request::SearchProject {
-                project,
-                query,
-                limit,
-            } => {
-                self.project(&project)?;
-                let limit = limit
-                    .map(|limit| limit as usize)
-                    .unwrap_or(crate::files::DEFAULT_LIMIT);
-                let mut remaining_files = limit;
-                let mut remaining_matches = limit;
-                let mut files = Vec::new();
-                let mut matches = Vec::new();
-                for worktree in project::list_worktrees(&self.conn(), &project)
-                    .map_err(failed)?
-                    .into_iter()
-                    .filter(|worktree| !worktree.archived)
-                {
-                    if remaining_files == 0 && remaining_matches == 0 {
-                        break;
-                    }
-                    let workspace = worktree.workspace_id();
-                    if remaining_files > 0 {
-                        let paths = crate::files::list(&worktree.path).map_err(failed)?;
-                        let found = crate::files::search(&paths, &query, remaining_files);
-                        remaining_files = remaining_files.saturating_sub(found.len());
-                        files.extend(found.into_iter().map(|file| {
-                            ginka_protocol::model::WorkspaceFileMatch {
-                                workspace: workspace.clone(),
-                                path: file.path,
-                            }
-                        }));
-                    }
-                    let found =
-                        crate::files::search_content(&worktree.path, &query, remaining_matches)
-                            .map_err(failed)?;
-                    remaining_matches = remaining_matches.saturating_sub(found.len());
-                    matches.extend(found.into_iter().map(|hit| {
-                        ginka_protocol::model::WorkspaceContentMatch {
-                            workspace: workspace.clone(),
-                            path: hit.path,
-                            line: hit.line,
-                            text: hit.text,
-                        }
-                    }));
-                }
-                Ok(Response::WorkspaceMatches { files, matches })
             }
             Request::ReadFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
