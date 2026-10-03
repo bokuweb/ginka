@@ -198,6 +198,7 @@ These are load-bearing. Violating them creates work that has to be undone.
 8. **Testable UI code goes in `ginka-ui`, never in `src/`.** `rustc` overflows its stack expanding `#[test]` in a crate that also holds the toolkit's builder chains, so a test next to a view does not merely offend rule 2 — it fails to compile.
 9. **`gpui-component` is the only linked UI toolkit, and it owns the `gpui` rev.** Never add a second GPUI component library and never pin `gpui` directly — `bezel` and `gpui-component` link incompatible forks of GPUI (`bezel-gpui 0.3.8+zed.82aeef` vs `gpui 0.2.2` from zed git), so mixing them does not compile. See roadmap §4.6.
 10. **No view hardcodes a colour, radius or duration.** Everything resolves through the theme tokens in `docs/ui.md` §2.
+11. **Nothing waits on the network, a hook or a whole repository with the service locked.** The daemon serves every client through one `Service` mutex. A request that pushes, fetches, commits, checks out, searches or reads `git status` across worktrees goes through `Service::begin`'s split (`service::handle_shared`): resolve under the lock, wait without it, record under it again. A test with a hook or fsmonitor that waits pins each one.
 
 ## UI stack
 
