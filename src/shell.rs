@@ -72,7 +72,8 @@ actions!(
         PreviousTab,
         NextSession,
         PreviousSession,
-        CloseAllTabs
+        CloseAllTabs,
+        OpenBoard
     ]
 );
 
@@ -194,6 +195,7 @@ pub fn apply_keymap(cx: &mut App, overrides: &[ginka_ui::keymap::Override]) {
                 Some("navigate_back") => KeyBinding::new(keys, NavigateBack, context),
                 Some("navigate_forward") => KeyBinding::new(keys, NavigateForward, context),
                 Some("open_settings") => KeyBinding::new(keys, OpenSettings, context),
+                Some("open_board") => KeyBinding::new(keys, OpenBoard, context),
                 // `ginka_ui::keymap::parse` refused anything else.
                 Some(_) => KeyBinding::new(keys, gpui::NoAction, context),
             }
@@ -2845,6 +2847,18 @@ impl Shell {
         if self.tabs.close_all() > 0 {
             self.show_tab(None, window, cx);
         }
+    }
+
+    /// Bring up the agents board, as its rail row does.
+    fn open_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_place(crate::sidebar::Place::Board, cx)
+        });
+        self.open_place(crate::sidebar::Place::Board, window, cx);
+    }
+
+    fn on_open_board(&mut self, _: &OpenBoard, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_board(window, cx);
     }
 
     fn on_close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
@@ -7657,6 +7671,7 @@ impl Shell {
             Command::NextSession => self.on_next_session(&NextSession, window, cx),
             Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
             Command::CloseAllTabs => self.close_all_tabs(window, cx),
+            Command::OpenBoard => self.open_board(window, cx),
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -14849,6 +14864,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_close_all_tabs))
+            .on_action(cx.listener(Self::on_open_board))
             .on_action(cx.listener(Self::on_next_session))
             .on_action(cx.listener(Self::on_previous_session))
             .on_action(cx.listener(Self::on_next_tab))

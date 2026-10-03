@@ -1866,3 +1866,6 @@ settings.updates.available:
 settings.updates.none:
   en: Every agent is up to date.
   ja: すべてのエージェントは最新です。
+palette.board:
+  en: "Open the agents board"
+  ja: "エージェントボードを開く"

@@ -19,6 +19,8 @@ use nucleo_matcher::{Config, Matcher};
 /// What choosing an entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Show the agents board across projects.
+    OpenBoard,
     /// Show the next conversation in the session list.
     NextSession,
     /// Show the previous conversation in the session list.
@@ -327,6 +329,12 @@ pub fn entries(
         });
     }
     all.push(Entry {
+        id: "place:board".into(),
+        label: rust_i18n::t!("palette.board").to_string(),
+        hint: None,
+        command: Command::OpenBoard,
+    });
+    all.push(Entry {
         id: "tabs:close-all".into(),
         label: rust_i18n::t!("palette.tabs.close_all").to_string(),
         hint: None,
@@ -537,6 +545,10 @@ mod tests {
                     .any(|entry| entry.command == Command::ShowSurface(*surface))
             );
         }
+        assert!(
+            all.iter().any(|entry| entry.command == Command::OpenBoard),
+            "the agents board is mouse-only without an entry"
+        );
     }
 
     #[test]

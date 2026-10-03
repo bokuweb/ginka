@@ -36,6 +36,7 @@ pub const ACTIONS: &[&str] = &[
     "navigate_back",
     "navigate_forward",
     "open_settings",
+    "open_board",
 ];
 
 /// One entry of the file.

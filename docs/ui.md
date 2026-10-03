@@ -456,7 +456,7 @@ out. The header's scope chips narrow it to the project on screen. A card is
 the agent's mark and the conversation's title, `project · branch`, the
 agent's status line in italics, and its state in words — the border of a
 *Needs you* card is the attention colour, but the word is always there too.
-A card opens its conversation. The grouping is `ginka_ui::board`.
+A card opens its conversation. The palette's *Open the agents board* (keymap action `open_board`) brings it up without the mouse, and every workspace on it is also a palette entry. The grouping is `ginka_ui::board`.
 
 ### 3.6 Notes
 
