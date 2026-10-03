@@ -1007,6 +1007,12 @@ impl Service {
                     other => git::changes_with_context(&worktree.path, other, context_lines)
                         .map_err(failed)?,
                 };
+                let mut files = files;
+                // Orca's line attribution, for diffs of the worktree: which
+                // added lines the turns since the last commit wrote.
+                if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
+                    self.attribute(&workspace, &worktree.path, &mut files);
+                }
                 Ok(Response::Changes {
                     changes: Changes { source, files },
                 })
@@ -3258,6 +3264,40 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
+    /// Mark which added lines in `files` the workspace's recent turns wrote
+    /// (`crate::attribution`). Only turns since the last commit count — an
+    /// older turn's lines are in the commit, not the diff — and at most the
+    /// newest [`ATTRIBUTION_TURNS`], so a long session does not make every
+    /// refresh re-read its whole history. Failing to work it out leaves the
+    /// lines unmarked rather than failing the diff.
+    fn attribute(
+        &self,
+        workspace: &WorkspaceId,
+        path: &std::path::Path,
+        files: &mut [ginka_protocol::model::FileChange],
+    ) {
+        let since = git::last_commit_time(path).unwrap_or(i64::MIN);
+        let conn = self.conn();
+        let Ok(checkpoints) = checkpoint::list(&conn, workspace) else {
+            return;
+        };
+        let turns: Vec<(String, String)> = checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.has_turn_start && checkpoint.created_at >= since)
+            .take(ATTRIBUTION_TURNS)
+            .filter_map(|checkpoint| {
+                checkpoint::turn_commits(&conn, &checkpoint.id)
+                    .ok()
+                    .flatten()
+            })
+            .collect();
+        drop(conn);
+        match crate::attribution::turn_added_lines(path, &turns) {
+            Ok(by_agent) => crate::attribution::mark(files, &by_agent),
+            Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+        }
+    }
+
     /// Give `prompt` to the workspace's latest conversation — queued if it is
     /// working — or, when `agent` names another or there is none, to a new
     /// conversation on that agent. The conversation that did the work knows
@@ -3666,6 +3706,9 @@ impl Service {
         }
     }
 }
+
+/// How many recent turns line attribution reads at most.
+const ATTRIBUTION_TURNS: usize = 20;
 
 /// A scheduled job a tick owes a firing, and the probe to run before it.
 #[derive(Debug, Clone)]

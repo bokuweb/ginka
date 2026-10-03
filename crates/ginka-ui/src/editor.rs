@@ -95,6 +95,9 @@ pub struct FileTabs {
     active: Option<usize>,
     history: Vec<String>,
     history_index: Option<usize>,
+    /// The tab a single click opened, which the next single click reuses
+    /// until it is kept (MonoCode's preview tab).
+    preview: Option<String>,
 }
 
 /// Decide how the save control behaves for a loaded file.
@@ -182,9 +185,47 @@ impl FileTabs {
             .map(String::as_str)
     }
 
+    /// Open `path` in the preview tab: shown as it is if already open,
+    /// otherwise in place of the current preview, or as a new tab when there
+    /// is none. Answers the path it displaced, whose buffer the caller drops.
+    pub fn open_preview(&mut self, path: impl Into<String>) -> Option<String> {
+        let path = path.into();
+        if self.paths.contains(&path) {
+            self.focus(&path);
+            return None;
+        }
+        let displaced = self.preview.take().and_then(|old| {
+            let index = self.paths.iter().position(|open| open == &old)?;
+            self.paths[index] = path.clone();
+            self.active = Some(index);
+            Some(old)
+        });
+        if displaced.is_none() {
+            self.paths.push(path.clone());
+            self.active = Some(self.paths.len() - 1);
+        }
+        self.record_visit(path.clone());
+        self.preview = Some(path);
+        displaced
+    }
+
+    /// Keep a previewed tab: the next preview opens beside it.
+    pub fn pin(&mut self, path: &str) {
+        if self.preview.as_deref() == Some(path) {
+            self.preview = None;
+        }
+    }
+
+    /// Whether `path` is the reusable preview tab.
+    pub fn is_preview(&self, path: &str) -> bool {
+        self.preview.as_deref() == Some(path)
+    }
+
     /// Open a path at the end, or bring its existing tab to the front.
+    /// Opening the previewed file this way keeps it.
     pub fn open(&mut self, path: impl Into<String>) {
         let path = path.into();
+        self.pin(&path);
         if let Some(index) = self.paths.iter().position(|open| open == &path) {
             self.active = Some(index);
             self.record_visit(path);
@@ -213,6 +254,7 @@ impl FileTabs {
         let Some(index) = self.paths.iter().position(|open| open == path) else {
             return false;
         };
+        self.pin(path);
         let active = self.active;
         self.paths.remove(index);
         self.active = match (self.paths.is_empty(), active) {
@@ -229,6 +271,7 @@ impl FileTabs {
     /// Forget every tab when its workspace leaves the screen.
     pub fn clear(&mut self) {
         self.paths.clear();
+        self.preview = None;
         self.active = None;
         self.history.clear();
         self.history_index = None;
@@ -682,6 +725,44 @@ mod tests {
             true
         ));
         assert!(!autosave_due(SaveState::Dirty, None, later, false, false));
+    }
+
+    #[test]
+    fn a_preview_tab_is_reused_until_it_is_kept() {
+        // MonoCode's preview tabs: browsing does not leave a tab per click.
+        let mut tabs = FileTabs::default();
+        tabs.open("main.rs");
+        assert_eq!(tabs.open_preview("a.rs"), None);
+        assert!(tabs.is_preview("a.rs"));
+        assert_eq!(
+            tabs.open_preview("b.rs"),
+            Some("a.rs".to_string()),
+            "the preview's place is taken, and the caller drops its buffer"
+        );
+        assert_eq!(tabs.paths(), ["main.rs", "b.rs"]);
+        assert_eq!(tabs.active(), Some("b.rs"));
+
+        // A file already open as a kept tab is just shown.
+        assert_eq!(tabs.open_preview("main.rs"), None);
+        assert_eq!(tabs.paths(), ["main.rs", "b.rs"]);
+
+        // Keeping it — an edit, a double click — makes the next preview new.
+        tabs.pin("b.rs");
+        assert!(!tabs.is_preview("b.rs"));
+        assert_eq!(tabs.open_preview("c.rs"), None);
+        assert_eq!(tabs.paths(), ["main.rs", "b.rs", "c.rs"]);
+
+        // Opening the previewed file for real keeps it too.
+        tabs.open("c.rs");
+        assert!(!tabs.is_preview("c.rs"));
+        assert_eq!(tabs.open_preview("d.rs"), None);
+        assert_eq!(tabs.paths().len(), 4);
+
+        // Closing the preview forgets it.
+        assert!(tabs.close("d.rs", SaveState::Clean));
+        assert!(!tabs.is_preview("d.rs"));
+        assert_eq!(tabs.open_preview("e.rs"), None);
+        assert_eq!(tabs.paths(), ["main.rs", "b.rs", "c.rs", "e.rs"]);
     }
 
     #[test]

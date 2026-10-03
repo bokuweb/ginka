@@ -884,6 +884,11 @@ pub struct DiffLine {
     /// of it. Byte ranges into `text`, in order and not overlapping.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Span>,
+    /// For an added line in a diff of the worktree: whether an agent's
+    /// turn wrote it (`true`) or a person did (`false`). Absent where it
+    /// was not worked out — other sources, and context or removed lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<bool>,
 }
 
 /// A range of bytes in a line.

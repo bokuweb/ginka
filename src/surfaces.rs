@@ -137,6 +137,9 @@ pub struct SurfacePanel {
     /// The workspace's branch has an open pull request, so its checks can
     /// be handed to the agent.
     open_pull_request: bool,
+    /// The file being opened was picked with a single click, so it goes in
+    /// the preview tab.
+    preview_next: bool,
     /// Changed images read for a side-by-side look, by staged-ness and
     /// path: the image before and after (Orca's image diff).
     image_diffs: HashMap<(bool, String), (Option<String>, Option<String>)>,
@@ -510,6 +513,7 @@ impl SurfacePanel {
             lease_push: None,
             commit_refused: false,
             open_pull_request: false,
+            preview_next: false,
             image_diffs: HashMap::new(),
             expanded: None,
             split: false,
@@ -723,6 +727,18 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Open a file picked from the tree or the search results: a single
+    /// click previews it in the reusable tab, a double click keeps it
+    /// (MonoCode's preview tabs). The keyboard keeps it too.
+    fn open_from_list(&mut self, path: String, event: &ClickEvent, cx: &mut Context<Self>) {
+        let single = matches!(event, ClickEvent::Mouse(click) if click.up.click_count < 2);
+        if !single {
+            self.file_tabs.pin(&path);
+        }
+        self.preview_next = single;
+        cx.emit(SurfaceEvent::OpenFile(path));
+    }
+
     /// Mark the workspace and path whose asynchronous read is current.
     ///
     /// Returns whether the daemon must be asked. `from_history` restores the
@@ -742,6 +758,8 @@ impl SurfacePanel {
         {
             if from_history {
                 self.file_tabs.restore(path);
+            } else if std::mem::take(&mut self.preview_next) {
+                self.file_tabs.open_preview(path);
             } else {
                 self.file_tabs.open(path);
             }
@@ -899,6 +917,15 @@ impl SurfacePanel {
             .path
             .clone();
         match mode {
+            FileOpenMode::Visit if std::mem::take(&mut self.preview_next) => {
+                // The previewed file this one replaces: its buffer goes
+                // with its tab, unless it holds unsaved work, in which case
+                // it was kept the moment it was edited and is not displaced.
+                if let Some(displaced) = self.file_tabs.open_preview(path.clone()) {
+                    self.file_buffers
+                        .retain(|buffer| buffer.file.path != displaced);
+                }
+            }
             FileOpenMode::Visit => self.file_tabs.open(path.clone()),
             FileOpenMode::History => self.file_tabs.restore(path.clone()),
         }
@@ -968,6 +995,8 @@ impl SurfacePanel {
             return;
         };
         buffer.last_edit = Some(std::time::Instant::now());
+        // An edited preview is kept: it is no longer only being looked at.
+        self.file_tabs.pin(path);
         let path = path.to_string();
         cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -3441,6 +3470,28 @@ impl SurfacePanel {
                                                         .unwrap_or_default(),
                                                 }),
                                         )
+                                        // Orca's line attribution: a glyph,
+                                        // named in its tooltip, beside what
+                                        // an agent's turn wrote.
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "by-agent:{}:{:?}",
+                                                    file.path, line.new_line
+                                                )))
+                                                .w(px(12.))
+                                                .flex_shrink_0()
+                                                .text_color(tokens.colors().accent)
+                                                .when(line.by_agent == Some(true), |this| {
+                                                    this.child("✦").tooltip(|window, cx| {
+                                                        Tooltip::new(
+                                                            rust_i18n::t!("surface.git.by_agent")
+                                                                .to_string(),
+                                                        )
+                                                        .build(window, cx)
+                                                    })
+                                                }),
+                                        )
                                         .child(diff_text(line, &tokens))
                                         .into_any_element()
                                 }),
@@ -4252,6 +4303,13 @@ impl SurfacePanel {
                     .unwrap_or(path)
                     .to_string();
                 let showing = active.as_deref() == Some(path);
+                // A preview tab is said in words, not only in italics: the
+                // next single click replaces it.
+                let label = if self.file_tabs.is_preview(path) {
+                    rust_i18n::t!("surface.files.preview_tab", name = label).to_string()
+                } else {
+                    label
+                };
                 ginka_ui::chrome::tab(SharedString::from(format!("file-tab:{path}")), showing, cx)
                     .gap_0p5()
                     .child(
@@ -4311,11 +4369,9 @@ impl SurfacePanel {
                     .items_center()
                     .cursor_pointer()
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.open_from_list(path.clone(), event, cx)
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -4349,11 +4405,9 @@ impl SurfacePanel {
                     .gap_0p5()
                     .cursor_pointer()
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.open_from_list(path.clone(), event, cx)
+                    }))
                     .child(
                         div()
                             .text_xs()
@@ -4576,8 +4630,8 @@ impl SurfacePanel {
                                         .child(row.name),
                                 ),
                         )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            this.open_from_list(path.clone(), event, cx)
                         }))
                         .into_any_element(),
                 }

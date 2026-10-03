@@ -1824,3 +1824,9 @@ surface.git.image_after:
 surface.git.image_missing:
   en: No image on this side
   ja: こちら側に画像はありません
+surface.git.by_agent:
+  en: Written by an agent's turn, and not edited since
+  ja: エージェントのターンが書き、その後は編集されていない行
+surface.files.preview_tab:
+  en: "%{name} (preview)"
+  ja: "%{name}（プレビュー）"
