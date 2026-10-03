@@ -2783,3 +2783,42 @@ fn a_commit_leaves_the_service_free_while_its_hooks_run() {
             .contains(&DaemonEvent::WorkspacesChanged { project })
     );
 }
+
+#[test]
+fn a_merge_leaves_the_service_free_while_its_hooks_run() {
+    // Merging commits uncommitted work first and then merges in the
+    // project's checkout: both run the project's hooks.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-merge".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("merged.txt"), "merged\n").unwrap();
+    let hook = held_hook(&fixture, "pre-commit");
+    let checkout = fixture.repo();
+
+    let (served, merged) = served_while_held(
+        fixture.service,
+        Request::MergeWorkspace {
+            workspace: workspace.id(),
+            into: None,
+            message: Some("add merged".into()),
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(matches!(merged, Ok(Response::Merged { .. })), "{merged:?}");
+    assert!(checkout.join("merged.txt").is_file());
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}

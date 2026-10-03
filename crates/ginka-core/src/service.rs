@@ -17,7 +17,7 @@ use crate::connector::{self, ConnectorControl};
 use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use ginka_protocol::event::{AgentEvent, DaemonEvent};
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::TranscriptPayload;
@@ -67,8 +67,8 @@ enum Step {
 /// lock only while state is read or written.
 ///
 /// A push, a pull, a sync, opening a pull request and reading its checks
-/// wait on a remote for as long as it takes, and a commit on the project's
-/// hooks; the service is unlocked for that wait, so every other window and command is still answered. What the
+/// wait on a remote for as long as it takes, and a commit or a merge on the
+/// project's hooks; the service is unlocked for that wait, so every other window and command is still answered. What the
 /// wait found is recorded under the lock again.
 pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
     let lock = || {
@@ -527,6 +527,51 @@ impl Service {
                     Ok(Response::Committed { commit })
                 },
             ),
+            Request::MergeWorkspace {
+                workspace,
+                into,
+                message,
+            } => {
+                let planned = self.worktree(&workspace).and_then(|worktree| {
+                    let project = self.project(&worktree.project)?;
+                    Ok((worktree, project))
+                });
+                let (worktree, project) = match planned {
+                    Ok(planned) => planned,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                let into = into
+                    .filter(|branch| !branch.trim().is_empty())
+                    .or_else(|| git::current_branch(&project.path))
+                    .unwrap_or_else(|| project.default_branch.clone());
+                if into == worktree.branch {
+                    return Step::Done(Err(RpcError::failed(format!(
+                        "{into} is this workspace's own branch; choose another to merge into"
+                    ))));
+                }
+                // Both the commit of what is left and the merge run the
+                // project's hooks.
+                Step::Away(Box::new(move || {
+                    let merged = (|| {
+                        if git::branch_status(&worktree.path)?.dirty {
+                            let message = message
+                                .filter(|message| !message.trim().is_empty())
+                                .context(
+                                    "the workspace has uncommitted work; give a message to commit it with",
+                                )?;
+                            git::commit(&worktree.path, &message, true)?;
+                        }
+                        git::merge_into(&project.path, &worktree.branch, &into)
+                    })();
+                    Box::new(move |service: &mut Service| {
+                        let outcome = merged.map_err(failed)?;
+                        service.events.emit(DaemonEvent::WorkspacesChanged {
+                            project: worktree.project.clone(),
+                        });
+                        Ok(Response::Merged { outcome })
+                    })
+                }))
+            }
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -627,6 +672,7 @@ impl Service {
             // Waiting on a remote or the project's hooks: [`Service::begin`]
             // splits these.
             Request::Commit { .. }
+            | Request::MergeWorkspace { .. }
             | Request::Push { .. }
             | Request::Pull { .. }
             | Request::Sync { .. }
@@ -1242,39 +1288,6 @@ impl Service {
                 let limit = limit.unwrap_or(50).min(200) as usize;
                 let commits = git::history(&worktree.path, limit).map_err(failed)?;
                 Ok(Response::History { commits })
-            }
-            Request::MergeWorkspace {
-                workspace,
-                into,
-                message,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let project = self.project(&worktree.project)?;
-                let into = into
-                    .filter(|branch| !branch.trim().is_empty())
-                    .or_else(|| git::current_branch(&project.path))
-                    .unwrap_or_else(|| project.default_branch.clone());
-                if into == worktree.branch {
-                    return Err(RpcError::failed(format!(
-                        "{into} is this workspace's own branch; choose another to merge into"
-                    )));
-                }
-                if git::branch_status(&worktree.path).map_err(failed)?.dirty {
-                    let message = message
-                        .filter(|message| !message.trim().is_empty())
-                        .ok_or_else(|| {
-                            RpcError::failed(
-                                "the workspace has uncommitted work; give a message to commit it with",
-                            )
-                        })?;
-                    git::commit(&worktree.path, &message, true).map_err(failed)?;
-                }
-                let outcome =
-                    git::merge_into(&project.path, &worktree.branch, &into).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Merged { outcome })
             }
             Request::StageFile {
                 workspace,
