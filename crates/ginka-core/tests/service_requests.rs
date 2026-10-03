@@ -2867,3 +2867,45 @@ fn listing_workspaces_leaves_the_service_free_while_git_reads_them() {
         other => panic!("expected workspaces, got {other:?}"),
     }
 }
+
+#[test]
+fn reading_a_diff_leaves_the_service_free_while_git_works() {
+    // The Git surface reads the worktree's diff on its polling interval,
+    // twice (staged and unstaged), from every window that shows it.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-diff".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("README.md"), "changed\n").unwrap();
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let (served, read) = served_while_held(
+        fixture.service,
+        Request::WorkspaceChanges {
+            workspace: workspace.id(),
+            source: ChangeSource::Unstaged,
+            context_lines: None,
+        },
+        (started, release),
+    );
+
+    assert!(served, "the service stayed locked while git read the diff");
+    match read {
+        Ok(Response::Changes { changes }) => {
+            assert!(changes.files.iter().any(|file| file.path == "README.md"))
+        }
+        other => panic!("expected changes, got {other:?}"),
+    }
+}

@@ -70,6 +70,20 @@ impl TurnLinesCache {
     /// but a daemon that runs for weeks should not grow without bound.
     pub const CAPACITY: usize = 512;
 
+    /// Whether the turn between `start` and `end` has been read.
+    pub fn contains(&self, start: &str, end: &str) -> bool {
+        self.by_turn
+            .contains_key(&(start.to_string(), end.to_string()))
+    }
+
+    /// Keep what a turn added, read elsewhere — off the service's lock.
+    pub fn keep(&mut self, start: String, end: String, lines: TurnLines) {
+        if self.by_turn.len() >= Self::CAPACITY {
+            self.by_turn.clear();
+        }
+        self.by_turn.insert((start, end), lines);
+    }
+
     /// The lines `turns` added together, reading with `read` only the turns
     /// not seen before.
     pub fn added_lines(

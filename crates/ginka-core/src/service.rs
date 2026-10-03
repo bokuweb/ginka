@@ -119,7 +119,8 @@ fn search_worktrees(
 ///
 /// A push, a pull, a sync, opening a pull request and reading its checks
 /// wait on a remote for as long as it takes, a commit or a merge on the
-/// project's hooks, and a search on the size of the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
+/// project's hooks, and a search, a diff or the workspace list on the size of
+/// the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
 /// wait found is recorded under the lock again.
 pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
     let lock = || {
@@ -722,6 +723,20 @@ impl Service {
                     })
                 }))
             }
+            // Polled by the Git surface — staged and unstaged, from every
+            // window showing it — and a `git diff` per turn for attribution
+            // the first time a turn is seen.
+            Request::WorkspaceChanges {
+                workspace,
+                source,
+                context_lines,
+            } => match self.plan_changes(workspace, source, context_lines) {
+                Ok(plan) => Step::Away(Box::new(move || {
+                    let read = plan.read();
+                    Box::new(move |service: &mut Service| read.finish(service))
+                })),
+                Err(error) => Step::Done(Err(error)),
+            },
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -830,6 +845,7 @@ impl Service {
             | Request::PullRequestChecks { .. }
             | Request::FixFailingChecks { .. }
             | Request::ListWorkspaces { .. }
+            | Request::WorkspaceChanges { .. }
             | Request::WorkspaceFiles { .. }
             | Request::SearchContent { .. }
             | Request::SearchProject { .. } => self.handle(request),
@@ -1343,85 +1359,6 @@ impl Service {
                 })
             }
 
-            Request::WorkspaceChanges {
-                workspace,
-                source,
-                context_lines,
-            } => {
-                let context_lines = context_lines.unwrap_or(3);
-                if context_lines > 25 {
-                    return Err(RpcError::failed("diff context exceeds 25 lines"));
-                }
-                let worktree = self.worktree(&workspace)?;
-                let files = match &source {
-                    // A checkpoint names a commit, and the commit is what git
-                    // can be asked about.
-                    ChangeSource::SinceCheckpoint { checkpoint } => {
-                        let stored = checkpoint::get(&self.conn(), checkpoint)
-                            .map_err(failed)?
-                            .filter(|stored| stored.workspace == workspace)
-                            .ok_or_else(|| {
-                                RpcError::not_found(format!(
-                                    "no checkpoint with id {} in workspace {}",
-                                    checkpoint.0, workspace.0
-                                ))
-                            })?;
-                        git::changes_since_with_context(
-                            &worktree.path,
-                            &stored.commit,
-                            context_lines,
-                        )
-                        .map_err(failed)?
-                    }
-                    ChangeSource::Turn { checkpoint } => {
-                        let conn = self.conn();
-                        let stored = checkpoint::get(&conn, checkpoint)
-                            .map_err(failed)?
-                            .filter(|stored| stored.workspace == workspace)
-                            .ok_or_else(|| {
-                                RpcError::not_found(format!(
-                                    "no checkpoint with id {} in workspace {}",
-                                    checkpoint.0, workspace.0
-                                ))
-                            })?;
-                        match checkpoint::turn_commits(&conn, &stored.id).map_err(failed)? {
-                            Some((start, end)) => git::changes_between_with_context(
-                                &worktree.path,
-                                &start,
-                                &end,
-                                context_lines,
-                            )
-                            .map_err(failed)?,
-                            None => {
-                                return Err(RpcError::not_found(format!(
-                                    "checkpoint {} has no saved turn start",
-                                    checkpoint.0
-                                )));
-                            }
-                        }
-                    }
-                    ChangeSource::Branch { base } => {
-                        let base = match base {
-                            Some(base) => base.clone(),
-                            None => self.project(&worktree.project)?.default_branch,
-                        };
-                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
-                        git::changes_since_with_context(&worktree.path, &fork, context_lines)
-                            .map_err(failed)?
-                    }
-                    other => git::changes_with_context(&worktree.path, other, context_lines)
-                        .map_err(failed)?,
-                };
-                let mut files = files;
-                // Orca's line attribution, for diffs of the worktree: which
-                // added lines the turns since the last commit wrote.
-                if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
-                    self.attribute(&workspace, &worktree.path, &mut files);
-                }
-                Ok(Response::Changes {
-                    changes: Changes { source, files },
-                })
-            }
             Request::WorkspaceHistory { workspace, limit } => {
                 let worktree = self.worktree(&workspace)?;
                 let limit = limit.unwrap_or(50).min(200) as usize;
@@ -3522,39 +3459,86 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
-    /// Mark which added lines in `files` the workspace's recent turns wrote
-    /// (`crate::attribution`). Only turns since the last commit count — an
-    /// older turn's lines are in the commit, not the diff — and at most the
-    /// newest [`ATTRIBUTION_TURNS`], so a long session does not make every
-    /// refresh re-read its whole history. Failing to work it out leaves the
-    /// lines unmarked rather than failing the diff.
-    fn attribute(
-        &mut self,
-        workspace: &WorkspaceId,
-        path: &std::path::Path,
-        files: &mut [ginka_protocol::model::FileChange],
-    ) {
-        let since = git::last_commit_time(path).unwrap_or(i64::MIN);
-        let conn = self.conn();
-        let Ok(checkpoints) = checkpoint::list(&conn, workspace) else {
-            return;
-        };
-        let turns: Vec<(String, String)> = checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.has_turn_start && checkpoint.created_at >= since)
-            .take(ATTRIBUTION_TURNS)
-            .filter_map(|checkpoint| {
-                checkpoint::turn_commits(&conn, &checkpoint.id)
-                    .ok()
-                    .flatten()
-            })
-            .collect();
-        drop(conn);
-        let read = |start: &str, end: &str| crate::attribution::turn_lines(path, start, end);
-        match self.turn_lines.added_lines(&turns, read) {
-            Ok(by_agent) => crate::attribution::mark(files, &by_agent),
-            Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+    /// Everything a diff needs from the database, worked out under the
+    /// lock, so that git can be read without it ([`ChangesPlan::read`]).
+    fn plan_changes(
+        &self,
+        workspace: WorkspaceId,
+        source: ChangeSource,
+        context_lines: Option<u8>,
+    ) -> Result<ChangesPlan, RpcError> {
+        let context_lines = context_lines.unwrap_or(3);
+        if context_lines > 25 {
+            return Err(RpcError::failed("diff context exceeds 25 lines"));
         }
+        let worktree = self.worktree(&workspace)?;
+        let checkpoint_in_workspace = |checkpoint: &CheckpointId| {
+            checkpoint::get(&self.conn(), checkpoint)
+                .map_err(failed)?
+                .filter(|stored| stored.workspace == workspace)
+                .ok_or_else(|| {
+                    RpcError::not_found(format!(
+                        "no checkpoint with id {} in workspace {}",
+                        checkpoint.0, workspace.0
+                    ))
+                })
+        };
+        let diff = match &source {
+            // A checkpoint names a commit, and the commit is what git can be
+            // asked about.
+            ChangeSource::SinceCheckpoint { checkpoint } => {
+                DiffPlan::Since(checkpoint_in_workspace(checkpoint)?.commit)
+            }
+            ChangeSource::Turn { checkpoint } => {
+                let stored = checkpoint_in_workspace(checkpoint)?;
+                match checkpoint::turn_commits(&self.conn(), &stored.id).map_err(failed)? {
+                    Some((start, end)) => DiffPlan::Between(start, end),
+                    None => {
+                        return Err(RpcError::not_found(format!(
+                            "checkpoint {} has no saved turn start",
+                            checkpoint.0
+                        )));
+                    }
+                }
+            }
+            ChangeSource::Branch { base } => DiffPlan::ForkOf(match base {
+                Some(base) => base.clone(),
+                None => self.project(&worktree.project)?.default_branch,
+            }),
+            other => DiffPlan::Worktree(other.clone()),
+        };
+        // Orca's line attribution, for diffs of the worktree: the turns whose
+        // added lines may be in it, newest first, and which of them were
+        // read before. Which are since the last commit is git's to say.
+        let turns = if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
+            let conn = self.conn();
+            let turns: Vec<Turn> = checkpoint::list(&conn, &workspace)
+                .unwrap_or_default()
+                .iter()
+                .filter(|checkpoint| checkpoint.has_turn_start)
+                .filter_map(|checkpoint| {
+                    let (start, end) = checkpoint::turn_commits(&conn, &checkpoint.id)
+                        .ok()
+                        .flatten()?;
+                    Some(Turn {
+                        created_at: checkpoint.created_at,
+                        known: self.turn_lines.contains(&start, &end),
+                        start,
+                        end,
+                    })
+                })
+                .collect();
+            Some(turns)
+        } else {
+            None
+        };
+        Ok(ChangesPlan {
+            path: worktree.path,
+            source,
+            context_lines,
+            diff,
+            turns,
+        })
     }
 
     /// Run `provider`'s own CLI with `args` (`mcp add …` / `mcp remove …`),
@@ -4045,6 +4029,127 @@ impl Service {
             pull_request: self.pull_requests.get(&id).cloned(),
             status_note: project::status_note(&self.conn(), &id).unwrap_or_default(),
         }
+    }
+}
+
+/// Which revisions a diff compares.
+enum DiffPlan {
+    /// The worktree against a commit.
+    Since(String),
+    /// Two snapshots: a turn's start and end.
+    Between(String, String),
+    /// The worktree against where it forked from this branch.
+    ForkOf(String),
+    /// The worktree's own staged, unstaged or uncommitted changes.
+    Worktree(ChangeSource),
+}
+
+/// A turn whose added lines may be in a worktree diff.
+struct Turn {
+    created_at: i64,
+    start: String,
+    end: String,
+    /// Already in the service's [`crate::attribution::TurnLinesCache`].
+    known: bool,
+}
+
+/// A diff to read, resolved under the lock ([`Service::plan_changes`]).
+struct ChangesPlan {
+    path: std::path::PathBuf,
+    source: ChangeSource,
+    context_lines: u8,
+    diff: DiffPlan,
+    /// For a worktree diff, the turns to attribute its lines to.
+    turns: Option<Vec<Turn>>,
+}
+
+/// A diff read off the lock, and the turns read for it.
+struct ChangesRead {
+    source: ChangeSource,
+    files: Result<Vec<ginka_protocol::model::FileChange>>,
+    /// The turns to attribute with, and what was read of those not cached.
+    turns: Vec<(String, String)>,
+    fresh: Vec<(String, String, crate::attribution::TurnLines)>,
+    path: std::path::PathBuf,
+}
+
+impl ChangesPlan {
+    /// Read the diff, and the lines any turn not read before added. Only
+    /// turns since the last commit count — an older turn's lines are in the
+    /// commit, not the diff — and at most the newest [`ATTRIBUTION_TURNS`].
+    fn read(self) -> ChangesRead {
+        let path = &self.path;
+        let files = match &self.diff {
+            DiffPlan::Since(commit) => {
+                git::changes_since_with_context(path, commit, self.context_lines)
+            }
+            DiffPlan::Between(start, end) => {
+                git::changes_between_with_context(path, start, end, self.context_lines)
+            }
+            DiffPlan::ForkOf(base) => git::fork_point(path, base)
+                .and_then(|fork| git::changes_since_with_context(path, &fork, self.context_lines)),
+            DiffPlan::Worktree(source) => {
+                git::changes_with_context(path, source, self.context_lines)
+            }
+        };
+        let mut turns = Vec::new();
+        let mut fresh = Vec::new();
+        if let (Ok(_), Some(candidates)) = (&files, self.turns) {
+            let since = git::last_commit_time(path).unwrap_or(i64::MIN);
+            for turn in candidates
+                .into_iter()
+                .filter(|turn| turn.created_at >= since)
+                .take(ATTRIBUTION_TURNS)
+            {
+                if !turn.known {
+                    match crate::attribution::turn_lines(path, &turn.start, &turn.end) {
+                        Ok(lines) => fresh.push((turn.start.clone(), turn.end.clone(), lines)),
+                        // Failing to work it out leaves the lines unmarked
+                        // rather than failing the diff.
+                        Err(error) => {
+                            tracing::debug!(%error, "could not attribute the diff's lines");
+                            turns.clear();
+                            fresh.clear();
+                            break;
+                        }
+                    }
+                }
+                turns.push((turn.start, turn.end));
+            }
+        }
+        ChangesRead {
+            source: self.source,
+            files,
+            turns,
+            fresh,
+            path: self.path,
+        }
+    }
+}
+
+impl ChangesRead {
+    /// Keep what was read of new turns and mark the diff's lines.
+    fn finish(self, service: &mut Service) -> Result<Response, RpcError> {
+        let mut files = self.files.map_err(failed)?;
+        for (start, end, lines) in self.fresh {
+            service.turn_lines.keep(start, end, lines);
+        }
+        if !self.turns.is_empty() {
+            // Everything is cached by now; a read here is only the rare turn
+            // the cache let go of in between.
+            let path = self.path;
+            let read = |start: &str, end: &str| crate::attribution::turn_lines(&path, start, end);
+            match service.turn_lines.added_lines(&self.turns, read) {
+                Ok(by_agent) => crate::attribution::mark(&mut files, &by_agent),
+                Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+            }
+        }
+        Ok(Response::Changes {
+            changes: Changes {
+                source: self.source,
+                files,
+            },
+        })
     }
 }
 
