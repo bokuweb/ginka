@@ -221,6 +221,9 @@ pub struct Service {
     /// What each recent turn added, for line attribution — read once per
     /// turn, since its snapshots never change.
     turn_lines: crate::attribution::TurnLinesCache,
+    /// Workspaces whose worktree is being deleted off the lock; closed to
+    /// every other request until it is gone.
+    removing: std::collections::HashSet<WorkspaceId>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -309,6 +312,7 @@ impl Service {
             statuses: std::collections::HashMap::new(),
             pull_requests: std::collections::HashMap::new(),
             turn_lines: Default::default(),
+            removing: Default::default(),
             agents: None,
             settings,
             accounts: None,
@@ -862,6 +866,33 @@ impl Service {
                     Ok(Response::Ack)
                 },
             ),
+            // Deleting a large worktree takes as long as the disk does. The
+            // workspace is closed to every other request meanwhile, so no
+            // agent is started in a directory halfway through its deletion.
+            Request::RemoveWorkspace { workspace, force } => {
+                let planned = self.worktree(&workspace).and_then(|worktree| {
+                    self.refuse_while_running(|running| *running == workspace)?;
+                    let project = self.project(&worktree.project)?;
+                    Ok((worktree, project))
+                });
+                let (worktree, project) = match planned {
+                    Ok(planned) => planned,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                self.removing.insert(workspace.clone());
+                Step::Away(Box::new(move || {
+                    let removed = git::remove_worktree(&project.path, &worktree.path, force);
+                    Box::new(move |service: &mut Service| {
+                        service.removing.remove(&workspace);
+                        removed.map_err(failed)?;
+                        registry::sync_worktrees(&service.conn(), &project).map_err(failed)?;
+                        service.events.emit(DaemonEvent::WorkspacesChanged {
+                            project: project.name,
+                        });
+                        Ok(Response::Ack)
+                    })
+                }))
+            }
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -972,6 +1003,7 @@ impl Service {
             | Request::CreateWorkspace { .. }
             | Request::FanOut { .. }
             | Request::CheckoutBranch { .. }
+            | Request::RemoveWorkspace { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
             | Request::WorkspaceHistory { .. }
@@ -1042,17 +1074,6 @@ impl Service {
                 Ok(Response::Workspace {
                     workspace: self.summarize(worktree),
                 })
-            }
-            Request::RemoveWorkspace { workspace, force } => {
-                let worktree = self.worktree(&workspace)?;
-                self.refuse_while_running(|running| *running == workspace)?;
-                let project = self.project(&worktree.project)?;
-                git::remove_worktree(&project.path, &worktree.path, force).map_err(failed)?;
-                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: project.name,
-                });
-                Ok(Response::Ack)
             }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
@@ -4022,6 +4043,9 @@ impl Service {
 
     /// Resolve a workspace id to the worktree it names.
     fn worktree(&self, workspace: &WorkspaceId) -> Result<Worktree, RpcError> {
+        if self.removing.contains(workspace) {
+            return Err(RpcError::failed(format!("{workspace} is being removed")));
+        }
         project::find_worktree(&self.conn(), workspace)
             .map_err(failed)?
             .ok_or_else(|| RpcError::not_found(format!("no workspace named {workspace}")))

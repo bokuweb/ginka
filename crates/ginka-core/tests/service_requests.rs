@@ -3026,3 +3026,69 @@ fn switching_branches_leaves_the_service_free_while_the_hook_runs() {
     assert!(served, "the service stayed locked while the hook ran");
     assert!(matches!(switched, Ok(Response::Ack)), "{switched:?}");
 }
+
+#[test]
+fn removing_a_worktree_leaves_the_service_free_and_the_workspace_closed_meanwhile() {
+    // Deleting a large worktree takes as long as the disk does. Other
+    // requests are answered meanwhile, and the workspace being removed is
+    // refused rather than handed to an agent halfway through its deletion.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-removal".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let service = Arc::new(Mutex::new(fixture.service));
+    let removing = {
+        let service = service.clone();
+        let workspace = workspace.id();
+        std::thread::spawn(move || {
+            ginka_core::service::handle_shared(
+                &service,
+                Request::RemoveWorkspace {
+                    workspace,
+                    force: false,
+                },
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "git never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            let other = service.handle(Request::ListProjects).is_ok();
+            let same = service.handle(Request::WorkspaceHistory {
+                workspace: workspace.id(),
+                limit: None,
+            });
+            served = Some((other, same));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    let removed = removing.join().unwrap();
+
+    let (other, same) = served.expect("the service stayed locked while git removed the worktree");
+    assert!(other);
+    let error = same.expect_err("a workspace being removed is not worked on");
+    assert!(error.message.contains("being removed"), "{}", error.message);
+    assert!(matches!(removed, Ok(Response::Ack)), "{removed:?}");
+    assert!(!workspace.worktree.path.exists());
+}
