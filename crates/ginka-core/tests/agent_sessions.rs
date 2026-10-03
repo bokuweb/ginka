@@ -4159,3 +4159,54 @@ fn mcp_servers_are_changed_by_the_vendors_own_cli_in_the_right_place() {
         .unwrap_err();
     assert!(refused.message.contains("already exists"), "{refused:?}");
 }
+
+#[test]
+fn a_worktree_or_project_with_a_running_agent_is_not_removed_from_under_it() {
+    // Deleting the directory an agent is working in leaves a process
+    // writing into nothing, and forgetting its project leaves a session no
+    // row can reach. Both wait until the agent has stopped.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+        "take your time",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let removed = fixture.service.handle(Request::RemoveWorkspace {
+        workspace: fixture.workspace.clone(),
+        force: true,
+    });
+    let error = removed.expect_err("a worktree with a running agent stays");
+    assert!(error.message.contains("running"), "{}", error.message);
+    assert!(fixture.workspace_path().is_dir());
+
+    let forgotten = fixture.service.handle(Request::RemoveProject {
+        project: ProjectName("comet".into()),
+    });
+    let error = forgotten.expect_err("a project with a running agent stays");
+    assert!(error.message.contains("running"), "{}", error.message);
+
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+    fixture
+        .service
+        .handle(Request::RemoveWorkspace {
+            workspace: fixture.workspace.clone(),
+            force: true,
+        })
+        .expect("once the agent has stopped, the worktree can go");
+}

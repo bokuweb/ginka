@@ -710,6 +710,9 @@ impl Service {
                 Ok(Response::Project { project })
             }
             Request::RemoveProject { project } => {
+                self.refuse_while_running(|workspace| {
+                    workspace.parts().is_some_and(|(owner, _)| owner == project)
+                })?;
                 if !project::remove_project(&self.conn(), &project).map_err(failed)? {
                     return Err(self.no_such_project(&project));
                 }
@@ -831,6 +834,7 @@ impl Service {
             }
             Request::RemoveWorkspace { workspace, force } => {
                 let worktree = self.worktree(&workspace)?;
+                self.refuse_while_running(|running| *running == workspace)?;
                 let project = self.project(&worktree.project)?;
                 git::remove_worktree(&project.path, &worktree.path, force).map_err(failed)?;
                 registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
@@ -3551,6 +3555,28 @@ impl Service {
     /// working — or, when `agent` names another or there is none, to a new
     /// conversation on that agent. The conversation that did the work knows
     /// why it did it, which is most of fixing what went wrong with it.
+    /// Refuse to take away somewhere an agent is working: a removal waits
+    /// until every session running in a workspace `affected` picks has
+    /// stopped, and says which.
+    fn refuse_while_running(
+        &self,
+        affected: impl Fn(&WorkspaceId) -> bool,
+    ) -> Result<(), RpcError> {
+        let running: Vec<String> = session::list(&self.conn(), None)
+            .map_err(failed)?
+            .into_iter()
+            .filter(|session| affected(&session.workspace) && self.sessions.is_running(&session.id))
+            .map(|session| session.id.0)
+            .collect();
+        if running.is_empty() {
+            return Ok(());
+        }
+        Err(RpcError::failed(format!(
+            "an agent is still running there ({}); stop it first",
+            running.join(", ")
+        )))
+    }
+
     fn hand_to_agent(
         &mut self,
         workspace: WorkspaceId,
