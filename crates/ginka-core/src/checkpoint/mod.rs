@@ -56,8 +56,11 @@ pub fn turn_id(session: &SessionId, turn: u32) -> TurnId {
 /// them.
 #[derive(Debug, Clone, Copy)]
 pub struct TurnRef<'a> {
+    /// The workspace whose worktree was snapshotted.
     pub workspace: &'a WorkspaceId,
+    /// The Ginka session the turn belongs to.
     pub session: &'a SessionId,
+    /// The turn's number within the session.
     pub turn: u32,
 }
 

@@ -35,16 +35,26 @@ pub enum DiffSource {
     /// One commit against its parent.
     Committed(String),
     /// Everything this branch has done since it forked from `base`.
-    Branch { base: String },
+    Branch {
+        /// Any revision `git merge-base` accepts, usually the project's base branch.
+        base: String,
+    },
 }
 
+/// What happened to one file, from the first letter of git's `--name-status` code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChangeStatus {
+    /// New in the range, or untracked in the working tree.
     Added,
+    /// Content changed in place.
     Modified,
+    /// Removed in the range.
     Deleted,
+    /// Moved, as git's rename detection reports it.
     Renamed,
+    /// Kind changed, e.g. a regular file became a symlink.
     TypeChanged,
+    /// A status code Ginka does not map (copies, unmerged entries).
     Unknown,
 }
 
@@ -61,34 +71,46 @@ impl ChangeStatus {
     }
 }
 
+/// One file in a [`Review`], with its line counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileChange {
+    /// Path relative to the worktree root, as git prints it.
     pub path: String,
+    /// What happened to the file.
     pub status: ChangeStatus,
     /// `None` for a binary file, where lines are not the unit.
     pub insertions: Option<u32>,
+    /// `None` for a binary file, like `insertions`.
     pub deletions: Option<u32>,
+    /// True when git gave no line counts for the file.
     pub is_binary: bool,
 }
 
+/// A change set: per-file stats plus the unified patch, both for one [`DiffSource`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Review {
+    /// The question this change set answers.
     pub source: DiffSource,
     /// Sorted by path, so a re-render never reshuffles the list under a
     /// reader who is part-way down it.
     pub files: Vec<FileChange>,
+    /// Unified diff of every file, untracked files inlined up to a size cap; empty
+    /// when there is nothing to compare.
     pub patch: String,
 }
 
 impl Review {
+    /// Lines added across all files; binary files count zero.
     pub fn insertions(&self) -> u32 {
         self.files.iter().filter_map(|file| file.insertions).sum()
     }
 
+    /// Lines removed across all files; binary files count zero.
     pub fn deletions(&self) -> u32 {
         self.files.iter().filter_map(|file| file.deletions).sum()
     }
 
+    /// True when no file changed, including when there was nothing to compare.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }

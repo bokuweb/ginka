@@ -53,34 +53,58 @@ pub mod testing {
     /// One call a scripted transport saw.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub enum Call {
+        /// A [`ChatTransport::post`] into a thread.
         Post {
+            /// Platform channel id.
             channel: String,
+            /// Id of the thread's root message.
             thread: String,
+            /// Body as posted, already rendered for the platform.
             text: String,
         },
+        /// A [`ChatTransport::edit`] replacing a message's text.
         Edit {
+            /// Platform channel id.
             channel: String,
+            /// Id of the message edited, as `post` returned it.
             message: String,
+            /// The replacement text.
             text: String,
         },
+        /// A [`ChatTransport::delete`] of a bot message.
         Delete {
+            /// Platform channel id.
             channel: String,
+            /// Id of the message deleted.
             message: String,
         },
+        /// A [`ChatTransport::react`] adding a reaction.
         React {
+            /// Platform channel id.
             channel: String,
+            /// Id of the message reacted to.
             message: String,
+            /// The reaction, by meaning rather than emoji.
             glyph: Glyph,
         },
+        /// A [`ChatTransport::unreact`] taking a reaction off.
         Unreact {
+            /// Platform channel id.
             channel: String,
+            /// Id of the message the reaction came off.
             message: String,
+            /// The reaction removed.
             glyph: Glyph,
         },
+        /// A [`ChatTransport::upload`] attaching a file.
         Upload {
+            /// Platform channel id.
             channel: String,
+            /// Id of the thread's root message.
             thread: String,
+            /// File name shown in the thread.
             name: String,
+            /// Payload length in bytes; the bytes themselves are not kept.
             bytes: usize,
         },
     }
@@ -96,6 +120,7 @@ pub mod testing {
     }
 
     impl ScriptedTransport {
+        /// A transport that succeeds at everything and has recorded nothing yet.
         pub fn new() -> Self {
             Self::default()
         }

@@ -4,6 +4,8 @@
 //! a viewport onto this crate, and the daemon is its long-running host. If a
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
+#![deny(missing_docs)]
+
 pub mod account;
 pub mod agent;
 pub mod agent_updates;

@@ -1,3 +1,5 @@
+//! Where Ginka keeps its state on disk.
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
@@ -23,10 +25,13 @@ impl Paths {
         Ok(Self { root })
     }
 
+    /// Use `root` as the state directory as is, ignoring `GINKA_HOME`; for tests
+    /// and callers that already resolved it. Nothing is created until [`Paths::ensure`].
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// The state directory every other path hangs off.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -41,6 +46,7 @@ impl Paths {
         self.root.join("settings.json")
     }
 
+    /// The SQLite database the daemon owns, `ginka.db`.
     pub fn database(&self) -> PathBuf {
         self.root.join("ginka.db")
     }
@@ -60,6 +66,7 @@ impl Paths {
         self.root.join("rates.json")
     }
 
+    /// Daily-rotated log files, one set per process (`logging::init`).
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
@@ -93,9 +100,6 @@ impl Paths {
         self.root.join("accounts")
     }
 
-    /// Chat connectors' secrets, one `<connector>.env` per connector, each
-    /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
-    /// environment, and nowhere else.
     /// The embedded browser's profile: its cache, and the cookies it keeps
     /// or was given from Chrome. Private to the user, like the connectors'
     /// secrets.
@@ -103,6 +107,9 @@ impl Paths {
         self.root.join("browser")
     }
 
+    /// Chat connectors' secrets, one `<connector>.env` per connector, each
+    /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
+    /// environment, and nowhere else.
     pub fn connectors(&self) -> PathBuf {
         self.root.join("connectors")
     }

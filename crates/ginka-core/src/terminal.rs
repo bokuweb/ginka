@@ -56,7 +56,9 @@ struct Running {
 
 /// A command to run in a terminal instead of the user's shell.
 pub struct TerminalCommand {
+    /// Executable to start in the PTY instead of the user's shell.
     pub program: String,
+    /// Arguments, in order, not passed through a shell.
     pub args: Vec<String>,
     /// Applied on top of the sanitized environment, and kept even where the
     /// sanitizing would have removed the variable: it was asked for.

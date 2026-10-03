@@ -19,7 +19,12 @@ pub enum Replay<T> {
     Events(Vec<(Seq, T)>),
     /// It fell out of the window; it has to re-read the world. The bounds are
     /// carried so the client can log how far behind it was.
-    Gap { oldest: Seq, latest: Seq },
+    Gap {
+        /// The oldest sequence number still held, or `latest + 1` when none is.
+        oldest: Seq,
+        /// The newest sequence number published.
+        latest: Seq,
+    },
     /// The cursor is from the future — a stale cursor against a restarted
     /// daemon, or a corrupt one. Also a resync, but a different bug to chase.
     Reset,
@@ -34,6 +39,8 @@ pub struct EventLog<T> {
 }
 
 impl<T: Clone> EventLog<T> {
+    /// An empty log holding at most `capacity` events; older ones fall out of
+    /// the replay window. The first event gets sequence number 1.
     pub fn new(capacity: usize) -> Self {
         Self {
             capacity,
@@ -55,18 +62,23 @@ impl<T: Clone> EventLog<T> {
         seq
     }
 
+    /// Sequence number of the last event published; 0 before the first.
     pub fn latest_seq(&self) -> Seq {
         self.next_seq - 1
     }
 
+    /// Sequence number of the oldest event still held; `None` while empty.
     pub fn oldest_seq(&self) -> Option<Seq> {
         self.held.front().map(|(seq, _)| *seq)
     }
 
+    /// Events currently held, at most the capacity.
     pub fn len(&self) -> usize {
         self.held.len()
     }
 
+    /// True when nothing is held: before the first append, or always with a
+    /// capacity of zero.
     pub fn is_empty(&self) -> bool {
         self.held.is_empty()
     }

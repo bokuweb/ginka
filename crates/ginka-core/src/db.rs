@@ -1,3 +1,5 @@
+//! The SQLite store: opening the database and applying the embedded migrations.
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;

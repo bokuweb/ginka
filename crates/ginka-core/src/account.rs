@@ -41,8 +41,11 @@ pub enum AccountError {
     /// The account belongs to a different provider than the one asked for.
     #[error("account `{account}` is a {actual} login, not a {expected} one")]
     WrongProvider {
+        /// The account id that was asked for.
         account: String,
+        /// The provider the caller wanted a login for.
         expected: String,
+        /// The provider whose default account that id names.
         actual: ProviderKind,
     },
     /// The provider's CLI reads its state from one fixed place.

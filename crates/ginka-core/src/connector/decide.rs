@@ -44,6 +44,7 @@ pub struct Inbound {
     pub mentions_bot: bool,
     /// Whether this is a root message rather than a reply in a thread.
     pub is_root: bool,
+    /// Attachments, not yet fetched; a message with files and no text is not empty.
     pub files: Vec<InboundFile>,
     /// Whether this is an edit of a message rather than a new one.
     pub is_edit: bool,
@@ -90,6 +91,7 @@ pub enum IgnoreReason {
 /// What the connector does with a message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
+    /// Drop it silently; the reason is only logged.
     Ignore(IgnoreReason),
     /// Start a session in the binding's target.
     Start {
@@ -101,17 +103,23 @@ pub enum Decision {
     },
     /// Send a follow-up into the session already answering this thread.
     Continue {
+        /// The session already mapped to this thread.
         session: SessionId,
     },
     /// A word for the connector rather than the agent.
     Control {
+        /// The session mapped to this thread.
         session: SessionId,
+        /// The control word, which only counts when it is the whole message.
         command: Control,
     },
     /// An answer to a question the agent asked.
     Verdict {
+        /// The session that asked.
         session: SessionId,
+        /// The open request the verdict names, lowercased.
         request_id: String,
+        /// What to send back to the agent.
         answer: Answer,
     },
 }

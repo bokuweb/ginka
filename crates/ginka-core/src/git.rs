@@ -24,6 +24,7 @@ use std::process::{Command, Stdio};
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWorktree {
+    /// The worktree's directory, as git reports it (absolute).
     pub path: PathBuf,
     /// The checked-out commit, absent for a worktree that has never had one.
     pub head: Option<String>,
@@ -154,6 +155,8 @@ pub fn top_level(path: &Path) -> Result<PathBuf> {
     Ok(PathBuf::from(git(path, &["rev-parse", "--show-toplevel"])?))
 }
 
+/// Whether `repo` has a remote named `origin`. Shells out to `git remote`;
+/// any failure reads as `false`.
 pub fn has_origin(repo: &Path) -> bool {
     git(repo, &["remote"])
         .map(|out| out.lines().any(|line| line.trim() == "origin"))
@@ -1408,6 +1411,7 @@ pub fn prune_worktrees(repo: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Unit tests, plus the fixture repository other modules' tests build on.
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -2640,10 +2644,13 @@ pub struct Git {
 }
 
 impl Git {
+    /// A runner whose commands all start in `cwd`. Nothing is checked until a
+    /// command runs.
     pub fn new(cwd: impl Into<PathBuf>) -> Self {
         Self { cwd: cwd.into() }
     }
 
+    /// The directory commands run in.
     pub fn cwd(&self) -> &Path {
         &self.cwd
     }

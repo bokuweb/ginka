@@ -59,7 +59,9 @@ pub fn parse_control(text: &str) -> Option<Control> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Answer {
+    /// Approve: `yes <id>`. Reaches the agent as `yes`.
     Yes,
+    /// Refuse: `no <id>`. Reaches the agent as `no`.
     No,
     /// Free text, for a question with no options, or an option by name.
     Text(String),

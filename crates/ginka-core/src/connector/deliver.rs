@@ -12,7 +12,9 @@ use anyhow::Result;
 /// Where a followed turn's messages go.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ThreadContext {
+    /// Platform channel id the thread is in.
     pub channel: String,
+    /// Root message id of the thread replies go under.
     pub thread: String,
     /// The message that triggered the turn, which reactions go on.
     pub trigger: String,
@@ -23,7 +25,9 @@ pub struct ThreadContext {
 /// The text the runner filled a footer in with.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FooterText {
+    /// Files the turn changed; at zero the footer is not posted.
     pub changed_files: usize,
+    /// The turn number its checkpoint is filed under.
     pub checkpoint_turn: u32,
     /// The workspace id, for the `ginka review <workspace>` hint.
     pub workspace: String,

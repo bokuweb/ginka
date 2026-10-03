@@ -25,7 +25,9 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// One tool, as `tools/list` describes it.
 pub struct Tool {
+    /// The name an agent calls it by, e.g. `ginka_workspace_status`.
     pub name: &'static str,
+    /// What the agent is told the tool does and when to use it.
     pub description: &'static str,
     /// The JSON Schema of its arguments.
     pub schema: Value,

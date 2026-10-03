@@ -229,24 +229,37 @@ fn field(text: &str, name: &str, low: u32, high: u32) -> Result<u64> {
 /// A job's fields as a request gives them, before they are stored.
 #[derive(Debug, Clone)]
 pub struct Draft {
+    /// The project the job runs for.
     pub project: ProjectName,
+    /// The workspace it runs in; `None` runs in the project's own checkout.
     pub workspace: Option<WorkspaceId>,
     /// The conversation a chat job continues; the caller has checked it.
     pub session: Option<SessionId>,
+    /// What lists call it.
     pub name: String,
+    /// Five cron fields or `@daily` and the like on the daemon host's clock, or
+    /// `@once <RFC 3339 timestamp>`; parsed before the job is stored.
     pub schedule: String,
+    /// Whether `body` is a prompt or a shell command.
     pub via: CronVia,
+    /// The driver a chat job starts; `None` for a terminal job.
     pub agent: Option<String>,
+    /// The prompt, or the command line.
     pub body: String,
     /// A shell probe run before each scheduled firing; non-zero skips it.
     pub precheck: Option<String>,
+    /// Whether the schedule fires it; a disabled job only runs when asked.
     pub enabled: bool,
 }
 
 /// What a job's last firing started, for overlap-skip.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LastStarted {
+    /// Session id the last chat firing started; while it is still working the
+    /// next firing is skipped.
     pub session: Option<String>,
+    /// Terminal id the last command firing started; while it is still running
+    /// the next firing is skipped.
     pub terminal: Option<String>,
 }
 
