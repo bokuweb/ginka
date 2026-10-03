@@ -31,6 +31,11 @@ pub fn ordered(checks: &[CheckRun]) -> Vec<CheckRun> {
 /// states no check is in. Skipped checks are not counted: they ran nothing.
 /// `None` when there is nothing to sum up.
 pub fn summary(checks: &[CheckRun]) -> Option<String> {
+    summary_in(checks, &rust_i18n::locale())
+}
+
+/// [`summary`] in a given locale.
+pub fn summary_in(checks: &[CheckRun], locale: &str) -> Option<String> {
     let count = |state| checks.iter().filter(|check| check.state == state).count();
     let parts: Vec<String> = [
         (CheckState::Failed, "checks.count.failed"),
@@ -41,7 +46,7 @@ pub fn summary(checks: &[CheckRun]) -> Option<String> {
     .into_iter()
     .filter_map(|(state, key)| match count(state) {
         0 => None,
-        n => Some(rust_i18n::t!(key, n = n).to_string()),
+        n => Some(rust_i18n::t!(key, locale = locale, n = n).to_string()),
     })
     .collect();
     (!parts.is_empty()).then(|| parts.join(" · "))
@@ -107,11 +112,12 @@ mod tests {
             check("e", CheckState::Skipped),
         ];
         assert_eq!(
-            summary(&checks).as_deref(),
+            // In a named locale: other tests switch the process's.
+            summary_in(&checks, "en").as_deref(),
             Some("2 failed · 1 running · 1 passed")
         );
-        assert_eq!(summary(&[check("e", CheckState::Skipped)]), None);
-        assert_eq!(summary(&[]), None);
+        assert_eq!(summary_in(&[check("e", CheckState::Skipped)], "en"), None);
+        assert_eq!(summary_in(&[], "en"), None);
     }
 
     #[test]
