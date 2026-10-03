@@ -860,7 +860,12 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
         });
-        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone(), local_paths));
+        let muted = settings.muted_projects.clone();
+        let sidebar = cx.new(|cx| {
+            let mut sidebar = SessionSidebar::new(rows, sidebar_search.clone(), local_paths);
+            sidebar.set_muted(muted, cx);
+            sidebar
+        });
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx, local_paths));
 
         let sidebar_search_changed =
@@ -1116,6 +1121,25 @@ impl Shell {
                             async move { link.resolve_conflicts(&workspace).await },
                             cx,
                         );
+                    }
+                    SidebarEvent::MuteProject { project, until } => {
+                        match until {
+                            Some(until) => {
+                                this.settings
+                                    .muted_projects
+                                    .insert(project.0.clone(), *until);
+                            }
+                            None => {
+                                this.settings.muted_projects.remove(&project.0);
+                            }
+                        }
+                        // Gone mutes are dropped as the map is written.
+                        let now = chrono::Utc::now().timestamp();
+                        this.settings.muted_projects.retain(|_, until| *until > now);
+                        this.save_settings();
+                        let muted = this.settings.muted_projects.clone();
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_muted(muted, cx));
                     }
                     SidebarEvent::LabelProject { project, label } => {
                         let (link, project, label) =
@@ -5325,12 +5349,24 @@ impl Shell {
         notable: ginka_ui::notify::Notable,
         cx: &mut Context<Self>,
     ) {
-        let title = self
+        let row = self
             .sidebar
             .read(cx)
             .rows()
             .iter()
             .find(|row| row.session.as_ref() == Some(session))
+            .cloned();
+        // A muted project stays quiet until its mute runs out.
+        if let Some(row) = &row
+            && ginka_ui::notify::muted(
+                &self.settings.muted_projects,
+                &row.origin,
+                chrono::Utc::now().timestamp(),
+            )
+        {
+            return;
+        }
+        let title = row
             .map(|row| row.title.to_string())
             .unwrap_or_else(|| "Ginka".to_string());
         let script = ginka_ui::notify::applescript_with_sound(

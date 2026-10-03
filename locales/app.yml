@@ -1770,3 +1770,12 @@ surface.git.fix_checks:
 surface.git.fix_checks_tooltip:
   en: Send the pull request's failing checks, with their log links, to this workspace's conversation to fix
   ja: プルリクエストの失敗したチェックをログのリンク付きでこのワークスペースの会話に送り、直させます
+sidebar.action.mute_hours:
+  en: "Mute notifications for %{hours}h"
+  ja: "通知を %{hours} 時間ミュート"
+sidebar.action.mute_forever:
+  en: Mute notifications until I turn them back on
+  ja: 通知を解除するまでミュート
+sidebar.action.unmute:
+  en: Turn notifications back on
+  ja: 通知のミュートを解除

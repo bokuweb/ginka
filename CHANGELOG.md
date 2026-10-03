@@ -38,6 +38,7 @@ far is unreleased.
   conversation.
 - A pull request's checks, and the failing ones handed to the agent; editor
   autosave that never writes over a file an agent changed.
+- Mute a project's notifications for a few hours or until turned back on.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.

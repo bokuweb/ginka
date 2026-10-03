@@ -73,6 +73,12 @@ pub enum SidebarEvent {
         project: ProjectName,
         label: String,
     },
+    /// Mute a project's notifications until a Unix second (`i64::MAX` for
+    /// until lifted), or lift the mute with `None`.
+    MuteProject {
+        project: ProjectName,
+        until: Option<i64>,
+    },
     /// Put a project at another place in the rail.
     MoveProject {
         project: ProjectName,
@@ -151,6 +157,8 @@ pub struct SessionSidebar {
     inbox_unread: bool,
     /// Which finished conversations this window has not shown yet.
     seen: ginka_ui::seen::Seen,
+    /// Projects whose notifications are muted, and until when.
+    muted: std::collections::BTreeMap<String, i64>,
     /// Which sessions are listed, by what they are doing.
     status: ginka_ui::workspace::StatusFilter,
     /// The row whose actions are open: MonoCode's session menu, drawn under
@@ -185,6 +193,7 @@ impl SessionSidebar {
             place: Place::Workspace,
             inbox_unread: false,
             seen: ginka_ui::seen::Seen::default(),
+            muted: std::collections::BTreeMap::new(),
             status: ginka_ui::workspace::StatusFilter::All,
             menu_for: None,
             project_menu_for: None,
@@ -250,6 +259,18 @@ impl SessionSidebar {
             _ => self.unlisted = 0,
         }
         cx.notify();
+    }
+
+    /// Which projects' notifications are muted, for the project menus.
+    pub fn set_muted(
+        &mut self,
+        muted: std::collections::BTreeMap<String, i64>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.muted != muted {
+            self.muted = muted;
+            cx.notify();
+        }
     }
 
     /// Replace the projects after a refresh.
@@ -658,6 +679,56 @@ impl SessionSidebar {
                         });
                     })),
                 );
+            }
+            // MonoCode's per-project mute: a choice of how long, or the way
+            // back once it is on.
+            let now = chrono::Utc::now().timestamp();
+            if ginka_ui::notify::muted(&self.muted, &project.0, now) {
+                let unmute = project.clone();
+                items.push(
+                    menu_item(
+                        &tokens,
+                        format!("project-unmute:{}", project.0),
+                        Icon::new(IconName::Bell),
+                        rust_i18n::t!("sidebar.action.unmute").to_string(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::MuteProject {
+                            project: unmute.clone(),
+                            until: None,
+                        });
+                    })),
+                );
+            } else {
+                for choice in ginka_ui::notify::MuteFor::CHOICES {
+                    let mute = project.clone();
+                    let label = match choice {
+                        ginka_ui::notify::MuteFor::Hours(hours) => {
+                            rust_i18n::t!("sidebar.action.mute_hours", hours = hours).to_string()
+                        }
+                        ginka_ui::notify::MuteFor::UntilResumed => {
+                            rust_i18n::t!("sidebar.action.mute_forever").to_string()
+                        }
+                    };
+                    items.push(
+                        menu_item(
+                            &tokens,
+                            format!("project-mute:{}:{choice:?}", project.0),
+                            Icon::new(IconName::Bell),
+                            label,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.project_menu_for = None;
+                            cx.emit(SidebarEvent::MuteProject {
+                                project: mute.clone(),
+                                until: Some(choice.until(chrono::Utc::now().timestamp())),
+                            });
+                        })),
+                    );
+                }
             }
             floating_menu(
                 &tokens,
