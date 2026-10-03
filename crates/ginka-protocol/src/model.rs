@@ -1110,7 +1110,8 @@ pub struct McpServerEntry {
     pub provider: String,
     pub scope: McpScope,
     /// The command it runs, or the address it is reached at — never its
-    /// arguments or environment, which can carry tokens.
+    /// arguments or environment, and an address with its user information,
+    /// query and fragment replaced by `…`, since any of them can carry a key.
     pub target: Option<String>,
 }
 
