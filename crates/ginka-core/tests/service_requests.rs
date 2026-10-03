@@ -2637,6 +2637,65 @@ fn a_branch_diff_reads_everything_since_it_left_its_base() {
     }
 }
 
+/// A git hook that says it started, then holds git until the test lets it
+/// go: a slow remote or a slow lint, without either. Returns the "started"
+/// and "release" files.
+fn held_hook(fixture: &Fixture, hook: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let started = fixture.work.path().join(format!("{hook}.started"));
+    let release = fixture.work.path().join(format!("{hook}.release"));
+    let hooks = fixture.work.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let path = hooks.join(hook);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    support::git(
+        &fixture.repo(),
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    (started, release)
+}
+
+/// Run `request` through the shared service on another thread while its
+/// hook holds it, and say whether another request was answered meanwhile.
+fn served_while_held(
+    service: Service,
+    request: Request,
+    (started, release): (std::path::PathBuf, std::path::PathBuf),
+) -> (bool, Result<Response, ginka_protocol::RpcError>) {
+    let service = Arc::new(Mutex::new(service));
+    let running = {
+        let service = service.clone();
+        std::thread::spawn(move || ginka_core::service::handle_shared(&service, request))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "the hook never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            served = matches!(
+                service.handle(Request::ListProjects),
+                Ok(Response::Projects { .. })
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    (served, running.join().unwrap())
+}
+
 #[test]
 fn a_push_leaves_the_service_free_for_other_requests_while_it_waits_on_the_remote() {
     // The daemon serves every client through one `Service`. A push, a pull
@@ -2658,71 +2717,64 @@ fn a_push_leaves_the_service_free_for_other_requests_while_it_waits_on_the_remot
         Response::Workspace { workspace } => workspace.id(),
         other => panic!("expected a workspace, got {other:?}"),
     };
-    // A pre-push hook that says it started, then holds the push until the
-    // test lets it go: a remote that takes its time, without a network.
-    let started = fixture.work.path().join("started");
-    let release = fixture.work.path().join("release");
-    let hooks = fixture.work.path().join("hooks");
-    std::fs::create_dir_all(&hooks).unwrap();
-    let hook = hooks.join("pre-push");
-    std::fs::write(
-        &hook,
-        format!(
-            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
-            started.display(),
-            release.display()
-        ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
-    support::git(
-        &fixture.repo(),
-        &["config", "core.hooksPath", hooks.to_str().unwrap()],
-    );
+    let hook = held_hook(&fixture, "pre-push");
 
-    let service = Arc::new(Mutex::new(fixture.service));
-    let pushing = {
-        let service = service.clone();
-        std::thread::spawn(move || {
-            ginka_core::service::handle_shared(
-                &service,
-                Request::Push {
-                    workspace,
-                    force_with_lease: false,
-                },
-            )
-        })
-    };
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
-    while !started.exists() {
-        assert!(
-            std::time::Instant::now() < deadline,
-            "the push never started"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    // The push is now waiting on its "remote". Another request must still
-    // be answered.
-    let mut served = false;
-    while std::time::Instant::now() < deadline {
-        if let Ok(mut service) = service.try_lock() {
-            served = matches!(
-                service.handle(Request::ListProjects),
-                Ok(Response::Projects { .. })
-            );
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    std::fs::write(&release, "").unwrap();
-    let pushed = pushing.join().unwrap();
+    let (served, pushed) = served_while_held(
+        fixture.service,
+        Request::Push {
+            workspace,
+            force_with_lease: false,
+        },
+        hook,
+    );
 
     assert!(served, "the service stayed locked while the push waited");
     assert!(matches!(pushed, Ok(Response::Ack)), "{pushed:?}");
     assert!(
         support::git(&remote, &["branch", "--list", "slow-push"]).contains("slow-push"),
         "the push reached the remote"
+    );
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}
+
+#[test]
+fn a_commit_leaves_the_service_free_while_its_hooks_run() {
+    // A pre-commit hook is the project's code: a lint that takes a minute,
+    // or one that itself asks `ginka` something — which, with the service
+    // held, would wait on the request it is part of forever.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-hook".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("new.txt"), "new\n").unwrap();
+    let hook = held_hook(&fixture, "pre-commit");
+
+    let (served, committed) = served_while_held(
+        fixture.service,
+        Request::Commit {
+            workspace: workspace.id(),
+            message: "add new".into(),
+            all: true,
+            amend: false,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(
+        matches!(committed, Ok(Response::Committed { .. })),
+        "{committed:?}"
     );
     assert!(
         fixture

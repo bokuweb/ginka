@@ -67,8 +67,8 @@ enum Step {
 /// lock only while state is read or written.
 ///
 /// A push, a pull, a sync, opening a pull request and reading its checks
-/// wait on a remote for as long as it takes; the service is unlocked for
-/// that wait, so every other window and command is still answered. What the
+/// wait on a remote for as long as it takes, and a commit on the project's
+/// hooks; the service is unlocked for that wait, so every other window and command is still answered. What the
 /// wait found is recorded under the lock again.
 pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
     let lock = || {
@@ -502,6 +502,31 @@ impl Service {
                     Ok(Response::Ack)
                 },
             ),
+            // The project's hooks run in a commit, for as long as they like —
+            // and one may itself ask the daemon something.
+            Request::Commit {
+                workspace,
+                message,
+                all,
+                amend,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    if amend {
+                        git::amend(path, &message, all)
+                    } else {
+                        anyhow::ensure!(!message.trim().is_empty(), "a commit needs a message");
+                        git::commit(path, &message, all)
+                    }
+                },
+                |service, worktree, commit| {
+                    // The branch moved, so what the sidebar says about it is stale.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Committed { commit })
+                },
+            ),
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -599,8 +624,10 @@ impl Service {
     fn answer(&mut self, request: Request) -> Result<Response, RpcError> {
         match request {
             Request::Ping => Ok(Response::Ack),
-            // Network-bound: [`Service::begin`] splits these.
-            Request::Push { .. }
+            // Waiting on a remote or the project's hooks: [`Service::begin`]
+            // splits these.
+            Request::Commit { .. }
+            | Request::Push { .. }
             | Request::Pull { .. }
             | Request::Sync { .. }
             | Request::CreatePullRequest { .. }
@@ -1215,27 +1242,6 @@ impl Service {
                 let limit = limit.unwrap_or(50).min(200) as usize;
                 let commits = git::history(&worktree.path, limit).map_err(failed)?;
                 Ok(Response::History { commits })
-            }
-            Request::Commit {
-                workspace,
-                message,
-                all,
-                amend,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let commit = if amend {
-                    git::amend(&worktree.path, &message, all).map_err(failed)?
-                } else {
-                    if message.trim().is_empty() {
-                        return Err(RpcError::failed("a commit needs a message"));
-                    }
-                    git::commit(&worktree.path, &message, all).map_err(failed)?
-                };
-                // The branch moved, so what the sidebar says about it is stale.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Committed { commit })
             }
             Request::MergeWorkspace {
                 workspace,
