@@ -255,7 +255,7 @@ Hand a stopped merge, rebase or cherry-pick's conflicts to an agent to resolve a
 
 ## `ginka commit`
 
-Commit a workspace's work. `--amend` folds it into the last commit instead — keeping that commit's message when none is given — and is refused once the commit has been pushed.
+Commit a workspace's work. `--fix-with-agent` hands a refusal — a failing hook, say — to the workspace's agent with what it said. `--amend` folds it into the last commit instead — keeping that commit's message when none is given — and is refused once the commit has been pushed.
 
 `ginka commit <WORKSPACE> [MESSAGE]`
 

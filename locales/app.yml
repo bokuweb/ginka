@@ -1872,3 +1872,6 @@ settings.updates.none:
 palette.board:
   en: "Open the agents board"
   ja: "エージェントボードを開く"
+cli.commit.handed_over:
+  en: "the commit was refused; conversation %{session} has been asked to fix it"
+  ja: "コミットが拒否されたので、会話 %{session} に修正を依頼しました"

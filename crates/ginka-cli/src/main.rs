@@ -313,6 +313,10 @@ enum Command {
         /// Commit only what is already staged.
         #[arg(long)]
         staged: bool,
+        /// If git or a hook refuses the commit, hand what it said, the
+        /// staged files and the message to the workspace's agent to fix.
+        #[arg(long, conflicts_with = "generate")]
+        fix_with_agent: bool,
         /// Fold the work into the last commit instead of making a new one.
         /// Without a message the commit keeps its own. Refused once that
         /// commit has been pushed.
@@ -1072,6 +1076,14 @@ fn main() -> Result<()> {
             agent,
             ..
         } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        Command::Commit {
+            workspace,
+            message: Some(message),
+            staged,
+            amend,
+            fix_with_agent: true,
+            ..
+        } => commit_or_hand_over(&paths, &workspace, message, staged, amend, cli.json),
         Command::Agents {
             check_updates: true,
         } => agent_updates(&paths, cli.json),
@@ -2167,6 +2179,57 @@ fn mcp_scope(word: &str) -> Result<ginka_protocol::model::McpScope> {
         "local" => ginka_protocol::model::McpScope::Local,
         other => anyhow::bail!("{other} is not a scope: user, project or local"),
     })
+}
+
+/// `ginka commit --fix-with-agent`: commit, and if git or a hook refuses,
+/// hand the refusal to the workspace's agent instead of only printing it.
+fn commit_or_hand_over(
+    paths: &Paths,
+    workspace: &str,
+    message: String,
+    staged: bool,
+    amend: bool,
+    json: bool,
+) -> Result<()> {
+    let workspace = WorkspaceId(workspace.to_string());
+    let response = smol::block_on(async {
+        let client = connect(paths).await?;
+        match client
+            .request(Request::Commit {
+                workspace: workspace.clone(),
+                message: message.clone(),
+                all: !staged,
+                amend,
+            })
+            .await
+        {
+            Ok(response) => anyhow::Ok(response),
+            Err(refusal) => {
+                eprintln!("{}", refusal.message);
+                client
+                    .request(Request::FixCommitFailure {
+                        workspace,
+                        message,
+                        output: refusal.message,
+                        agent: None,
+                    })
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error}"))
+            }
+        }
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&response)?);
+    } else {
+        if let Response::Session { session } = &response {
+            eprintln!(
+                "{}",
+                rust_i18n::t!("cli.commit.handed_over", session = session.id.0.clone())
+            );
+        }
+        print(response, false);
+    }
+    Ok(())
 }
 
 /// `ginka agents --check-updates`: ask, wait for the pushed answer, and
