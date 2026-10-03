@@ -642,6 +642,9 @@ pub struct Shell {
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
     /// The MCP servers the agent CLIs are configured with, for Settings.
     mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
+    /// The last update check's answer, and whether one is on its way.
+    agent_updates: Option<Vec<ginka_protocol::model::AgentUpdate>>,
+    checking_updates: bool,
     /// The provider executable editor, when open in Settings.
     provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
@@ -1650,6 +1653,13 @@ impl Shell {
                                 }
                             })
                             .map_err(|_| ()),
+                        DaemonEvent::AgentUpdatesChecked { updates } => this
+                            .update(cx, |this, cx| {
+                                this.checking_updates = false;
+                                this.agent_updates = Some(updates);
+                                cx.notify();
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
                             message,
@@ -1742,6 +1752,8 @@ impl Shell {
             agents: Vec::new(),
             provider_settings: Vec::new(),
             mcp_servers: Vec::new(),
+            agent_updates: None,
+            checking_updates: false,
             provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -5642,6 +5654,27 @@ impl Shell {
         .detach();
     }
 
+    /// Ask the daemon to check npm for newer agent CLIs; the answer comes
+    /// back as `AgentUpdatesChecked`.
+    fn check_agent_updates(&mut self, cx: &mut Context<Self>) {
+        self.checking_updates = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let asked = cx
+                .background_spawn(async move { link.check_agent_updates().await })
+                .await;
+            if asked.is_err() {
+                this.update(cx, |this, cx| {
+                    this.checking_updates = false;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
     /// Read the MCP servers the agent CLIs are configured with, for the
     /// settings page: the user's, and the workspace on screen's project's.
     fn refresh_mcp_servers(&mut self, cx: &mut Context<Self>) {
@@ -5841,6 +5874,52 @@ impl Shell {
                     .text_size(px(11.5))
                     .text_color(tokens.colors().text_muted)
                     .child(rust_i18n::t!("settings.providers").to_string()),
+            )
+            // MonoCode's update check, on request only: the answer names
+            // the command, and nothing is installed from here.
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("check-agent-updates")
+                            .ghost()
+                            .compact()
+                            .small()
+                            .disabled(self.checking_updates)
+                            .label(if self.checking_updates {
+                                rust_i18n::t!("settings.updates.checking").to_string()
+                            } else {
+                                rust_i18n::t!("settings.updates.check").to_string()
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.check_agent_updates(cx))),
+                    )
+                    .children(self.agent_updates.as_ref().map(|updates| {
+                        let behind: Vec<String> = updates
+                            .iter()
+                            .filter(|update| update.update_available)
+                            .map(|update| {
+                                rust_i18n::t!(
+                                    "settings.updates.available",
+                                    agent = update.agent.clone(),
+                                    installed = update.installed.clone().unwrap_or_default(),
+                                    latest = update.latest.clone().unwrap_or_default(),
+                                    command = update.command.clone()
+                                )
+                                .to_string()
+                            })
+                            .collect();
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .when(behind.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.updates.none").to_string())
+                            })
+                            .children(behind)
+                    })),
             )
             .children(self.provider_settings.iter().map(|setting| {
                 let provider = setting.provider;

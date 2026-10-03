@@ -86,6 +86,11 @@ pub enum Request {
         note: Option<String>,
     },
 
+    /// Ask npm for the latest release of each installed agent CLI and say
+    /// which are behind (MonoCode's update check). Only when asked: Ginka
+    /// does not phone home. Answers `Ack`; the result arrives as
+    /// `DaemonEvent::AgentUpdatesChecked`. Nothing is installed.
+    CheckAgentUpdates,
     /// Which agents this machine has, and whether they are usable.
     ///
     /// Probing runs each vendor's CLI, so this is a request rather than

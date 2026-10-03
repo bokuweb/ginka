@@ -1845,3 +1845,24 @@ settings.mcp_servers.remove:
 settings.mcp_servers.remove_confirm:
   en: Remove it
   ja: 本当に削除
+cli.agents.update_available:
+  en: "update available: %{command}"
+  ja: "更新があります: %{command}"
+cli.agents.up_to_date:
+  en: up to date
+  ja: 最新です
+cli.agents.unknown_latest:
+  en: "could not read the latest release"
+  ja: "最新版を確認できませんでした"
+settings.updates.check:
+  en: Check for updates
+  ja: 更新を確認
+settings.updates.checking:
+  en: Checking…
+  ja: 確認中…
+settings.updates.available:
+  en: "%{agent} %{installed} → %{latest}: %{command}"
+  ja: "%{agent} %{installed} → %{latest}: %{command}"
+settings.updates.none:
+  en: Every agent is up to date.
+  ja: すべてのエージェントは最新です。

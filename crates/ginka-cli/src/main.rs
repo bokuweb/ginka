@@ -54,7 +54,12 @@ enum Command {
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
     /// Report which agent CLIs this machine has, and whether they are usable.
-    Agents,
+    Agents {
+        /// Also ask npm whether a newer release of each is out, and print
+        /// the command that updates it. Nothing is installed.
+        #[arg(long)]
+        check_updates: bool,
+    },
     /// Manage logins: several per provider, each in a directory of its own.
     ///
     /// A session runs on one of them, and the usage report says what each
@@ -1067,6 +1072,9 @@ fn main() -> Result<()> {
             agent,
             ..
         } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        Command::Agents {
+            check_updates: true,
+        } => agent_updates(&paths, cli.json),
         Command::Pr {
             workspace,
             draft,
@@ -1358,7 +1366,7 @@ fn request_for(command: Command) -> Result<Request> {
             }
         }
 
-        Command::Agents => Request::ListAgents,
+        Command::Agents { .. } => Request::ListAgents,
         Command::Slack(SlackCommand::Status) | Command::Slack(SlackCommand::Bindings) => {
             Request::ListConnectors
         }
@@ -2148,6 +2156,50 @@ fn mcp_scope(word: &str) -> Result<ginka_protocol::model::McpScope> {
         "local" => ginka_protocol::model::McpScope::Local,
         other => anyhow::bail!("{other} is not a scope: user, project or local"),
     })
+}
+
+/// `ginka agents --check-updates`: ask, wait for the pushed answer, and
+/// print each agent's installed and latest version and how to update.
+fn agent_updates(paths: &Paths, json: bool) -> Result<()> {
+    let updates = smol::block_on(async {
+        let client = connect(paths).await?;
+        let events = client.events();
+        client
+            .request(Request::CheckAgentUpdates)
+            .await
+            .map_err(|error| anyhow::anyhow!("{error}"))?;
+        loop {
+            let event = events
+                .recv()
+                .await
+                .context("the daemon closed the connection before answering")?;
+            if let ginka_protocol::event::DaemonEvent::AgentUpdatesChecked { updates } =
+                event.payload
+            {
+                break anyhow::Ok(updates);
+            }
+        }
+    })?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&updates)?);
+        return Ok(());
+    }
+    for update in updates {
+        let verdict = if update.update_available {
+            rust_i18n::t!("cli.agents.update_available", command = update.command).to_string()
+        } else if update.latest.is_some() {
+            rust_i18n::t!("cli.agents.up_to_date").to_string()
+        } else {
+            rust_i18n::t!("cli.agents.unknown_latest").to_string()
+        };
+        println!(
+            "{}\t{}\t{}\t{verdict}",
+            update.agent,
+            update.installed.unwrap_or_else(|| "?".into()),
+            update.latest.unwrap_or_else(|| "?".into())
+        );
+    }
+    Ok(())
 }
 
 /// `ginka pr --generate`: ask, then wait for the pushed outcome and print

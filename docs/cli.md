@@ -52,7 +52,9 @@ Manage workspaces, which are git worktrees
 
 Report which agent CLIs this machine has, and whether they are usable
 
-`ginka agents`
+`ginka agents [--check-updates]`
+
+`--check-updates` asks npm for each installed agent CLI's latest release and prints the command that updates it; nothing is installed.
 
 ## `ginka account`
 

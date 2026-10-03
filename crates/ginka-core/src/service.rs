@@ -642,6 +642,24 @@ impl Service {
                 Ok(Response::Ack)
             }
 
+            Request::CheckAgentUpdates => {
+                let agents = self.agents();
+                let events = self.events.clone();
+                // The registry is the network: never under the service's
+                // lock, and a slow answer only delays its own event.
+                std::thread::spawn(move || {
+                    let updates = crate::agent_updates::check(&agents, |url| {
+                        Ok(ureq::get(url)
+                            .call()?
+                            .body_mut()
+                            .with_config()
+                            .limit(256 * 1024)
+                            .read_to_string()?)
+                    });
+                    events.emit(DaemonEvent::AgentUpdatesChecked { updates });
+                });
+                Ok(Response::Ack)
+            }
             Request::ListAgents => Ok(Response::Agents {
                 agents: self.agents(),
             }),

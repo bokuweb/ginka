@@ -1114,6 +1114,21 @@ pub struct McpServerEntry {
     pub target: Option<String>,
 }
 
+/// Whether a newer release of an agent CLI is out.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUpdate {
+    /// The driver id: `claude`, `codex`, …
+    pub agent: String,
+    /// What the probe read from the installed CLI.
+    pub installed: Option<String>,
+    /// The latest published version, when the registry could be read.
+    pub latest: Option<String>,
+    pub update_available: bool,
+    /// The command that updates it, for the reader to run.
+    pub command: String,
+}
+
 /// An MCP server to add to an agent CLI's configuration.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

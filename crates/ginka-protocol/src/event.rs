@@ -322,6 +322,11 @@ pub enum DaemonEvent {
         error: Option<String>,
     },
 
+    /// What `CheckAgentUpdates` found, one row per installed agent.
+    AgentUpdatesChecked {
+        updates: Vec<crate::model::AgentUpdate>,
+    },
+
     /// A pull request asked for with `CreateGeneratedPullRequest` was opened
     /// — `url` — or could not be, and `error` says why. Pushed for the same
     /// reason as `CommitMessageGenerated`.

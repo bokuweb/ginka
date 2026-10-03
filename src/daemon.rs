@@ -1647,6 +1647,13 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Ask for an update check; the answer is `AgentUpdatesChecked`.
+    pub async fn check_agent_updates(&self) -> Result<(), String> {
+        self.ask_result(Request::CheckAgentUpdates)
+            .await
+            .map(|_| ())
+    }
+
     /// The MCP servers the agent CLIs are configured with outside Ginka.
     pub async fn mcp_servers(
         &self,

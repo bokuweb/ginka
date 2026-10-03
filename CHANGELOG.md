@@ -48,6 +48,7 @@ far is unreleased.
 - Preview tabs: a single click in the file tree reuses one tab.
 - Add and remove Claude Code's and Codex's MCP servers through their own
   CLIs.
+- Check, on request, whether a newer agent CLI is out.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.
