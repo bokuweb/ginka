@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 /// Shown until anything better exists.
 pub const DEFAULT_TITLE: &str = "New session";
 
+/// A session's title, kept as the user's and the agent's separate names.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionTitle {
@@ -53,10 +54,12 @@ impl SessionTitle {
         self.agent.as_deref()
     }
 
+    /// Whether the agent title is still prompt text standing in for a real one.
     pub fn agent_title_is_placeholder(&self) -> bool {
         self.agent_is_placeholder
     }
 
+    /// What to show: the user's title, else the agent's, else [`DEFAULT_TITLE`].
     pub fn display(&self) -> &str {
         self.user
             .as_deref()

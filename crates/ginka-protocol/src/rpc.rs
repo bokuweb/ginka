@@ -29,6 +29,7 @@ pub enum Request {
     ListProjects,
     /// Register a repository or folder, adopting the worktrees it already has.
     AddProject {
+        /// The repository or folder to register. A daemon-host path.
         path: PathBuf,
         /// Optional reader-facing name; the stable key still derives from the path.
         #[serde(default)]
@@ -36,21 +37,40 @@ pub enum Request {
     },
     /// Forget a project. The worktrees on disk are left alone: the daemon
     /// registered them, it did not create the user's code.
-    RemoveProject { project: ProjectName },
+    RemoveProject {
+        /// The project to forget.
+        project: ProjectName,
+    },
     /// Name a project the way the reader groups it; blank clears it. The
     /// project's `name` — its identity — does not change.
-    SetProjectLabel { project: ProjectName, label: String },
+    SetProjectLabel {
+        /// The project to name.
+        project: ProjectName,
+        /// The new label; blank clears it.
+        label: String,
+    },
     /// Put a project at `index` in the rail's order; an index past the end
     /// is the end.
-    MoveProject { project: ProjectName, index: u32 },
+    MoveProject {
+        /// The project to move.
+        project: ProjectName,
+        /// Zero-based destination in the rail's order.
+        index: u32,
+    },
 
     /// Every workspace, reconciled against git first. `project` limits it.
-    ListWorkspaces { project: Option<ProjectName> },
+    ListWorkspaces {
+        /// Only this project's workspaces, when set.
+        project: Option<ProjectName>,
+    },
     /// Create a worktree on `branch`, cutting it from `base` when the branch
     /// does not exist yet.
     CreateWorkspace {
+        /// The project to add the worktree to.
         project: ProjectName,
+        /// The branch to check out; also names the worktree.
         branch: String,
+        /// What a new branch is cut from; the project's default branch when absent.
         base: Option<String>,
     },
     /// Make somewhere to work with no project at all.
@@ -59,17 +79,29 @@ pub enum Request {
     /// as a plain project and answers with its workspace. This is the "just
     /// start an agent" flow: a question that needs a scratch directory should
     /// not need a repository first.
-    CreateScratchWorkspace { name: Option<String> },
+    CreateScratchWorkspace {
+        /// What the directory and project are called; `scratch` when absent.
+        name: Option<String>,
+    },
     /// Remove a workspace's worktree. `force` is required when it is dirty.
-    RemoveWorkspace { workspace: WorkspaceId, force: bool },
+    RemoveWorkspace {
+        /// The workspace to remove.
+        workspace: WorkspaceId,
+        /// Remove it even with uncommitted work, which is then lost.
+        force: bool,
+    },
     /// Pin or unpin a workspace.
     PinWorkspace {
+        /// The workspace to pin or unpin.
         workspace: WorkspaceId,
+        /// `true` pins it, `false` unpins it.
         pinned: bool,
     },
     /// Archive or restore a workspace without deleting its worktree or history.
     ArchiveWorkspace {
+        /// The workspace to archive or restore.
         workspace: WorkspaceId,
+        /// `true` archives it, `false` restores it.
         archived: bool,
     },
     /// Write the line of status shown under a workspace in the sidebar, or
@@ -79,10 +111,13 @@ pub enum Request {
     /// sends the directory it runs in as `path` instead, which the daemon
     /// resolves to the worktree holding it. One of the two is required.
     SetWorkspaceStatus {
+        /// The workspace to write on; required unless `path` is given.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+        /// A directory inside the worktree, resolved by the daemon. A daemon-host path.
         #[serde(default)]
         path: Option<std::path::PathBuf>,
+        /// The line to show, kept to one bounded line; `None` or blank clears it.
         note: Option<String>,
     },
 
@@ -106,6 +141,7 @@ pub enum Request {
     AddAccount {
         /// A slug, immutable once created, unique across providers.
         id: AccountId,
+        /// The provider whose CLI signs into it.
         provider: ProviderKind,
         /// What the chip says.
         label: String,
@@ -113,35 +149,55 @@ pub enum Request {
     /// Forget a login. The directory holds the vendor's sign-in, which is the
     /// thing a person least wants deleted by accident, so it stays unless
     /// `delete_home` says otherwise.
-    RemoveAccount { id: AccountId, delete_home: bool },
+    RemoveAccount {
+        /// The account to forget; a provider's default cannot be removed.
+        id: AccountId,
+        /// Also delete the account's directory and the sign-in inside it.
+        delete_home: bool,
+    },
     /// Select the account future sessions of its provider use. Existing
     /// sessions retain the account they started on.
-    SelectAccount { id: AccountId },
+    SelectAccount {
+        /// The account new sessions of its provider will use.
+        id: AccountId,
+    },
     /// Run the vendor's own sign-in for an account, in a terminal in
     /// `workspace`'s dock, with the account's directory in its environment.
     LoginAccount {
+        /// The account to sign in.
         id: AccountId,
+        /// The workspace whose terminal dock the sign-in opens in.
         workspace: WorkspaceId,
+        /// Terminal height in character cells.
         rows: u16,
+        /// Terminal width in character cells.
         cols: u16,
     },
     /// Ask the provider how much of an account's rate-limit windows is left,
     /// without running a turn. Answers with the reading, and pushes it.
-    RefreshPlanUsage { account: AccountId },
+    RefreshPlanUsage {
+        /// The account to read.
+        account: AccountId,
+    },
     /// Sessions, newest first. `workspace` limits it; `origin` limits it to
     /// the session still answering that thread, which is how a connector
     /// finds where a reply belongs.
     ListSessions {
+        /// Only this workspace's sessions, when set.
         workspace: Option<WorkspaceId>,
+        /// Only the session still answering this chat thread, when set.
         #[serde(default)]
         origin: Option<SessionOrigin>,
     },
     /// Start an agent in a workspace and send it `prompt`.
     StartSession {
+        /// The workspace the agent runs in.
         workspace: WorkspaceId,
         /// A driver id: `claude`, `codex`, …
         agent: String,
+        /// The opening prompt, attachment references included.
         prompt: String,
+        /// Provider model id; the provider's default when absent.
         model: Option<String>,
         /// Provider reasoning level, when the selected model accepts one.
         #[serde(default)]
@@ -165,9 +221,13 @@ pub enum Request {
     /// `null` selects the provider default. The driver decides whether its
     /// transport can keep the vendor session or needs a restart.
     UpdateSessionOptions {
+        /// The conversation to change.
         session: SessionId,
+        /// Provider model id; `None` selects the provider default.
         model: Option<String>,
+        /// Provider reasoning level; `None` selects the model's default.
         reasoning_effort: Option<String>,
+        /// Provider service tier; `None` selects the model's default.
         service_tier: Option<String>,
     },
     /// Ask the same question in several worktrees at once.
@@ -177,17 +237,25 @@ pub enum Request {
     /// re-prompting one agent three times. One worktree per attempt, so the
     /// attempts cannot tread on each other.
     FanOut {
+        /// The project every attempt's worktree is created in.
         project: ProjectName,
         /// What the branches are called: `<prefix>-1`, `<prefix>-2`, …
         branch_prefix: String,
+        /// What the branches are cut from; the project's default branch when absent.
         base: Option<String>,
+        /// The prompt every attempt is sent.
         prompt: String,
         /// One attempt per entry. The same agent can appear more than once.
         attempts: Vec<Attempt>,
     },
     /// Send a follow-up. Queued when the agent is mid-turn, which is why this
     /// answers `Ack` rather than waiting for the reply.
-    SendMessage { session: SessionId, text: String },
+    SendMessage {
+        /// The conversation to continue.
+        session: SessionId,
+        /// The follow-up prompt, attachment references included.
+        text: String,
+    },
     /// Follow-ups waiting behind a session's active turn, in dispatch order.
     QueuedMessages {
         /// Session whose pending prompts are requested.
@@ -229,38 +297,72 @@ pub enum Request {
     /// Put a follow-up in the queue even where the running turn could take
     /// it now — the Codex CLI's Tab. With nothing running and nothing
     /// waiting ahead of it, it starts at once, like `SendMessage`.
-    QueueMessage { session: SessionId, text: String },
+    QueueMessage {
+        /// The conversation to queue for.
+        session: SessionId,
+        /// The follow-up prompt, attachment references included.
+        text: String,
+    },
     /// Stop the running turn and send this queued prompt next — opencodex's
     /// Steer. The rest of the queue keeps its order and keeps going. With
     /// nothing running it is sent at once.
-    InterruptWithQueuedMessage { session: SessionId, id: u64 },
+    InterruptWithQueuedMessage {
+        /// The conversation whose turn is stopped.
+        session: SessionId,
+        /// Stable session-local row id of the prompt to send next.
+        id: u64,
+    },
     /// Hold the queue, or let it go. A stopped or failed turn holds it; a
     /// restarted daemon brings it back held. Letting a held queue go while
     /// nothing is running sends its first prompt.
-    SetQueuePaused { session: SessionId, paused: bool },
+    SetQueuePaused {
+        /// The conversation whose queue to hold or release.
+        session: SessionId,
+        /// `true` holds the queue, `false` lets it go.
+        paused: bool,
+    },
     /// Throw away every waiting follow-up.
-    ClearQueue { session: SessionId },
+    ClearQueue {
+        /// The conversation whose queue is emptied.
+        session: SessionId,
+    },
     /// Ask the provider to compact an idle conversation's context.
     ///
     /// This is deliberately distinct from a follow-up: it is refused while a
     /// turn is running and on providers without an explicit compact command.
-    CompactSession { session: SessionId },
+    CompactSession {
+        /// The idle conversation to compact.
+        session: SessionId,
+    },
     /// Answer an [`AskUser`](crate::event::AgentEvent::AskUser), approve a
     /// [`PlanProposal`](crate::event::AgentEvent::PlanProposal), or resolve a
     /// [`Permission`](crate::event::AgentEvent::Permission) request.
     RespondToAgent {
+        /// The session whose running turn is waiting.
         session: SessionId,
         /// The `id` from the event being answered.
         request_id: String,
+        /// The answer: an option's text, free text, or the approval decision.
         response: String,
     },
     /// Rename a conversation. An empty title clears it back to none.
-    RenameSession { session: SessionId, title: String },
+    RenameSession {
+        /// The conversation to rename.
+        session: SessionId,
+        /// The new title; empty clears it.
+        title: String,
+    },
     /// Stop a session answering the thread that started it, so the next
     /// message there starts a new one. The origin stays on the record.
-    CloseSessionOrigin { session: SessionId },
+    CloseSessionOrigin {
+        /// The session to detach from its thread.
+        session: SessionId,
+    },
     /// Forget a session and its transcript and checkpoints.
-    RemoveSession { session: SessionId },
+    RemoveSession {
+        /// The session to forget.
+        session: SessionId,
+    },
     /// Take a copy of a conversation as it was, and carry on from there.
     ///
     /// `after` is the transcript position to fork at; `None` forks the whole
@@ -273,12 +375,17 @@ pub enum Request {
     /// changes and no model is named, the new agent's default is used, because
     /// a model id is the vendor's and does not carry across.
     ForkSession {
+        /// The conversation to copy.
         session: SessionId,
+        /// Last transcript position kept; `None` keeps the whole transcript.
         after: Option<u64>,
+        /// Driver id to continue on; the original's when absent.
         #[serde(default)]
         agent: Option<String>,
+        /// Model for the fork; see above for the default when absent.
         #[serde(default)]
         model: Option<String>,
+        /// Login to continue on; the original's when absent.
         #[serde(default)]
         account: Option<AccountId>,
     },
@@ -293,38 +400,56 @@ pub enum Request {
     /// replaced in it. `text` is then sent there. The original conversation
     /// is left as it was. Answers with the new session.
     EditPrompt {
+        /// The conversation the prompt was sent in.
         session: SessionId,
+        /// Transcript position of the user prompt being edited.
         seq: u64,
+        /// The replacement prompt.
         text: String,
     },
     /// The conversations the agents' own CLIs keep for a workspace's
     /// directory — `claude` or `codex` run in a terminal, outside Ginka —
     /// newest first, leaving out the ones Ginka's sessions already hold.
     /// Answers with [`Response::CliSessions`].
-    CliSessions { workspace: WorkspaceId },
+    CliSessions {
+        /// The workspace whose directory the CLIs are asked about.
+        workspace: WorkspaceId,
+    },
     /// Bring one of those conversations in: a new session in `workspace`
     /// holding the vendor's id, so its next turn resumes that same thread,
     /// with the conversation's recent turns as its transcript. On the
     /// provider's system login, which is where the CLI keeps it. Answers
     /// with the new session.
     AdoptCliSession {
+        /// The workspace the new session runs in.
         workspace: WorkspaceId,
+        /// Driver id that can resume it: `claude` or `codex`.
         agent: String,
+        /// The vendor's session id, from [`Response::CliSessions`].
         vendor_session_id: String,
     },
     /// Find transcript entries containing `query`.
     SearchSessions {
+        /// Only this workspace's sessions, when set.
         workspace: Option<WorkspaceId>,
+        /// Text to look for in transcript entries.
         query: String,
+        /// Maximum matches; 50 when absent.
         limit: Option<u32>,
     },
 
     /// Kill the agent's process tree.
-    CancelSession { session: SessionId },
+    CancelSession {
+        /// The session whose process is killed.
+        session: SessionId,
+    },
     /// Read a transcript. `after` pages forward from a sequence number.
     SessionTranscript {
+        /// The conversation to read.
         session: SessionId,
+        /// Exclusive lower bound on `seq`; from the start when absent.
         after: Option<u64>,
+        /// Maximum entries; unbounded when absent.
         limit: Option<u32>,
     },
 
@@ -333,7 +458,9 @@ pub enum Request {
     /// The review half of the loop: an agent that edited twelve files is only
     /// useful if the twelve are readable without leaving the window.
     WorkspaceChanges {
+        /// The workspace to diff.
         workspace: WorkspaceId,
+        /// What to measure against.
         source: ChangeSource,
         /// Unchanged lines around each edit; omitted means three, at most 25.
         #[serde(default)]
@@ -341,6 +468,7 @@ pub enum Request {
     },
     /// Recent commits in a workspace, newest first and bounded by the daemon.
     WorkspaceHistory {
+        /// The workspace whose history to read.
         workspace: WorkspaceId,
         /// Maximum rows to return; defaults to 50 and never exceeds 200.
         #[serde(default)]
@@ -357,9 +485,13 @@ pub enum Request {
     /// message when `message` is empty; the daemon refuses it when that
     /// commit is already on a remote.
     Commit {
+        /// The workspace to commit in.
         workspace: WorkspaceId,
+        /// The commit message; may be empty only with `amend`.
         message: String,
+        /// Stage every change, untracked files included, before committing.
         all: bool,
+        /// Fold into the last commit instead of making a new one.
         #[serde(default)]
         amend: bool,
     },
@@ -368,8 +500,11 @@ pub enum Request {
     /// on. Uncommitted work in the workspace is committed first with
     /// `message`, and refused without one.
     MergeWorkspace {
+        /// The workspace whose branch is merged.
         workspace: WorkspaceId,
+        /// The branch to merge into; the project checkout's branch when absent.
         into: Option<String>,
+        /// Commit message for uncommitted work, required when there is any.
         message: Option<String>,
     },
     /// Put one file into the next commit, or take it back out.
@@ -378,7 +513,9 @@ pub enum Request {
     /// ordinary outcome of reading an agent's work, and committing all of it
     /// is not the only thing a reader may want to do about it.
     StageFile {
+        /// The workspace whose index changes.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
         /// `true` stages it, `false` takes it back out.
         staged: bool,
@@ -389,8 +526,11 @@ pub enum Request {
     /// unstaged or staged diff. A stale header is refused rather than matched
     /// approximately to another change.
     StageHunk {
+        /// The workspace whose index changes.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
+        /// The hunk's complete `@@` line, as last read.
         header: String,
         /// `true` stages it, `false` takes it back out.
         staged: bool,
@@ -400,8 +540,11 @@ pub enum Request {
     /// `header` is the complete `@@` line last read from the unstaged diff. A
     /// stale header is refused rather than matched approximately.
     RevertHunk {
+        /// The workspace whose worktree changes.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
+        /// The hunk's complete `@@` line, as last read from the unstaged diff.
         header: String,
     },
     /// Throw away one file's uncommitted work.
@@ -409,7 +552,9 @@ pub enum Request {
     /// Destructive and not undoable through git: a file the agent invented is
     /// deleted. The caller confirms; the daemon does as it is told.
     RevertFile {
+        /// The workspace whose worktree changes.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
     },
     /// Push a workspace's branch, setting an upstream if it has none.
@@ -418,16 +563,24 @@ pub enum Request {
     /// an amend or a rebase — only if the remote is still what was last
     /// fetched. It is never what a plain push falls back to.
     Push {
+        /// The workspace whose branch is pushed.
         workspace: WorkspaceId,
+        /// Replace rewritten remote history, guarded by the last fetch.
         #[serde(default)]
         force_with_lease: bool,
     },
     /// Fetch and fast-forward a clean workspace branch from its upstream.
-    Pull { workspace: WorkspaceId },
+    Pull {
+        /// The workspace to fast-forward.
+        workspace: WorkspaceId,
+    },
     /// Bring a workspace branch level with its remote in one action: publish
     /// it if it was never pushed, otherwise fast-forward, then push what is
     /// ahead. Answers with [`Response::Synced`].
-    Sync { workspace: WorkspaceId },
+    Sync {
+        /// The workspace to bring level with its remote.
+        workspace: WorkspaceId,
+    },
     /// Push the workspace's branch and open a pull request for it with the
     /// GitHub CLI, titled and described from its commits. Answers with the
     /// pull request's address — the existing one's, when the branch already
@@ -436,7 +589,9 @@ pub enum Request {
     /// `gh` rather than the API: it is already signed in wherever someone
     /// reviews on GitHub, and Ginka never holds the token (rule 7).
     CreatePullRequest {
+        /// The workspace whose branch the pull request is from.
         workspace: WorkspaceId,
+        /// Open it as a draft.
         #[serde(default)]
         draft: bool,
     },
@@ -444,6 +599,7 @@ pub enum Request {
     /// The notes of a project, or every note when `project` is absent, most
     /// recently touched first.
     ListNotes {
+        /// Only this project's notes, when set.
         #[serde(default)]
         project: Option<ProjectName>,
         /// Case-insensitive substring in title, body or tags.
@@ -456,37 +612,51 @@ pub enum Request {
     /// Write a note. Without an `id` it is a new one; with one it replaces the
     /// title and body of the note that has it.
     SaveNote {
+        /// The note to replace; absent creates a new one.
         #[serde(default)]
         id: Option<String>,
+        /// The project it belongs to; absent for a note that belongs to none.
         #[serde(default)]
         project: Option<ProjectName>,
+        /// One line, shown in the list.
         title: String,
+        /// Markdown.
         body: String,
         /// Omit to retain existing tags on edit; an empty list clears them.
         #[serde(default)]
         tags: Option<Vec<String>>,
     },
     /// Forget a note.
-    RemoveNote { id: String },
+    RemoveNote {
+        /// The note to forget.
+        id: String,
+    },
 
     /// Raise a ticket: work noticed in passing, handed to the reader as a
     /// card they can start in its own session. `workspace` defaults to the
     /// raising session's; one of the two is needed.
     RaiseTicket {
+        /// Where the ticket belongs; the raising session's workspace when absent.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+        /// The session raising it, when an agent is.
         #[serde(default)]
         from_session: Option<SessionId>,
+        /// A short imperative, the card's heading.
         title: String,
+        /// One or two sentences for the card: why now, and what it will do.
         #[serde(default)]
         summary: String,
+        /// What the new session is told; self-contained.
         prompt: String,
     },
     /// Tickets, newest first: a workspace's, or every one. Open ones only
     /// unless `all`.
     ListTickets {
+        /// Only this workspace's tickets, when set.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+        /// Include started and dismissed tickets.
         #[serde(default)]
         all: bool,
     },
@@ -494,49 +664,71 @@ pub enum Request {
     /// workspace, or in a new worktree on `branch` in the same project.
     /// `agent` defaults to the raising session's agent.
     StartTicket {
+        /// The open ticket to start.
         ticket: String,
+        /// Driver id to run it on.
         #[serde(default)]
         agent: Option<String>,
+        /// A branch for a new worktree; the ticket's workspace when absent.
         #[serde(default)]
         branch: Option<String>,
     },
     /// Decide against an open ticket.
-    DismissTicket { ticket: String },
+    DismissTicket {
+        /// The open ticket to dismiss.
+        ticket: String,
+    },
     /// Send a follow-up from one session to another. The receiver is told
     /// who sent it and how to answer, which is what makes it a conversation
     /// between agents rather than an anonymous prompt.
     MessageSession {
+        /// The session sending; named to the receiver so it can answer.
         from: SessionId,
+        /// The session receiving it as a follow-up.
         to: SessionId,
+        /// The message.
         text: String,
     },
 
     /// Saved commands and prompts: a project's own and the global ones, or
     /// only the global ones when `project` is absent. By name.
     ListQuickCommands {
+        /// Also this project's own commands, when set.
         #[serde(default)]
         project: Option<ProjectName>,
     },
     /// Save a quick command: new without an `id`, a replacement with one.
     SaveQuickCommand {
+        /// The command to replace; absent creates a new one.
         #[serde(default)]
         id: Option<String>,
+        /// The project it belongs to; absent offers it in every project.
         #[serde(default)]
         project: Option<ProjectName>,
+        /// What the menu and the palette call it.
         name: String,
+        /// Whether it is a shell command or a prompt.
         kind: crate::model::QuickCommandKind,
+        /// The shell command line, or the prompt text.
         body: String,
     },
     /// Forget a quick command.
-    RemoveQuickCommand { id: String },
+    RemoveQuickCommand {
+        /// The command to forget.
+        id: String,
+    },
     /// Run a shell quick command in a new terminal in the workspace, which
     /// stays open on a shell afterwards so its output can be read. A prompt
     /// command is refused: sending a prompt is the conversation's to do,
     /// through `SendMessage` or `StartSession`.
     RunQuickCommand {
+        /// The workspace whose dock the terminal opens in.
         workspace: WorkspaceId,
+        /// The shell quick command to run.
         id: String,
+        /// Terminal height in character cells.
         rows: u16,
+        /// Terminal width in character cells.
         cols: u16,
     },
 
@@ -544,21 +736,29 @@ pub enum Request {
     ///
     /// What `@` in the composer reaches for, and what a quick-open will.
     WorkspaceFiles {
+        /// The workspace to list.
         workspace: WorkspaceId,
+        /// Fuzzy filter on the path; every file when absent.
         query: Option<String>,
+        /// Maximum entries; 30 when absent.
         limit: Option<u32>,
     },
     /// The commands a workspace offers after `/`.
     SlashCommands {
+        /// The workspace whose commands to list.
         workspace: WorkspaceId,
+        /// Filter on the name, typed after the slash.
         query: Option<String>,
     },
     /// Run `zg index` for a workspace in a daemon terminal, so agents started
     /// there are handed zvec-grep's search (`ginka-core::tools`). Answers
     /// the terminal; refused when `zg` is not installed.
     IndexWorkspace {
+        /// The workspace to index.
         workspace: WorkspaceId,
+        /// Terminal height in character cells.
         rows: u16,
+        /// Terminal width in character cells.
         cols: u16,
     },
     /// Write a commit message for a workspace's changes on a cheap model
@@ -567,9 +767,12 @@ pub enum Request {
     /// driver to run it on; the workspace's latest session's otherwise, and
     /// `claude` failing that. `staged` describes only what is staged.
     GenerateCommitMessage {
+        /// The workspace whose changes are described.
         workspace: WorkspaceId,
+        /// Driver id to write it with.
         #[serde(default)]
         agent: Option<String>,
+        /// Describe only what is staged.
         #[serde(default)]
         staged: bool,
     },
@@ -580,21 +783,30 @@ pub enum Request {
     /// `DaemonEvent::PullRequestOpened`. `agent` is chosen as for
     /// `GenerateCommitMessage`.
     CreateGeneratedPullRequest {
+        /// The workspace whose branch the pull request is from.
         workspace: WorkspaceId,
+        /// Open it as a draft.
         #[serde(default)]
         draft: bool,
+        /// Driver id to write the title and description with.
         #[serde(default)]
         agent: Option<String>,
     },
     /// The local branches of a workspace's repository, with which is checked
     /// out here and which are held by other worktrees.
-    ListBranches { workspace: WorkspaceId },
+    ListBranches {
+        /// The workspace whose repository's branches to list.
+        workspace: WorkspaceId,
+    },
     /// Check a branch out inside a workspace, creating it from HEAD with
     /// `create`. The workspace keeps its name: its id never follows the branch
     /// (`AGENTS.md` rule 4), so nothing is re-keyed.
     CheckoutBranch {
+        /// The workspace to switch.
         workspace: WorkspaceId,
+        /// Short branch name to check out.
         branch: String,
+        /// Create the branch from HEAD first.
         #[serde(default)]
         create: bool,
     },
@@ -602,14 +814,18 @@ pub enum Request {
     /// every registered project's — or one project's, when named
     /// (`docs/roadmap.md` §3.3 N11).
     ListSkills {
+        /// Scan only this project's roots, not every registered project's.
         #[serde(default)]
         project: Option<ProjectName>,
     },
     /// Enable or disable every copy of a skill, by renaming its `SKILL.md`.
     /// Nothing is deleted; `project` narrows the search the same way.
     SetSkillEnabled {
+        /// The skill's name, as listed.
         name: String,
+        /// `true` enables every copy, `false` disables every copy.
         enabled: bool,
+        /// Scan only this project's roots, not every registered project's.
         #[serde(default)]
         project: Option<ProjectName>,
     },
@@ -626,25 +842,37 @@ pub enum Request {
         project: Option<ProjectName>,
     },
     /// What the user was in the middle of typing in a workspace.
-    ComposerDraft { workspace: WorkspaceId },
+    ComposerDraft {
+        /// The workspace whose draft to read.
+        workspace: WorkspaceId,
+    },
     /// Keep what they are typing. An empty draft forgets it.
     SaveComposerDraft {
+        /// The workspace the draft belongs to.
         workspace: WorkspaceId,
+        /// The composer's text; empty forgets the draft.
         text: String,
     },
 
     /// What the work has cost, by day, by agent and by account, with the
     /// latest reading of every account's rate-limit windows.
-    Usage { days: Option<u32> },
+    Usage {
+        /// How many days back to count; 30 when absent.
+        days: Option<u32>,
+    },
 
     /// A changed image as it was and as it is under `source` (Orca's image
     /// diff). Each side is sent only when it is a recognised image within
     /// the preview limit. Every source is covered: a turn's two snapshots,
     /// a checkpoint or a branch's fork point against the worktree.
     ImageDiff {
+        /// The workspace the image is in.
         workspace: WorkspaceId,
+        /// What the old side is read from.
         source: crate::model::ChangeSource,
+        /// Relative to the worktree root.
         path: String,
+        /// Where the image was before a rename, when it moved.
         #[serde(default)]
         old_path: Option<String>,
     },
@@ -652,6 +880,7 @@ pub enum Request {
     /// the user's, and with `workspace` that repository's and that
     /// project's own (MonoCode's Settings → MCP). Read-only.
     ListMcpServers {
+        /// Also this workspace's repository and project configuration, when set.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
     },
@@ -660,29 +889,42 @@ pub enum Request {
     /// needs `workspace`, whose project it is written for. Not offered over
     /// MCP: an agent must not be able to install itself a server.
     AddMcpServer {
+        /// The workspace whose project a project or local scope is written for.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+        /// What to add, where and for which CLI.
         spec: crate::model::McpServerSpec,
     },
     /// Remove an MCP server from an agent CLI's configuration, through that
     /// CLI. `scope` narrows where; `workspace` is needed for a project or
     /// local one.
     RemoveMcpServer {
+        /// The workspace whose project a project or local scope refers to.
         #[serde(default)]
         workspace: Option<WorkspaceId>,
+        /// Whose configuration to change: `claude`, `codex`.
         provider: String,
+        /// The server's configured name.
         name: String,
+        /// Where to remove it from. When absent no scope is passed to the
+        /// vendor's CLI, which picks its own, and the command runs from the
+        /// home directory as for user scope.
         #[serde(default)]
         scope: Option<crate::model::McpScope>,
     },
     /// The checks of the pull request open from a workspace's branch, read
     /// with `gh pr checks` (Orca's checks view).
-    PullRequestChecks { workspace: WorkspaceId },
+    PullRequestChecks {
+        /// The workspace whose branch's pull request to read.
+        workspace: WorkspaceId,
+    },
     /// Hand the failing checks of the workspace's pull request to an agent
     /// to fix — Orca's "Fix broken checks". Routed like `ResolveConflicts`;
     /// refused when nothing failed. Answers with the conversation.
     FixFailingChecks {
+        /// The workspace whose pull request failed.
         workspace: WorkspaceId,
+        /// Which agent fixes them; chosen as for [`Request::ResolveConflicts`].
         #[serde(default)]
         agent: Option<String>,
     },
@@ -692,6 +934,7 @@ pub enum Request {
     /// with AI". Refused when nothing is conflicted. Answers with the
     /// conversation the request went to.
     ResolveConflicts {
+        /// The worktree with the conflicts.
         workspace: WorkspaceId,
         /// Which agent resolves them. Omitted, the workspace's latest
         /// conversation takes them as a follow-up (queued if it is working);
@@ -704,9 +947,13 @@ pub enum Request {
     /// `message` the message it was going to use. The daemon adds the staged
     /// files. Routed like [`Request::ResolveConflicts`].
     FixCommitFailure {
+        /// The workspace where the commit was refused.
         workspace: WorkspaceId,
+        /// The commit message that was refused.
         message: String,
+        /// What git and its hooks printed.
         output: String,
+        /// Which agent fixes it; chosen as for [`Request::ResolveConflicts`].
         #[serde(default)]
         agent: Option<String>,
     },
@@ -719,24 +966,37 @@ pub enum Request {
     /// comments); refused when it comes before `line` or has none to start
     /// from.
     AddReviewComment {
+        /// The workspace whose diff is commented on.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
+        /// One-based line on `side`; `None` comments on the whole file.
         line: Option<u32>,
+        /// Last line of a multi-line comment, inclusive.
         #[serde(default)]
         end_line: Option<u32>,
+        /// Which side of the diff the line numbers count on.
         side: DiffSide,
+        /// What to tell the agent.
         text: String,
     },
     /// Every comment waiting in a workspace, in reading order.
-    ListReviewComments { workspace: WorkspaceId },
+    ListReviewComments {
+        /// The workspace whose comments to list.
+        workspace: WorkspaceId,
+    },
     /// Take one comment back.
-    RemoveReviewComment { comment: String },
+    RemoveReviewComment {
+        /// The [`ReviewComment::id`] to remove.
+        comment: String,
+    },
     /// Send the batch to the agent as one message, and clear it.
     ///
     /// One message rather than one per comment: an agent given them together
     /// can see that three of them are the same mistake, and a turn per comment
     /// is three times the context and three times the cost.
     SendReviewComments {
+        /// The workspace whose waiting comments are sent.
         workspace: WorkspaceId,
         /// The conversation to send them to. Its agent gets the batch as a
         /// follow-up, queued if it is still working.
@@ -744,26 +1004,43 @@ pub enum Request {
     },
 
     /// Every checkpoint taken in a workspace, newest first.
-    ListCheckpoints { workspace: WorkspaceId },
+    ListCheckpoints {
+        /// The workspace whose checkpoints to list.
+        workspace: WorkspaceId,
+    },
     /// Store a file the user attached, so a message can refer to it.
     ///
     /// The bytes travel base64-encoded because the wire is JSON; the daemon
     /// writes them once and every later mention is the reference it answers
     /// with (`docs/roadmap.md` §3.3 N6).
-    UploadAttachment { name: String, data_base64: String },
+    UploadAttachment {
+        /// The file's name as the user knows it; display only.
+        name: String,
+        /// The file's bytes, base64-encoded.
+        data_base64: String,
+    },
     /// Read a daemon-owned attachment as a bounded, signature-checked image.
     /// Returns no image for missing, unsafe, oversized or non-image references.
-    ReadAttachmentImage { reference: String },
+    ReadAttachmentImage {
+        /// The `ginka-attachment:<id>` reference to read.
+        reference: String,
+    },
     /// Put the worktree back to a checkpoint's state.
-    RestoreCheckpoint { checkpoint: CheckpointId },
+    RestoreCheckpoint {
+        /// The checkpoint whose tree is restored.
+        checkpoint: CheckpointId,
+    },
 
     /// Start a shell in a workspace.
     ///
     /// The daemon owns the pty, so the shell outlives the window that opened
     /// it — which is the whole point of the process split.
     OpenTerminal {
+        /// The workspace the shell starts in.
         workspace: WorkspaceId,
+        /// Terminal height in character cells.
         rows: u16,
+        /// Terminal width in character cells.
         cols: u16,
     },
     /// The lines in a workspace's files that contain `query`.
@@ -771,8 +1048,11 @@ pub enum Request {
     /// The other half of finding something: a reader who knows what the code
     /// says and not what it is called cannot get there by path.
     SearchContent {
+        /// The workspace to search.
         workspace: WorkspaceId,
+        /// Literal text to look for.
         query: String,
+        /// Maximum matches; 30 when absent.
         limit: Option<u32>,
     },
     /// Find fuzzy file paths and literal source lines across a project's active workspaces.
@@ -780,8 +1060,11 @@ pub enum Request {
     /// `limit` is shared across the complete result, rather than applied once
     /// per worktree, so one request remains bounded as projects grow.
     SearchProject {
+        /// The project whose active workspaces are searched.
         project: ProjectName,
+        /// Fuzzy path query and literal content text.
         query: String,
+        /// Maximum hits of each kind, shared across every worktree.
         limit: Option<u32>,
     },
 
@@ -791,7 +1074,9 @@ pub enum Request {
     /// for `../../.ssh/id_rsa` is asking the daemon to do something it will
     /// not do.
     ReadFile {
+        /// The workspace whose worktree holds the file.
         workspace: WorkspaceId,
+        /// Relative to the worktree root.
         path: String,
     },
     /// Launch a daemon-host editor on an existing file inside the worktree.
@@ -822,58 +1107,101 @@ pub enum Request {
     /// A window that has just opened asks this: the daemon kept them running
     /// while it was gone, and a dock that showed none of them would be hiding
     /// work that is still going.
-    WorkspaceTerminals { workspace: WorkspaceId },
+    WorkspaceTerminals {
+        /// The workspace whose shells to list.
+        workspace: WorkspaceId,
+    },
     /// What a terminal has printed lately, for a window reattaching to it.
-    TerminalHistory { terminal: TerminalId },
+    TerminalHistory {
+        /// The terminal to read back.
+        terminal: TerminalId,
+    },
     /// Send keystrokes to a terminal.
-    WriteTerminal { terminal: TerminalId, data: String },
+    WriteTerminal {
+        /// The terminal to type into.
+        terminal: TerminalId,
+        /// Bytes to write to the pty, escapes included.
+        data: String,
+    },
     /// Tell a terminal how big its window is now.
     ResizeTerminal {
+        /// The terminal to resize.
         terminal: TerminalId,
+        /// New height in character cells.
         rows: u16,
+        /// New width in character cells.
         cols: u16,
     },
     /// Close a terminal and stop its shell.
-    CloseTerminal { terminal: TerminalId },
+    CloseTerminal {
+        /// The terminal to close.
+        terminal: TerminalId,
+    },
 
     /// Scheduled jobs: a project's, or every project's.
-    ListCronJobs { project: Option<ProjectName> },
+    ListCronJobs {
+        /// Only this project's jobs, when set.
+        project: Option<ProjectName>,
+    },
     /// Save a scheduled job: new without an `id`, a replacement with one.
     /// The cron expression or `@once` timestamp is checked here, so a job
     /// that can never fire is refused when written rather than found silent.
     SaveCronJob {
+        /// The job to replace; absent creates a new one.
         id: Option<i64>,
+        /// The project it runs for.
         project: ProjectName,
+        /// The workspace it runs in; the project's own checkout when absent.
         workspace: Option<WorkspaceId>,
         /// A chat job's conversation to continue instead of starting one
         /// (a reminder). Must be a conversation in `project`.
         #[serde(default)]
         session: Option<SessionId>,
+        /// What lists call it.
         name: String,
+        /// Five cron fields, an `@daily`-style macro, or `@once <RFC3339 timestamp>`.
         schedule: String,
+        /// Whether the body is a prompt or a shell command.
         via: crate::model::CronVia,
+        /// The driver a chat job starts; absent for a terminal job.
         agent: Option<String>,
+        /// The prompt, or the command line.
         body: String,
         /// Run first on every scheduled firing; a failure skips the firing.
         #[serde(default)]
         precheck: Option<String>,
+        /// Whether the schedule fires it.
         enabled: bool,
     },
     /// Forget a scheduled job and its history.
-    RemoveCronJob { id: i64 },
+    RemoveCronJob {
+        /// The job to forget.
+        id: i64,
+    },
     /// Fire a job now, as its schedule would — including skipping it while
     /// its previous run is still going. Its precheck is not run: asking for
     /// a run now is the answer the probe would have given.
-    RunCronJob { id: i64 },
+    RunCronJob {
+        /// The job to fire.
+        id: i64,
+    },
     /// A job's firings, most recent first.
-    CronRuns { id: i64, limit: Option<u32> },
+    CronRuns {
+        /// The job whose firings to list.
+        id: i64,
+        /// Maximum firings; 50 when absent, at most 500.
+        limit: Option<u32>,
+    },
 
     /// The last `limit` transcript entries before position `before` — or
     /// before the end — oldest first. How a window opens a long session on
     /// its latest page and reads the earlier ones on request.
     SessionTranscriptTail {
+        /// The conversation to read.
         session: SessionId,
+        /// Exclusive upper bound on `seq`; the end of the transcript when absent.
         before: Option<u64>,
+        /// Maximum entries, capped by the daemon at 5000.
         limit: u32,
     },
 
@@ -883,11 +1211,17 @@ pub enum Request {
     DaemonSettings,
     /// Change one top-level setting to a JSON value, checked against the
     /// settings' shape before it is written and taken at once.
-    UpdateDaemonSettings { key: String, value: String },
+    UpdateDaemonSettings {
+        /// The top-level key in `settings.json`.
+        key: String,
+        /// The new value, as JSON text.
+        value: String,
+    },
     /// The providers shipped by this build and their daemon-owned settings.
     ListProviderSettings,
     /// Change one provider without replacing other providers' settings.
     UpdateProviderSettings {
+        /// The provider to change.
         provider: ProviderKind,
         /// Leave the enabled state unchanged when absent.
         enabled: Option<bool>,
@@ -901,22 +1235,31 @@ pub enum Request {
     /// address bar to complete from. Credentials, fragments and
     /// secret-looking query parameters are dropped before it is kept.
     RecordBrowserVisit {
+        /// The workspace whose browser loaded it.
         workspace: WorkspaceId,
+        /// The address loaded, before it is cleaned.
         url: String,
+        /// The page title, when it had one.
         title: Option<String>,
     },
     /// The pages to offer for what is typed in a workspace's address bar,
     /// most frecent first.
     BrowserSuggestions {
+        /// The workspace whose history to search.
         workspace: WorkspaceId,
+        /// What has been typed so far.
         query: String,
+        /// Maximum pages; 8 when absent, at most 50.
         limit: Option<u32>,
     },
     /// Put the skills that teach an agent to drive Ginka — `ginka-start`,
     /// `ginka-chat`, `ginka-terminal`, `ginka-loop` — into Claude Code's and
     /// Codex's skills directories on the daemon's host. A different file
     /// already there is left alone unless `force`.
-    InstallBundledSkills { force: bool },
+    InstallBundledSkills {
+        /// Overwrite a different file already in place.
+        force: bool,
+    },
 
     /// Every chat connector this daemon hosts, and whether each is connected
     /// (`docs/connectors.md` §3.3).
@@ -950,6 +1293,7 @@ pub enum Request {
 pub struct Attempt {
     /// A driver id: `claude`, `codex`, …
     pub agent: String,
+    /// Provider model id; the provider's default when absent.
     pub model: Option<String>,
     /// Which login to run on; the provider's active account when absent.
     #[serde(default)]
@@ -984,50 +1328,77 @@ pub struct ProviderSetting {
 pub enum Response {
     /// The request succeeded and there is nothing to return.
     Ack,
+    /// Answers [`Request::ListProjects`].
     Projects {
+        /// Every registered project, in sidebar order.
         projects: Vec<Project>,
     },
+    /// Answers [`Request::AddProject`].
     Project {
+        /// The project as registered.
         project: Project,
     },
+    /// Answers [`Request::ListWorkspaces`].
     Workspaces {
+        /// Every matching workspace, reconciled against git.
         workspaces: Vec<WorkspaceSummary>,
     },
+    /// A workspace that was just created, by [`Request::CreateWorkspace`] or
+    /// [`Request::CreateScratchWorkspace`].
     Workspace {
+        /// The new workspace.
         workspace: WorkspaceSummary,
     },
+    /// Answers [`Request::ListAgents`].
     Agents {
+        /// One row per known driver, whether installed or not.
         agents: Vec<AgentStatus>,
     },
+    /// Answers [`Request::Accounts`].
     Accounts {
+        /// Every login of every provider, the defaults first.
         accounts: Vec<Account>,
     },
+    /// Answers [`Request::AddAccount`].
     Account {
+        /// The account as created.
         account: Account,
     },
     /// A reading of an account's windows, or none when the provider could
     /// not be asked.
     PlanUsage {
+        /// The reading; `None` when the provider could not be asked.
         snapshot: Option<PlanSnapshot>,
     },
+    /// Answers [`Request::ListSessions`].
     Sessions {
+        /// Matching sessions, newest first.
         sessions: Vec<Session>,
     },
+    /// Answers [`Request::SearchSessions`].
     SessionMatches {
+        /// Where the query was found, one row per transcript entry.
         matches: Vec<SessionMatch>,
     },
+    /// A session that was just started, forked, adopted or handed work.
     Session {
+        /// The session's full record.
         session: Session,
     },
     /// Provider options were applied to this session. When the outcome says a
     /// restart was required, `session` is the context-preserving replacement.
     SessionOptionsApplied {
+        /// The session that runs later turns: the same one, or its replacement.
         session: Session,
+        /// Whether the change was absorbed or forced a restart.
         outcome: crate::provider::OptionOutcome,
     },
+    /// Answers [`Request::SessionTranscript`] and [`Request::SessionTranscriptTail`].
     Transcript {
+        /// Entries in ascending `seq` order.
         entries: Vec<TranscriptEntry>,
     },
+    /// Answers [`Request::QueuedMessages`].
     QueuedMessages {
         /// Pending prompts in dispatch order.
         messages: Vec<crate::model::QueuedMessage>,
@@ -1041,63 +1412,93 @@ pub enum Response {
         #[serde(default)]
         resume_at: Option<i64>,
     },
+    /// Answers [`Request::ListCheckpoints`].
     Checkpoints {
+        /// Every checkpoint in the workspace, newest first.
         checkpoints: Vec<Checkpoint>,
     },
     /// The two sides of a changed image; `None` where there is no image.
     ImageDiff {
+        /// The image as it was under the source.
         before: Option<crate::model::FileImage>,
+        /// The image as it is now.
         after: Option<crate::model::FileImage>,
     },
     /// MCP servers configured outside Ginka, by provider and scope.
     McpServers {
+        /// One row per server, provider and scope.
         servers: Vec<crate::model::McpServerEntry>,
     },
     /// A pull request's checks, in the order `gh` lists them.
     Checks {
+        /// One row per check.
         checks: Vec<crate::model::CheckRun>,
     },
+    /// Answers [`Request::WorkspaceChanges`].
     Changes {
+        /// Every changed file, with what it was measured against.
         changes: Changes,
     },
     /// Recent commits in newest-first order.
     History {
+        /// Newest first, bounded by the request's limit.
         commits: Vec<GitCommit>,
     },
+    /// Answers [`Request::WorkspaceFiles`].
     Files {
+        /// Best matches first.
         files: Vec<FileEntry>,
     },
+    /// Answers [`Request::SlashCommands`].
     Commands {
+        /// The commands that match what was typed.
         commands: Vec<SlashCommand>,
     },
+    /// Answers [`Request::ListBranches`].
     Branches {
+        /// Every local branch of the workspace's repository.
         branches: Vec<BranchInfo>,
     },
+    /// Answers [`Request::ListSkills`].
     Skills {
+        /// One entry per skill name, carrying every copy.
         skills: Vec<Skill>,
         /// The scan stopped at its cap; the list is what fitted.
         truncated: bool,
     },
+    /// Answers [`Request::ListReviewComments`].
     ReviewComments {
+        /// The waiting comments, in reading order.
         comments: Vec<ReviewComment>,
     },
+    /// Answers [`Request::UploadAttachment`].
     Attachment {
+        /// The stored file and the reference a message uses for it.
         attachment: Attachment,
     },
     /// A previewable attachment, or no image if it cannot be safely displayed.
     AttachmentImage {
+        /// The image; `None` when the reference is missing, unsafe, oversized or not an image.
         image: Option<crate::model::FileImage>,
     },
+    /// Answers [`Request::ComposerDraft`].
     Draft {
+        /// The saved draft; empty when there is none.
         text: String,
     },
+    /// A terminal that was just opened, for a shell, a sign-in, an index or a quick command.
     Terminal {
+        /// The new terminal; its output arrives as `DaemonEvent::TerminalOutput`.
         terminal: TerminalId,
     },
+    /// Answers [`Request::ReadFile`] and [`Request::WriteFile`].
     FileContent {
+        /// The file as read, or as written with its new revision.
         file: FileContent,
     },
+    /// Answers [`Request::SearchContent`].
     Matches {
+        /// Matching lines, bounded by the request's limit.
         matches: Vec<ContentMatch>,
     },
     /// Path and content hits from more than one worktree, tagged with their source.
@@ -1107,11 +1508,14 @@ pub enum Response {
         /// Literal content hits, under their own shared project-wide limit.
         matches: Vec<WorkspaceContentMatch>,
     },
+    /// Answers [`Request::WorkspaceTerminals`].
     Terminals {
+        /// The shells still running in the workspace.
         terminals: Vec<TerminalInfo>,
     },
     /// What a fan-out started, and what it could not.
     FannedOut {
+        /// The sessions that started, in the order their attempts were asked for.
         started: Vec<Session>,
         /// One line per attempt that did not start, in the order they were
         /// asked for: an arm that failed must not take the others with it.
@@ -1119,11 +1523,16 @@ pub enum Response {
     },
     /// What a terminal printed before this window was looking.
     TerminalHistory {
+        /// The retained output, escapes and all, oldest first.
         data: String,
     },
+    /// Answers [`Request::Usage`].
     Usage {
+        /// One row per day in the requested range.
         by_day: Vec<UsageRow>,
+        /// One row per driver.
         by_agent: Vec<UsageRow>,
+        /// One row per account.
         by_account: Vec<UsageRow>,
         /// When the rate table that priced unpriced turns was fetched; absent
         /// when there is none, and nothing was estimated.
@@ -1139,23 +1548,29 @@ pub enum Response {
         /// The latest reading per account, for those that have one.
         plans: Vec<PlanSnapshot>,
     },
-    /// A commit was made, and this is what it is called.
     /// What a merge did.
     Merged {
+        /// Which branch moved, where to, and whether it fast-forwarded.
         outcome: crate::model::MergeOutcome,
     },
+    /// Answers [`Request::Commit`].
     Committed {
+        /// The new commit's full object id.
         commit: String,
     },
+    /// Answers [`Request::ListConnectors`].
     Connectors {
+        /// One entry per connector this daemon hosts.
         connectors: Vec<ConnectorState>,
     },
     /// A pull request exists for the branch, and this is where.
     PullRequest {
+        /// The pull request's web address.
         url: String,
     },
     /// The conversations [`Request::CliSessions`] found.
     CliSessions {
+        /// Newest first, without the ones Ginka's sessions already hold.
         sessions: Vec<crate::model::CliSession>,
     },
     /// What [`Request::Sync`] did.
@@ -1165,47 +1580,69 @@ pub enum Response {
         /// Commits went out, or the branch was published.
         pushed: bool,
     },
+    /// Answers [`Request::ListNotes`].
     Notes {
+        /// Matching notes, most recently touched first.
         notes: Vec<Note>,
     },
+    /// Answers [`Request::SaveNote`].
     Note {
+        /// The note as stored.
         note: Note,
     },
     /// The daemon's settings, secrets left out.
     DaemonSettings {
+        /// The settings file as JSON text, every environment value replaced by `[set]`.
         json: String,
     },
     /// Runtime provider choices, including disabled providers.
     ProviderSettings {
+        /// One row per provider this build ships.
         providers: Vec<ProviderSetting>,
     },
     /// Pages the address bar can offer.
     BrowserSuggestions {
+        /// Most frecent first.
         pages: Vec<crate::model::VisitedPage>,
     },
     /// What installing Ginka's own skills did, a row per skill and place.
     BundledSkillsInstalled {
+        /// One row per skill and destination.
         results: Vec<crate::model::BundledSkillInstall>,
     },
+    /// Answers [`Request::ListCronJobs`].
     CronJobs {
+        /// The matching jobs.
         jobs: Vec<crate::model::CronJob>,
     },
+    /// Answers [`Request::SaveCronJob`] and [`Request::RunCronJob`].
     CronJob {
+        /// The job as stored, with its next and last run.
         job: crate::model::CronJob,
     },
+    /// Answers [`Request::CronRuns`].
     CronRuns {
+        /// The job's firings, most recent first.
         runs: Vec<crate::model::CronRun>,
     },
+    /// Answers [`Request::ListTickets`].
     Tickets {
+        /// Matching tickets, newest first.
         tickets: Vec<crate::model::Ticket>,
     },
+    /// A ticket that was just raised or changed.
     Ticket {
+        /// The ticket as stored.
         ticket: crate::model::Ticket,
     },
+    /// Answers [`Request::ListQuickCommands`].
     QuickCommands {
+        /// Matching commands, by name.
         commands: Vec<crate::model::QuickCommand>,
     },
+    /// Answers [`Request::SaveQuickCommand`].
     QuickCommand {
+        /// The command as stored.
         command: crate::model::QuickCommand,
     },
 }

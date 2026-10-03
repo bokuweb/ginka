@@ -20,12 +20,17 @@ pub enum AgentEvent {
     /// The session is live. Carries the provider's own session id, which is
     /// what a resume is built from.
     Connected {
+        /// The vendor's own session id, when it has issued one yet.
         session_id: Option<String>,
+        /// The model the provider reports it is actually running.
         model: Option<String>,
     },
     /// Slash commands the provider defines for itself, merged with the ones on
     /// disk by the composer.
-    Commands { commands: Vec<String> },
+    Commands {
+        /// Command names without the leading slash.
+        commands: Vec<String>,
+    },
     /// A turn began under these effective session options.
     ///
     /// The supervisor emits this before reading vendor output so every driver
@@ -49,14 +54,26 @@ pub enum AgentEvent {
     /// A fragment of assistant text. Deltas are emitted as they arrive and are
     /// never buffered into whole messages by the driver — the UI folds them,
     /// because it is the only layer that knows what is on screen.
-    TextDelta { text: String },
+    TextDelta {
+        /// The fragment, appended to whatever text came before it.
+        text: String,
+    },
     /// A fragment of the agent's reasoning, where the vendor exposes it.
-    Reasoning { text: String },
+    Reasoning {
+        /// The fragment, appended to the reasoning so far.
+        text: String,
+    },
     /// The agent invoked a tool, normalized into the one shape a transcript
     /// renders. `id` on the item correlates with the matching result.
-    ToolCall { activity: ActivityItem },
+    ToolCall {
+        /// The call, not yet complete.
+        activity: ActivityItem,
+    },
     /// The result of a tool call, completing the call it belongs to.
-    ToolResult { activity: ActivityItem },
+    ToolResult {
+        /// The same call, completed with its result.
+        activity: ActivityItem,
+    },
     /// A delegated agent began work under one parent transcript row.
     SubagentStarted {
         /// Provider call id used to correlate its later steps and result.
@@ -83,12 +100,20 @@ pub enum AgentEvent {
     /// The agent is blocked on the user. `options` is empty for a free-text
     /// question.
     AskUser {
+        /// Correlates the reply sent through `respond_to_agent`.
         id: String,
+        /// What the agent wants to know.
         question: String,
+        /// Choices offered, in the agent's order.
         options: Vec<String>,
     },
     /// The agent proposed a plan and wants it approved before acting.
-    PlanProposal { id: String, plan: String },
+    PlanProposal {
+        /// Correlates the approval sent through `respond_to_agent`.
+        id: String,
+        /// The proposed plan, as the agent wrote it.
+        plan: String,
+    },
     /// The agent wants to do something its access mode does not allow.
     Permission {
         /// Correlates the decision with the paused transport request.
@@ -100,31 +125,57 @@ pub enum AgentEvent {
     /// A steered message reached the running turn.
     SteerAccepted,
     /// It did not, and the caller has to fall back to the queue.
-    SteerRejected { reason: Option<String> },
+    SteerRejected {
+        /// Why the transport refused, when it said.
+        reason: Option<String>,
+    },
     /// The provider's own name for this session.
-    AgentTitle { title: String },
+    AgentTitle {
+        /// The provider's title, as it supplied it.
+        title: String,
+    },
     /// Token and cost accounting for the turn so far.
-    Usage { usage: Usage },
+    Usage {
+        /// Cumulative totals for the session so far.
+        usage: Usage,
+    },
     /// Current context-window occupancy when the provider reports both sides.
-    ContextUsage { usage: ContextUsage },
+    ContextUsage {
+        /// The latest occupancy reading.
+        usage: ContextUsage,
+    },
     /// The account's rate-limit windows, where the vendor reports them as it
     /// works (`docs/accounts.md` §6).
-    PlanUsage { usage: PlanUsage },
+    PlanUsage {
+        /// The windows as the vendor reported them with this turn.
+        usage: PlanUsage,
+    },
     /// A turn boundary. Checkpoints are taken here.
-    TurnEnd { turn: u32 },
+    TurnEnd {
+        /// One-based number of the turn that just ended.
+        turn: u32,
+    },
     /// The session reached a terminal state; no further events will arrive.
     SessionResult {
+        /// The state the session ended in.
         state: SessionState,
+        /// The agent's closing words, when it gave any.
         summary: Option<String>,
     },
     /// The agent's process is gone.
-    ProcessExited { code: Option<i32> },
+    ProcessExited {
+        /// Exit status; `None` when there was none, as for a process killed by a signal.
+        code: Option<i32>,
+    },
     /// A shape this build does not understand.
     ///
     /// Loud but not fatal. A vendor adding a message type should appear in the
     /// transcript as "not understood" rather than end the session — and rather
     /// than be silently mis-parsed into something it is not (roadmap R6).
-    Unsupported { shape: String },
+    Unsupported {
+        /// The vendor's message type, or why its message no longer parses.
+        shape: String,
+    },
 }
 
 /// Token and cost accounting.
@@ -135,9 +186,13 @@ pub enum AgentEvent {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct Usage {
+    /// Prompt tokens sent, cumulative for the session.
     pub input_tokens: u64,
+    /// Tokens the model generated, cumulative for the session.
     pub output_tokens: u64,
+    /// Prompt tokens served from the provider's cache.
     pub cache_read_tokens: u64,
+    /// Tokens spent on hidden reasoning, where the vendor reports them.
     pub reasoning_tokens: u64,
     /// `None` when the vendor does not price the request.
     pub cost_usd: Option<f64>,
@@ -253,23 +308,36 @@ pub enum DaemonEvent {
     ProjectsChanged,
     /// The set of worktrees under `project` changed, or one of their branches
     /// did. Clients re-read rather than patching, because git is the authority.
-    WorkspacesChanged { project: ProjectName },
+    WorkspacesChanged {
+        /// The project whose worktrees changed.
+        project: ProjectName,
+    },
     /// A poller found the workspace's git status different from last tick.
     WorkspaceStatusChanged {
+        /// The workspace that was polled.
         workspace: WorkspaceId,
+        /// Its new status.
         status: BranchStatus,
     },
     /// The pull request opened from a workspace's branch appeared, changed
     /// state, or went away (`None`).
     WorkspacePullRequestChanged {
+        /// The workspace whose branch the pull request is from.
         workspace: WorkspaceId,
+        /// The pull request as it stands now; `None` once there is none.
         pull_request: Option<PullRequest>,
     },
     /// A session was created; carries the whole record so a client that has
     /// never seen it does not have to ask.
-    SessionStarted { session: Box<Session> },
+    SessionStarted {
+        /// The new session's full record.
+        session: Box<Session>,
+    },
     /// A conversation's provider options changed for its later turns.
-    SessionOptionsChanged { session: Box<Session> },
+    SessionOptionsChanged {
+        /// The session's record with its new options.
+        session: Box<Session>,
+    },
     /// Something was added to a transcript: a prompt the user sent, or an
     /// event a driver produced.
     ///
@@ -278,7 +346,9 @@ pub enum DaemonEvent {
     /// own prompt appears in every window as soon as it is sent, rather than
     /// on whatever tick notices it next.
     SessionEvent {
+        /// The session the entry was appended to.
         session: SessionId,
+        /// The entry, with its transcript position.
         entry: TranscriptEntry,
     },
     /// A session moved: started working, blocked on the user, or ended.
@@ -287,7 +357,9 @@ pub enum DaemonEvent {
     /// the end could not tell an agent that is thinking from one that has not
     /// started, and would wait for a poll to find out.
     SessionStateChanged {
+        /// The session that moved.
         session: SessionId,
+        /// The state it moved to.
         state: SessionState,
     },
     /// A session's editable follow-up queue changed. Clients re-read the
@@ -300,25 +372,41 @@ pub enum DaemonEvent {
     ///
     /// The bytes as the shell wrote them, escapes and all: what they mean is
     /// the client's business, because it is the one with a screen.
-    TerminalOutput { terminal: TerminalId, data: String },
+    TerminalOutput {
+        /// The terminal that printed.
+        terminal: TerminalId,
+        /// The output chunk, in the order the shell wrote it.
+        data: String,
+    },
     /// A terminal's shell exited, so there is nothing left to type into.
-    TerminalClosed { terminal: TerminalId },
+    TerminalClosed {
+        /// The terminal whose shell exited.
+        terminal: TerminalId,
+    },
     /// An account's rate-limit windows were read again.
-    PlanUsageChanged { snapshot: PlanSnapshot },
+    PlanUsageChanged {
+        /// The new reading, with the account it belongs to.
+        snapshot: PlanSnapshot,
+    },
     /// An account was added, removed, or signed in. Clients re-read the list.
     AccountsChanged,
     /// A chat connector connected, dropped, or failed. The whole state
     /// travels so a window shows the dot going red without asking.
-    ConnectorStateChanged { state: ConnectorState },
+    ConnectorStateChanged {
+        /// The connector's whole current state.
+        state: ConnectorState,
+    },
     /// A commit message asked for with `generate_commit_message` is ready, or
     /// could not be written. Pushed rather than answered because generation
     /// runs a model for tens of seconds, and a request that long would hold
     /// every other client's turn.
     CommitMessageGenerated {
+        /// The workspace the message was asked for.
         workspace: WorkspaceId,
         /// Subject, blank line, body — as git takes it. `None` when it
         /// failed, and `error` says why.
         message: Option<String>,
+        /// Why generation failed; `None` when it succeeded.
         error: Option<String>,
     },
 
@@ -332,14 +420,20 @@ pub enum DaemonEvent {
     /// — `url` — or could not be, and `error` says why. Pushed for the same
     /// reason as `CommitMessageGenerated`.
     PullRequestOpened {
+        /// The workspace the pull request was asked for.
         workspace: WorkspaceId,
+        /// The opened pull request's address; `None` when it failed.
         url: Option<String>,
+        /// Why it could not be opened; `None` when it succeeded.
         error: Option<String>,
     },
 
     /// A ticket was raised, started or dismissed in `workspace`. Clients
     /// re-read that workspace's tickets.
-    TicketsChanged { workspace: WorkspaceId },
+    TicketsChanged {
+        /// The workspace whose tickets changed.
+        workspace: WorkspaceId,
+    },
 
     /// The daemon is shutting down. Clients should stop reconnecting.
     Shutdown,
@@ -573,6 +667,7 @@ pub struct ActivityItem {
     /// The provider's own id for the call, which is how a result finds the
     /// call it belongs to. `None` where a provider does not give one.
     pub id: Option<String>,
+    /// What sort of work the call is, for its icon and grouping.
     pub kind: ActivityKind,
     /// One line, always non-empty: this is the row a reader scans.
     pub title: String,
@@ -585,7 +680,9 @@ pub struct ActivityItem {
     pub tasks: Option<Vec<TaskItem>>,
     /// The result, once there is one.
     pub detail: Option<String>,
+    /// Whether the tool reported an error; meaningful once `complete`.
     pub failed: bool,
+    /// Whether the result has arrived.
     pub complete: bool,
 }
 
