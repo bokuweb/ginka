@@ -1715,6 +1715,22 @@ impl Service {
                 let prompt = crate::conflicts::prompt(&conflicts);
                 self.hand_to_agent(workspace, agent, prompt)
             }
+            Request::PullRequestChecks { workspace } => {
+                let worktree = self.worktree(&workspace)?;
+                Ok(Response::Checks {
+                    checks: crate::checks::read(&worktree.path).map_err(failed)?,
+                })
+            }
+            Request::FixFailingChecks { workspace, agent } => {
+                let worktree = self.worktree(&workspace)?;
+                let checks = crate::checks::read(&worktree.path).map_err(failed)?;
+                let Some(prompt) = crate::checks::fix_prompt(&checks) else {
+                    return Err(RpcError::failed(format!(
+                        "no check on {workspace}'s pull request has failed"
+                    )));
+                };
+                self.hand_to_agent(workspace, agent, prompt)
+            }
             Request::FixCommitFailure {
                 workspace,
                 message,

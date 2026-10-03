@@ -42,12 +42,23 @@ use std::time::Duration;
 /// reports every step of a drag.
 const ARRANGEMENT_SETTLES: Duration = Duration::from_millis(400);
 
+/// A comment being written in the Git surface: its file, the line it starts
+/// on, where a shift-clicked range ends, and its text box.
+type OpenComment = (String, Option<u32>, Option<u32>, Entity<TextareaState>);
+
 struct FileBuffer {
     workspace: WorkspaceId,
     file: FileContent,
     editor: Option<Entity<EditorState>>,
     complaint: Option<SharedString>,
     previewing: bool,
+    /// When the reader last typed in it, for autosave.
+    last_edit: Option<std::time::Instant>,
+    /// A save is on its way to the daemon.
+    saving: bool,
+    /// The daemon refused the last save — the file changed on disk — so it
+    /// is not saved again without the reader.
+    conflicted: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -123,6 +134,9 @@ pub struct SurfacePanel {
     /// The complaint on screen is a refused commit, which the agent can be
     /// asked to fix.
     commit_refused: bool,
+    /// The workspace's branch has an open pull request, so its checks can
+    /// be handed to the agent.
+    open_pull_request: bool,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -136,7 +150,7 @@ pub struct SurfacePanel {
     /// form, not a margin note.
     ///
     /// The second line is where a shift-click range ends, when it is one.
-    commenting: Option<(String, Option<u32>, Option<u32>, Entity<TextareaState>)>,
+    commenting: Option<OpenComment>,
     /// The paths that are staged for the next commit.
     ///
     /// Read separately from the changes themselves: the uncommitted diff is
@@ -284,6 +298,8 @@ pub enum SurfaceEvent {
     /// Hand a refused commit — what git and its hooks said, and the message
     /// it was going to use — to the workspace's agent to fix.
     FixCommit { message: String, output: String },
+    /// Hand the failing checks of the branch's pull request to the agent.
+    FixChecks,
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
     /// Read what one commit did; it comes back through
@@ -483,6 +499,7 @@ impl SurfacePanel {
             opening_pull_request: false,
             lease_push: None,
             commit_refused: false,
+            open_pull_request: false,
             expanded: None,
             split: false,
             comments: Vec::new(),
@@ -808,8 +825,10 @@ impl SurfacePanel {
             });
             let lsp = crate::lsp::EditorLspBinding::default();
             let lsp_for_changes = lsp.clone();
-            cx.subscribe(&editor, move |_, editor, event: &InputEvent, cx| {
+            let edited_path = file.path.clone();
+            cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.note_edit(&edited_path, cx);
                     let text = editor.read(cx).value().to_string();
                     let (version, server) = lsp_for_changes.change_target();
                     if let Some(server) = server {
@@ -857,6 +876,9 @@ impl SurfacePanel {
             editor,
             complaint: None,
             previewing: false,
+            last_edit: None,
+            saving: false,
+            conflicted: false,
         });
         let path = self
             .file_buffers
@@ -918,8 +940,65 @@ impl SurfacePanel {
         {
             buffer.file = file;
             buffer.complaint = None;
+            buffer.saving = false;
+            buffer.conflicted = false;
             cx.notify();
         }
+    }
+
+    /// The reader typed in `path`: autosave it once typing pauses for
+    /// [`ginka_ui::editor::AUTOSAVE_AFTER`] (MonoCode's autosave).
+    fn note_edit(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        buffer.last_edit = Some(std::time::Instant::now());
+        let path = path.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(ginka_ui::editor::AUTOSAVE_AFTER)
+                .await;
+            this.update(cx, |this, cx| this.autosave(&path, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Save `path` if [`ginka_ui::editor::autosave_due`] says so — the timer
+    /// of an earlier keystroke finds the buffer still being typed in, and
+    /// does nothing.
+    fn autosave(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        let Some(editor) = buffer.editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        let state = save_state(&buffer.file, &text);
+        if !ginka_ui::editor::autosave_due(
+            state,
+            buffer.last_edit,
+            std::time::Instant::now(),
+            buffer.conflicted,
+            buffer.saving,
+        ) {
+            return;
+        }
+        buffer.saving = true;
+        cx.emit(SurfaceEvent::SaveFile {
+            workspace: buffer.workspace.clone(),
+            path: buffer.file.path.clone(),
+            text,
+            expected_revision: buffer.file.revision.clone(),
+        });
     }
 
     /// Keep the editor intact and explain why its save was refused.
@@ -936,6 +1015,10 @@ impl SurfacePanel {
             .find(|buffer| &buffer.workspace == workspace && buffer.file.path == path)
         {
             buffer.complaint = Some(error.into());
+            buffer.saving = false;
+            // Not saved over by itself again: a manual save is the reader
+            // deciding to.
+            buffer.conflicted = true;
             cx.notify();
         }
     }
@@ -1078,6 +1161,11 @@ impl SurfacePanel {
         self.complaint = complaint.map(SharedString::from);
         self.commit_refused = false;
         cx.notify();
+    }
+
+    /// Whether the workspace's branch has an open pull request.
+    pub fn set_open_pull_request(&mut self, open: bool) {
+        self.open_pull_request = open;
     }
 
     /// Say how a push went: a refused plain push offers the lease push,
@@ -1960,6 +2048,19 @@ impl SurfacePanel {
                         cx.notify();
                     })),
             )
+            .when(self.open_pull_request, |row| {
+                // Orca's "Fix broken checks": what failed, and where its log
+                // is, goes to the agent; nothing is sent when all is green.
+                row.child(
+                    Button::new("git-fix-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_checks_tooltip").to_string())
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::FixChecks))),
+                )
+            })
             .child(
                 Button::new("git-create-pr-written")
                     .ghost()

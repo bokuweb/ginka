@@ -1761,3 +1761,12 @@ sidebar.unseen:
 surface.git.comment_lines:
   en: "Lines %{lines} — shift-click another line to cover a range"
   ja: "%{lines} 行目 — Shift+クリックで範囲を広げられます"
+cli.checks.none:
+  en: "no checks have reported on this pull request"
+  ja: "このプルリクエストにはまだチェック結果がありません"
+surface.git.fix_checks:
+  en: Fix failing checks
+  ja: 失敗したチェックを直させる
+surface.git.fix_checks_tooltip:
+  en: Send the pull request's failing checks, with their log links, to this workspace's conversation to fix
+  ja: プルリクエストの失敗したチェックをログのリンク付きでこのワークスペースの会話に送り、直させます

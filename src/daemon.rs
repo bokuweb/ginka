@@ -1582,6 +1582,18 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Hand the failing checks of the workspace's pull request to its latest
+    /// conversation. The refusal — nothing failed, no pull request — is the
+    /// answer when there is one.
+    pub async fn fix_checks(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::FixFailingChecks {
+            workspace: workspace.clone(),
+            agent: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Hand a refused commit to the workspace's latest conversation.
     pub async fn fix_commit(
         &self,

@@ -251,6 +251,19 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// The checks on the workspace branch's pull request; `--fix` hands
+    /// the failing ones to an agent.
+    Checks {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Send the failing checks to the workspace's latest conversation
+        /// (or `--agent`) to fix.
+        #[arg(long)]
+        fix: bool,
+        /// With `--fix`, start a new conversation on this agent instead.
+        #[arg(long, requires = "fix")]
+        agent: Option<String>,
+    },
     /// Hand a stopped merge, rebase or cherry-pick's conflicts to an agent
     /// to resolve and finish.
     Resolve {
@@ -602,6 +615,9 @@ enum TerminalCommand {
 }
 
 #[derive(Subcommand)]
+// `Add` carries every field a job has; the arguments are parsed once per run,
+// so boxing it would cost every match for memory no one holds.
+#[allow(clippy::large_enum_variant)]
 enum CronCommand {
     /// List scheduled jobs, with when each fires next and how it last went.
     List {
@@ -1494,6 +1510,21 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             header,
         },
+        Command::Checks {
+            workspace,
+            fix: false,
+            ..
+        } => Request::PullRequestChecks {
+            workspace: WorkspaceId(workspace),
+        },
+        Command::Checks {
+            workspace,
+            fix: true,
+            agent,
+        } => Request::FixFailingChecks {
+            workspace: WorkspaceId(workspace),
+            agent,
+        },
         Command::Resolve { workspace, agent } => Request::ResolveConflicts {
             workspace: WorkspaceId(workspace),
             agent,
@@ -2320,6 +2351,25 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::Checks { checks } => {
+            if checks.is_empty() {
+                println!("{}", rust_i18n::t!("cli.checks.none"));
+            }
+            for check in checks {
+                let state = match check.state {
+                    ginka_protocol::model::CheckState::Passed => "pass",
+                    ginka_protocol::model::CheckState::Failed => "FAIL",
+                    ginka_protocol::model::CheckState::Pending => "pending",
+                    ginka_protocol::model::CheckState::Skipped => "skipped",
+                    ginka_protocol::model::CheckState::Cancelled => "cancelled",
+                };
+                let name = match &check.workflow {
+                    Some(workflow) => format!("{workflow} / {}", check.name),
+                    None => check.name.clone(),
+                };
+                println!("{state}\t{name}\t{}", check.link.unwrap_or_default());
+            }
+        }
         Response::History { commits } => {
             for commit in commits {
                 println!(

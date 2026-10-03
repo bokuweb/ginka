@@ -953,6 +953,34 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::PushWithLease => {
                     this.sync_git(RemoteAction::PushWithLease, cx)
                 }
+                crate::surfaces::SurfaceEvent::FixChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |this, cx| {
+                            let sent = cx
+                                .background_spawn(async move { link.fix_checks(&workspace).await })
+                                .await;
+                            match sent {
+                                // Nothing failed, or no pull request: say so
+                                // where the button was.
+                                Err(error) => {
+                                    surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_git_sync_result(Some(error), cx)
+                                    });
+                                }
+                                Ok(()) => {
+                                    this.update(cx, |this, cx| {
+                                        this.after_row_change(async { Ok(()) }, cx)
+                                    })
+                                    .ok();
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
                 crate::surfaces::SurfaceEvent::FixCommit { message, output } => {
                     if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
                     {
@@ -14195,8 +14223,20 @@ impl Render for Shell {
         // reveal has walked out so far.
         self.write_a_little_more(window);
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            // Whether the branch has an open pull request whose checks the
+            // Git surface can offer to fix.
+            let open_pull_request = self.session.as_ref().is_some_and(|row| {
+                row.pull_request.as_ref().is_some_and(|pull_request| {
+                    matches!(
+                        pull_request.state,
+                        ginka_protocol::model::PullRequestState::Open
+                            | ginka_protocol::model::PullRequestState::Draft
+                    )
+                })
+            });
             self.surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_workspace(workspace, window, cx)
+                surfaces.set_workspace(workspace, window, cx);
+                surfaces.set_open_pull_request(open_pull_request);
             });
         }
         // Copied out: the headers below bind listeners through `cx`, and a

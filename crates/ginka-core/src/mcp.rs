@@ -529,6 +529,24 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_pr_checks",
+            description: "The checks on the pull request open from a workspace's branch — name, workflow, state (passed, failed, pending, skipped, cancelled) and log link — read with gh.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
+            name: "ginka_fix_checks",
+            description: "Hand the failing checks of a workspace's pull request to an agent to fix, with each failure's name and log link. Refused when nothing failed. Without `agent`, the workspace's latest conversation takes it.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace, "agent": {"type": "string"}},
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_fix_commit",
             description: "Hand a commit that git or its hooks refused to an agent to fix: `output` is what the refusal said, `message` the commit message. The staged files are added by the daemon. Without `agent`, the workspace's latest conversation takes it.",
             schema: json!({
@@ -1132,6 +1150,13 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
             header: text("header")?,
+        },
+        "ginka_pr_checks" => Request::PullRequestChecks {
+            workspace: WorkspaceId(text("workspace")?),
+        },
+        "ginka_fix_checks" => Request::FixFailingChecks {
+            workspace: WorkspaceId(text("workspace")?),
+            agent: maybe("agent"),
         },
         "ginka_fix_commit" => Request::FixCommitFailure {
             workspace: WorkspaceId(text("workspace")?),

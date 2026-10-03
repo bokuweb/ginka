@@ -632,6 +632,18 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// The checks of the pull request open from a workspace's branch, read
+    /// with `gh pr checks` (Orca's checks view).
+    PullRequestChecks { workspace: WorkspaceId },
+    /// Hand the failing checks of the workspace's pull request to an agent
+    /// to fix — Orca's "Fix broken checks". Routed like `ResolveConflicts`;
+    /// refused when nothing failed. Answers with the conversation.
+    FixFailingChecks {
+        workspace: WorkspaceId,
+        #[serde(default)]
+        agent: Option<String>,
+    },
+
     /// Hand a worktree's conflicts — a merge, rebase or cherry-pick that
     /// stopped on them — to an agent to resolve and finish: Orca's "Resolve
     /// with AI". Refused when nothing is conflicted. Answers with the
@@ -988,6 +1000,10 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    /// A pull request's checks, in the order `gh` lists them.
+    Checks {
+        checks: Vec<crate::model::CheckRun>,
     },
     Changes {
         changes: Changes,

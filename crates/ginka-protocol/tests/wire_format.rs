@@ -596,3 +596,18 @@ fn a_branch_diff_names_its_base_or_leaves_it_to_the_project() {
     let defaulted: ChangeSource = serde_json::from_value(json!({"against": "branch"})).unwrap();
     assert_eq!(defaulted, ChangeSource::Branch { base: None });
 }
+
+#[test]
+fn a_check_says_its_state_in_a_word() {
+    use ginka_protocol::model::{CheckRun, CheckState};
+    assert_eq!(
+        serde_json::to_value(CheckRun {
+            name: "test".into(),
+            workflow: Some("CI".into()),
+            state: CheckState::Failed,
+            link: None,
+        })
+        .unwrap(),
+        json!({"name": "test", "workflow": "CI", "state": "failed", "link": null})
+    );
+}

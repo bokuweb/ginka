@@ -1096,6 +1096,31 @@ pub struct WorkspaceSummary {
     pub status_note: Option<StatusNote>,
 }
 
+/// One check on a pull request, as `gh pr checks` reports it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckRun {
+    pub name: String,
+    /// The workflow it belongs to, when it is an Actions job.
+    pub workflow: Option<String>,
+    pub state: CheckState,
+    /// Where its log is.
+    pub link: Option<String>,
+}
+
+/// Where a check stands.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Passed,
+    Failed,
+    /// Queued or running — or a state this build does not know.
+    Pending,
+    Skipped,
+    Cancelled,
+}
+
 /// A short, free-text line saying where a workspace's work stands.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

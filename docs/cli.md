@@ -224,6 +224,12 @@ Throw away a file's uncommitted work
 
 `ginka revert <WORKSPACE> <PATH>`
 
+## `ginka checks`
+
+The checks on the workspace branch's pull request, read with `gh`; `--fix` hands the failing ones to the workspace's agent
+
+`ginka checks <WORKSPACE> [--fix] [--agent <AGENT>]`
+
 ## `ginka resolve`
 
 Hand a stopped merge, rebase or cherry-pick's conflicts to an agent to resolve and finish
