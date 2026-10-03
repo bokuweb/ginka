@@ -704,13 +704,9 @@ impl Connection {
     /// an executor thread that other connections' pushes are waiting on.
     async fn handle(&self, request: Request) -> Result<ginka_protocol::rpc::Response, RpcError> {
         let service = self.service.clone();
-        smol::unblock(move || {
-            let mut service = service
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            service.handle(request)
-        })
-        .await
+        // Locked only while state is touched: a push or a `gh` call waits
+        // on the network with the service free for everyone else.
+        smol::unblock(move || ginka_core::service::handle_shared(&service, request)).await
     }
 }
 

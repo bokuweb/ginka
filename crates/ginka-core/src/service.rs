@@ -8,6 +8,8 @@
 //! It owns the database connection and is not `Sync`: the daemon serialises
 //! requests through it. That is deliberate — SQLite writes are serialised
 //! anyway, and one owner means no half-applied mutation can be observed.
+//! What waits on the network is the exception: [`handle_shared`] runs that
+//! wait with the service unlocked, between two locked steps.
 
 use crate::agent::Supervisor;
 use crate::checkpoint;
@@ -43,6 +45,43 @@ pub struct NullSink;
 
 impl EventSink for NullSink {
     fn emit(&self, _event: DaemonEvent) {}
+}
+
+/// What becomes of a request's network outcome, run with the service
+/// locked again.
+type Finish = Box<dyn FnOnce(&mut Service) -> Result<Response, RpcError> + Send>;
+
+/// How far [`Service::begin`] got with a request.
+// Large only because `Response` is: a step lives for one request, never in
+// a collection, so boxing the answer would buy nothing.
+#[allow(clippy::large_enum_variant)]
+enum Step {
+    /// Answered, under the lock.
+    Done(Result<Response, RpcError>),
+    /// Waiting on the network is left: run it unlocked, then its [`Finish`]
+    /// locked.
+    Away(Box<dyn FnOnce() -> Finish + Send>),
+}
+
+/// Answer a request for a service shared between connections, holding its
+/// lock only while state is read or written.
+///
+/// A push, a pull, a sync, opening a pull request and reading its checks
+/// wait on a remote for as long as it takes; the service is unlocked for
+/// that wait, so every other window and command is still answered. What the
+/// wait found is recorded under the lock again.
+pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
+    let lock = || {
+        service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    let work = match lock().begin(request) {
+        Step::Done(answer) => return answer,
+        Step::Away(work) => work,
+    };
+    let finish = work();
+    finish(&mut lock())
 }
 
 /// The daemon's request handler.
@@ -433,8 +472,140 @@ impl Service {
     /// boundary, so a client has to be able to match on `code` instead of
     /// reading a sentence.
     pub fn handle(&mut self, request: Request) -> Result<Response, RpcError> {
+        match self.begin(request) {
+            Step::Done(answer) => answer,
+            Step::Away(work) => work()(self),
+        }
+    }
+
+    /// Start a request: answer it, or — when it has to wait on the network —
+    /// hand back the waiting to be done with the service unlocked
+    /// ([`handle_shared`]) and what to do with its outcome afterwards.
+    fn begin(&mut self, request: Request) -> Step {
+        match request {
+            Request::Push {
+                workspace,
+                force_with_lease,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    if force_with_lease {
+                        git::push_with_lease(path)
+                    } else {
+                        git::push(path)
+                    }
+                },
+                |service, worktree, _| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
+            Request::Pull { workspace } => self.away_in(
+                &workspace,
+                git::pull_fast_forward,
+                |service, worktree, _| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
+            Request::Sync { workspace } => {
+                self.away_in(&workspace, git::sync, |service, worktree, synced| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Synced {
+                        pulled: synced.pulled,
+                        pushed: synced.pushed,
+                    })
+                })
+            }
+            Request::CreatePullRequest { workspace, draft } => self.away_in(
+                &workspace,
+                move |path| git::create_pull_request(path, draft),
+                move |service, worktree, url| {
+                    // Known at once rather than on the poller's next beat: the
+                    // reader just asked for it and is looking at the row.
+                    if let Some(number) = git::pull_request_number(&url) {
+                        let state = if draft {
+                            ginka_protocol::model::PullRequestState::Draft
+                        } else {
+                            ginka_protocol::model::PullRequestState::Open
+                        };
+                        let pull_request = ginka_protocol::model::PullRequest {
+                            number,
+                            url: url.clone(),
+                            state,
+                        };
+                        service.note_pull_request(worktree.workspace_id(), Some(pull_request));
+                    }
+                    // The push moved the branch's upstream, which the sidebar shows.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::PullRequest { url })
+                },
+            ),
+            Request::PullRequestChecks { workspace } => {
+                self.away_in(&workspace, crate::checks::read, |_, _, checks| {
+                    Ok(Response::Checks { checks })
+                })
+            }
+            Request::FixFailingChecks { workspace, agent } => self.away_in(
+                &workspace,
+                crate::checks::read,
+                move |service, worktree, checks| {
+                    let workspace = worktree.workspace_id();
+                    let Some(prompt) = crate::checks::fix_prompt(&checks) else {
+                        return Err(RpcError::failed(format!(
+                            "no check on {workspace}'s pull request has failed"
+                        )));
+                    };
+                    service.hand_to_agent(workspace, agent, prompt)
+                },
+            ),
+            other => Step::Done(self.answer(other)),
+        }
+    }
+
+    /// Plan network work on a workspace's worktree: the worktree is resolved
+    /// now, under the lock; `work` runs on its path without it; `finish`
+    /// takes the lock back to record what came of it. A failed `work` is the
+    /// request's error and `finish` does not run.
+    fn away_in<T: Send + 'static>(
+        &mut self,
+        workspace: &WorkspaceId,
+        work: impl FnOnce(&std::path::Path) -> Result<T> + Send + 'static,
+        finish: impl FnOnce(&mut Service, Worktree, T) -> Result<Response, RpcError> + Send + 'static,
+    ) -> Step {
+        let worktree = match self.worktree(workspace) {
+            Ok(worktree) => worktree,
+            Err(error) => return Step::Done(Err(error)),
+        };
+        Step::Away(Box::new(move || {
+            let outcome = work(&worktree.path);
+            Box::new(move |service: &mut Service| {
+                let outcome = outcome.map_err(failed)?;
+                finish(service, worktree, outcome)
+            })
+        }))
+    }
+
+    /// Answer a request that needs nothing from the network, start to end
+    /// under the lock.
+    fn answer(&mut self, request: Request) -> Result<Response, RpcError> {
         match request {
             Request::Ping => Ok(Response::Ack),
+            // Network-bound: [`Service::begin`] splits these.
+            Request::Push { .. }
+            | Request::Pull { .. }
+            | Request::Sync { .. }
+            | Request::CreatePullRequest { .. }
+            | Request::PullRequestChecks { .. }
+            | Request::FixFailingChecks { .. } => self.handle(request),
 
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
@@ -1144,45 +1315,6 @@ impl Service {
                 });
                 Ok(Response::Ack)
             }
-            Request::Push {
-                workspace,
-                force_with_lease,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                if force_with_lease {
-                    git::push_with_lease(&worktree.path).map_err(failed)?;
-                } else {
-                    git::push(&worktree.path).map_err(failed)?;
-                }
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
-            }
-            Request::CreatePullRequest { workspace, draft } => {
-                let worktree = self.worktree(&workspace)?;
-                let url = git::create_pull_request(&worktree.path, draft).map_err(failed)?;
-                // Known at once rather than on the poller's next beat: the
-                // reader just asked for it and is looking at the row.
-                if let Some(number) = git::pull_request_number(&url) {
-                    let state = if draft {
-                        ginka_protocol::model::PullRequestState::Draft
-                    } else {
-                        ginka_protocol::model::PullRequestState::Open
-                    };
-                    let pull_request = ginka_protocol::model::PullRequest {
-                        number,
-                        url: url.clone(),
-                        state,
-                    };
-                    self.note_pull_request(worktree.workspace_id(), Some(pull_request));
-                }
-                // The push moved the branch's upstream, which the sidebar shows.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::PullRequest { url })
-            }
             Request::ListNotes {
                 project,
                 query,
@@ -1531,25 +1663,6 @@ impl Service {
                 Ok(Response::Ack)
             }
             Request::MessageSession { from, to, text } => self.message_session(&from, &to, &text),
-            Request::Pull { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                git::pull_fast_forward(&worktree.path).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
-            }
-            Request::Sync { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                let synced = git::sync(&worktree.path).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Synced {
-                    pulled: synced.pulled,
-                    pushed: synced.pushed,
-                })
-            }
             Request::WorkspaceFiles {
                 workspace,
                 query,
@@ -1825,22 +1938,6 @@ impl Service {
                     &args,
                 )?;
                 Ok(Response::Ack)
-            }
-            Request::PullRequestChecks { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                Ok(Response::Checks {
-                    checks: crate::checks::read(&worktree.path).map_err(failed)?,
-                })
-            }
-            Request::FixFailingChecks { workspace, agent } => {
-                let worktree = self.worktree(&workspace)?;
-                let checks = crate::checks::read(&worktree.path).map_err(failed)?;
-                let Some(prompt) = crate::checks::fix_prompt(&checks) else {
-                    return Err(RpcError::failed(format!(
-                        "no check on {workspace}'s pull request has failed"
-                    )));
-                };
-                self.hand_to_agent(workspace, agent, prompt)
             }
             Request::FixCommitFailure {
                 workspace,
