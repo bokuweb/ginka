@@ -1560,6 +1560,12 @@ sidebar.action.remove_project:
 sidebar.action.remove_project.confirm:
   en: Remove — the folder stays on disk
   ja: 外す（フォルダはディスクに残ります）
+sidebar.action.forget:
+  en: Delete conversation
+  ja: 会話を削除
+sidebar.action.forget.confirm:
+  en: Delete it and its checkpoints?
+  ja: 会話とチェックポイントを削除？
 sidebar.action.delete:
   en: Delete
   ja: 削除

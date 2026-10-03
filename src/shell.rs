@@ -1308,6 +1308,23 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::RemoveSession { session } => {
+                        // The conversation on screen is going: drop what is
+                        // drawn of it, so the refresh shows whatever the
+                        // workspace holds next rather than a stale transcript.
+                        if this.transcript_of.as_ref() == Some(session) {
+                            this.transcript = Transcript::new();
+                            this.transcript_of = None;
+                            this.transcript_search = None;
+                            this.session_state = None;
+                            this.follow_transcript();
+                        }
+                        let (link, session) = (this.link.clone(), session.clone());
+                        this.after_row_change(
+                            async move { link.remove_session(&session).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::RemoveWorkspace { workspace } => {
                         let (link, workspace) = (this.link.clone(), workspace.clone());
                         this.after_row_change(

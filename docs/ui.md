@@ -161,7 +161,9 @@ active conversation. With nothing selected, the rail stands alone.
 - **Row menu** — a `…` on each session row opens its actions under it:
   *Rename* (the title becomes a field; ↩ keeps it), *Status note…* (the
   note line becomes a field; ↩ writes it, an empty field clears it), *Pin* / *Unpin*
-  (pinned rows lead the list and carry a star) and *Archive*. Archived rows
+  (pinned rows lead the list and carry a star), *Archive* and *Delete
+  conversation*, which asks again and forgets the transcript and its
+  checkpoints, stopping a running turn first. Archived rows
   offer *Restore* and *Delete*, which asks again before removing the worktree
   and is refused while it has uncommitted work. A change the daemon refuses
   says why in a notice at the foot of the window. A row with prompts waiting says how many.

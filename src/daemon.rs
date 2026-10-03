@@ -1837,6 +1837,16 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Forget a conversation, its transcript and checkpoints, stopping it
+    /// first if it is running.
+    pub async fn remove_session(&self, session: &SessionId) -> Result<(), String> {
+        self.ask_result(Request::RemoveSession {
+            session: session.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Delete a workspace's worktree; refused while it has uncommitted work.
     pub async fn remove_workspace(&self, workspace: &WorkspaceId) -> Result<(), String> {
         self.ask_result(Request::RemoveWorkspace {

@@ -77,6 +77,10 @@ pub enum SidebarEvent {
     RemoveProject {
         project: ProjectName,
     },
+    /// Forget a conversation, its transcript and checkpoints.
+    RemoveSession {
+        session: SessionId,
+    },
     /// Delete an archived workspace's worktree.
     RemoveWorkspace {
         workspace: WorkspaceId,
@@ -104,6 +108,7 @@ pub enum SidebarEvent {
 enum Removal {
     Project(ProjectName),
     Workspace(WorkspaceId),
+    Session(SessionId),
 }
 
 /// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
@@ -1452,6 +1457,34 @@ impl SessionSidebar {
                 cx.notify();
             }))
         });
+        // Forgetting is for good — the transcript and its checkpoints go,
+        // and a running turn is stopped — so it asks twice.
+        let forget = row.session.clone().map(|session| {
+            let armed = self.removing == Some(Removal::Session(session.clone()));
+            menu_item(
+                &tokens,
+                format!("forget:{key}"),
+                Icon::new(IconName::Delete),
+                if armed {
+                    rust_i18n::t!("sidebar.action.forget.confirm").to_string()
+                } else {
+                    rust_i18n::t!("sidebar.action.forget").to_string()
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if armed {
+                    this.removing = None;
+                    this.menu_for = None;
+                    cx.emit(SidebarEvent::RemoveSession {
+                        session: session.clone(),
+                    });
+                } else {
+                    this.removing = Some(Removal::Session(session.clone()));
+                }
+                cx.notify();
+            }))
+        });
         floating_menu(
             &tokens,
             resolve
@@ -1459,9 +1492,11 @@ impl SessionSidebar {
                 .chain(rename)
                 .chain([note])
                 .chain(copy_id)
-                .chain([pin, archive]),
+                .chain([pin, archive])
+                .chain(forget),
             cx.listener(|this, _, _, cx| {
                 this.menu_for = None;
+                this.removing = None;
                 cx.notify();
             }),
         )
