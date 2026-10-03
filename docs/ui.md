@@ -162,7 +162,9 @@ active conversation. With nothing selected, the rail stands alone.
   *Rename* (the title becomes a field; ↩ keeps it), *Status note…* (the
   note line becomes a field; ↩ writes it, an empty field clears it), *Pin* / *Unpin*
   (pinned rows lead the list and carry a star) and *Archive*. Archived rows
-  offer *Restore*. A row with prompts waiting says how many.
+  offer *Restore* and *Delete*, which asks again before removing the worktree
+  and is refused while it has uncommitted work. A change the daemon refuses
+  says why in a notice at the foot of the window. A row with prompts waiting says how many.
 - **Status filter** — a chip beside the session search cycles *All*,
   *Working*, *Needs you* and *Done*; `⌘1–9` pick only the rows it shows.
 - **Session list header** — `Workspace` and a `+` for a new session. The whole
@@ -387,7 +389,9 @@ Dragging across the terminal grid selects exact character cells in either direct
   old file on the left and the new on the right, a removed line beside the
   line that replaced it; either side is clickable for a review comment.
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
-  (in place), *Move up* and *Move down*.
+  (in place), *Move up*, *Move down*, the notification mutes and *Remove from
+  Ginka*, which asks again and forgets the project while its folder stays on
+  disk.
 - **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
   schedule, name, execution scope, what runs, when it next fires and how it last went, with
   *Pause*, *Edit*, *Run now*, *History* and *Remove*. *History* lists the

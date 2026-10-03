@@ -1554,6 +1554,18 @@ sidebar.action.note:
 sidebar.note.placeholder:
   en: Where this stands — empty clears it
   ja: いまの状況（空にすると消えます）
+sidebar.action.remove_project:
+  en: Remove from Ginka
+  ja: Ginka から外す
+sidebar.action.remove_project.confirm:
+  en: Remove — the folder stays on disk
+  ja: 外す（フォルダはディスクに残ります）
+sidebar.action.delete:
+  en: Delete
+  ja: 削除
+sidebar.action.delete.confirm:
+  en: Delete the worktree?
+  ja: ワークツリーを削除？
 sidebar.action.pin:
   en: Pin
   ja: ピン留め

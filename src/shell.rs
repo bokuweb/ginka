@@ -1296,6 +1296,20 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::RemoveProject { project } => {
+                        let (link, project) = (this.link.clone(), project.clone());
+                        this.after_row_change(
+                            async move { link.remove_project(&project).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveWorkspace { workspace } => {
+                        let (link, workspace) = (this.link.clone(), workspace.clone());
+                        this.after_row_change(
+                            async move { link.remove_workspace(&workspace).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::Rename { session, title } => {
                         let (link, session, title) =
                             (this.link.clone(), session.clone(), title.clone());
@@ -5612,6 +5626,9 @@ impl Shell {
             let outcome = cx.background_spawn(change).await;
             if let Err(error) = outcome {
                 tracing::warn!(%error, "the daemon refused a sidebar change");
+                // In the daemon's words: a refused rename or delete that
+                // only reached the log looks like a click that did nothing.
+                this.update(cx, |this, cx| this.show_notice(error, cx)).ok();
             }
             pull_rows(&this, &link, cx).await.ok();
         })

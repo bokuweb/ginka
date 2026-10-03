@@ -73,6 +73,14 @@ pub enum SidebarEvent {
         project: ProjectName,
         label: String,
     },
+    /// Forget a project; its checkout and worktrees stay on disk.
+    RemoveProject {
+        project: ProjectName,
+    },
+    /// Delete an archived workspace's worktree.
+    RemoveWorkspace {
+        workspace: WorkspaceId,
+    },
     /// Write a workspace's status note, or clear it with `None`.
     SetStatusNote {
         workspace: WorkspaceId,
@@ -89,6 +97,13 @@ pub enum SidebarEvent {
         project: ProjectName,
         index: u32,
     },
+}
+
+/// What has been asked to be removed once and waits for the second click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Removal {
+    Project(ProjectName),
+    Workspace(WorkspaceId),
 }
 
 /// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
@@ -177,6 +192,9 @@ pub struct SessionSidebar {
     renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
     /// The workspace whose status note is being written, and its field.
     noting: Option<(WorkspaceId, Entity<InputState>)>,
+    /// A project or archived workspace asked to be removed once; the
+    /// second click removes it.
+    removing: Option<Removal>,
 }
 
 impl SessionSidebar {
@@ -207,6 +225,7 @@ impl SessionSidebar {
             labelling: None,
             renaming: None,
             noting: None,
+            removing: None,
         }
     }
 
@@ -283,6 +302,15 @@ impl SessionSidebar {
 
     /// Replace the projects after a refresh.
     pub fn set_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut Context<Self>) {
+        // A project removed — here or from another window — is no longer
+        // somewhere the rail can be.
+        if self
+            .selected_project
+            .as_ref()
+            .is_some_and(|selected| !projects.iter().any(|project| &project.name == selected))
+        {
+            self.selected_project = None;
+        }
         self.projects = projects;
         cx.notify();
     }
@@ -758,11 +786,42 @@ impl SessionSidebar {
                     );
                 }
             }
+            // Forgetting is not deleting: the checkout stays, and adding the
+            // folder again brings the project back. Still asked twice, since
+            // its conversations go from the rail with it.
+            let armed = self.removing == Some(Removal::Project(project.clone()));
+            let remove = project.clone();
+            items.push(
+                menu_item(
+                    &tokens,
+                    format!("project-remove:{}", project.0),
+                    Icon::new(IconName::Delete),
+                    if armed {
+                        rust_i18n::t!("sidebar.action.remove_project.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("sidebar.action.remove_project").to_string()
+                    },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if armed {
+                        this.removing = None;
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::RemoveProject {
+                            project: remove.clone(),
+                        });
+                    } else {
+                        this.removing = Some(Removal::Project(remove.clone()));
+                    }
+                    cx.notify();
+                })),
+            );
             floating_menu(
                 &tokens,
                 items,
                 cx.listener(|this, _, _, cx| {
                     this.project_menu_for = None;
+                    this.removing = None;
                     cx.notify();
                 }),
             )
@@ -1568,6 +1627,41 @@ impl SessionSidebar {
                         });
                     }))
                     .child(rust_i18n::t!("sidebar.action.restore").to_string())
+            })
+            .child({
+                // Deleting the worktree is for good, so it asks twice; the
+                // daemon refuses one with uncommitted work either way.
+                let workspace = row.workspace.clone();
+                let armed = self.removing == Some(Removal::Workspace(workspace.clone()));
+                div()
+                    .id(("delete", index))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(tokens.radius.control()))
+                    .text_xs()
+                    .text_color(if armed {
+                        tokens.colors().status_error
+                    } else {
+                        tokens.colors().text_muted
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if armed {
+                            this.removing = None;
+                            cx.emit(SidebarEvent::RemoveWorkspace {
+                                workspace: workspace.clone(),
+                            });
+                        } else {
+                            this.removing = Some(Removal::Workspace(workspace.clone()));
+                        }
+                        cx.notify();
+                    }))
+                    .child(if armed {
+                        rust_i18n::t!("sidebar.action.delete.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("sidebar.action.delete").to_string()
+                    })
             })
     }
 

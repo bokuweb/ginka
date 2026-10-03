@@ -1803,6 +1803,25 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Forget a project. Its checkout and worktrees stay on disk.
+    pub async fn remove_project(&self, project: &ProjectName) -> Result<(), String> {
+        self.ask_result(Request::RemoveProject {
+            project: project.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a workspace's worktree; refused while it has uncommitted work.
+    pub async fn remove_workspace(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::RemoveWorkspace {
+            workspace: workspace.clone(),
+            force: false,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Write a workspace's status note, or clear it with `None`.
     pub async fn set_status_note(
         &self,
