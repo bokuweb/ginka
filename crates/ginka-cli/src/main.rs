@@ -251,6 +251,12 @@ enum Command {
         /// The path, relative to the worktree root.
         path: String,
     },
+    /// The MCP servers Claude Code and Codex are configured with outside
+    /// Ginka, and with `--workspace` that repository's own.
+    McpServers {
+        #[arg(long)]
+        workspace: Option<String>,
+    },
     /// The checks on the workspace branch's pull request; `--fix` hands
     /// the failing ones to an agent.
     Checks {
@@ -1510,6 +1516,9 @@ fn request_for(command: Command) -> Result<Request> {
             path,
             header,
         },
+        Command::McpServers { workspace } => Request::ListMcpServers {
+            workspace: workspace.map(WorkspaceId),
+        },
         Command::Checks {
             workspace,
             fix: false,
@@ -2351,6 +2360,24 @@ fn print(response: Response, patch: bool) {
         }
         Response::Checkpoints { checkpoints } => print_checkpoints(&checkpoints),
         Response::Changes { changes } => print_changes(&changes, patch),
+        Response::McpServers { servers } => {
+            if servers.is_empty() {
+                println!("{}", rust_i18n::t!("cli.mcp_servers.none"));
+            }
+            for server in servers {
+                let scope = match server.scope {
+                    ginka_protocol::model::McpScope::User => "user",
+                    ginka_protocol::model::McpScope::Project => "project",
+                    ginka_protocol::model::McpScope::Local => "local",
+                };
+                println!(
+                    "{}\t{}\t{scope}\t{}",
+                    server.provider,
+                    server.name,
+                    server.target.unwrap_or_default()
+                );
+            }
+        }
         Response::Checks { checks } => {
             if checks.is_empty() {
                 println!("{}", rust_i18n::t!("cli.checks.none"));

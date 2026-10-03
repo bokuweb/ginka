@@ -578,6 +578,8 @@ pub struct Shell {
     agents: Vec<AgentStatus>,
     /// Provider settings from the daemon, shown in Settings.
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
+    /// The MCP servers the agent CLIs are configured with, for Settings.
+    mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
     /// The provider executable editor, when open in Settings.
     provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
@@ -1639,6 +1641,7 @@ impl Shell {
             prompt_outline_open: false,
             agents: Vec::new(),
             provider_settings: Vec::new(),
+            mcp_servers: Vec::new(),
             provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -5434,7 +5437,8 @@ impl Shell {
                     self.inbox = Some(inbox);
                 }
             }
-            Place::Settings | Place::Workspace | Place::Board => {}
+            Place::Settings => self.refresh_mcp_servers(cx),
+            Place::Workspace | Place::Board => {}
         }
         let _ = window;
         cx.notify();
@@ -5445,6 +5449,24 @@ impl Shell {
             sidebar.set_place(crate::sidebar::Place::Settings, cx)
         });
         self.open_place(crate::sidebar::Place::Settings, window, cx);
+    }
+
+    /// Read the MCP servers the agent CLIs are configured with, for the
+    /// settings page: the user's, and the workspace on screen's project's.
+    fn refresh_mcp_servers(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        cx.spawn(async move |this, cx| {
+            let servers = cx
+                .background_spawn(async move { link.mcp_servers(workspace).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.mcp_servers = servers;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The settings page: appearance and language. `docs/ui.md` §3.7.
@@ -5533,6 +5555,71 @@ impl Shell {
             .into_any_element();
         let quick_section = self.quick_settings(cx);
         let cron_section = self.cron_settings(cx);
+        // MonoCode's Settings → MCP, read-only: what each agent CLI is
+        // configured with beside what Ginka hands it.
+        let mcp_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.mcp_servers").to_string()),
+            )
+            .when(self.mcp_servers.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("settings.mcp_servers.none").to_string()),
+                )
+            })
+            .children(self.mcp_servers.iter().map(|server| {
+                let scope = match server.scope {
+                    ginka_protocol::model::McpScope::User => {
+                        rust_i18n::t!("settings.mcp_servers.user").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Project => {
+                        rust_i18n::t!("settings.mcp_servers.project").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Local => {
+                        rust_i18n::t!("settings.mcp_servers.local").to_string()
+                    }
+                };
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .text_size(px(12.5))
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(server.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(format!("{} · {scope}", server.provider)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(server.target.clone().unwrap_or_default()),
+                    )
+            }));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -5797,6 +5884,7 @@ impl Shell {
                             ))
                             .child(quick_section)
                             .child(provider_section)
+                            .child(mcp_section)
                             .child(cron_section),
                     ),
             )

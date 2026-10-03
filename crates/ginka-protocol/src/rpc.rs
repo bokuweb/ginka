@@ -632,6 +632,13 @@ pub enum Request {
     /// latest reading of every account's rate-limit windows.
     Usage { days: Option<u32> },
 
+    /// The MCP servers the agent CLIs are configured with outside Ginka —
+    /// the user's, and with `workspace` that repository's and that
+    /// project's own (MonoCode's Settings → MCP). Read-only.
+    ListMcpServers {
+        #[serde(default)]
+        workspace: Option<WorkspaceId>,
+    },
     /// The checks of the pull request open from a workspace's branch, read
     /// with `gh pr checks` (Orca's checks view).
     PullRequestChecks { workspace: WorkspaceId },
@@ -1000,6 +1007,10 @@ pub enum Response {
     },
     Checkpoints {
         checkpoints: Vec<Checkpoint>,
+    },
+    /// MCP servers configured outside Ginka, by provider and scope.
+    McpServers {
+        servers: Vec<crate::model::McpServerEntry>,
     },
     /// A pull request's checks, in the order `gh` lists them.
     Checks {

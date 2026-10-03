@@ -1779,3 +1779,21 @@ sidebar.action.mute_forever:
 sidebar.action.unmute:
   en: Turn notifications back on
   ja: 通知のミュートを解除
+cli.mcp_servers.none:
+  en: "no MCP servers are configured for Claude Code or Codex"
+  ja: "Claude Code にも Codex にも MCP サーバーは設定されていません"
+settings.mcp_servers:
+  en: MCP servers configured in the agents
+  ja: エージェントに設定済みの MCP サーバー
+settings.mcp_servers.none:
+  en: Neither Claude Code nor Codex has an MCP server configured.
+  ja: Claude Code にも Codex にも MCP サーバーは設定されていません。
+settings.mcp_servers.user:
+  en: every project
+  ja: すべてのプロジェクト
+settings.mcp_servers.project:
+  en: this repository
+  ja: このリポジトリ
+settings.mcp_servers.local:
+  en: this project only
+  ja: このプロジェクトのみ

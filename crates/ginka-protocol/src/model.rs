@@ -1096,6 +1096,32 @@ pub struct WorkspaceSummary {
     pub status_note: Option<StatusNote>,
 }
 
+/// An MCP server an agent CLI is configured with, outside Ginka.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    pub name: String,
+    /// Whose configuration names it: `claude`, `codex`.
+    pub provider: String,
+    pub scope: McpScope,
+    /// The command it runs, or the address it is reached at — never its
+    /// arguments or environment, which can carry tokens.
+    pub target: Option<String>,
+}
+
+/// Where an MCP server is configured.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpScope {
+    /// For every project, in the user's own configuration.
+    User,
+    /// Checked into the repository (`.mcp.json`).
+    Project,
+    /// For this project only, in the user's configuration.
+    Local,
+}
+
 /// One check on a pull request, as `gh pr checks` reports it.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

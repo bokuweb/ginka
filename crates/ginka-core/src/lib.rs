@@ -37,6 +37,7 @@ pub mod i18n;
 pub mod logging;
 pub mod lsp;
 pub mod mcp;
+pub mod mcp_inventory;
 pub mod notes;
 pub mod paths;
 pub mod pr_details;

@@ -1582,6 +1582,17 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// The MCP servers the agent CLIs are configured with outside Ginka.
+    pub async fn mcp_servers(
+        &self,
+        workspace: Option<WorkspaceId>,
+    ) -> Vec<ginka_protocol::model::McpServerEntry> {
+        match self.ask(Request::ListMcpServers { workspace }).await {
+            Some(Response::McpServers { servers }) => servers,
+            _ => Vec::new(),
+        }
+    }
+
     /// Hand the failing checks of the workspace's pull request to its latest
     /// conversation. The refusal — nothing failed, no pull request — is the
     /// answer when there is one.

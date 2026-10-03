@@ -1715,6 +1715,17 @@ impl Service {
                 let prompt = crate::conflicts::prompt(&conflicts);
                 self.hand_to_agent(workspace, agent, prompt)
             }
+            Request::ListMcpServers { workspace } => {
+                let project = match &workspace {
+                    Some(workspace) => Some(self.worktree(workspace)?.path),
+                    None => None,
+                };
+                let home = dirs::home_dir()
+                    .ok_or_else(|| RpcError::failed("there is no home directory to read"))?;
+                Ok(Response::McpServers {
+                    servers: crate::mcp_inventory::discover(&home, project.as_deref()),
+                })
+            }
             Request::PullRequestChecks { workspace } => {
                 let worktree = self.worktree(&workspace)?;
                 Ok(Response::Checks {

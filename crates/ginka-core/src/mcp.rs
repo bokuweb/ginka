@@ -529,6 +529,14 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_mcp_servers",
+            description: "The MCP servers Claude Code and Codex are configured with outside Ginka — user-wide, and with `workspace` that repository's .mcp.json and that project's own — by name, provider, scope and command or URL. Read-only; arguments and environments are never shown.",
+            schema: json!({
+                "type": "object",
+                "properties": {"workspace": workspace},
+            }),
+        },
+        Tool {
             name: "ginka_pr_checks",
             description: "The checks on the pull request open from a workspace's branch — name, workflow, state (passed, failed, pending, skipped, cancelled) and log link — read with gh.",
             schema: json!({
@@ -1150,6 +1158,9 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             workspace: WorkspaceId(text("workspace")?),
             path: text("path")?,
             header: text("header")?,
+        },
+        "ginka_mcp_servers" => Request::ListMcpServers {
+            workspace: maybe("workspace").map(WorkspaceId),
         },
         "ginka_pr_checks" => Request::PullRequestChecks {
             workspace: WorkspaceId(text("workspace")?),

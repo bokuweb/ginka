@@ -224,6 +224,12 @@ Throw away a file's uncommitted work
 
 `ginka revert <WORKSPACE> <PATH>`
 
+## `ginka mcp-servers`
+
+The MCP servers Claude Code and Codex are configured with outside Ginka; `--workspace` adds that repository's `.mcp.json` and that project's own
+
+`ginka mcp-servers [--workspace <WORKSPACE>]`
+
 ## `ginka checks`
 
 The checks on the workspace branch's pull request, read with `gh`; `--fix` hands the failing ones to the workspace's agent
