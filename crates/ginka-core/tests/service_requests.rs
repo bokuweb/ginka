@@ -2909,3 +2909,37 @@ fn reading_a_diff_leaves_the_service_free_while_git_works() {
         other => panic!("expected changes, got {other:?}"),
     }
 }
+
+#[test]
+fn creating_a_workspace_leaves_the_service_free_while_git_checks_it_out() {
+    // A checkout of a large repository, its post-checkout hook and the
+    // files `.worktreeinclude` copies all take as long as they take.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let hook = held_hook(&fixture, "post-checkout");
+
+    let (served, created) = served_while_held(
+        fixture.service,
+        Request::CreateWorkspace {
+            project: project.clone(),
+            branch: "slow-checkout".into(),
+            base: None,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while git checked out");
+    match created {
+        Ok(Response::Workspace { workspace }) => {
+            assert_eq!(workspace.worktree.branch, "slow-checkout");
+            assert!(workspace.worktree.path.join("README.md").is_file());
+        }
+        other => panic!("expected a workspace, got {other:?}"),
+    }
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}

@@ -63,6 +63,41 @@ enum Step {
     Away(Box<dyn FnOnce() -> Finish + Send>),
 }
 
+/// Check out `branch` from `base` as a new worktree at `path`, with the
+/// ignored files the repository asks every worktree to start with. Returns
+/// the path as git records it, which on macOS differs from the one asked for
+/// (/var against /private/var).
+fn check_out(
+    project: &std::path::Path,
+    path: &std::path::Path,
+    branch: &str,
+    base: &str,
+) -> Result<std::path::PathBuf> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    git::add_worktree(project, path, branch, base)?;
+    // `.worktreeinclude`, best-effort: a missing `.env` should not cost the
+    // reader the worktree itself.
+    match crate::worktree_include::copy_included(project, path) {
+        Ok(copied) if !copied.is_empty() => {
+            tracing::info!(count = copied.len(), "copied .worktreeinclude files");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
+    }
+    // …and the heavy ignored directories it shares rather than copies
+    // (`.worktreeshare`), on the same terms.
+    match crate::worktree_include::link_shared(project, path) {
+        Ok(linked) if !linked.is_empty() => {
+            tracing::info!(?linked, "linked .worktreeshare directories");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not link .worktreeshare directories"),
+    }
+    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
 /// Search a project's worktrees for paths and lines matching `query`, up
 /// to `limit` of each across all of them, in the order given.
 fn search_worktrees(
@@ -119,8 +154,8 @@ fn search_worktrees(
 ///
 /// A push, a pull, a sync, opening a pull request and reading its checks
 /// wait on a remote for as long as it takes, a commit or a merge on the
-/// project's hooks, and a search, a diff or the workspace list on the size of
-/// the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
+/// project's hooks, and a checkout, a search, a diff or the workspace list on
+/// the size of the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
 /// wait found is recorded under the lock again.
 pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
     let lock = || {
@@ -737,6 +772,56 @@ impl Service {
                 })),
                 Err(error) => Step::Done(Err(error)),
             },
+            // A checkout of a large repository, its post-checkout hook and
+            // the files `.worktreeinclude` copies take as long as they take.
+            Request::CreateWorkspace {
+                project,
+                branch,
+                base,
+            } => {
+                let project = match self.project(&project) {
+                    Ok(project) => project,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                if project.kind == ProjectKind::Plain {
+                    return Step::Done(Err(RpcError::failed(format!(
+                        "{} is a plain folder and has no worktrees",
+                        project.name
+                    ))));
+                }
+                let base = base.unwrap_or_else(|| project.default_branch.clone());
+                // Worktrees live under Ginka's own directory rather than beside
+                // the user's checkout, so the app never litters the repository
+                // it was pointed at.
+                let path = self
+                    .paths
+                    .worktrees()
+                    .join(&project.name.0)
+                    .join(slugify(&branch));
+                Step::Away(Box::new(move || {
+                    let checked_out = check_out(&project.path, &path, &branch, &base);
+                    Box::new(move |service: &mut Service| {
+                        let path = checked_out.map_err(failed)?;
+                        service.adopt_worktree(&project, &path, &branch)
+                    })
+                }))
+            }
+            Request::WorkspaceHistory { workspace, limit } => {
+                let limit = limit.unwrap_or(50).min(200) as usize;
+                self.away_in(
+                    &workspace,
+                    move |path| git::history(path, limit),
+                    |_, _, commits| Ok(Response::History { commits }),
+                )
+            }
+            // A worktree per attempt, each a checkout.
+            Request::FanOut {
+                project,
+                branch_prefix,
+                base,
+                prompt,
+                attempts,
+            } => self.fan_out(project, &branch_prefix, base, prompt, attempts),
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -844,8 +929,11 @@ impl Service {
             | Request::CreatePullRequest { .. }
             | Request::PullRequestChecks { .. }
             | Request::FixFailingChecks { .. }
+            | Request::CreateWorkspace { .. }
+            | Request::FanOut { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
+            | Request::WorkspaceHistory { .. }
             | Request::WorkspaceFiles { .. }
             | Request::SearchContent { .. }
             | Request::SearchProject { .. } => self.handle(request),
@@ -890,75 +978,6 @@ impl Service {
                 Ok(Response::Ack)
             }
 
-            Request::CreateWorkspace {
-                project,
-                branch,
-                base,
-            } => {
-                let project = self.project(&project)?;
-                if project.kind == ProjectKind::Plain {
-                    return Err(RpcError::failed(format!(
-                        "{} is a plain folder and has no worktrees",
-                        project.name
-                    )));
-                }
-                let base = base.unwrap_or_else(|| project.default_branch.clone());
-                // Worktrees live under Ginka's own directory rather than beside
-                // the user's checkout, so the app never litters the repository
-                // it was pointed at.
-                let path = self
-                    .paths
-                    .worktrees()
-                    .join(&project.name.0)
-                    .join(slugify(&branch));
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(failed)?;
-                }
-                git::add_worktree(&project.path, &path, &branch, &base).map_err(failed)?;
-                // The ignored files the repository asks every worktree to
-                // start with (`.worktreeinclude`). Best-effort: a missing
-                // `.env` should not cost the reader the worktree itself.
-                match crate::worktree_include::copy_included(&project.path, &path) {
-                    Ok(copied) if !copied.is_empty() => {
-                        tracing::info!(count = copied.len(), "copied .worktreeinclude files");
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
-                }
-                // …and the heavy ignored directories it shares rather than
-                // copies (`.worktreeshare`), on the same best-effort terms.
-                match crate::worktree_include::link_shared(&project.path, &path) {
-                    Ok(linked) if !linked.is_empty() => {
-                        tracing::info!(?linked, "linked .worktreeshare directories");
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "could not link .worktreeshare directories")
-                    }
-                }
-                // git records the resolved path, which on macOS differs from
-                // the one we asked for (/var against /private/var).
-                let path = path.canonicalize().unwrap_or(path);
-                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: project.name.clone(),
-                });
-
-                let worktree = project::list_worktrees(&self.conn(), &project.name)
-                    .map_err(failed)?
-                    .into_iter()
-                    .find(|worktree| worktree.path == path || worktree.branch == branch)
-                    .ok_or_else(|| {
-                        RpcError::failed(format!(
-                            "created {} but git did not report it as a worktree",
-                            path.display()
-                        ))
-                    })?;
-                self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
-                Ok(Response::Workspace {
-                    workspace: self.summarize(worktree),
-                })
-            }
             Request::CreateScratchWorkspace { name } => {
                 let project = registry::create_scratch_workspace(
                     &self.conn(),
@@ -1170,13 +1189,6 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
-            Request::FanOut {
-                project,
-                branch_prefix,
-                base,
-                prompt,
-                attempts,
-            } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
             Request::QueuedMessages { session } => {
                 self.session(&session)?;
@@ -1359,12 +1371,6 @@ impl Service {
                 })
             }
 
-            Request::WorkspaceHistory { workspace, limit } => {
-                let worktree = self.worktree(&workspace)?;
-                let limit = limit.unwrap_or(50).min(200) as usize;
-                let commits = git::history(&worktree.path, limit).map_err(failed)?;
-                Ok(Response::History { commits })
-            }
             Request::StageFile {
                 workspace,
                 path,
@@ -3459,6 +3465,34 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
+    /// Record a worktree [`check_out`] made, set it up as the project asks,
+    /// and answer with its summary.
+    fn adopt_worktree(
+        &mut self,
+        project: &Project,
+        path: &std::path::Path,
+        branch: &str,
+    ) -> Result<Response, RpcError> {
+        registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
+        self.events.emit(DaemonEvent::WorkspacesChanged {
+            project: project.name.clone(),
+        });
+        let worktree = project::list_worktrees(&self.conn(), &project.name)
+            .map_err(failed)?
+            .into_iter()
+            .find(|worktree| worktree.path == path || worktree.branch == branch)
+            .ok_or_else(|| {
+                RpcError::failed(format!(
+                    "created {} but git did not report it as a worktree",
+                    path.display()
+                ))
+            })?;
+        self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
+        Ok(Response::Workspace {
+            workspace: self.summarize(worktree),
+        })
+    }
+
     /// Everything a diff needs from the database, worked out under the
     /// lock, so that git can be read without it ([`ChangesPlan::read`]).
     fn plan_changes(
@@ -4252,57 +4286,96 @@ fn today() -> String {
 impl Service {
     /// Ask the same question in one worktree per attempt.
     ///
-    /// Each arm goes through the same requests a person would send, so an arm
-    /// gets the project's setup and its own checkpoint exactly as a hand-made
-    /// workspace does. An arm that fails is reported and the rest carry on:
+    /// Each arm goes the way a hand-made workspace does — [`check_out`] off
+    /// the lock, [`Service::adopt_worktree`] and `StartSession` on it — so it
+    /// gets the project's setup and its own checkpoint the same way. An arm that fails is reported and the rest carry on:
     /// two answers are worth having even when the third never started.
     fn fan_out(
         &mut self,
         project: ProjectName,
         prefix: &str,
         base: Option<String>,
-        prompt: &str,
-        attempts: &[ginka_protocol::rpc::Attempt],
-    ) -> Result<Response, RpcError> {
+        prompt: String,
+        attempts: Vec<ginka_protocol::rpc::Attempt>,
+    ) -> Step {
         if attempts.is_empty() {
-            return Err(RpcError::failed("a fan-out needs at least one attempt"));
+            return Step::Done(Err(RpcError::failed(
+                "a fan-out needs at least one attempt",
+            )));
         }
-        let mut started = Vec::new();
-        let mut failed = Vec::new();
-        for (index, attempt) in attempts.iter().enumerate() {
-            let branch = format!("{prefix}-{}", index + 1);
-            let workspace = match self.handle(Request::CreateWorkspace {
-                project: project.clone(),
-                branch: branch.clone(),
-                base: base.clone(),
-            }) {
-                Ok(Response::Workspace { workspace }) => workspace,
-                Ok(other) => {
-                    failed.push(format!("{branch}: unexpected answer {other:?}"));
-                    continue;
-                }
-                Err(error) => {
-                    failed.push(format!("{branch}: {}", error.message));
-                    continue;
-                }
-            };
-            match self.handle(Request::StartSession {
-                workspace: workspace.worktree.workspace_id(),
-                agent: attempt.agent.clone(),
-                prompt: prompt.to_string(),
-                model: attempt.model.clone(),
-                reasoning_effort: None,
-                service_tier: None,
-                account: attempt.account.clone(),
-                access_mode: None,
-                origin: None,
-            }) {
-                Ok(Response::Session { session }) => started.push(session),
-                Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
-                Err(error) => failed.push(format!("{branch}: {}", error.message)),
-            }
+        let project = match self.project(&project) {
+            Ok(project) => project,
+            Err(error) => return Step::Done(Err(error)),
+        };
+        if project.kind == ProjectKind::Plain {
+            return Step::Done(Err(RpcError::failed(format!(
+                "{} is a plain folder and has no worktrees",
+                project.name
+            ))));
         }
-        Ok(Response::FannedOut { started, failed })
+        let base = base.unwrap_or_else(|| project.default_branch.clone());
+        let planned: Vec<(String, std::path::PathBuf, ginka_protocol::rpc::Attempt)> = attempts
+            .into_iter()
+            .enumerate()
+            .map(|(index, attempt)| {
+                let branch = format!("{prefix}-{}", index + 1);
+                let path = self
+                    .paths
+                    .worktrees()
+                    .join(&project.name.0)
+                    .join(slugify(&branch));
+                (branch, path, attempt)
+            })
+            .collect();
+        Step::Away(Box::new(move || {
+            // The checkouts, without the service held; the sessions after,
+            // with it.
+            let checked_out: Vec<_> = planned
+                .into_iter()
+                .map(|(branch, path, attempt)| {
+                    let outcome = check_out(&project.path, &path, &branch, &base);
+                    (branch, outcome, attempt)
+                })
+                .collect();
+            Box::new(move |service: &mut Service| {
+                let mut started = Vec::new();
+                let mut failed = Vec::new();
+                for (branch, outcome, attempt) in checked_out {
+                    let workspace =
+                        match outcome.map_err(|error| error.to_string()).and_then(|path| {
+                            service
+                                .adopt_worktree(&project, &path, &branch)
+                                .map_err(|error| error.message)
+                        }) {
+                            Ok(Response::Workspace { workspace }) => workspace,
+                            Ok(other) => {
+                                failed.push(format!("{branch}: unexpected answer {other:?}"));
+                                continue;
+                            }
+                            Err(error) => {
+                                failed.push(format!("{branch}: {error}"));
+                                continue;
+                            }
+                        };
+                    match service.handle(Request::StartSession {
+                        workspace: workspace.worktree.workspace_id(),
+                        agent: attempt.agent.clone(),
+                        prompt: prompt.clone(),
+                        model: attempt.model.clone(),
+                        reasoning_effort: None,
+                        service_tier: None,
+                        account: attempt.account.clone(),
+                        access_mode: None,
+                        origin: None,
+                    }) {
+                        Ok(Response::Session { session }) => started.push(session),
+                        Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
+                        Err(error) => failed.push(format!("{branch}: {}", error.message)),
+                    }
+                }
+                Ok(Response::FannedOut { started, failed })
+            })
+        }))
     }
 
     /// Reconcile every project's worktrees against git.
