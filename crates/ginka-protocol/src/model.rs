@@ -467,6 +467,7 @@ pub struct Account {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountIdentity {
+    /// The address the login is signed in as.
     pub email: Option<String>,
     /// The organisation the login bills to.
     pub organization: Option<String>,
@@ -1108,6 +1109,7 @@ pub struct McpServerEntry {
     pub name: String,
     /// Whose configuration names it: `claude`, `codex`.
     pub provider: String,
+    /// Where it is configured.
     pub scope: McpScope,
     /// The command it runs, or the address it is reached at — never its
     /// arguments or environment, and an address with its user information,
@@ -1137,7 +1139,9 @@ pub struct McpServerSpec {
     pub name: String,
     /// Whose configuration it goes into: `claude`, `codex`.
     pub provider: String,
+    /// Where it is written; Codex has user scope only.
     pub scope: McpScope,
+    /// How it is reached.
     pub target: McpTarget,
 }
 
@@ -1147,9 +1151,17 @@ pub struct McpServerSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum McpTarget {
     /// A program the agent starts and speaks to over stdio.
-    Command { program: String, args: Vec<String> },
+    Command {
+        /// The program, found on the agent's PATH.
+        program: String,
+        /// Its arguments, as given.
+        args: Vec<String>,
+    },
     /// A streamable HTTP server.
-    Url { url: String },
+    Url {
+        /// An `http://` or `https://` address.
+        url: String,
+    },
 }
 
 /// Where an MCP server is configured.
@@ -1172,6 +1184,7 @@ pub struct CheckRun {
     pub name: String,
     /// The workflow it belongs to, when it is an Actions job.
     pub workflow: Option<String>,
+    /// Where it stands.
     pub state: CheckState,
     /// Where its log is.
     pub link: Option<String>,
@@ -1182,11 +1195,15 @@ pub struct CheckRun {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckState {
+    /// It ran and succeeded.
     Passed,
+    /// It ran and failed: what "Fix failing checks" hands over.
     Failed,
     /// Queued or running — or a state this build does not know.
     Pending,
+    /// Its conditions did not apply, so it did not run.
     Skipped,
+    /// It was stopped before it finished.
     Cancelled,
 }
 

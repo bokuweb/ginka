@@ -324,6 +324,7 @@ pub enum DaemonEvent {
 
     /// What `CheckAgentUpdates` found, one row per installed agent.
     AgentUpdatesChecked {
+        /// One row per installed agent Ginka knows a package for.
         updates: Vec<crate::model::AgentUpdate>,
     },
 

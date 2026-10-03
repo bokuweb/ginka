@@ -238,6 +238,7 @@ pub struct Draft {
     pub via: CronVia,
     pub agent: Option<String>,
     pub body: String,
+    /// A shell probe run before each scheduled firing; non-zero skips it.
     pub precheck: Option<String>,
     pub enabled: bool,
 }
