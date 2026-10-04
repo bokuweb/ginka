@@ -1298,6 +1298,60 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Where the selected project stands in the rail, for the palette.
+    pub fn selected_project_place(&self) -> Option<ginka_ui::palette::ProjectPlace> {
+        let selected = self.selected_project()?;
+        let index = self
+            .projects
+            .iter()
+            .position(|project| &project.name == selected)?;
+        let now = chrono::Utc::now().timestamp();
+        Some(ginka_ui::palette::ProjectPlace {
+            index,
+            count: self.projects.len(),
+            muted: ginka_ui::notify::muted(&self.muted, &selected.0, now),
+        })
+    }
+
+    /// Do one of the project menu's actions to the selected project: the
+    /// palette's way into the menu, for a keyboard.
+    pub fn act_on_selected_project(
+        &mut self,
+        action: ginka_ui::palette::ProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::ProjectAction;
+        let Some(place) = self.selected_project_place() else {
+            return;
+        };
+        let Some(project) = self.projects.get(place.index).cloned() else {
+            return;
+        };
+        match action {
+            ProjectAction::Rename => self.start_labelling(project.name, project.label, window, cx),
+            ProjectAction::MoveUp if place.index > 0 => cx.emit(SidebarEvent::MoveProject {
+                project: project.name,
+                index: place.index as u32 - 1,
+            }),
+            ProjectAction::MoveDown if place.index + 1 < place.count => {
+                cx.emit(SidebarEvent::MoveProject {
+                    project: project.name,
+                    index: place.index as u32 + 1,
+                })
+            }
+            ProjectAction::MoveUp | ProjectAction::MoveDown => {}
+            ProjectAction::Mute(choice) => cx.emit(SidebarEvent::MuteProject {
+                project: project.name,
+                until: Some(choice.until(chrono::Utc::now().timestamp())),
+            }),
+            ProjectAction::Unmute => cx.emit(SidebarEvent::MuteProject {
+                project: project.name,
+                until: None,
+            }),
+        }
+    }
+
     /// Do one of the row menu's actions to the selected row: the palette's
     /// way into the menu, for a keyboard (`ginka_ui::palette::RowAction`).
     pub fn act_on_selected(

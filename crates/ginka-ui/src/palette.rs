@@ -21,6 +21,8 @@ use nucleo_matcher::{Config, Matcher};
 pub enum Command {
     /// Do one of the sidebar row menu's actions to the selected workspace.
     Row(RowAction),
+    /// Do one of the project menu's actions to the selected project.
+    Project(ProjectAction),
     /// Show the agents board across projects.
     OpenBoard,
     /// Show the next conversation in the session list.
@@ -135,6 +137,90 @@ pub fn row_entries(row: Option<&SessionRow>) -> Vec<Entry> {
         RowAction::TogglePin,
     ));
     entries.push(entry("archive", "palette.row.archive", RowAction::Archive));
+    entries
+}
+
+/// The project menu's actions, offered here for a keyboard. Removing a
+/// project is left to the menu, whose second click is its confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectAction {
+    /// Show the selected project under another name.
+    Rename,
+    /// Put the selected project one place earlier in the rail.
+    MoveUp,
+    /// Put the selected project one place later in the rail.
+    MoveDown,
+    /// Mute the selected project's notifications for a while.
+    Mute(crate::notify::MuteFor),
+    /// Lift the selected project's mute.
+    Unmute,
+}
+
+/// Where the selected project stands, for [`project_entries`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectPlace {
+    /// Its position in the rail, 0 first.
+    pub index: usize,
+    /// How many projects the rail has.
+    pub count: usize,
+    /// Whether its notifications are muted now.
+    pub muted: bool,
+}
+
+/// The project actions that apply to the selected project: moving only
+/// where there is somewhere to move, muting or unmuting by its state.
+pub fn project_entries(project: Option<ProjectPlace>) -> Vec<Entry> {
+    let Some(project) = project else {
+        return Vec::new();
+    };
+    let entry = |id: String, label: String, action: ProjectAction| Entry {
+        id: format!("project:{id}"),
+        label,
+        hint: None,
+        command: Command::Project(action),
+    };
+    let mut entries = vec![entry(
+        "rename".into(),
+        rust_i18n::t!("palette.project.rename").to_string(),
+        ProjectAction::Rename,
+    )];
+    if project.index > 0 {
+        entries.push(entry(
+            "up".into(),
+            rust_i18n::t!("palette.project.move_up").to_string(),
+            ProjectAction::MoveUp,
+        ));
+    }
+    if project.index + 1 < project.count {
+        entries.push(entry(
+            "down".into(),
+            rust_i18n::t!("palette.project.move_down").to_string(),
+            ProjectAction::MoveDown,
+        ));
+    }
+    if project.muted {
+        entries.push(entry(
+            "unmute".into(),
+            rust_i18n::t!("palette.project.unmute").to_string(),
+            ProjectAction::Unmute,
+        ));
+    } else {
+        for choice in crate::notify::MuteFor::CHOICES {
+            let how_long = match choice {
+                crate::notify::MuteFor::Hours(hours) => {
+                    rust_i18n::t!("sidebar.action.mute_hours", hours = hours).to_string()
+                }
+                crate::notify::MuteFor::UntilResumed => {
+                    rust_i18n::t!("sidebar.action.mute_forever").to_string()
+                }
+            };
+            entries.push(entry(
+                format!("mute:{choice:?}"),
+                rust_i18n::t!("palette.project.mute", how_long = how_long).to_string(),
+                ProjectAction::Mute(choice),
+            ));
+        }
+    }
     entries
 }
 
@@ -566,6 +652,44 @@ mod tests {
         assert!(
             commands(Some(&row)).is_empty(),
             "an archived row has its own controls"
+        );
+    }
+
+    #[test]
+    fn the_project_menu_is_reachable_from_the_palette() {
+        let commands = |place: Option<ProjectPlace>| -> Vec<Command> {
+            project_entries(place)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect()
+        };
+        assert!(commands(None).is_empty());
+
+        let first = commands(Some(ProjectPlace {
+            index: 0,
+            count: 2,
+            muted: false,
+        }));
+        assert!(first.contains(&Command::Project(ProjectAction::Rename)));
+        assert!(!first.contains(&Command::Project(ProjectAction::MoveUp)));
+        assert!(first.contains(&Command::Project(ProjectAction::MoveDown)));
+        assert!(first.contains(&Command::Project(ProjectAction::Mute(
+            crate::notify::MuteFor::Hours(1)
+        ))));
+        assert!(!first.contains(&Command::Project(ProjectAction::Unmute)));
+
+        let last_muted = commands(Some(ProjectPlace {
+            index: 1,
+            count: 2,
+            muted: true,
+        }));
+        assert!(last_muted.contains(&Command::Project(ProjectAction::MoveUp)));
+        assert!(!last_muted.contains(&Command::Project(ProjectAction::MoveDown)));
+        assert!(last_muted.contains(&Command::Project(ProjectAction::Unmute)));
+        assert!(
+            !last_muted
+                .iter()
+                .any(|command| matches!(command, Command::Project(ProjectAction::Mute(_))))
         );
     }
 

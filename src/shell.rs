@@ -7796,6 +7796,9 @@ impl Shell {
         entries.extend(ginka_ui::palette::row_entries(
             self.sidebar.read(cx).selected_row(),
         ));
+        entries.extend(ginka_ui::palette::project_entries(
+            self.sidebar.read(cx).selected_project_place(),
+        ));
         entries.extend(ginka_ui::palette::quick_command_entries(
             &self.quick_commands,
             self.session.is_some(),
@@ -7939,6 +7942,9 @@ impl Shell {
             Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
             Command::CloseAllTabs => self.close_all_tabs(window, cx),
             Command::OpenBoard => self.open_board(window, cx),
+            Command::Project(action) => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.act_on_selected_project(action, window, cx)
+            }),
             Command::Row(action) => self.sidebar.update(cx, |sidebar, cx| {
                 sidebar.act_on_selected(action, window, cx)
             }),

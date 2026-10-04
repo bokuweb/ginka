@@ -397,7 +397,7 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
   (in place), *Move up*, *Move down*, the notification mutes and *Remove from
   Ginka*, which asks again and forgets the project while its folder stays on
-  disk.
+  disk. All but removing are in the command palette for the selected project.
 - **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
   schedule, name, execution scope, what runs, when it next fires and how it last went, with
   *Pause*, *Edit*, *Run now*, *History* and *Remove*. *History* lists the

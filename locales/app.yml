@@ -2010,3 +2010,18 @@ palette.row.archive:
 palette.row.resolve:
   en: Resolve this workspace's conflicts with the agent
   ja: このワークスペースのコンフリクトをエージェントで解決
+palette.project.rename:
+  en: Rename this project
+  ja: このプロジェクトの名前を変更
+palette.project.move_up:
+  en: Move this project up
+  ja: このプロジェクトを上へ
+palette.project.move_down:
+  en: Move this project down
+  ja: このプロジェクトを下へ
+palette.project.mute:
+  en: "Mute this project: %{how_long}"
+  ja: "このプロジェクトをミュート: %{how_long}"
+palette.project.unmute:
+  en: Unmute this project
+  ja: このプロジェクトのミュートを解除
