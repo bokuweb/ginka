@@ -5,9 +5,11 @@ use std::path::{Path, PathBuf};
 
 /// Every on-disk location Ginka owns, resolved once.
 ///
-/// The root is overridable through `GINKA_HOME` so tests (and the debug build,
-/// which must not touch a release install's state) can run against a temporary
-/// directory. See `docs/roadmap.md` §4.1.
+/// The root is overridable through `GINKA_HOME`, so tests run against a
+/// temporary directory and a development build can be kept away from a
+/// release install's state (`GINKA_HOME=~/.ginka-dev scripts/dev-macos`).
+/// A debug build does not move it on its own: doing so would make every
+/// existing development setup look empty. See `docs/roadmap.md` §4.1.
 #[derive(Debug, Clone)]
 pub struct Paths {
     root: PathBuf,

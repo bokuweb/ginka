@@ -161,7 +161,7 @@ cargo run -p ginka-protocol --features export --bin export-types   # TypeScript 
 `cargo clippy`/`cargo test` on the whole workspace also builds the GPUI app; the domain crates alone are
 `cargo test -p ginka-core -p ginka-protocol`, which is the fast loop.
 
-`GINKA_HOME` overrides `~/.ginka`; point it at a temp directory rather than testing against your real state. `GINKA_LOG` sets the tracing filter.
+`GINKA_HOME` overrides `~/.ginka`; point it at a temp directory rather than testing against your real state, and at a directory of its own (`GINKA_HOME=~/.ginka-dev scripts/dev-macos`) to keep a development build — and the daemon it starts — apart from a release install's. `GINKA_LOG` sets the tracing filter.
 
 ## Layout
 
