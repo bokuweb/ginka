@@ -163,7 +163,9 @@ active conversation. With nothing selected, the rail stands alone.
   note line becomes a field; ↩ writes it, an empty field clears it), *Pin* / *Unpin*
   (pinned rows lead the list and carry a star), *Archive* and *Delete
   conversation*, which asks again and forgets the transcript and its
-  checkpoints, stopping a running turn first. Archived rows
+  checkpoints, stopping a running turn first.
+  Every row action but deleting is also in the command palette for the
+  selected row (`ginka_ui::palette::row_entries`), so a keyboard reaches it. Archived rows
   offer *Restore* and *Delete*, which asks again before removing the worktree
   and is refused while it has uncommitted work. A change the daemon refuses
   says why in a notice at the foot of the window. A row with prompts waiting says how many.

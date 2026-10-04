@@ -1298,6 +1298,47 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Do one of the row menu's actions to the selected row: the palette's
+    /// way into the menu, for a keyboard (`ginka_ui::palette::RowAction`).
+    pub fn act_on_selected(
+        &mut self,
+        action: ginka_ui::palette::RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::RowAction;
+        let Some(row) = self.selected_row().cloned() else {
+            return;
+        };
+        match action {
+            RowAction::Rename => {
+                if let Some(session) = row.session.clone() {
+                    self.start_rename(
+                        row.workspace.clone(),
+                        session,
+                        row.title.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            RowAction::StatusNote => {
+                self.start_note(row.workspace.clone(), row.status_note.clone(), window, cx)
+            }
+            RowAction::TogglePin => cx.emit(SidebarEvent::Pin {
+                workspace: row.workspace.clone(),
+                pinned: !row.pinned,
+            }),
+            RowAction::Archive => cx.emit(SidebarEvent::Archive {
+                workspace: row.workspace.clone(),
+                archived: true,
+            }),
+            RowAction::ResolveConflicts => cx.emit(SidebarEvent::ResolveConflicts {
+                workspace: row.workspace.clone(),
+            }),
+        }
+    }
+
     /// Start writing a workspace's status note, with the current one in a
     /// focused field. Enter saves; an empty field clears the note.
     fn start_note(

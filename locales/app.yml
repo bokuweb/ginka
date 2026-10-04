@@ -1992,3 +1992,21 @@ surface.name.reports:
 surface.name.skills:
   en: Skills
   ja: スキル
+palette.row.rename:
+  en: Rename this conversation
+  ja: この会話の名前を変更
+palette.row.note:
+  en: Write this workspace's status note
+  ja: このワークスペースのステータスメモを書く
+palette.row.pin:
+  en: Pin this workspace
+  ja: このワークスペースをピン留め
+palette.row.unpin:
+  en: Unpin this workspace
+  ja: このワークスペースのピン留めを外す
+palette.row.archive:
+  en: Archive this workspace
+  ja: このワークスペースをアーカイブ
+palette.row.resolve:
+  en: Resolve this workspace's conflicts with the agent
+  ja: このワークスペースのコンフリクトをエージェントで解決

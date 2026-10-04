@@ -19,6 +19,8 @@ use nucleo_matcher::{Config, Matcher};
 /// What choosing an entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Do one of the sidebar row menu's actions to the selected workspace.
+    Row(RowAction),
     /// Show the agents board across projects.
     OpenBoard,
     /// Show the next conversation in the session list.
@@ -79,6 +81,61 @@ pub enum Command {
     SearchEverywhere,
     /// Bring in a conversation started in an agent's own CLI.
     ResumeFromCli,
+}
+
+/// The sidebar row menu's actions, offered here so a keyboard reaches them
+/// too (`docs/ui.md` §6). Deleting a conversation is left to the menu, whose
+/// second click is the confirmation the palette has no place for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    /// Give the selected conversation a title of the reader's own.
+    Rename,
+    /// Write or clear the selected workspace's status note.
+    StatusNote,
+    /// Pin or unpin the selected workspace.
+    TogglePin,
+    /// Move the selected workspace to the archived section.
+    Archive,
+    /// Hand the selected workspace's merge conflicts to an agent.
+    ResolveConflicts,
+}
+
+/// The row actions that apply to `row`, the workspace selected in the
+/// sidebar: renaming needs a conversation, resolving needs conflicts, and an
+/// archived row has only its own controls.
+pub fn row_entries(row: Option<&SessionRow>) -> Vec<Entry> {
+    let Some(row) = row.filter(|row| !row.archived) else {
+        return Vec::new();
+    };
+    let entry = |id: &str, key: &str, action: RowAction| Entry {
+        id: format!("row:{id}"),
+        label: rust_i18n::t!(key).to_string(),
+        hint: None,
+        command: Command::Row(action),
+    };
+    let mut entries = Vec::new();
+    if row.status.conflict {
+        entries.push(entry(
+            "resolve",
+            "palette.row.resolve",
+            RowAction::ResolveConflicts,
+        ));
+    }
+    if row.session.is_some() {
+        entries.push(entry("rename", "palette.row.rename", RowAction::Rename));
+    }
+    entries.push(entry("note", "palette.row.note", RowAction::StatusNote));
+    entries.push(entry(
+        "pin",
+        if row.pinned {
+            "palette.row.unpin"
+        } else {
+            "palette.row.pin"
+        },
+        RowAction::TogglePin,
+    ));
+    entries.push(entry("archive", "palette.row.archive", RowAction::Archive));
+    entries
 }
 
 /// The saved commands the palette offers, where there is a workspace to run
@@ -478,6 +535,39 @@ fn shortcut(panel: Panel) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_row_menu_is_reachable_from_the_palette_for_the_selected_row() {
+        let commands = |row: Option<&SessionRow>| -> Vec<Command> {
+            row_entries(row)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect()
+        };
+        assert!(commands(None).is_empty(), "nothing selected, nothing to do");
+
+        let mut row = SessionRow::samples().remove(0);
+        row.pinned = false;
+        row.status.conflict = false;
+        let offered = commands(Some(&row));
+        assert!(offered.contains(&Command::Row(RowAction::StatusNote)));
+        assert!(offered.contains(&Command::Row(RowAction::TogglePin)));
+        assert!(offered.contains(&Command::Row(RowAction::Archive)));
+        assert!(!offered.contains(&Command::Row(RowAction::ResolveConflicts)));
+        assert_eq!(
+            offered.contains(&Command::Row(RowAction::Rename)),
+            row.session.is_some()
+        );
+
+        row.status.conflict = true;
+        assert!(commands(Some(&row)).contains(&Command::Row(RowAction::ResolveConflicts)));
+
+        row.archived = true;
+        assert!(
+            commands(Some(&row)).is_empty(),
+            "an archived row has its own controls"
+        );
+    }
 
     #[test]
     fn saved_commands_are_offered_only_where_they_can_run() {
