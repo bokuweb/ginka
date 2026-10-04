@@ -30,6 +30,11 @@ pub fn discover(worktree: &Path, home: Option<&Path>) -> Vec<SlashCommand> {
             "Ask a brief read-only question in a separate conversation",
             "<question>",
         ),
+        (
+            "plan",
+            "Run this turn read-only and ask for a plan; the next turn runs as before",
+            "<what to plan>",
+        ),
     ]
     .into_iter()
     .map(|(name, description, hint)| SlashCommand {
@@ -243,7 +248,10 @@ mod tests {
 
         let found = discover(&worktree, Some(&home));
         let names: Vec<&str> = found.iter().map(|command| command.name.as_str()).collect();
-        assert_eq!(names, vec!["btw", "goal", "mine", "project", "side"]);
+        assert_eq!(
+            names,
+            vec!["btw", "goal", "mine", "plan", "project", "side"]
+        );
         assert_eq!(
             found.iter().find(|c| c.name == "mine").unwrap().scope,
             CommandScope::User
@@ -278,7 +286,7 @@ mod tests {
             .into_iter()
             .map(|command| command.name)
             .collect();
-        assert_eq!(names, ["btw", "goal", "side"]);
+        assert_eq!(names, ["btw", "goal", "plan", "side"]);
     }
 
     #[test]

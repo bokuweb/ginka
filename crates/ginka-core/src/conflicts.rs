@@ -14,9 +14,13 @@ use std::process::Command;
 /// The operation a worktree is part-way through.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operation {
+    /// `git merge`, stopped with `MERGE_HEAD` set.
     Merge,
+    /// `git rebase`, with a `rebase-merge` or `rebase-apply` directory.
     Rebase,
+    /// `git cherry-pick`, with `CHERRY_PICK_HEAD` set.
     CherryPick,
+    /// `git revert`, with `REVERT_HEAD` set.
     Revert,
 }
 
@@ -46,7 +50,10 @@ impl Operation {
 /// and the paths it could not merge.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Conflicts {
+    /// What stopped, when git has one open; `None` for unmerged paths with
+    /// no operation in progress (a stash pop, say).
     pub operation: Option<Operation>,
+    /// The unmerged paths, relative to the worktree root.
     pub paths: Vec<String>,
 }
 

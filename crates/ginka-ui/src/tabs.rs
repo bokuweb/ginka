@@ -38,18 +38,22 @@ impl Tabs {
         tabs
     }
 
+    /// The open tabs, left to right, with no duplicates.
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
 
+    /// The tab the centre column shows; `None` before the window has picked one or once all are closed.
     pub fn active(&self) -> Option<&Tab> {
         self.tabs.get(self.active?)
     }
 
+    /// The active tab's position in `tabs()`, when there is one.
     pub fn active_index(&self) -> Option<usize> {
         self.active
     }
 
+    /// Whether no tab is open at all.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
@@ -109,6 +113,27 @@ impl Tabs {
             other => other,
         };
         Some(closed)
+    }
+
+    /// Close every tab (MonoCode's Close All Tabs), answering how many
+    /// were open.
+    pub fn close_all(&mut self) -> usize {
+        let count = self.tabs.len();
+        self.tabs.clear();
+        self.active = None;
+        count
+    }
+
+    /// Close every tab but the one at `index`, which becomes active. An
+    /// index past the end closes them all.
+    pub fn close_others(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            self.close_all();
+            return;
+        }
+        let kept = self.tabs.remove(index);
+        self.tabs = vec![kept];
+        self.active = Some(0);
     }
 
     /// Close every tab whose workspace is gone.
@@ -222,6 +247,20 @@ mod tests {
         tabs.open(Tab::Workspace(ws("b")));
         assert_eq!(tabs.tabs().len(), 3);
         assert_eq!(tabs.active(), Some(&Tab::Workspace(ws("b"))));
+    }
+
+    #[test]
+    fn close_all_and_close_others_leave_what_was_asked_for() {
+        let mut tabs = Tabs::restore([ws("a"), ws("b"), ws("c")]);
+        tabs.select_number(2);
+        tabs.close_others(1);
+        assert_eq!(tabs.workspaces(), vec![ws("b")]);
+        assert_eq!(tabs.active(), Some(&Tab::Workspace(ws("b"))));
+        assert_eq!(tabs.close_all(), 1);
+        assert!(tabs.is_empty());
+        assert_eq!(tabs.active(), None);
+        tabs.close_others(5);
+        assert!(tabs.is_empty(), "nothing to keep is nothing kept");
     }
 
     #[test]

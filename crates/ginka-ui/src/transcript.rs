@@ -150,19 +150,31 @@ fn markdown_link_ranges(characters: &[char]) -> Vec<(usize, usize)> {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Block {
     /// Something the user sent.
-    User { text: String },
+    User {
+        /// What the user typed, as sent.
+        text: String,
+    },
     /// Assistant prose, with its deltas already folded together.
-    Assistant { text: String },
+    Assistant {
+        /// The answer so far, as Markdown.
+        text: String,
+    },
     /// The agent's reasoning, where the vendor exposes it.
-    Reasoning { text: String },
+    Reasoning {
+        /// The reasoning so far, as the vendor exposed it.
+        text: String,
+    },
     /// A tool call and, once it arrives, its result.
     Tool {
         /// Correlates the call with its result.
         id: String,
+        /// The normalized kind of tool, shown as the block's label.
         name: String,
+        /// The call's one-line title, the line the reader scans.
         input: String,
         /// `None` while the tool is still running.
         output: Option<String>,
+        /// Whether the tool reported a failure.
         is_error: bool,
     },
     /// The newest complete snapshot from an agent-maintained task list.
@@ -187,7 +199,9 @@ pub enum Block {
     Question {
         /// What an answer is sent against.
         id: String,
+        /// What the agent asked, or the permission it wants.
         question: String,
+        /// Choices the agent offered; empty for a free-form answer.
         options: Vec<String>,
         /// Whether the reader has already replied to it.
         ///
@@ -198,12 +212,16 @@ pub enum Block {
     },
     /// A plan the agent wants approved before acting.
     Plan {
+        /// What an approval or rejection is sent against.
         id: String,
+        /// The proposed plan, as Markdown.
         plan: String,
+        /// Whether the reader has already approved or rejected it.
         answered: bool,
     },
     /// A turn boundary. A checkpoint was taken here.
     TurnEnd {
+        /// One-based number of the turn that ended.
         turn: u32,
         /// The inclusive transcript position copied by a fork from here.
         seq: u64,
@@ -218,7 +236,9 @@ pub enum Block {
     },
     /// How the session ended.
     Outcome {
+        /// The terminal state the session reached.
         state: SessionState,
+        /// The driver's closing summary, when it gave one.
         summary: Option<String>,
     },
 }
@@ -234,7 +254,10 @@ pub enum Applied {
     /// Its position is beyond the next one expected, so something in between
     /// was missed. The caller has to re-read rather than carry on: a
     /// transcript with a hole in it is worse than one that is refetched.
-    Gap { expected: u64 },
+    Gap {
+        /// The position that should have come next; re-read from here.
+        expected: u64,
+    },
 }
 
 /// A session's transcript, folded.
@@ -390,6 +413,7 @@ impl Transcript {
         })
     }
 
+    /// Whether no block has been folded in yet; with nothing running, the centre column then shows the home screen.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
     }
@@ -877,7 +901,11 @@ pub enum Activity {
     /// Nothing has arrived for this turn yet.
     Thinking,
     /// A tool is running and has not answered.
-    Running { tool: String },
+    Running {
+        /// What is running, in the reader's terms: the call's title, a delegated
+        /// agent's brief or the task in progress.
+        tool: String,
+    },
     /// Text is arriving; the words themselves are the indicator.
     Writing,
 }

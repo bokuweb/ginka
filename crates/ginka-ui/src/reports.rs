@@ -12,8 +12,11 @@ use ginka_protocol::{ContextUsage, Usage};
 /// The usage report as the daemon answers it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageReport {
+    /// Totals per calendar day.
     pub by_day: Vec<UsageRow>,
+    /// Totals per agent (provider).
     pub by_agent: Vec<UsageRow>,
+    /// Totals per login.
     pub by_account: Vec<UsageRow>,
     /// The latest reading per login, for those that have one.
     pub plans: Vec<PlanSnapshot>,
@@ -21,6 +24,7 @@ pub struct UsageReport {
     pub rates_fetched_at: Option<i64>,
     /// By model and by project, including agents run outside Ginka.
     pub by_model: Vec<UsageRow>,
+    /// By project, including agents run outside Ginka.
     pub by_project: Vec<UsageRow>,
 }
 

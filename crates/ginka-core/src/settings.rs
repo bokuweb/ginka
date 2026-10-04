@@ -1,3 +1,6 @@
+//! JSON settings files: the app's `~/.ginka/app.json` and the daemon's
+//! `~/.ginka/settings.json`, loaded leniently and saved atomically.
+
 use anyhow::{Context, Result};
 use ginka_protocol::provider::{ProviderKind, ProviderModel};
 use serde::{Deserialize, Serialize};
@@ -12,12 +15,20 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppSettings {
+    /// Light, dark, or following the system.
     pub appearance: Appearance,
+    /// Whether the session sidebar is shown; global across workspaces.
     pub sidebar_open: bool,
+    /// Sidebar width in logical pixels; widths under 420 saved by older builds
+    /// are replaced by the default on restore.
     pub sidebar_width: f32,
+    /// Surface-panel visibility for a workspace with no saved layout of its own.
     pub right_panel_open: bool,
+    /// Surface-panel width in logical pixels, for a workspace with no saved layout.
     pub right_panel_width: f32,
+    /// Terminal-dock visibility for a workspace with no saved layout of its own.
     pub terminal_dock_open: bool,
+    /// Terminal-dock height in logical pixels, for a workspace with no saved layout.
     pub terminal_dock_height: f32,
     /// Right-panel and terminal arrangement keyed by immutable workspace id.
     pub workspace_layouts: BTreeMap<String, WorkspaceLayoutSettings>,
@@ -38,6 +49,10 @@ pub struct AppSettings {
     /// The conversations open as tabs across the centre column, by
     /// workspace id, left to right. Restored where the workspace still exists.
     pub open_tabs: Vec<String>,
+    /// Projects whose desktop notifications are muted, by name, with the
+    /// Unix second the mute ends — `i64::MAX` until it is lifted. A mute
+    /// that has run out is simply ignored.
+    pub muted_projects: BTreeMap<String, i64>,
 }
 
 impl Default for AppSettings {
@@ -63,6 +78,7 @@ impl Default for AppSettings {
             notifications: true,
             notification_sounds: true,
             open_tabs: Vec::new(),
+            muted_projects: BTreeMap::new(),
         }
     }
 }
@@ -221,11 +237,15 @@ fn model_options_key(provider: &str, model: &str) -> String {
     format!("{provider}/{model}")
 }
 
+/// Which palette the window draws; stored as `light`, `dark` or `system`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Appearance {
+    /// Always the light palette.
     Light,
+    /// Always the dark palette.
     Dark,
+    /// Follow the operating system's appearance, switching when it does.
     #[default]
     System,
 }
@@ -295,6 +315,8 @@ pub struct DaemonSettings {
 }
 
 impl DaemonSettings {
+    /// False only when the provider is in `disabled_providers`; every provider
+    /// is enabled by default.
     pub fn is_enabled(&self, provider: ProviderKind) -> bool {
         !self.disabled_providers.contains(&provider)
     }
@@ -355,6 +377,7 @@ pub struct AgentSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountSettings {
+    /// The vendor this login belongs to.
     pub provider: ProviderKind,
     /// What the chip says.
     pub label: String,

@@ -301,6 +301,7 @@ impl AgentDriver for ClaudeDriver {
 }
 
 impl ClaudeDriver {
+    /// The driver id sessions and settings name Claude Code by.
     pub const ID: &'static str = "claude";
 
     /// The command a spec launches. Separate from starting it so the argument
@@ -330,6 +331,8 @@ impl ClaudeDriver {
         command
     }
 
+    /// Spawn `claude` for `spec` and start reading its stream into `events` on a
+    /// background thread. Fails only when the process cannot be started.
     pub fn start(spec: &ProcessSessionSpec, events: Sender<AgentEvent>) -> Result<ClaudeSession> {
         let mut session = Self::start_with(Self::command(spec), events)?;
         session.options = spec.options.clone();
@@ -390,6 +393,7 @@ impl ClaudeSession {
         self.process.session_id()
     }
 
+    /// True until the agent's output stream has closed and the process was reaped.
     pub fn is_running(&self) -> bool {
         self.process.is_running()
     }
@@ -432,6 +436,7 @@ pub struct PromptMessage {
 }
 
 impl PromptMessage {
+    /// A user message carrying `text` as the next prompt.
     pub fn user(text: impl Into<String>) -> Self {
         Self { text: text.into() }
     }

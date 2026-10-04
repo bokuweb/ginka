@@ -378,9 +378,6 @@ impl Daemon {
                                 service.reload_settings_if_changed();
                                 service.sync();
                             }
-                            if status {
-                                service.poll_statuses();
-                            }
                             if cron {
                                 service.resume_limited_queues(chrono_now());
                                 service.take_due_cron_now()
@@ -388,6 +385,11 @@ impl Daemon {
                                 Vec::new()
                             }
                         };
+                        // A `git status` per worktree, read without the
+                        // service held.
+                        if status {
+                            ginka_core::service::poll_statuses_shared(&service);
+                        }
                         // A precheck can take up to a minute; requests are
                         // served meanwhile, and the lock is taken back only
                         // to fire.
@@ -441,6 +443,17 @@ impl Daemon {
         )
         .await;
 
+        // Agents and shells run in process groups of their own: nothing ends
+        // them when this process does.
+        let stopped = self
+            .service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop_everything();
+        if stopped > 0 {
+            tracing::info!(stopped, "stopped the agents still running");
+        }
+
         // Closing the event streams ends every connection's pump, which closes
         // its write queue, which lets the writer flush what is already in it.
         // Then wait for those writers: the client that asked the daemon to stop
@@ -458,6 +471,15 @@ impl Daemon {
         tracing::info!("daemon stopped");
         Ok(())
     }
+}
+
+/// Whether an `Authorization` header carries the daemon's bearer token,
+/// compared without leaking in timing how much of it was right
+/// ([`ginka_core::daemon::token_matches`]).
+fn bearer_matches(token: &str, header: &str) -> bool {
+    header
+        .strip_prefix("Bearer ")
+        .is_some_and(|presented| ginka_core::daemon::token_matches(token, presented))
 }
 
 /// Dig the request id out of a frame that would not parse.
@@ -613,7 +635,7 @@ impl Connection {
         &self,
         stream: async_net::TcpStream,
     ) -> Result<WebSocketStream<async_net::TcpStream>> {
-        let expected = format!("Bearer {}", self.token);
+        let token = self.token.clone();
         let socket = async_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &HandshakeRequest, response: HandshakeResponse| {
@@ -624,7 +646,7 @@ impl Connection {
                     .unwrap_or_default();
                 // Loopback is not authentication: every other process on the
                 // machine can reach this port.
-                if presented == expected {
+                if bearer_matches(&token, presented) {
                     Ok(response)
                 } else {
                     let mut refusal =
@@ -704,14 +726,34 @@ impl Connection {
     /// an executor thread that other connections' pushes are waiting on.
     async fn handle(&self, request: Request) -> Result<ginka_protocol::rpc::Response, RpcError> {
         let service = self.service.clone();
-        smol::unblock(move || {
-            let mut service = service
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            service.handle(request)
-        })
-        .await
+        // Locked only while state is touched: a push or a `gh` call waits
+        // on the network with the service free for everyone else.
+        smol::unblock(move || contained(|| ginka_core::service::handle_shared(&service, request)))
+            .await
     }
+}
+
+/// Run one request's handling so that a panic in it becomes that request's
+/// error instead of the connection's end.
+///
+/// A bug in one request must not cost the client its connection — and with
+/// it every push it is waiting on — or leave it waiting forever for an
+/// answer that will never come. The service's lock recovers from the poison
+/// a panic leaves (see [`ginka_core::service::handle_shared`]).
+fn contained(
+    handle: impl FnOnce() -> Result<ginka_protocol::rpc::Response, RpcError>,
+) -> Result<ginka_protocol::rpc::Response, RpcError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(handle)).unwrap_or_else(|panic| {
+        let why = panic
+            .downcast_ref::<&str>()
+            .map(|why| why.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        tracing::error!(%why, "a request panicked");
+        Err(RpcError::failed(format!(
+            "the daemon hit an internal error handling this request: {why}"
+        )))
+    })
 }
 
 /// Apply the protocol's message bound to everything received from a client.
@@ -728,6 +770,37 @@ fn wire_config() -> WebSocketConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_daemons_bearer_token_opens_a_connection() {
+        assert!(bearer_matches("s3cret", "Bearer s3cret"));
+        assert!(!bearer_matches("s3cret", "Bearer s3cres"));
+        assert!(
+            !bearer_matches("s3cret", "s3cret"),
+            "the scheme is required"
+        );
+        assert!(!bearer_matches("s3cret", "Basic s3cret"));
+        assert!(!bearer_matches("s3cret", ""));
+        assert!(
+            !bearer_matches("", "Bearer "),
+            "an empty token never matches"
+        );
+    }
+
+    #[test]
+    fn a_request_that_panics_is_answered_with_an_error() {
+        let answered = contained(|| panic!("a bug in one request"));
+        let error = answered.expect_err("a panic is that request's error");
+        assert_eq!(error.code, "failed");
+        assert!(
+            error.message.contains("a bug in one request"),
+            "{}",
+            error.message
+        );
+
+        let fine = contained(|| Ok(ginka_protocol::rpc::Response::Ack));
+        assert!(matches!(fine, Ok(ginka_protocol::rpc::Response::Ack)));
+    }
 
     #[test]
     fn the_daemon_bounds_client_messages_and_their_frames() {

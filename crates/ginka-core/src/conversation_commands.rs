@@ -18,12 +18,18 @@ pub enum Command<'a> {
     Side(&'a str),
     /// Ask a short, read-only question in a separate session.
     Btw(&'a str),
+    /// Run this one turn read-only, asking for a plan rather than changes;
+    /// the conversation's own mode applies again to the next.
+    Plan(&'a str),
 }
+
+/// What a `/plan` turn is told in front of its prompt.
+pub const PLAN_INSTRUCTION: &str = "Plan only, for this turn: read what you need and write an implementation plan — the steps, the files they touch, and how to test them. Do not change any files; this turn runs read-only.";
 
 /// Parse only complete command names at the beginning of a message.
 pub fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim();
-    for (prefix, kind) in [("/goal", 0), ("/side", 1), ("/btw", 2)] {
+    for (prefix, kind) in [("/goal", 0), ("/side", 1), ("/btw", 2), ("/plan", 3)] {
         let Some(rest) = text.strip_prefix(prefix) else {
             continue;
         };
@@ -35,7 +41,8 @@ pub fn parse(text: &str) -> Option<Command<'_>> {
             0 if argument == "done" || argument == "clear" => Command::ClearGoal,
             0 => Command::Goal(argument),
             1 => Command::Side(argument),
-            _ => Command::Btw(argument),
+            2 => Command::Btw(argument),
+            _ => Command::Plan(argument),
         });
     }
     None
@@ -89,6 +96,11 @@ mod tests {
         assert_eq!(parse("/goal done"), Some(Command::ClearGoal));
         assert_eq!(parse("/side why?"), Some(Command::Side("why?")));
         assert_eq!(parse("/btw why?"), Some(Command::Btw("why?")));
+        assert_eq!(
+            parse("/plan the migration"),
+            Some(Command::Plan("the migration"))
+        );
+        assert_eq!(parse("/planning x"), None);
     }
 
     #[test]

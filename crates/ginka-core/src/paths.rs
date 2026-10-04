@@ -1,11 +1,15 @@
+//! Where Ginka keeps its state on disk.
+
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 
 /// Every on-disk location Ginka owns, resolved once.
 ///
-/// The root is overridable through `GINKA_HOME` so tests (and the debug build,
-/// which must not touch a release install's state) can run against a temporary
-/// directory. See `docs/roadmap.md` §4.1.
+/// The root is overridable through `GINKA_HOME`, so tests run against a
+/// temporary directory and a development build can be kept away from a
+/// release install's state (`GINKA_HOME=~/.ginka-dev scripts/dev-macos`).
+/// A debug build does not move it on its own: doing so would make every
+/// existing development setup look empty. See `docs/roadmap.md` §4.1.
 #[derive(Debug, Clone)]
 pub struct Paths {
     root: PathBuf,
@@ -23,10 +27,13 @@ impl Paths {
         Ok(Self { root })
     }
 
+    /// Use `root` as the state directory as is, ignoring `GINKA_HOME`; for tests
+    /// and callers that already resolved it. Nothing is created until [`Paths::ensure`].
     pub fn with_root(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// The state directory every other path hangs off.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -41,6 +48,7 @@ impl Paths {
         self.root.join("settings.json")
     }
 
+    /// The SQLite database the daemon owns, `ginka.db`.
     pub fn database(&self) -> PathBuf {
         self.root.join("ginka.db")
     }
@@ -60,6 +68,7 @@ impl Paths {
         self.root.join("rates.json")
     }
 
+    /// Daily-rotated log files, one set per process (`logging::init`).
     pub fn logs(&self) -> PathBuf {
         self.root.join("logs")
     }
@@ -93,9 +102,6 @@ impl Paths {
         self.root.join("accounts")
     }
 
-    /// Chat connectors' secrets, one `<connector>.env` per connector, each
-    /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
-    /// environment, and nowhere else.
     /// The embedded browser's profile: its cache, and the cookies it keeps
     /// or was given from Chrome. Private to the user, like the connectors'
     /// secrets.
@@ -103,6 +109,9 @@ impl Paths {
         self.root.join("browser")
     }
 
+    /// Chat connectors' secrets, one `<connector>.env` per connector, each
+    /// `0600` (`docs/connectors.md` §4.1). Tokens live here or in the
+    /// environment, and nowhere else.
     pub fn connectors(&self) -> PathBuf {
         self.root.join("connectors")
     }

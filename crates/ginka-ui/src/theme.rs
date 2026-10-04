@@ -14,9 +14,12 @@ use std::time::Duration;
 const DARK: &str = include_str!("../../../assets/themes/dark.json");
 const LIGHT: &str = include_str!("../../../assets/themes/light.json");
 
+/// Which of the two built-in palettes is on screen, after `Appearance::System` has been resolved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    /// The light palette, `assets/themes/light.json`.
     Light,
+    /// The dark glass palette, `assets/themes/dark.json`.
     Dark,
 }
 
@@ -57,17 +60,25 @@ pub fn toggled(current: Appearance, system: WindowAppearance) -> Appearance {
 #[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct Tokens {
+    /// Human-readable theme name from the theme file, e.g. "Ginka Dark".
     pub name: String,
+    /// Whether the palette is authored for a light or a dark window.
     pub appearance: ThemeAppearance,
+    /// Every colour the app may paint.
     pub colors: Colors,
+    /// Corner radii, in pixels.
     pub radius: Radii,
+    /// Motion durations, in milliseconds.
     pub duration_ms: Durations,
 }
 
+/// The `appearance` a theme file declares; decides which toolkit mode and derived tints apply.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ThemeAppearance {
+    /// Dark text on a light window.
     Light,
+    /// Light text on the dark glass window; the default.
     #[default]
     Dark,
 }
@@ -83,50 +94,70 @@ pub enum ThemeAppearance {
 pub struct Colors {
     #[serde(skip)]
     appearance: ThemeAppearance,
+    /// Translucent window base the blur shows through; `bg.window`.
     #[serde(rename = "bg.window", deserialize_with = "hex")]
     pub bg_window: Hsla,
+    /// Faint tint behind the project rail; `bg.sidebar`.
     #[serde(rename = "bg.sidebar", deserialize_with = "hex")]
     pub bg_sidebar: Hsla,
+    /// Fill for cards, the composer and fields; `bg.surface`.
     #[serde(rename = "bg.surface", deserialize_with = "hex")]
     pub bg_surface: Hsla,
+    /// Fill for raised surfaces and the selected sidebar row; `bg.raised`.
     #[serde(rename = "bg.raised", deserialize_with = "hex")]
     pub bg_raised: Hsla,
+    /// Opaque background of the terminal pane; `bg.terminal`.
     #[serde(rename = "bg.terminal", deserialize_with = "hex")]
     pub bg_terminal: Hsla,
+    /// Panel separators; `border.subtle`.
     #[serde(rename = "border.subtle", deserialize_with = "hex")]
     pub border_subtle: Hsla,
+    /// Border of a focused input or selected row; `border.strong`.
     #[serde(rename = "border.strong", deserialize_with = "hex")]
     pub border_strong: Hsla,
+    /// Titles and the reader's own messages; `text.primary`.
     #[serde(rename = "text.primary", deserialize_with = "hex")]
     pub text_primary: Hsla,
+    /// Subtitles, metadata and transcript body; `text.secondary`.
     #[serde(rename = "text.secondary", deserialize_with = "hex")]
     pub text_secondary: Hsla,
+    /// Timestamps and placeholders; `text.muted`.
     #[serde(rename = "text.muted", deserialize_with = "hex")]
     pub text_muted: Hsla,
+    /// Selection, links, focus ring and primary actions; row tints are derived from it.
     #[serde(deserialize_with = "hex")]
     pub accent: Hsla,
+    /// An agent that is running; `status.working`.
     #[serde(rename = "status.working", deserialize_with = "hex")]
     pub status_working: Hsla,
+    /// An agent waiting on the user; `status.attention`.
     #[serde(rename = "status.attention", deserialize_with = "hex")]
     pub status_attention: Hsla,
+    /// A completed agent or an open pull request; `status.done`.
     #[serde(rename = "status.done", deserialize_with = "hex")]
     pub status_done: Hsla,
+    /// A failed agent or a closed pull request; `status.error`.
     #[serde(rename = "status.error", deserialize_with = "hex")]
     pub status_error: Hsla,
+    /// Background tint behind inline code; `code.bg`.
     #[serde(rename = "code.bg", deserialize_with = "hex")]
     pub code_bg: Hsla,
 }
 
+/// Corner radii, in pixels, from largest object to smallest.
 #[derive(Debug, Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct Radii {
+    /// The window's own corners.
     pub window: f32,
     /// The composer and other cards that hold a group of controls. Larger than
     /// a panel on purpose: a card is an object on the surface, and the corner
     /// is what says so.
     pub card: f32,
+    /// Panels and popovers; smaller than a card.
     pub panel: f32,
+    /// List rows, chips and toolkit buttons and fields.
     pub row: f32,
 }
 
@@ -142,21 +173,27 @@ impl Radii {
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 pub struct Durations {
+    /// Hover and press feedback (~120 ms).
     pub quick: u64,
+    /// A panel coming in or going (~200 ms).
     pub fade: u64,
+    /// Layout changes such as list reordering (~260 ms).
     pub standard: u64,
 }
 
 #[allow(dead_code)]
 impl Durations {
+    /// `quick` as a `Duration`.
     pub fn quick(&self) -> Duration {
         Duration::from_millis(self.quick)
     }
 
+    /// `standard` as a `Duration`.
     pub fn standard(&self) -> Duration {
         Duration::from_millis(self.standard)
     }
 
+    /// `fade` as a `Duration`.
     pub fn fade(&self) -> Duration {
         Duration::from_millis(self.fade)
     }
@@ -206,6 +243,7 @@ impl Tokens {
         }
     }
 
+    /// Parse the compiled-in theme for `mode`; panics only if a built-in theme file is malformed.
     pub fn load(mode: Mode) -> Self {
         let source = match mode {
             Mode::Dark => DARK,
@@ -218,10 +256,12 @@ impl Tokens {
         tokens
     }
 
+    /// The tokens installed as the app global; panics before `install` has run.
     pub fn global(cx: &App) -> &Tokens {
         cx.global::<Tokens>()
     }
 
+    /// Load the theme for `mode` and make it the app global every view resolves against.
     pub fn install(mode: Mode, cx: &mut App) {
         cx.set_global(Tokens::load(mode));
     }
@@ -407,6 +447,7 @@ pub fn apply(mode: Mode, cx: &mut App) {
 }
 
 impl Tokens {
+    /// The active palette.
     pub fn colors(&self) -> &Colors {
         &self.colors
     }

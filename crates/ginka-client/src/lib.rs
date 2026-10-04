@@ -9,6 +9,8 @@
 //! correlated by id, so callers may have several in flight; pushes arrive on a
 //! channel whether or not anyone is asking for anything.
 
+#![deny(missing_docs)]
+
 pub mod discovery;
 
 pub use discovery::{DaemonLocation, Discovery};
@@ -34,6 +36,7 @@ pub struct Event {
     /// The daemon-wide position of this event. Store it: it is what a
     /// reconnecting client resumes from.
     pub seq: Seq,
+    /// What happened.
     pub payload: DaemonEvent,
 }
 
@@ -44,6 +47,7 @@ pub use cursor::{Delivery, EventCursor};
 /// Where a reconnecting client resumes the event stream from.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ResumeCursor {
+    /// The last sequence number already seen; replay starts after it.
     pub after: Seq,
 }
 

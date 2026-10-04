@@ -13,6 +13,8 @@
 //! - [`handshake`] — how a client finds the daemon in the first place.
 //! - [`rpc`] and [`envelope`] — the request surface and the frames carrying it.
 
+#![deny(missing_docs)]
+
 pub mod envelope;
 pub mod event;
 pub mod handshake;

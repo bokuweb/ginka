@@ -150,6 +150,26 @@ impl DaemonLink {
         }
     }
 
+    /// The daemon's settings document, with secrets left out; empty when
+    /// the daemon cannot be reached.
+    pub async fn daemon_settings(&self) -> String {
+        match self.ask(Request::DaemonSettings).await {
+            Some(Response::DaemonSettings { json }) => json,
+            _ => String::new(),
+        }
+    }
+
+    /// Change one daemon setting to a JSON value; the refusal is the
+    /// daemon's own words.
+    pub async fn update_daemon_setting(&self, key: &str, value: String) -> Result<(), String> {
+        self.ask_result(Request::UpdateDaemonSettings {
+            key: key.to_string(),
+            value,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Persist an executable edit using the same provider settings request as CLI and MCP.
     pub async fn update_provider_settings(&self, request: Request) -> Result<(), String> {
         match self.ask_result(request).await? {
@@ -611,10 +631,12 @@ impl DaemonLink {
         }
     }
 
-    /// Push a workspace branch through the daemon.
-    pub async fn push(&self, workspace: &WorkspaceId) -> Result<(), String> {
+    /// Push a workspace branch through the daemon; `with_lease` replaces
+    /// rewritten history if the remote is still what was last fetched.
+    pub async fn push(&self, workspace: &WorkspaceId, with_lease: bool) -> Result<(), String> {
         self.git_sync(Request::Push {
             workspace: workspace.clone(),
+            force_with_lease: with_lease,
         })
         .await
     }
@@ -870,16 +892,23 @@ impl DaemonLink {
         workspace: &WorkspaceId,
         path: &str,
         line: Option<u32>,
+        end_line: Option<u32>,
         text: String,
     ) {
         self.ask(Request::AddReviewComment {
             workspace: workspace.clone(),
             path: path.to_string(),
             line,
+            end_line,
             side: ginka_protocol::DiffSide::New,
             text,
         })
         .await;
+    }
+
+    /// Take one waiting review comment back.
+    pub async fn remove_comment(&self, comment: String) {
+        self.ask(Request::RemoveReviewComment { comment }).await;
     }
 
     /// The comments waiting in a workspace, in reading order.
@@ -1202,6 +1231,20 @@ impl DaemonLink {
             .map(|_| ())
     }
 
+    /// A scheduled job's latest firings, newest first.
+    pub async fn cron_runs(&self, id: i64, limit: u32) -> Vec<ginka_protocol::model::CronRun> {
+        match self
+            .ask(Request::CronRuns {
+                id,
+                limit: Some(limit),
+            })
+            .await
+        {
+            Some(Response::CronRuns { runs }) => runs,
+            _ => Vec::new(),
+        }
+    }
+
     /// Forget a quick command.
     pub async fn remove_quick_command(&self, id: String) {
         self.ask(Request::RemoveQuickCommand { id }).await;
@@ -1357,13 +1400,14 @@ impl DaemonLink {
         session: &SessionId,
         after: u64,
         agent: String,
+        model: Option<String>,
     ) -> Result<Session, String> {
         match self
             .ask_result(Request::ForkSession {
                 session: session.clone(),
                 after: Some(after),
                 agent: Some(agent),
-                model: None,
+                model,
                 account: None,
             })
             .await?
@@ -1441,6 +1485,21 @@ impl DaemonLink {
             Response::Ack => Ok(()),
             _ => Err("the daemon returned the wrong response for branch checkout".into()),
         }
+    }
+
+    /// Have an agent write the pull request's details and open it; the
+    /// outcome arrives as `PullRequestOpened`.
+    pub async fn create_generated_pull_request(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<(), String> {
+        self.ask_result(Request::CreateGeneratedPullRequest {
+            workspace: workspace.clone(),
+            draft: false,
+            agent: None,
+        })
+        .await
+        .map(|_| ())
     }
 
     /// Ask the daemon one question and keep its refusal, for the callers
@@ -1562,6 +1621,130 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// A changed image's two sides as `data:` URLs under `source`. A side
+    /// that is not a previewable image is `None`.
+    pub async fn image_diff(
+        &self,
+        workspace: &WorkspaceId,
+        path: &str,
+        old_path: Option<String>,
+        source: ginka_protocol::model::ChangeSource,
+    ) -> (Option<String>, Option<String>) {
+        match self
+            .ask(Request::ImageDiff {
+                workspace: workspace.clone(),
+                source,
+                path: path.to_string(),
+                old_path,
+            })
+            .await
+        {
+            Some(Response::ImageDiff { before, after }) => {
+                let url = |image: Option<ginka_protocol::model::FileImage>| {
+                    image.map(|image| {
+                        format!("data:{};base64,{}", image.media_type, image.data_base64)
+                    })
+                };
+                (url(before), url(after))
+            }
+            _ => (None, None),
+        }
+    }
+
+    /// Add an MCP server through its vendor's CLI; the vendor's refusal is
+    /// the error.
+    pub async fn add_mcp_server(
+        &self,
+        workspace: Option<WorkspaceId>,
+        spec: ginka_protocol::model::McpServerSpec,
+    ) -> Result<(), String> {
+        self.ask_result(Request::AddMcpServer { workspace, spec })
+            .await
+            .map(|_| ())
+    }
+
+    /// Remove an MCP server through its vendor's CLI.
+    pub async fn remove_mcp_server(
+        &self,
+        workspace: Option<WorkspaceId>,
+        provider: String,
+        name: String,
+        scope: Option<ginka_protocol::model::McpScope>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::RemoveMcpServer {
+            workspace,
+            provider,
+            name,
+            scope,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Ask for an update check; the answer is `AgentUpdatesChecked`.
+    pub async fn check_agent_updates(&self) -> Result<(), String> {
+        self.ask_result(Request::CheckAgentUpdates)
+            .await
+            .map(|_| ())
+    }
+
+    /// The MCP servers the agent CLIs are configured with outside Ginka.
+    pub async fn mcp_servers(
+        &self,
+        workspace: Option<WorkspaceId>,
+    ) -> Vec<ginka_protocol::model::McpServerEntry> {
+        match self.ask(Request::ListMcpServers { workspace }).await {
+            Some(Response::McpServers { servers }) => servers,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Hand the failing checks of the workspace's pull request to its latest
+    /// conversation. The refusal — nothing failed, no pull request — is the
+    /// answer when there is one.
+    pub async fn fix_checks(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::FixFailingChecks {
+            workspace: workspace.clone(),
+            agent: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// The checks of the pull request open from the workspace's branch, or
+    /// why they could not be read (`gh` missing, signed out, no pull request).
+    pub async fn pull_request_checks(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<Vec<ginka_protocol::model::CheckRun>, String> {
+        match self
+            .ask_result(Request::PullRequestChecks {
+                workspace: workspace.clone(),
+            })
+            .await?
+        {
+            Response::Checks { checks } => Ok(checks),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
+    }
+
+    /// Hand a refused commit to the workspace's latest conversation.
+    pub async fn fix_commit(
+        &self,
+        workspace: &WorkspaceId,
+        message: String,
+        output: String,
+    ) -> Result<(), String> {
+        self.ask_result(Request::FixCommitFailure {
+            workspace: workspace.clone(),
+            message,
+            output,
+            agent: None,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Hand a workspace's conflicts to its latest conversation's agent, or
     /// a new conversation when it has none.
     pub async fn resolve_conflicts(&self, workspace: &WorkspaceId) -> Result<(), String> {
@@ -1640,6 +1823,50 @@ impl DaemonLink {
         self.ask_result(Request::RenameSession {
             session: session.clone(),
             title,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a project. Its checkout and worktrees stay on disk.
+    pub async fn remove_project(&self, project: &ProjectName) -> Result<(), String> {
+        self.ask_result(Request::RemoveProject {
+            project: project.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a conversation, its transcript and checkpoints, stopping it
+    /// first if it is running.
+    pub async fn remove_session(&self, session: &SessionId) -> Result<(), String> {
+        self.ask_result(Request::RemoveSession {
+            session: session.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a workspace's worktree; refused while it has uncommitted work.
+    pub async fn remove_workspace(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::RemoveWorkspace {
+            workspace: workspace.clone(),
+            force: false,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Write a workspace's status note, or clear it with `None`.
+    pub async fn set_status_note(
+        &self,
+        workspace: &WorkspaceId,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceStatus {
+            workspace: Some(workspace.clone()),
+            path: None,
+            note,
         })
         .await
         .map(|_| ())

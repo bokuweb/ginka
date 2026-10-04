@@ -2209,6 +2209,7 @@ fn a_review_goes_back_to_the_agent_as_one_message() {
             workspace: fixture.workspace.clone(),
             path: path.into(),
             line,
+            end_line: None,
             side: ginka_protocol::DiffSide::New,
             text: text.into(),
         });
@@ -3351,6 +3352,7 @@ fn a_chat_job_starts_a_conversation_and_is_skipped_while_it_is_working() {
         id: None,
         project: ginka_protocol::ProjectName("comet".into()),
         workspace: Some(fixture.workspace.clone()),
+        session: None,
         name: "morning review".into(),
         schedule: "0 9 * * 1-5".into(),
         via: ginka_protocol::model::CronVia::Chat,
@@ -3770,5 +3772,594 @@ fn conflicts_go_to_the_conversation_that_made_the_branch() {
             "the agent was never asked"
         );
         std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-hook"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-hook"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "write the parser");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+
+    let path = fixture.workspace_path();
+    let hooks = std::path::PathBuf::from(support::git(
+        &path,
+        &["rev-parse", "--path-format=absolute", "--git-path", "hooks"],
+    ));
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'lint: trailing whitespace in parser.rs' >&2\nexit 1\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    std::fs::write(path.join("parser.rs"), "fn parse() {} \n").unwrap();
+
+    let refused = fixture
+        .service
+        .handle(Request::Commit {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            all: true,
+            amend: false,
+        })
+        .unwrap_err();
+    assert!(
+        refused.message.contains("trailing whitespace in parser.rs"),
+        "the refusal carries what the hook said: {refused:?}"
+    );
+
+    match fixture
+        .service
+        .handle(Request::FixCommitFailure {
+            workspace: fixture.workspace.clone(),
+            message: "Add the parser".into(),
+            output: refused.message.clone(),
+            agent: None,
+        })
+        .unwrap()
+    {
+        Response::Session { session: answered } => assert_eq!(answered.id, session),
+        other => panic!("expected the session, got {other:?}"),
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let asked = fixture.transcript(&session).iter().any(|entry| {
+            matches!(entry, TranscriptPayload::User { text }
+                if text.starts_with("A commit in this worktree was refused")
+                    && text.contains("- parser.rs")
+                    && text.contains("Add the parser")
+                    && text.contains("trailing whitespace in parser.rs"))
+        });
+        if asked {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the agent was never asked"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn a_branch_with_nothing_on_it_gets_no_written_pull_request() {
+    // The details are written off the request path, like a commit message;
+    // a branch with no commits since its base has nothing to describe, and
+    // says so through the same event a success would use.
+    let mut fixture = Fixture::new();
+    assert_eq!(
+        fixture.ask(Request::CreateGeneratedPullRequest {
+            workspace: fixture.workspace.clone(),
+            draft: true,
+            agent: Some("claude".into()),
+        }),
+        Response::Ack
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some((url, error)) = fixture
+            .recorder
+            .all()
+            .into_iter()
+            .find_map(|event| match event {
+                DaemonEvent::PullRequestOpened { url, error, .. } => Some((url, error)),
+                _ => None,
+            })
+        {
+            assert_eq!(url, None);
+            let error = error.unwrap_or_default();
+            assert!(
+                error.contains("no commits") || error.contains("no branch named"),
+                "{error}"
+            );
+            return;
+        }
+        assert!(Instant::now() < deadline, "no answer arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+#[test]
+fn plan_runs_one_turn_read_only_and_the_next_goes_back_to_the_conversations_mode() {
+    // MonoCode's /plan: a turn to think in, without changing the mode the
+    // conversation was started with (N2 only forbids widening it).
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-plan"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "start".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    let told = spoken(&fixture.wait_for_said(&session.id, "start"));
+    assert!(told.contains("--full-auto"), "{told}");
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "/plan sketch the migration".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "sketch the migration"));
+    let planned = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(planned.contains("--sandbox read-only"), "{planned}");
+    assert!(!planned.contains("--full-auto"), "{planned}");
+    assert!(
+        planned.contains("Do not change any files"),
+        "the turn is told why it cannot write: {planned}"
+    );
+    assert!(
+        !fixture.transcript(&session.id).iter().any(
+            |entry| matches!(entry, TranscriptPayload::User { text } if text.starts_with("/plan"))
+        ),
+        "the command word is Ginka's, not part of the conversation"
+    );
+
+    fixture.ask(Request::SendMessage {
+        session: session.id.clone(),
+        text: "now build it".into(),
+    });
+    let told = spoken(&fixture.wait_for_said(&session.id, "now build it"));
+    let built = &told[told.rfind("resume t-plan").expect("resumed")..];
+    assert!(built.contains("--full-auto"), "{built}");
+    assert_eq!(
+        fixture.stored(&session.id).access_mode,
+        ginka_protocol::AccessMode::Auto
+    );
+}
+
+#[test]
+fn a_conversation_opened_with_plan_keeps_the_mode_it_was_asked_for() {
+    let mut fixture = Fixture::new();
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"thread.started","thread_id":"t-first"}"#,
+            r#"{"type":"item.completed","item":{"id":"i0","item_type":"agent_message","text":{args_json}}}"#,
+            r#"{"id":"1","msg":{"type":"task_complete","last_agent_message":"done"}}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let session = match fixture.ask(Request::StartSession {
+        workspace: fixture.workspace.clone(),
+        agent: "codex".into(),
+        prompt: "/plan the rewrite".into(),
+        model: None,
+        reasoning_effort: None,
+        service_tier: None,
+        account: None,
+        access_mode: Some(ginka_protocol::AccessMode::Auto),
+        origin: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(session.access_mode, ginka_protocol::AccessMode::Auto);
+    let told = spoken(&fixture.wait_for_said(&session.id, "the rewrite"));
+    assert!(told.contains("--sandbox read-only"), "{told}");
+    assert!(!told.contains("--full-auto"), "{told}");
+}
+
+#[test]
+fn a_reminder_arrives_in_the_conversation_it_was_set_on() {
+    // MonoCode's session reminders: a scheduled prompt that continues an
+    // existing conversation rather than starting a new one.
+    let mut fixture = Fixture::new();
+    let answer = [
+        r#"{"type":"system","subtype":"init","session_id":"vendor-remind"}"#,
+        r#"{"type":"result","subtype":"success","is_error":false,"result":"ok","session_id":"vendor-remind"}"#,
+    ]
+    .join("\n");
+    let session = fixture.start(&answer, "deploy the service");
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    let project =
+        ginka_protocol::ProjectName(fixture.workspace.0.split('/').next().unwrap().to_string());
+
+    // A shell job cannot be pointed at a conversation.
+    assert!(
+        fixture
+            .service
+            .handle(Request::SaveCronJob {
+                id: None,
+                project: project.clone(),
+                workspace: None,
+                session: Some(session.clone()),
+                name: "nonsense".into(),
+                schedule: "@hourly".into(),
+                via: ginka_protocol::model::CronVia::Terminal,
+                agent: None,
+                body: "true".into(),
+                precheck: None,
+                enabled: true,
+            })
+            .is_err()
+    );
+
+    let job = match fixture.ask(Request::SaveCronJob {
+        id: None,
+        project,
+        workspace: None,
+        session: Some(session.clone()),
+        name: "check back".into(),
+        schedule: "* * * * *".into(),
+        via: ginka_protocol::model::CronVia::Chat,
+        agent: None,
+        body: "Check whether the deploy finished.".into(),
+        precheck: None,
+        enabled: true,
+    }) {
+        Response::CronJob { job } => job,
+        other => panic!("expected a job, got {other:?}"),
+    };
+    assert_eq!(job.session.as_ref(), Some(&session));
+
+    let sessions_before = match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => sessions.len(),
+        other => panic!("expected sessions, got {other:?}"),
+    };
+    let later = chrono::Local::now() + chrono::Duration::minutes(2);
+    assert_eq!(fixture.service.run_due_cron(later), 1);
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !fixture.transcript(&session).iter().any(|entry| {
+        matches!(entry, TranscriptPayload::User { text } if text == "Check whether the deploy finished.")
+    }) {
+        assert!(Instant::now() < deadline, "the reminder never arrived");
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    match fixture.ask(Request::ListSessions {
+        workspace: None,
+        origin: None,
+    }) {
+        Response::Sessions { sessions } => {
+            assert_eq!(
+                sessions.len(),
+                sessions_before,
+                "no new conversation was started"
+            )
+        }
+        other => panic!("expected sessions, got {other:?}"),
+    }
+}
+
+#[test]
+fn mcp_servers_are_changed_by_the_vendors_own_cli_in_the_right_place() {
+    // The command line is the vendor's (`claude mcp add …`), run with the
+    // binary Ginka is configured to use, in the worktree for a project
+    // scope; the vendor's refusal is the error.
+    let mut fixture = Fixture::new();
+    let log = fixture.path("vendor-cli.log");
+    let fake = fixture.path("fake-claude.sh");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ \"$3\" = \"refused\" ] || [ \"$5\" = \"refused\" ]; then echo 'already exists' >&2; exit 1; fi\necho \"$PWD|$*\" >> '{}'\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut drivers = Registry::with_defaults();
+    drivers.insert(Arc::new(ClaudeDriver::with_program(fake.to_string_lossy())));
+    fixture.service = Service::new(
+        fixture.paths.clone(),
+        db::open(&fixture.db_path).unwrap(),
+        fixture.recorder.clone(),
+    )
+    .with_drivers(drivers);
+
+    let spec = |name: &str, scope| ginka_protocol::model::McpServerSpec {
+        name: name.into(),
+        provider: "claude".into(),
+        scope,
+        target: ginka_protocol::model::McpTarget::Command {
+            program: "npx".into(),
+            args: vec!["-y".into(), "docs-mcp".into()],
+        },
+    };
+    fixture.ask(Request::AddMcpServer {
+        workspace: Some(fixture.workspace.clone()),
+        spec: spec("docs", ginka_protocol::model::McpScope::Project),
+    });
+    fixture.ask(Request::RemoveMcpServer {
+        workspace: Some(fixture.workspace.clone()),
+        provider: "claude".into(),
+        name: "docs".into(),
+        scope: Some(ginka_protocol::model::McpScope::Project),
+    });
+    let worktree = fixture.workspace_path();
+    let lines: Vec<String> = std::fs::read_to_string(&log)
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    let canonical = |path: &std::path::Path| std::fs::canonicalize(path).unwrap();
+    let (cwd, args) = lines[0].split_once('|').unwrap();
+    assert_eq!(canonical(std::path::Path::new(cwd)), canonical(&worktree));
+    assert_eq!(args, "mcp add --scope project docs -- npx -y docs-mcp");
+    assert_eq!(
+        lines[1].split_once('|').unwrap().1,
+        "mcp remove --scope project docs"
+    );
+
+    // A project scope with no workspace has nowhere to be written.
+    let homeless = fixture
+        .service
+        .handle(Request::AddMcpServer {
+            workspace: None,
+            spec: spec("docs", ginka_protocol::model::McpScope::Project),
+        })
+        .unwrap_err();
+    assert!(
+        homeless.message.contains("needs the workspace"),
+        "{homeless:?}"
+    );
+
+    // The vendor's refusal is what the reader sees.
+    let refused = fixture
+        .service
+        .handle(Request::AddMcpServer {
+            workspace: Some(fixture.workspace.clone()),
+            spec: spec("refused", ginka_protocol::model::McpScope::Project),
+        })
+        .unwrap_err();
+    assert!(refused.message.contains("already exists"), "{refused:?}");
+}
+
+#[test]
+fn a_worktree_or_project_with_a_running_agent_is_not_removed_from_under_it() {
+    // Deleting the directory an agent is working in leaves a process
+    // writing into nothing, and forgetting its project leaves a session no
+    // row can reach. Both wait until the agent has stopped.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"working"}]}}"#,
+            "#sleep 60000",
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+        "take your time",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while spoken(&fixture.transcript(&session)).is_empty() {
+        assert!(Instant::now() < deadline, "the agent never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let removed = fixture.service.handle(Request::RemoveWorkspace {
+        workspace: fixture.workspace.clone(),
+        force: true,
+    });
+    let error = removed.expect_err("a worktree with a running agent stays");
+    assert!(error.message.contains("running"), "{}", error.message);
+    assert!(fixture.workspace_path().is_dir());
+
+    let forgotten = fixture.service.handle(Request::RemoveProject {
+        project: ProjectName("comet".into()),
+    });
+    let error = forgotten.expect_err("a project with a running agent stays");
+    assert!(error.message.contains("running"), "{}", error.message);
+
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: session.clone(),
+        })
+        .unwrap();
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+    fixture
+        .service
+        .handle(Request::RemoveWorkspace {
+            workspace: fixture.workspace.clone(),
+            force: true,
+        })
+        .expect("once the agent has stopped, the worktree can go");
+}
+
+#[test]
+fn a_rewind_leaves_the_service_free_and_the_workspace_closed_while_git_works() {
+    // A rewind snapshots the whole worktree and then rewrites it, which on a
+    // large repository takes a while. Other requests are answered meanwhile;
+    // the workspace being rewound is not touched by any of them.
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    let path = fixture.workspace_path();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "leave it alone",
+    );
+    fixture.settle(&session);
+    std::fs::write(path.join("README.md"), "changed since\n").unwrap();
+    let checkpoint = fixture
+        .checkpoints()
+        .into_iter()
+        .find(|point| point.turn == 0)
+        .expect("the pre-flight checkpoint");
+
+    // A filesystem monitor that says it started and then waits: git asks it
+    // on every look at the worktree.
+    let started = fixture.path("monitor.started");
+    let release = fixture.path("monitor.release");
+    let monitor = fixture.path("fsmonitor");
+    std::fs::write(
+        &monitor,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    support::git(
+        &path,
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let workspace = fixture.workspace.clone();
+    let spare = fixture.path("spare");
+    let service = Arc::new(Mutex::new(std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(spare),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )));
+    let rewinding = {
+        let service = service.clone();
+        let checkpoint = checkpoint.id.clone();
+        std::thread::spawn(move || {
+            ginka_core::service::handle_shared(&service, Request::RestoreCheckpoint { checkpoint })
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "git never looked at the worktree"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut served = None;
+    while Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            let other = service.handle(Request::ListProjects).is_ok();
+            let same = service.handle(Request::WorkspaceHistory {
+                workspace: workspace.clone(),
+                limit: None,
+            });
+            served = Some((other, same));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    let rewound = rewinding.join().unwrap();
+    support::git(&path, &["config", "--unset", "core.fsmonitor"]);
+    fixture.service = Arc::try_unwrap(service)
+        .ok()
+        .expect("the rewind is done with the service")
+        .into_inner()
+        .unwrap();
+
+    let (other, same) = served.expect("the service stayed locked while git rewound");
+    assert!(other);
+    let error = same.expect_err("a workspace being rewound is not worked on");
+    assert!(
+        error.message.contains("being restored"),
+        "{}",
+        error.message
+    );
+    assert!(matches!(rewound, Ok(Response::Ack)), "{rewound:?}");
+    assert_ne!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "changed since\n"
+    );
+    assert!(
+        fixture
+            .checkpoints()
+            .iter()
+            .any(|point| point.label.starts_with("before restoring:")),
+        "the state the rewind replaced is still kept"
+    );
+}
+
+#[test]
+fn stopping_the_daemon_stops_every_agent_and_what_it_started() {
+    // Agents run in process groups of their own, so nothing else ends them
+    // when the daemon exits: left behind, they keep editing worktrees and
+    // spending tokens with no one watching.
+    let mut fixture = Fixture::new();
+    let pidfile = fixture.path("child.pid");
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"building"}]}}"#,
+            &format!("#spawn {}", pidfile.display()),
+            "#sleep 60000",
+        ]
+        .join("\n"),
+        "build it",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !pidfile.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never started its child"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let child: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let stopped = fixture.service.stop_everything();
+
+    assert_eq!(stopped, 1, "one agent was running");
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the agent's child outlived the daemon"
+        );
+        std::thread::sleep(Duration::from_millis(25));
     }
 }

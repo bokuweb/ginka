@@ -32,6 +32,7 @@ pub struct MessageModel {
     /// cheap tier by name, and guessing an id that does not exist is worse
     /// than letting the CLI choose.
     pub model: Option<String>,
+    /// Reasoning effort to ask for; `None` where the provider has no such knob.
     pub reasoning_effort: Option<String>,
 }
 
@@ -93,12 +94,30 @@ pub fn generate(
     files: &[String],
     diff: &str,
 ) -> Result<CommitMessage> {
+    CommitMessage::parse(&ask_cheap(
+        driver,
+        worktree,
+        env,
+        &build_prompt(files, diff),
+    )?)
+}
+
+/// Ask `driver` one question on its cheap tier, read-only, and answer with
+/// what it said (§3.3 N9). Shared by commit messages and pull request
+/// details: both are a fixed classification over a diff already in the
+/// prompt, and both run off the service's lock.
+pub fn ask_cheap(
+    driver: &dyn AgentDriver,
+    worktree: &Path,
+    env: &[(String, String)],
+    prompt: &str,
+) -> Result<String> {
     use std::io::{BufRead as _, Write as _};
 
     let model = ProviderKind::parse(driver.id())
         .map(|provider| message_model(provider, &SessionOptions::default()).model)
         .unwrap_or_default();
-    let prompt = build_prompt(files, diff);
+    let prompt = prompt.to_string();
     let spec = SessionSpec::new(worktree, prompt.clone())
         .with_model(model)
         .with_access_mode(AccessMode::ReadOnly);
@@ -176,7 +195,7 @@ pub fn generate(
             state.unrecognized
         );
     }
-    CommitMessage::parse(&said)
+    Ok(said)
 }
 
 /// The prompt a commit subject is generated from.
@@ -209,13 +228,19 @@ pub fn build_prompt(files: &[String], diff: &str) -> String {
     prompt
 }
 
+/// A commit message read from a model's answer, ready for git.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitMessage {
+    /// One line, quotes and fences stripped, cut on a word to
+    /// [`CommitMessage::MAX_SUBJECT_CHARS`]. Never empty.
     pub subject: String,
+    /// Everything after the subject line, trimmed; `None` when the model gave
+    /// only a subject.
     pub body: Option<String>,
 }
 
 impl CommitMessage {
+    /// Longest subject kept, in characters; longer ones are cut on a word.
     pub const MAX_SUBJECT_CHARS: usize = 72;
 
     /// Read a model's answer into a commit message.

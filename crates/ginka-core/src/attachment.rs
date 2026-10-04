@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+/// Prefix of every attachment reference; the rest is the stored file name.
 pub const ATTACHMENT_SCHEME: &str = "ginka-attachment:";
 
 /// One upload is capped so a stray drag of a video file fails fast instead of
@@ -25,19 +26,25 @@ pub struct StoredAttachment {
     pub path: PathBuf,
     /// The name the user knows it by. Display only: never a path component.
     pub name: String,
+    /// Size of the upload in bytes; never zero and never over
+    /// [`MAX_ATTACHMENT_BYTES`].
     pub bytes: usize,
 }
 
+/// The daemon's attachment directory, one flat file per upload named by a
+/// fresh UUID plus a sanitized extension.
 #[derive(Debug, Clone)]
 pub struct AttachmentStore {
     root: PathBuf,
 }
 
 impl AttachmentStore {
+    /// A store rooted at `root`; the directory is created on the first `put`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// The directory uploads are written into.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -80,6 +87,8 @@ impl AttachmentStore {
         })
     }
 
+    /// The bytes behind a `ginka-attachment:` reference. `Ok(None)` for a
+    /// malformed reference or a file that is gone; other I/O failures are errors.
     pub fn read(&self, reference: &str) -> Result<Option<Vec<u8>>> {
         let Some(path) = self.path_of(reference) else {
             return Ok(None);
@@ -91,6 +100,9 @@ impl AttachmentStore {
         }
     }
 
+    /// Where a reference's file would be, without checking it exists. `None`
+    /// unless it carries the scheme and a bare file name, so a reference can
+    /// never escape the store.
     pub fn path_of(&self, reference: &str) -> Option<PathBuf> {
         let name = reference.strip_prefix(ATTACHMENT_SCHEME)?;
         if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {

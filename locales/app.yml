@@ -577,6 +577,9 @@ composer.command.side.description:
 composer.command.btw.description:
   en: Ask a brief read-only question in a separate conversation
   ja: 読み取り専用の短い質問を別の会話で行う
+composer.command.plan.description:
+  en: Run this turn read-only and ask for a plan; the next turn runs as before
+  ja: このターンだけ読み取り専用で計画を立てさせ、次のターンは元のモードに戻します
 composer.project.new:
   en: New project…
   ja: 新しいプロジェクト…
@@ -1122,6 +1125,9 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.amended:
+  en: "amended the last commit, now %{commit}"
+  ja: "直前のコミットを修正しました（%{commit}）"
 cli.cron.off:
   en: "off"
   ja: "停止中"
@@ -1170,6 +1176,12 @@ settings.cron.resume:
 settings.cron.run:
   en: "Run now"
   ja: "今すぐ実行"
+settings.cron.history:
+  en: History
+  ja: 履歴
+settings.cron.no_runs:
+  en: It has not run yet.
+  ja: まだ実行されていません。
 settings.cron.edit:
   en: "Edit"
   ja: "編集"
@@ -1536,6 +1548,30 @@ sidebar.action.move_down:
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
+sidebar.action.note:
+  en: Status note…
+  ja: ステータスメモ…
+sidebar.note.placeholder:
+  en: Where this stands — empty clears it
+  ja: いまの状況（空にすると消えます）
+sidebar.action.remove_project:
+  en: Remove from Ginka
+  ja: Ginka から外す
+sidebar.action.remove_project.confirm:
+  en: Remove — the folder stays on disk
+  ja: 外す（フォルダはディスクに残ります）
+sidebar.action.forget:
+  en: Delete conversation
+  ja: 会話を削除
+sidebar.action.forget.confirm:
+  en: Delete it and its checkpoints?
+  ja: 会話とチェックポイントを削除？
+sidebar.action.delete:
+  en: Delete
+  ja: 削除
+sidebar.action.delete.confirm:
+  en: Delete the worktree?
+  ja: ワークツリーを削除？
 sidebar.action.pin:
   en: Pin
   ja: ピン留め
@@ -2133,3 +2169,279 @@ aws.sqs.sent:
 aws.sqs.deleted:
   en: Message deleted
   ja: メッセージを削除しました
+surface.git.push_lease:
+  en: Force push…
+  ja: 強制プッシュ…
+surface.git.push_lease.confirm:
+  en: Replace the remote branch
+  ja: リモートのブランチを置き換える
+surface.git.push_lease_tooltip:
+  en: Push rewritten history (after an amend or a rebase) with --force-with-lease. It is refused if someone pushed since your last fetch.
+  ja: amend や rebase で書き換えた履歴を --force-with-lease でプッシュします。最後の fetch 以降に誰かがプッシュしていれば拒否されます。
+surface.git.fix_commit:
+  en: Ask the agent to fix it
+  ja: エージェントに直させる
+surface.git.fix_commit_tooltip:
+  en: Send what git and its hooks said, the staged files and the message to this workspace's conversation, to fix without skipping the hooks
+  ja: git とフックの出力、ステージ済みのファイル、メッセージをこのワークスペースの会話に送り、フックを飛ばさずに直させます
+terminal.copy_context:
+  en: Copy terminal context (last 400 lines, scrollback included)
+  ja: ターミナルの文脈をコピー（スクロールバックを含む最後の400行）
+composer.account.suggest:
+  en: "%{account} has more room"
+  ja: "%{account} のほうが余裕があります"
+surface.git.create_pr_written:
+  en: Create PR, written by the agent
+  ja: エージェントが書いたPRを作成
+surface.git.create_pr_written_tooltip:
+  en: Push, then open a pull request whose title and description an agent wrote from this branch's commits and diff against the default branch
+  ja: プッシュしてから、このブランチのコミットとデフォルトブランチとの差分をもとにエージェントが書いたタイトルと説明でPRを作成します
+sidebar.unseen:
+  en: new
+  ja: 新着
+surface.git.comment_lines:
+  en: "Lines %{lines} — shift-click another line to cover a range"
+  ja: "%{lines} 行目 — Shift+クリックで範囲を広げられます"
+cli.checks.none:
+  en: "no checks have reported on this pull request"
+  ja: "このプルリクエストにはまだチェック結果がありません"
+surface.git.fix_checks:
+  en: Fix failing checks
+  ja: 失敗したチェックを直させる
+surface.git.fix_checks_tooltip:
+  en: Send the pull request's failing checks, with their log links, to this workspace's conversation to fix
+  ja: プルリクエストの失敗したチェックをログのリンク付きでこのワークスペースの会話に送り、直させます
+sidebar.action.mute_hours:
+  en: "Mute notifications for %{hours}h"
+  ja: "通知を %{hours} 時間ミュート"
+sidebar.action.mute_forever:
+  en: Mute notifications until I turn them back on
+  ja: 通知を解除するまでミュート
+sidebar.action.unmute:
+  en: Turn notifications back on
+  ja: 通知のミュートを解除
+cli.mcp_servers.none:
+  en: "no MCP servers are configured for Claude Code or Codex"
+  ja: "Claude Code にも Codex にも MCP サーバーは設定されていません"
+settings.mcp_servers:
+  en: MCP servers configured in the agents
+  ja: エージェントに設定済みの MCP サーバー
+settings.mcp_servers.none:
+  en: Neither Claude Code nor Codex has an MCP server configured.
+  ja: Claude Code にも Codex にも MCP サーバーは設定されていません。
+settings.mcp_servers.user:
+  en: every project
+  ja: すべてのプロジェクト
+settings.mcp_servers.project:
+  en: this repository
+  ja: このリポジトリ
+settings.mcp_servers.local:
+  en: this project only
+  ja: このプロジェクトのみ
+palette.session.next:
+  en: Next conversation
+  ja: 次の会話
+palette.session.previous:
+  en: Previous conversation
+  ja: 前の会話
+palette.tabs.close_all:
+  en: Close all tabs
+  ja: すべてのタブを閉じる
+sidebar.action.copy_id:
+  en: Copy conversation id
+  ja: 会話IDをコピー
+cli.image_diff.none:
+  en: "(no image)"
+  ja: "（画像なし）"
+surface.git.show_images:
+  en: Show the images
+  ja: 画像を表示
+surface.git.image_before:
+  en: Before
+  ja: 変更前
+surface.git.image_after:
+  en: After
+  ja: 変更後
+surface.git.image_missing:
+  en: No image on this side
+  ja: こちら側に画像はありません
+surface.git.by_agent:
+  en: Written by an agent's turn, and not edited since
+  ja: エージェントのターンが書き、その後は編集されていない行
+surface.files.preview_tab:
+  en: "%{name} (preview)"
+  ja: "%{name}（プレビュー）"
+settings.mcp_servers.name:
+  en: Name
+  ja: 名前
+settings.mcp_servers.target:
+  en: "https://… or a command, e.g. npx -y some-mcp"
+  ja: "https://… またはコマンド（例: npx -y some-mcp）"
+settings.mcp_servers.add:
+  en: Add
+  ja: 追加
+settings.mcp_servers.remove:
+  en: Remove
+  ja: 削除
+settings.mcp_servers.remove_confirm:
+  en: Remove it
+  ja: 本当に削除
+cli.agents.update_available:
+  en: "update available: %{command}"
+  ja: "更新があります: %{command}"
+cli.agents.up_to_date:
+  en: up to date
+  ja: 最新です
+cli.agents.unknown_latest:
+  en: "could not read the latest release"
+  ja: "最新版を確認できませんでした"
+settings.updates.check:
+  en: Check for updates
+  ja: 更新を確認
+settings.updates.checking:
+  en: Checking…
+  ja: 確認中…
+settings.updates.available:
+  en: "%{agent} %{installed} → %{latest}: %{command}"
+  ja: "%{agent} %{installed} → %{latest}: %{command}"
+settings.updates.none:
+  en: Every agent is up to date.
+  ja: すべてのエージェントは最新です。
+palette.board:
+  en: "Open the agents board"
+  ja: "エージェントボードを開く"
+cli.commit.handed_over:
+  en: "the commit was refused; conversation %{session} has been asked to fix it"
+  ja: "コミットが拒否されたので、会話 %{session} に修正を依頼しました"
+checks.count.failed:
+  en: "%{n} failed"
+  ja: "失敗 %{n}"
+checks.count.cancelled:
+  en: "%{n} cancelled"
+  ja: "中止 %{n}"
+checks.count.running:
+  en: "%{n} running"
+  ja: "実行中 %{n}"
+checks.count.passed:
+  en: "%{n} passed"
+  ja: "成功 %{n}"
+checks.state.failed:
+  en: failed
+  ja: 失敗
+checks.state.cancelled:
+  en: cancelled
+  ja: 中止
+checks.state.running:
+  en: running
+  ja: 実行中
+checks.state.passed:
+  en: passed
+  ja: 成功
+checks.state.skipped:
+  en: skipped
+  ja: スキップ
+surface.git.comment_remove:
+  en: Take this comment back
+  ja: このコメントを取り消す
+settings.daemon:
+  en: Daemon
+  ja: デーモン
+settings.daemon.keep_awake:
+  en: Keep the Mac awake while an agent works
+  ja: エージェントの作業中は Mac をスリープさせない
+settings.daemon.keep_awake.help:
+  en: Lets the machine sleep again once the agent has finished. macOS only.
+  ja: エージェントが終わると再びスリープできます。macOS のみ。
+settings.daemon.resume_after_limit:
+  en: Resume after a usage limit resets
+  ja: 利用上限がリセットされたら再開する
+settings.daemon.resume_after_limit.help:
+  en: Holds the queue when a turn hits a limit with a known reset time, and lets it go then.
+  ja: リセット時刻が分かる上限に当たったらキューを止め、リセット時に再開します。
+settings.daemon.fetch_rates:
+  en: Fetch the public rate table
+  ja: 公開料金表を取得する
+settings.daemon.fetch_rates.help:
+  en: At most daily, to price turns a vendor does not. Off, costs are only what vendors report.
+  ja: ベンダーが料金を返さないターンの見積もりに、最大1日1回取得します。オフならベンダー報告分のみ。
+settings.daemon.scan_vendor_logs:
+  en: Count agents run outside Ginka
+  ja: Ginka 外で動いたエージェントも集計する
+settings.daemon.scan_vendor_logs.help:
+  en: Reads Claude Code's and Codex's own session logs, read only, so Reports covers the whole plan.
+  ja: Claude Code と Codex のセッションログを読み取り専用で読み、レポートにプラン全体を反映します。
+surface.git.checks:
+  en: Checks
+  ja: チェック
+surface.git.checks_tooltip:
+  en: List the pull request's checks, failures first; a check with a log opens it
+  ja: プルリクエストのチェックを失敗から順に一覧します。ログがあるチェックはクリックで開きます
+surface.git.checks.loading:
+  en: Reading the checks…
+  ja: チェックを読み込み中…
+surface.git.checks.none:
+  en: This pull request has no checks.
+  ja: このプルリクエストにはチェックがありません。
+surface.name.terminal:
+  en: Terminal
+  ja: ターミナル
+surface.name.git:
+  en: Git
+  ja: Git
+surface.name.files:
+  en: Files
+  ja: ファイル
+surface.name.browser:
+  en: Browser
+  ja: ブラウザ
+surface.name.reports:
+  en: Reports
+  ja: レポート
+surface.name.skills:
+  en: Skills
+  ja: スキル
+palette.row.rename:
+  en: Rename this conversation
+  ja: この会話の名前を変更
+palette.row.note:
+  en: Write this workspace's status note
+  ja: このワークスペースのステータスメモを書く
+palette.row.pin:
+  en: Pin this workspace
+  ja: このワークスペースをピン留め
+palette.row.unpin:
+  en: Unpin this workspace
+  ja: このワークスペースのピン留めを外す
+palette.row.archive:
+  en: Archive this workspace
+  ja: このワークスペースをアーカイブ
+palette.row.resolve:
+  en: Resolve this workspace's conflicts with the agent
+  ja: このワークスペースのコンフリクトをエージェントで解決
+palette.project.rename:
+  en: Rename this project
+  ja: このプロジェクトの名前を変更
+palette.project.move_up:
+  en: Move this project up
+  ja: このプロジェクトを上へ
+palette.project.move_down:
+  en: Move this project down
+  ja: このプロジェクトを下へ
+palette.project.mute:
+  en: "Mute this project: %{how_long}"
+  ja: "このプロジェクトをミュート: %{how_long}"
+palette.project.unmute:
+  en: Unmute this project
+  ja: このプロジェクトのミュートを解除
+cli.doctor.found:
+  en: found (version not readable)
+  ja: あり（バージョン不明）
+cli.doctor.git_missing:
+  en: "not found — worktrees, diffs and commits need it"
+  ja: "見つかりません — ワークツリー・差分・コミットに必要です"
+cli.doctor.gh_missing:
+  en: "not found — pull requests and their checks need it"
+  ja: "見つかりません — プルリクエストとチェックに必要です"
+cli.doctor.agent_missing:
+  en: not installed
+  ja: 未インストール

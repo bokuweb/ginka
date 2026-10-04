@@ -4,18 +4,24 @@
 //! a viewport onto this crate, and the daemon is its long-running host. If a
 //! piece of logic needs a `Window` to be exercised, it is in the wrong crate.
 
+#![deny(missing_docs)]
+
 pub mod account;
 pub mod agent;
+pub mod agent_updates;
 pub mod attachment;
+pub mod attribution;
 pub mod blob;
 pub mod browser;
 pub mod browser_history;
 pub mod checkpoint;
+pub mod checks;
 pub mod chrome_cookies;
 pub mod cli_sessions;
 pub mod commands;
 pub mod comments;
 pub mod commit;
+pub mod commit_failure;
 pub mod composer;
 pub mod conflicts;
 pub mod connector;
@@ -32,11 +38,14 @@ pub mod files;
 pub mod git;
 pub mod handoff;
 pub mod i18n;
+pub mod image_diff;
 pub mod logging;
 pub mod lsp;
 pub mod mcp;
+pub mod mcp_inventory;
 pub mod notes;
 pub mod paths;
+pub mod pr_details;
 pub mod project;
 pub mod quick_commands;
 pub mod registry;

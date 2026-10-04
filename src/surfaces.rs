@@ -24,6 +24,7 @@ use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{
     BasePanel, DockArea, DockEvent, DockLayout, Panel, PanelControl, PanelEvent, panel_handle,
@@ -42,12 +43,23 @@ use std::time::Duration;
 /// reports every step of a drag.
 const ARRANGEMENT_SETTLES: Duration = Duration::from_millis(400);
 
+/// A comment being written in the Git surface: its file, the line it starts
+/// on, where a shift-clicked range ends, and its text box.
+type OpenComment = (String, Option<u32>, Option<u32>, Entity<TextareaState>);
+
 struct FileBuffer {
     workspace: WorkspaceId,
     file: FileContent,
     editor: Option<Entity<EditorState>>,
     complaint: Option<SharedString>,
     previewing: bool,
+    /// When the reader last typed in it, for autosave.
+    last_edit: Option<std::time::Instant>,
+    /// A save is on its way to the daemon.
+    saving: bool,
+    /// The daemon refused the last save — the file changed on disk — so it
+    /// is not saved again without the reader.
+    conflicted: bool,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -116,6 +128,27 @@ pub struct SurfacePanel {
     pull_request: Option<(SharedString, bool)>,
     /// A pull request is being opened.
     opening_pull_request: bool,
+    /// The last plain push was refused, so overwriting the remote with a
+    /// lease is offered — and `true` in the second field once the reader has
+    /// asked once and must confirm.
+    lease_push: Option<bool>,
+    /// The complaint on screen is a refused commit, which the agent can be
+    /// asked to fix.
+    commit_refused: bool,
+    /// The workspace's branch has an open pull request, so its checks can
+    /// be handed to the agent.
+    open_pull_request: bool,
+    /// The pull request's checks are listed under the remote actions.
+    checks_open: bool,
+    /// Its checks, failures first, or why they could not be read; `None`
+    /// while they are being read.
+    checks: Option<Result<Vec<ginka_protocol::model::CheckRun>, SharedString>>,
+    /// The file being opened was picked with a single click, so it goes in
+    /// the preview tab.
+    preview_next: bool,
+    /// Changed images read for a side-by-side look, by change source and
+    /// path: the image before and after (Orca's image diff).
+    image_diffs: HashMap<(String, String), (Option<String>, Option<String>)>,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -127,7 +160,9 @@ pub struct SurfacePanel {
     ///
     /// One at a time: a review is read line by line, and two open boxes is a
     /// form, not a margin note.
-    commenting: Option<(String, Option<u32>, Entity<TextareaState>)>,
+    ///
+    /// The second line is where a shift-click range ends, when it is one.
+    commenting: Option<OpenComment>,
     /// The paths that are staged for the next commit.
     ///
     /// Read separately from the changes themselves: the uncommitted diff is
@@ -269,6 +304,24 @@ pub enum SurfaceEvent {
     Sync,
     /// Push the workspace branch, creating its upstream when needed.
     Push,
+    /// Replace the remote branch with rewritten history, if the remote is
+    /// still what was last fetched. Offered only after a plain push failed.
+    PushWithLease,
+    /// Hand a refused commit — what git and its hooks said, and the message
+    /// it was going to use — to the workspace's agent to fix.
+    FixCommit { message: String, output: String },
+    /// Hand the failing checks of the branch's pull request to the agent.
+    FixChecks,
+    /// Read the checks of the branch's pull request; they come back
+    /// through [`Surfaces::set_checks`].
+    LoadChecks,
+    /// Read a changed image's two sides under the change source it is
+    /// shown in: staged, unstaged, a commit or a turn.
+    LoadImageDiff {
+        path: String,
+        old_path: Option<String>,
+        source: ginka_protocol::model::ChangeSource,
+    },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
     /// Read what one commit did; it comes back through
@@ -278,14 +331,21 @@ pub enum SurfaceEvent {
     OpenTurn(Checkpoint),
     /// Push the branch and open a pull request for it.
     CreatePullRequest,
+    /// Push and open a pull request whose title and description an agent
+    /// wrote from the branch's commits and diff.
+    CreateGeneratedPullRequest,
     /// Leave a comment on a file, and a line of it.
     Comment {
         path: String,
         line: Option<u32>,
+        /// The last line of a shift-clicked range.
+        end_line: Option<u32>,
         text: String,
     },
     /// Send every waiting comment back to the agent.
     SendReview,
+    /// Take a waiting review comment back before it is sent.
+    RemoveComment { id: String },
     /// Look for files whose path matches this.
     FindFiles(String),
     /// Read a file and show it.
@@ -461,6 +521,13 @@ impl SurfacePanel {
             commit_view: None,
             pull_request: None,
             opening_pull_request: false,
+            lease_push: None,
+            commit_refused: false,
+            open_pull_request: false,
+            checks_open: false,
+            checks: None,
+            preview_next: false,
+            image_diffs: HashMap::new(),
             expanded: None,
             split: false,
             comments: Vec::new(),
@@ -673,6 +740,18 @@ impl SurfacePanel {
         cx.notify();
     }
 
+    /// Open a file picked from the tree or the search results: a single
+    /// click previews it in the reusable tab, a double click keeps it
+    /// (MonoCode's preview tabs). The keyboard keeps it too.
+    fn open_from_list(&mut self, path: String, event: &ClickEvent, cx: &mut Context<Self>) {
+        let single = matches!(event, ClickEvent::Mouse(click) if click.up.click_count < 2);
+        if !single {
+            self.file_tabs.pin(&path);
+        }
+        self.preview_next = single;
+        cx.emit(SurfaceEvent::OpenFile(path));
+    }
+
     /// Mark the workspace and path whose asynchronous read is current.
     ///
     /// Returns whether the daemon must be asked. `from_history` restores the
@@ -692,6 +771,8 @@ impl SurfacePanel {
         {
             if from_history {
                 self.file_tabs.restore(path);
+            } else if std::mem::take(&mut self.preview_next) {
+                self.file_tabs.open_preview(path);
             } else {
                 self.file_tabs.open(path);
             }
@@ -766,6 +847,9 @@ impl SurfacePanel {
         let mode = *mode;
         self.opening = None;
         let Some(file) = file else {
+            // A failed read opens nothing, so the preview it was for is not
+            // left waiting to catch the next, unrelated open.
+            self.preview_next = false;
             self.definition = None;
             cx.notify();
             return;
@@ -786,8 +870,10 @@ impl SurfacePanel {
             });
             let lsp = crate::lsp::EditorLspBinding::default();
             let lsp_for_changes = lsp.clone();
-            cx.subscribe(&editor, move |_, editor, event: &InputEvent, cx| {
+            let edited_path = file.path.clone();
+            cx.subscribe(&editor, move |this, editor, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
+                    this.note_edit(&edited_path, cx);
                     let text = editor.read(cx).value().to_string();
                     let (version, server) = lsp_for_changes.change_target();
                     if let Some(server) = server {
@@ -835,6 +921,9 @@ impl SurfacePanel {
             editor,
             complaint: None,
             previewing: false,
+            last_edit: None,
+            saving: false,
+            conflicted: false,
         });
         let path = self
             .file_buffers
@@ -844,6 +933,15 @@ impl SurfacePanel {
             .path
             .clone();
         match mode {
+            FileOpenMode::Visit if std::mem::take(&mut self.preview_next) => {
+                // The previewed file this one replaces: its buffer goes
+                // with its tab, unless it holds unsaved work, in which case
+                // it was kept the moment it was edited and is not displaced.
+                if let Some(displaced) = self.file_tabs.open_preview(path.clone()) {
+                    self.file_buffers
+                        .retain(|buffer| buffer.file.path != displaced);
+                }
+            }
             FileOpenMode::Visit => self.file_tabs.open(path.clone()),
             FileOpenMode::History => self.file_tabs.restore(path.clone()),
         }
@@ -896,8 +994,67 @@ impl SurfacePanel {
         {
             buffer.file = file;
             buffer.complaint = None;
+            buffer.saving = false;
+            buffer.conflicted = false;
             cx.notify();
         }
+    }
+
+    /// The reader typed in `path`: autosave it once typing pauses for
+    /// [`ginka_ui::editor::AUTOSAVE_AFTER`] (MonoCode's autosave).
+    fn note_edit(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        buffer.last_edit = Some(std::time::Instant::now());
+        // An edited preview is kept: it is no longer only being looked at.
+        self.file_tabs.pin(path);
+        let path = path.to_string();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(ginka_ui::editor::AUTOSAVE_AFTER)
+                .await;
+            this.update(cx, |this, cx| this.autosave(&path, cx)).ok();
+        })
+        .detach();
+    }
+
+    /// Save `path` if [`ginka_ui::editor::autosave_due`] says so — the timer
+    /// of an earlier keystroke finds the buffer still being typed in, and
+    /// does nothing.
+    fn autosave(&mut self, path: &str, cx: &mut Context<Self>) {
+        let Some(buffer) = self
+            .file_buffers
+            .iter_mut()
+            .find(|buffer| buffer.file.path == path)
+        else {
+            return;
+        };
+        let Some(editor) = buffer.editor.as_ref() else {
+            return;
+        };
+        let text = editor.read(cx).value().to_string();
+        let state = save_state(&buffer.file, &text);
+        if !ginka_ui::editor::autosave_due(
+            state,
+            buffer.last_edit,
+            std::time::Instant::now(),
+            buffer.conflicted,
+            buffer.saving,
+        ) {
+            return;
+        }
+        buffer.saving = true;
+        cx.emit(SurfaceEvent::SaveFile {
+            workspace: buffer.workspace.clone(),
+            path: buffer.file.path.clone(),
+            text,
+            expected_revision: buffer.file.revision.clone(),
+        });
     }
 
     /// Keep the editor intact and explain why its save was refused.
@@ -914,6 +1071,10 @@ impl SurfacePanel {
             .find(|buffer| &buffer.workspace == workspace && buffer.file.path == path)
         {
             buffer.complaint = Some(error.into());
+            buffer.saving = false;
+            // Not saved over by itself again: a manual save is the reader
+            // deciding to.
+            buffer.conflicted = true;
             cx.notify();
         }
     }
@@ -1043,6 +1204,7 @@ impl SurfacePanel {
     /// Say why a commit did not happen, or clear it once one did.
     pub fn set_commit_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = self.complaint.is_some();
         if self.complaint.is_none() {
             // It went in; the message belongs to the commit now.
             self.message = None;
@@ -1053,7 +1215,154 @@ impl SurfacePanel {
     /// Show a remote-sync error without disturbing a commit message draft.
     pub fn set_git_sync_result(&mut self, complaint: Option<String>, cx: &mut Context<Self>) {
         self.complaint = complaint.map(SharedString::from);
+        self.commit_refused = false;
         cx.notify();
+    }
+
+    /// A changed image's two sides arrived, as `data:` URLs.
+    pub fn set_image_diff(
+        &mut self,
+        source: &ginka_protocol::model::ChangeSource,
+        path: String,
+        before: Option<String>,
+        after: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.image_diffs
+            .insert((image_source_key(source), path), (before, after));
+        cx.notify();
+    }
+
+    /// A binary file's expanded row: its images side by side once read,
+    /// and until then the word "binary" and a way to read them (Orca's image
+    /// diff). `source` is the change the row is shown under.
+    fn image_diff_view(
+        &self,
+        file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let key = (image_source_key(source), file.path.clone());
+        match self.image_diffs.get(&key).cloned() {
+            Some((before, after)) => h_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .children(
+                    [
+                        (
+                            rust_i18n::t!("surface.git.image_before").to_string(),
+                            before,
+                        ),
+                        (rust_i18n::t!("surface.git.image_after").to_string(), after),
+                    ]
+                    .into_iter()
+                    .map(|(label, url)| {
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(label),
+                            )
+                            .child(match url {
+                                Some(url) => div()
+                                    .h(px(180.))
+                                    .rounded(px(tokens.radius.row))
+                                    .bg(tokens.colors().bg_surface)
+                                    .child(
+                                        img(SharedString::from(url))
+                                            .size_full()
+                                            .object_fit(ObjectFit::Contain),
+                                    )
+                                    .into_any_element(),
+                                None => div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("surface.git.image_missing").to_string())
+                                    .into_any_element(),
+                            })
+                    }),
+                )
+                .into_any_element(),
+            None => {
+                let (path, old_path, source) =
+                    (file.path.clone(), file.old_path.clone(), source.clone());
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.binary").to_string()),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "show-images:{}:{}",
+                            key.0, file.path
+                        )))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.show_images").to_string())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::LoadImageDiff {
+                                path: path.clone(),
+                                old_path: old_path.clone(),
+                                source: source.clone(),
+                            })
+                        })),
+                    )
+                    .into_any_element()
+            }
+        }
+    }
+
+    /// Whether the workspace's branch has an open pull request.
+    pub fn set_open_pull_request(&mut self, open: bool) {
+        self.open_pull_request = open;
+    }
+
+    /// The checks read for `workspace`'s pull request, or why they could
+    /// not be. Dropped when the reader has moved to another workspace since.
+    pub fn set_checks(
+        &mut self,
+        workspace: &WorkspaceId,
+        checks: Result<Vec<ginka_protocol::model::CheckRun>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_workspace.as_ref() != Some(workspace) {
+            return;
+        }
+        self.checks = Some(
+            checks
+                .map(|checks| ginka_ui::checks::ordered(&checks))
+                .map_err(SharedString::from),
+        );
+        cx.notify();
+    }
+
+    /// Say how a push went: a refused plain push offers the lease push,
+    /// anything that went through takes the offer away.
+    pub fn set_push_result(
+        &mut self,
+        complaint: Option<String>,
+        with_lease: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.lease_push = match (&complaint, with_lease) {
+            (Some(_), false) => Some(false),
+            _ => None,
+        };
+        self.set_git_sync_result(complaint, cx);
     }
 
     /// Show what a commit did. `changes` is `None` while it is being read; a
@@ -1323,6 +1632,9 @@ impl SurfacePanel {
         if self.browser_workspace.as_ref() == Some(&workspace) {
             return;
         }
+        // Another workspace, another pull request.
+        self.checks_open = false;
+        self.checks = None;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = window;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1419,6 +1731,8 @@ impl SurfacePanel {
     pub fn set_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.changes != changes {
             self.changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -1427,6 +1741,8 @@ impl SurfacePanel {
     pub fn set_staged_changes(&mut self, changes: Option<Changes>, cx: &mut Context<Self>) {
         if self.staged_changes != changes {
             self.staged_changes = changes;
+            // A side read before this change may no longer be the image.
+            self.image_diffs.clear();
             cx.notify();
         }
     }
@@ -1548,7 +1864,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_primary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.show(surface, cx)))
     }
@@ -1625,6 +1941,7 @@ impl SurfacePanel {
                 .flex_1()
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
+                .children(self.git_checks(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .when(self.turns_open, |this| this.child(self.git_turns(cx)))
                 .child(self.diff_filter_input(cx))
@@ -1660,6 +1977,7 @@ impl SurfacePanel {
             .overflow_y_scroll()
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
+            .children(self.git_checks(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
             .when(self.turns_open, |this| this.child(self.git_turns(cx)))
             .child(self.diff_filter_input(cx))
@@ -1844,6 +2162,7 @@ impl SurfacePanel {
         let tokens = Tokens::global(cx).clone();
         let history_open = self.history_open;
         let turns_open = self.turns_open;
+        let checks_open = self.checks_open;
         h_flex()
             .w_full()
             .px_3()
@@ -1879,6 +2198,29 @@ impl SurfacePanel {
                     .tooltip(rust_i18n::t!("surface.git.push_tooltip").to_string())
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::Push))),
             )
+            .children(self.lease_push.map(|armed| {
+                // Two activations, like discarding a file: overwriting a
+                // remote branch is not undone from here.
+                Button::new("git-push-lease")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(if armed {
+                        rust_i18n::t!("surface.git.push_lease.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("surface.git.push_lease").to_string()
+                    })
+                    .tooltip(rust_i18n::t!("surface.git.push_lease_tooltip").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if armed {
+                            this.lease_push = None;
+                            cx.emit(SurfaceEvent::PushWithLease);
+                        } else {
+                            this.lease_push = Some(true);
+                        }
+                        cx.notify();
+                    }))
+            }))
             .child(
                 Button::new("git-create-pr")
                     .ghost()
@@ -1895,6 +2237,51 @@ impl SurfacePanel {
                         this.opening_pull_request = true;
                         this.pull_request = None;
                         cx.emit(SurfaceEvent::CreatePullRequest);
+                        cx.notify();
+                    })),
+            )
+            .when(self.open_pull_request, |row| {
+                // Orca's "Fix broken checks": what failed, and where its log
+                // is, goes to the agent; nothing is sent when all is green.
+                row.child(
+                    Button::new("git-fix-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_checks_tooltip").to_string())
+                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::FixChecks))),
+                )
+                .child(
+                    Button::new("git-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .selected(checks_open)
+                        .label(rust_i18n::t!("surface.git.checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.checks_tooltip").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.checks_open = !checks_open;
+                            if this.checks_open {
+                                this.checks = None;
+                                cx.emit(SurfaceEvent::LoadChecks);
+                            }
+                            cx.notify();
+                        })),
+                )
+            })
+            .child(
+                Button::new("git-create-pr-written")
+                    .ghost()
+                    .compact()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.create_pr_written").to_string())
+                    .tooltip(rust_i18n::t!("surface.git.create_pr_written_tooltip").to_string())
+                    .disabled(self.opening_pull_request)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.opening_pull_request = true;
+                        this.pull_request = None;
+                        cx.emit(SurfaceEvent::CreateGeneratedPullRequest);
                         cx.notify();
                     })),
             )
@@ -1925,6 +2312,80 @@ impl SurfacePanel {
                         cx.notify();
                     })),
             )
+    }
+
+    /// The pull request's checks, failures first, under a line that sums
+    /// them up; a check with a log opens it.
+    fn git_checks(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if !(self.checks_open && self.open_pull_request) {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let body = v_flex()
+            .id("git-checks-list")
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_0p5()
+            .text_xs()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle);
+        Some(match &self.checks {
+            None => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.loading").to_string()),
+            Some(Err(error)) => body
+                .text_color(tokens.colors().status_error)
+                .child(error.clone()),
+            Some(Ok(checks)) if checks.is_empty() => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.none").to_string()),
+            Some(Ok(checks)) => body
+                .children(ginka_ui::checks::summary(checks).map(|summary| {
+                    div()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(summary)
+                }))
+                .children(checks.iter().enumerate().map(|(index, check)| {
+                    let failed = matches!(
+                        check.state,
+                        ginka_protocol::model::CheckState::Failed
+                            | ginka_protocol::model::CheckState::Cancelled
+                    );
+                    let link = check.link.clone();
+                    h_flex()
+                        .id(("git-check", index))
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(84.))
+                                .flex_shrink_0()
+                                .text_color(if failed {
+                                    tokens.colors().status_error
+                                } else {
+                                    tokens.colors().text_muted
+                                })
+                                .child(ginka_ui::checks::label(check.state)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if link.is_some() {
+                                    tokens.colors().accent
+                                } else {
+                                    tokens.colors().text_secondary
+                                })
+                                .child(ginka_ui::checks::title(check)),
+                        )
+                        .when_some(link, |row, url| {
+                            row.cursor_pointer()
+                                .on_click(move |_, _, cx| cx.open_url(&url))
+                        })
+                })),
+        })
     }
 
     /// Where the last pull request is, or why it could not be opened: a link
@@ -2262,7 +2723,10 @@ impl SurfacePanel {
                         .files
                         .iter()
                         .filter(|file| self.diff_filter.matches(file))
-                        .map(|file| self.file_row_read_only(file, cx).into_any_element()),
+                        .map(|file| {
+                            self.file_row_read_only(file, &changes.source, cx)
+                                .into_any_element()
+                        }),
                 );
                 rows
             }
@@ -2351,21 +2815,51 @@ impl SurfacePanel {
             }
         })
         .detach();
-        self.commenting = Some((path, line, state));
+        self.commenting = Some((path, line, None, state));
         cx.notify();
+    }
+
+    /// A click on a diff line: a new comment there, or — with shift held
+    /// while a comment is open on another line of the same file — that
+    /// comment stretched to cover both (Orca's multi-line comments).
+    fn click_line(
+        &mut self,
+        path: String,
+        anchor: Option<u32>,
+        shift: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if shift
+            && let Some(clicked) = anchor
+            && let Some((open_path, Some(start), end, _)) = self.commenting.as_mut()
+            && *open_path == path
+        {
+            let (low, high) = ginka_ui::comment_range::extend(*start, clicked);
+            *start = low;
+            *end = high;
+            cx.notify();
+            return;
+        }
+        self.comment_on(path, anchor, window, cx);
     }
 
     /// Hand a finished comment to the shell, which is the one holding the
     /// daemon.
     fn finish_comment(&mut self, text: String, cx: &mut Context<Self>) {
-        let Some((path, line, _)) = self.commenting.take() else {
+        let Some((path, line, end_line, _)) = self.commenting.take() else {
             return;
         };
         cx.notify();
         if text.is_empty() {
             return;
         }
-        cx.emit(SurfaceEvent::Comment { path, line, text });
+        cx.emit(SurfaceEvent::Comment {
+            path,
+            line,
+            end_line,
+            text,
+        });
     }
 
     /// The comments already left on a line, and the box for a new one.
@@ -2381,8 +2875,10 @@ impl SurfacePanel {
             .iter()
             .filter(|comment| comment.path == path && comment.line == line)
             .map(|comment| {
-                div()
+                let id = comment.id.clone();
+                h_flex()
                     .w_full()
+                    .gap_2()
                     .px_3()
                     .py_1()
                     .ml_8()
@@ -2391,23 +2887,62 @@ impl SurfacePanel {
                     .bg(tokens.colors().row_hover())
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
-                    .child(comment.text.clone())
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(match (comment.line, comment.end_line) {
+                                (Some(start), Some(end)) => format!(
+                                    "{} · {}",
+                                    ginka_ui::comment_range::label(start, Some(end)),
+                                    comment.text
+                                ),
+                                _ => comment.text.clone(),
+                            }),
+                    )
+                    .child(
+                        // Taken back before it is sent: a comment that turned
+                        // out wrong should not reach the agent.
+                        Button::new(SharedString::from(format!("remove-comment:{}", comment.id)))
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(rust_i18n::t!("surface.git.comment_remove").to_string())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SurfaceEvent::RemoveComment { id: id.clone() })
+                            })),
+                    )
                     .into_any_element()
             })
             .collect();
 
-        if let Some((open_path, open_line, state)) = &self.commenting
+        if let Some((open_path, open_line, end_line, state)) = &self.commenting
             && open_path == path
             && *open_line == line
         {
             drawn.push(
-                div()
+                v_flex()
                     .w_full()
                     .px_2()
                     .py_1()
                     .ml_8()
+                    .gap_0p5()
                     .border_l_2()
                     .border_color(tokens.colors().accent)
+                    // Which lines it is about, and how to make it more.
+                    .children(open_line.map(|start| {
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(
+                                rust_i18n::t!(
+                                    "surface.git.comment_lines",
+                                    lines = ginka_ui::comment_range::label(start, *end_line)
+                                )
+                                .to_string(),
+                            )
+                    }))
                     .child(Textarea::new(state))
                     .into_any_element(),
             );
@@ -2443,6 +2978,35 @@ impl SurfacePanel {
                     .text_color(tokens.colors().status_error)
                     .child(why)
             }))
+            .when(self.commit_refused, |this| {
+                // Orca's "Fix with AI": the hook said what is wrong, and the
+                // agent that wrote the code is the one to fix it.
+                this.child(
+                    Button::new("commit-fix-with-agent")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.fix_commit").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.fix_commit_tooltip").to_string())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            let Some(output) = this.complaint.clone() else {
+                                return;
+                            };
+                            let message = this
+                                .message
+                                .as_ref()
+                                .map(|state| state.read(cx).value().to_string())
+                                .unwrap_or_default();
+                            this.commit_refused = false;
+                            this.complaint = None;
+                            cx.emit(SurfaceEvent::FixCommit {
+                                message,
+                                output: output.to_string(),
+                            });
+                            cx.notify();
+                        })),
+                )
+            })
             .child(match open {
                 Some(state) => v_flex()
                     .w_full()
@@ -2741,8 +3305,11 @@ impl SurfacePanel {
     fn file_row_read_only(
         &self,
         file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let image_view = (file.binary && self.expanded.as_deref() == Some(file.path.as_str()))
+            .then(|| self.image_diff_view(file, source, cx));
         let tokens = Tokens::global(cx).clone();
         let expanded = self.expanded.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
@@ -2801,6 +3368,7 @@ impl SurfacePanel {
                             .child(format!("-{}", file.removed)),
                     ),
             )
+            .children(image_view)
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
                     v_flex()
@@ -2922,14 +3490,12 @@ impl SurfacePanel {
                     .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
-                this.child(
-                    div()
-                        .px_3()
-                        .py_2()
-                        .text_xs()
-                        .text_color(tokens.colors().text_muted)
-                        .child(rust_i18n::t!("surface.git.binary").to_string()),
-                )
+                let source = if staged {
+                    ginka_protocol::model::ChangeSource::Staged
+                } else {
+                    ginka_protocol::model::ChangeSource::Unstaged
+                };
+                this.child(self.image_diff_view(file, &source, cx))
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
@@ -3045,9 +3611,17 @@ impl SurfacePanel {
                                         .gap_2()
                                         .cursor_pointer()
                                         .hover(|this| this.bg(tokens.colors().row_hover()))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.comment_on(path.clone(), anchor, window, cx)
-                                        }))
+                                        .on_click(cx.listener(
+                                            move |this, event: &ClickEvent, window, cx| {
+                                                this.click_line(
+                                                    path.clone(),
+                                                    anchor,
+                                                    event.modifiers().shift,
+                                                    window,
+                                                    cx,
+                                                )
+                                            },
+                                        ))
                                         .font_family(mono.clone())
                                         .text_xs()
                                         .line_height(px(17.))
@@ -3073,6 +3647,28 @@ impl SurfacePanel {
                                                         .new_line
                                                         .map(|at| at.to_string())
                                                         .unwrap_or_default(),
+                                                }),
+                                        )
+                                        // Orca's line attribution: a glyph,
+                                        // named in its tooltip, beside what
+                                        // an agent's turn wrote.
+                                        .child(
+                                            div()
+                                                .id(SharedString::from(format!(
+                                                    "by-agent:{}:{:?}",
+                                                    file.path, line.new_line
+                                                )))
+                                                .w(px(12.))
+                                                .flex_shrink_0()
+                                                .text_color(tokens.colors().accent)
+                                                .when(line.by_agent == Some(true), |this| {
+                                                    this.child("✦").tooltip(|window, cx| {
+                                                        Tooltip::new(
+                                                            rust_i18n::t!("surface.git.by_agent")
+                                                                .to_string(),
+                                                        )
+                                                        .build(window, cx)
+                                                    })
                                                 }),
                                         )
                                         .child(diff_text(line, &tokens))
@@ -3107,7 +3703,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_secondary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .child(
                 div()
@@ -3886,6 +4482,13 @@ impl SurfacePanel {
                     .unwrap_or(path)
                     .to_string();
                 let showing = active.as_deref() == Some(path);
+                // A preview tab is said in words, not only in italics: the
+                // next single click replaces it.
+                let label = if self.file_tabs.is_preview(path) {
+                    rust_i18n::t!("surface.files.preview_tab", name = label).to_string()
+                } else {
+                    label
+                };
                 ginka_ui::chrome::tab(SharedString::from(format!("file-tab:{path}")), showing, cx)
                     .gap_0p5()
                     .child(
@@ -3945,11 +4548,9 @@ impl SurfacePanel {
                     .items_center()
                     .cursor_pointer()
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.open_from_list(path.clone(), event, cx)
+                    }))
                     .child(
                         div()
                             .flex_1()
@@ -3983,11 +4584,9 @@ impl SurfacePanel {
                     .gap_0p5()
                     .cursor_pointer()
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(
-                        cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
-                        }),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        this.open_from_list(path.clone(), event, cx)
+                    }))
                     .child(
                         div()
                             .text_xs()
@@ -4210,8 +4809,8 @@ impl SurfacePanel {
                                         .child(row.name),
                                 ),
                         )
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(SurfaceEvent::OpenFile(path.clone()))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                            this.open_from_list(path.clone(), event, cx)
                         }))
                         .into_any_element(),
                 }
@@ -4584,8 +5183,8 @@ fn split_row(
             .when(line.kind == LineKind::Removed, |this| {
                 this.bg(tokens.colors().status_error.opacity(0.10))
             })
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.comment_on(path.clone(), anchor, window, cx)
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.click_line(path.clone(), anchor, event.modifiers().shift, window, cx)
             }))
             .child(
                 div()
@@ -4608,6 +5207,12 @@ fn split_row(
         .child(div().w(px(1.)).h_full().bg(tokens.colors().border_subtle))
         .child(side(row.right, false, cx))
         .into_any_element()
+}
+
+/// How a change source keys the image-diff cache: its debug form, which
+/// names the kind and the commit, checkpoint or base it is measured from.
+fn image_source_key(source: &ginka_protocol::model::ChangeSource) -> String {
+    format!("{source:?}")
 }
 
 /// One line of a diff, with the parts that actually changed marked.
@@ -4773,11 +5378,11 @@ impl Panel for SurfaceTab {
             .gap(px(6.))
             .items_center()
             .child(ginka_ui::chrome::tab_icon(self.surface.icon(), active, cx))
-            .child(ginka_ui::chrome::tab_label(self.surface.label()))
+            .child(ginka_ui::chrome::tab_label(self.surface.title()))
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.surface.label().into())
+        Some(self.surface.title().into())
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

@@ -65,6 +65,7 @@ pub struct ProjectRow {
     /// What a new worktree here would be cut from. Empty for a plain folder,
     /// which has no branches at all.
     pub default_branch: SharedString,
+    /// Git repository or plain folder; a plain folder hides branch, pull-request and worktree controls.
     pub kind: ProjectKind,
 }
 
@@ -226,9 +227,13 @@ pub fn relative_age(now: i64, then: i64) -> String {
 /// recognisable at 12px where text is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
+    /// Anthropic's Claude Code; also what an unknown driver id reads as.
     Claude,
+    /// OpenAI's Codex CLI.
     Codex,
+    /// Google's Gemini CLI.
     Gemini,
+    /// The OpenCode CLI.
     OpenCode,
 }
 
@@ -260,6 +265,7 @@ impl Agent {
         }
     }
 
+    /// The single-colour mark a sidebar row carries for this agent.
     pub fn glyph(self) -> Icon {
         Icon::empty().path(match self {
             Self::Claude => icon::AGENT_SPARK,
@@ -294,6 +300,7 @@ impl Agent {
         }
     }
 
+    /// The agent's product name, as pickers and row details print it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
@@ -349,7 +356,9 @@ pub struct SessionRow {
     pub workspace: WorkspaceId,
     /// The session running in it, when there is one.
     pub session: Option<SessionId>,
+    /// The row's headline: the session's title, or the worktree name made readable when it has none.
     pub title: SharedString,
+    /// The agent whose glyph the row carries.
     pub agent: Agent,
     /// Model used by the latest session in this workspace.
     pub model: Option<String>,
@@ -368,9 +377,11 @@ pub struct SessionRow {
     pub origin: SharedString,
     /// The worktree branch, truncated from the left when it does not fit.
     pub branch: SharedString,
+    /// What the agent is doing, which sets the row's status mark and its place in the attention sort.
     pub state: AgentState,
     /// Relative time, shown when the row is not running.
     pub age: SharedString,
+    /// Whether the worktree is archived; archived rows are left out of the list and of next/previous stepping.
     pub archived: bool,
     /// Kept at the top of its project's list, in a section of its own.
     pub pinned: bool,
@@ -386,6 +397,9 @@ pub struct SessionRow {
     /// The latest session's own state, finer than [`SessionRow::state`]:
     /// the agents board tells a finished turn from one never started.
     pub session_state: Option<SessionState>,
+    /// When the latest session last changed, in Unix seconds — the clock
+    /// [`crate::seen::Seen`] measures "since the reader looked" by.
+    pub updated_at: Option<i64>,
 }
 
 /// The mark a pull request in `state` is drawn with: the same shapes GitHub
@@ -472,6 +486,7 @@ impl SessionRow {
                 .as_ref()
                 .map(|note| note.text.clone().into()),
             session_state: session.map(|session| session.state),
+            updated_at: session.map(|session| session.updated_at),
         }
     }
 
@@ -564,6 +579,7 @@ impl SessionRow {
             pull_request: None,
             status_note: None,
             session_state: None,
+            updated_at: None,
         }
     }
 
@@ -636,17 +652,18 @@ impl SessionRow {
         ]
     }
 
-    /// Working first, then rows waiting on the user, then everything else.
-    ///
-    /// The reorder animates on the standard curve (`docs/ui.md` §3.2). Sorting
-    /// is stable so equal rows keep their relative order and nothing jumps
-    /// under the cursor for no reason.
     /// The order the session list uses: pinned rows first — the reader put
     /// them there — and then the attention sort within each part.
     pub fn list_rank(&self) -> (bool, u8) {
         (!self.pinned, self.attention_rank())
     }
 
+    /// The attention sort's key: working first (0), then rows waiting on the
+    /// user (1), then everything else (2).
+    ///
+    /// The reorder animates on the standard curve (`docs/ui.md` §3.2). Sorting
+    /// is stable so equal rows keep their relative order and nothing jumps
+    /// under the cursor for no reason.
     pub fn attention_rank(&self) -> u8 {
         match self.state {
             AgentState::Working => 0,
@@ -692,6 +709,19 @@ pub fn session_shortcuts(
     project: &ProjectName,
     query: &str,
 ) -> Vec<WorkspaceId> {
+    visible_sessions(rows, project, query)
+        .into_iter()
+        .take(9)
+        .collect()
+}
+
+/// Every session the list shows for `project` and `query`, in the list's
+/// order — what next/previous session steps through.
+pub fn visible_sessions(
+    rows: &[SessionRow],
+    project: &ProjectName,
+    query: &str,
+) -> Vec<WorkspaceId> {
     let mut visible = rows
         .iter()
         .filter(|row| !row.archived)
@@ -701,19 +731,43 @@ pub fn session_shortcuts(
     visible.sort_by_key(|row| row.attention_rank());
     visible
         .into_iter()
-        .take(9)
         .map(|row| row.workspace.clone())
         .collect()
+}
+
+/// The conversation before or after `current` in the list's own order —
+/// MonoCode's next/previous session — wrapping at the ends. With nothing
+/// selected, the first (or, going back, the last).
+pub fn adjacent_session(
+    visible: &[WorkspaceId],
+    current: Option<&WorkspaceId>,
+    forward: bool,
+) -> Option<WorkspaceId> {
+    if visible.is_empty() {
+        return None;
+    }
+    let count = visible.len();
+    let next = match current.and_then(|current| visible.iter().position(|id| id == current)) {
+        Some(at) if forward => (at + 1) % count,
+        Some(at) => (at + count - 1) % count,
+        None if forward => 0,
+        None => count - 1,
+    };
+    Some(visible[next].clone())
 }
 
 /// Which sessions the list shows, by what they are doing — MonoCode's
 /// status filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusFilter {
+    /// Every session, whatever it is doing.
     #[default]
     All,
+    /// Only sessions whose agent is running.
     Working,
+    /// Only sessions waiting on the user.
     NeedsAttention,
+    /// Only sessions with nothing running and nothing asked.
     Idle,
 }
 
@@ -1338,5 +1392,34 @@ mod tests {
         for agent in [Agent::Claude, Agent::Codex, Agent::Gemini, Agent::OpenCode] {
             assert_eq!(Agent::from_id(agent.driver_id()), agent);
         }
+    }
+
+    #[test]
+    fn next_and_previous_session_walk_the_list_and_wrap() {
+        let ids: Vec<WorkspaceId> = ["a", "b", "c"]
+            .iter()
+            .map(|name| WorkspaceId(format!("p/{name}")))
+            .collect();
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[0]), true),
+            Some(ids[1].clone())
+        );
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[2]), true),
+            Some(ids[0].clone())
+        );
+        assert_eq!(
+            adjacent_session(&ids, Some(&ids[0]), false),
+            Some(ids[2].clone())
+        );
+        assert_eq!(adjacent_session(&ids, None, true), Some(ids[0].clone()));
+        assert_eq!(adjacent_session(&ids, None, false), Some(ids[2].clone()));
+        let gone = WorkspaceId("p/gone".into());
+        assert_eq!(
+            adjacent_session(&ids, Some(&gone), true),
+            Some(ids[0].clone()),
+            "a selection the list no longer shows starts from the top"
+        );
+        assert_eq!(adjacent_session(&[], None, true), None);
     }
 }

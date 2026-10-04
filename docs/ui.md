@@ -159,9 +159,16 @@ active conversation. With nothing selected, the rail stands alone.
   a lit place outranks it. The rail cannot be closed while a place other than
   a project is showing: there would be nothing on screen to get back from.
 - **Row menu** — a `…` on each session row opens its actions under it:
-  *Rename* (the title becomes a field; ↩ keeps it), *Pin* / *Unpin*
-  (pinned rows lead the list and carry a star) and *Archive*. Archived rows
-  offer *Restore*. A row with prompts waiting says how many.
+  *Rename* (the title becomes a field; ↩ keeps it), *Status note…* (the
+  note line becomes a field; ↩ writes it, an empty field clears it), *Pin* / *Unpin*
+  (pinned rows lead the list and carry a star), *Archive* and *Delete
+  conversation*, which asks again and forgets the transcript and its
+  checkpoints, stopping a running turn first.
+  Every row action but deleting is also in the command palette for the
+  selected row (`ginka_ui::palette::row_entries`), so a keyboard reaches it. Archived rows
+  offer *Restore* and *Delete*, which asks again before removing the worktree
+  and is refused while it has uncommitted work. A change the daemon refuses
+  says why in a notice at the foot of the window. A row with prompts waiting says how many.
 - **Status filter** — a chip beside the session search cycles *All*,
   *Working*, *Needs you* and *Done*; `⌘1–9` pick only the rows it shows.
 - **Session list header** — `Workspace` and a `+` for a new session. The whole
@@ -385,11 +392,17 @@ Dragging across the terminal grid selects exact character cells in either direct
 - **Split diff** — each changes section has *Unified | Split*. Split puts the
   old file on the left and the new on the right, a removed line beside the
   line that replaced it; either side is clickable for a review comment.
+  A waiting comment carries an × that takes it back before the review is
+  sent.
 - **Project menu** — a project in the rail has a ⋯ that opens *Rename*
-  (in place), *Move up* and *Move down*.
+  (in place), *Move up*, *Move down*, the notification mutes and *Remove from
+  Ginka*, which asks again and forgets the project while its folder stays on
+  disk. All but removing are in the command palette for the selected project.
 - **Scheduled jobs** — Settings lists the project's cron and one-time jobs:
   schedule, name, execution scope, what runs, when it next fires and how it last went, with
-  *Pause*, *Edit*, *Run now* and *Remove*. *Edit* fills the form below; saving
+  *Pause*, *Edit*, *Run now*, *History* and *Remove*. *History* lists the
+  job's latest 20 firings under its row — when, how it went, how long a
+  finished run took and the first line of why a run failed. *Edit* fills the form below; saving
   updates the same job and keeps its run history. The form chooses the project
   checkout or an active workspace for new and existing jobs, and can
   set or clear an optional precheck command; a non-zero exit skips a scheduled
@@ -421,7 +434,7 @@ The Skills surface keeps a creation form visible even when its catalogue is empt
 
 The Git surface keeps Pull and Push visible even when the worktree is clean. Pull is a daemon-owned fast-forward-only operation; dirty or diverged branches leave the worktree untouched and show the refusal inline without clearing a commit-message draft.
 
-History beside those controls expands a bounded newest-first commit graph without hiding the current diff. Each row is a lane drawing — a dot per commit, a lane per line of history, curves where branches fork and merge, laid out by `ginka_ui::graph` from the parent ids alone and coloured from the status palette — then the subject, short id and relative age. A row opens a read-only view of what that commit did against its first parent, with the way back to the uncommitted diff at its head. *Turns* lists only checkpoints with a saved start and opens a read-only diff between that turn's saved start and end snapshots; initial and restore-safety snapshots stay in the rewind menu. An older checkpoint without a saved start returns an error through CLI or MCP. *Create PR* beside Push pushes the branch and opens a pull request with `gh`; the answer is a link to it, or the refusal in `gh`'s own words.
+History beside those controls expands a bounded newest-first commit graph without hiding the current diff. Each row is a lane drawing — a dot per commit, a lane per line of history, curves where branches fork and merge, laid out by `ginka_ui::graph` from the parent ids alone and coloured from the status palette — then the subject, short id and relative age. A row opens a read-only view of what that commit did against its first parent, with the way back to the uncommitted diff at its head. *Turns* lists only checkpoints with a saved start and opens a read-only diff between that turn's saved start and end snapshots; initial and restore-safety snapshots stay in the rewind menu. An older checkpoint without a saved start returns an error through CLI or MCP. *Create PR* beside Push pushes the branch and opens a pull request with `gh`; the answer is a link to it, or the refusal in `gh`'s own words. While the branch has an open pull request, *Checks* lists its checks under the actions — a line summing them up ("2 failed · 1 running · 5 passed"), then failures first, each with its state in a word as well as a mark and a click through to its log when it has one — and *Fix failing checks* hands the red ones to the agent.
 
 The diff list separates worktree-only changes from staged changes. The same path may appear in both when only some hunks are staged; each hunk header has an accessible Stage or Unstage action, and unstaged hunks also have a two-step Discard action. Stage, unstage and discard all regenerate the corresponding side of the diff; a stale header reports its refusal inline instead of applying to another hunk. Discard reverses only the worktree-versus-index patch, preserving already staged edits in the same file.
 
@@ -456,7 +469,7 @@ out. The header's scope chips narrow it to the project on screen. A card is
 the agent's mark and the conversation's title, `project · branch`, the
 agent's status line in italics, and its state in words — the border of a
 *Needs you* card is the attention colour, but the word is always there too.
-A card opens its conversation. The grouping is `ginka_ui::board`.
+A card opens its conversation. The palette's *Open the agents board* (keymap action `open_board`) brings it up without the mouse, and every workspace on it is also a palette entry. The grouping is `ginka_ui::board`.
 
 ### 3.6 Notes
 
@@ -485,6 +498,12 @@ an immediate enable/disable control. Edit path opens a focused executable field;
 Save applies the trimmed path, Use automatic clears the override, and errors stay
 beside the field. The daemon owns these settings; the window, CLI and MCP use the
 same request to set or clear an executable override.
+The Daemon section offers the daemon's own switches — keep the Mac awake while
+an agent works, resume after a usage limit resets, fetch the public rate table,
+count agents run outside Ginka — each an on/off control with a line saying what
+it does (`ginka_ui::daemon_settings`). A change goes through the same
+`UpdateDaemonSettings` as `ginka settings set`; the page then reads the settings
+back, so it shows what the daemon took, and a refusal shows as a notice.
 
 ### 3.8 Standalone AWS client
 
@@ -629,3 +648,7 @@ Four things are not in any library and are load-bearing for the product's identi
 ## 7. Accessibility
 
 AA contrast for all token pairs in both themes. Full keyboard traversal. Respect the system reduce-motion setting — when set, transitions become instant and the status glyph stops animating (it still changes colour and shape). Minimum hit target 28 px.
+
+Next and previous conversation are ⌥⌘↓ / ⌥⌘↑ (⇧⌥↓ / ⇧⌥↑ elsewhere), stepping through the session list as it is filtered and sorted, wrapping at the ends; the palette also offers *Close all tabs*.
+
+Shortcuts can be changed in `keymap.json` in the state directory: each entry binds `keys` to one of `ginka_ui::keymap::ACTIONS` or, with `"action": null`, frees them. It is applied after the defaults; a file that binds a chord twice or names an unknown action is not applied at all, and the log says why.

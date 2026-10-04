@@ -3,9 +3,11 @@
 //! Editing changes the visible fields while retaining a job's agent, enabled
 //! state and run history identity.
 
-use ginka_protocol::model::{CronJob, CronVia};
+use ginka_protocol::model::{CronJob, CronOutcome, CronRun, CronVia};
 use ginka_protocol::rpc::Request;
 use ginka_protocol::{ProjectName, WorkspaceId};
+
+use crate::workspace::relative_age;
 
 /// Values the scheduled-job form lets the reader change.
 pub struct FormValues {
@@ -45,6 +47,8 @@ pub fn save_request(
         id: editing.map(|job| job.id),
         project,
         workspace: form.workspace,
+        // Settings does not set reminders; editing one keeps its target.
+        session: editing.and_then(|job| job.session.clone()),
         name: form.name,
         schedule: form.schedule,
         via: form.via,
@@ -55,6 +59,44 @@ pub fn save_request(
     }
 }
 
+/// How many firings the run history shows.
+pub const HISTORY_LIMIT: u32 = 20;
+
+/// One firing as the run history lists it: how long ago it started, how it
+/// went, how long a finished run took, and the daemon's detail — why it
+/// failed or what it started.
+pub fn run_line(run: &CronRun, now: i64) -> String {
+    let mut parts = vec![
+        relative_age(now, run.started_at),
+        run.outcome.as_str().to_string(),
+    ];
+    if run.outcome == CronOutcome::Finished
+        && let Some(finished) = run.finished_at
+    {
+        parts.push(duration(finished - run.started_at));
+    }
+    if let Some(detail) = run
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+    {
+        // A failure can be a whole stderr; the row has room for its first line.
+        parts.push(detail.lines().next().unwrap_or(detail).to_string());
+    }
+    parts.join(" · ")
+}
+
+/// A run's length, in the largest units that keep it short.
+fn duration(seconds: i64) -> String {
+    let seconds = seconds.max(0);
+    match seconds {
+        ..60 => format!("{seconds}s"),
+        60..3_600 => format!("{}m {}s", seconds / 60, seconds % 60),
+        _ => format!("{}h {}m", seconds / 3_600, seconds % 3_600 / 60),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use ginka_protocol::ProjectName;
@@ -62,7 +104,50 @@ mod tests {
     use ginka_protocol::model::{CronJob, CronVia};
     use ginka_protocol::rpc::Request;
 
-    use super::{FormValues, save_request};
+    use super::{FormValues, run_line, save_request};
+    use ginka_protocol::model::{CronOutcome, CronRun};
+
+    fn run(outcome: CronOutcome, finished: Option<i64>, detail: Option<&str>) -> CronRun {
+        CronRun {
+            id: 1,
+            job: 1,
+            started_at: 1_000,
+            finished_at: finished,
+            outcome,
+            detail: detail.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn a_finished_run_says_how_long_it_took() {
+        let line = run_line(
+            &run(CronOutcome::Finished, Some(1_125), None),
+            1_000 + 7_200,
+        );
+        assert_eq!(line, "2h · finished · 2m 5s");
+    }
+
+    #[test]
+    fn a_failed_run_shows_the_first_line_of_why() {
+        let line = run_line(
+            &run(
+                CronOutcome::Failed,
+                None,
+                Some("no such worktree\nmore stderr"),
+            ),
+            1_030,
+        );
+        assert_eq!(line, "now · failed · no such worktree");
+    }
+
+    #[test]
+    fn a_started_run_has_no_length_and_a_blank_detail_is_dropped() {
+        let line = run_line(
+            &run(CronOutcome::Started, Some(1_500), Some("  ")),
+            1_000 + 300,
+        );
+        assert_eq!(line, "5m · started");
+    }
 
     #[test]
     fn editing_keeps_hidden_job_fields_and_identity() {
@@ -72,6 +157,7 @@ mod tests {
             id: 42,
             project: project.clone(),
             workspace: Some(workspace.clone()),
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Chat,
@@ -96,7 +182,7 @@ mod tests {
             Some("codex".into()),
         );
         assert!(matches!(request, Request::SaveCronJob {
-            id: Some(42), project: p, workspace: Some(w), name, schedule,
+            id: Some(42), project: p, workspace: Some(w), session: None, name, schedule,
             via: CronVia::Chat, agent: Some(agent), body,
             precheck: Some(precheck), enabled: false,
         } if p == project && w == workspace && name == "Review open PRs"
@@ -121,6 +207,7 @@ mod tests {
         );
         assert!(matches!(request, Request::SaveCronJob {
             id: None, workspace: None, agent: Some(agent),
+            session: None,
             precheck: None, enabled: true, ..
         } if agent == "codex"));
     }
@@ -132,6 +219,7 @@ mod tests {
             id: 9,
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -187,6 +275,7 @@ mod tests {
             id: 7,
             project: project.clone(),
             workspace: None,
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -248,6 +337,7 @@ mod tests {
             id: 7,
             project: project.clone(),
             workspace: Some(WorkspaceId("shop-old".into())),
+            session: None,
             name: "review".into(),
             schedule: "@daily".into(),
             via: CronVia::Terminal,
@@ -281,6 +371,7 @@ mod tests {
             Request::SaveCronJob {
                 id: Some(7),
                 workspace: None,
+                session: None,
                 ..
             }
         ));

@@ -980,6 +980,22 @@ impl Supervisor {
         }
     }
 
+    /// Cancel every running turn, as [`Supervisor::cancel`] does one, and
+    /// say how many there were. What the daemon does on its way out.
+    pub fn cancel_all(&self) -> usize {
+        let running: Vec<SessionId> = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
+        for session in &running {
+            self.cancel(session);
+        }
+        running.len()
+    }
+
     /// Kill a running turn's process tree without touching its queue: what
     /// an interrupt does, whose exit hands over to the prompt it chose.
     fn stop_process(&self, session: &SessionId) {

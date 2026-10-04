@@ -62,6 +62,7 @@ pub fn snapshot_of<'a>(plans: &'a [PlanSnapshot], account: &AccountId) -> Option
 pub struct Headroom {
     /// The window's name: `5h`, `week`.
     pub window: String,
+    /// How much of that window is spent, from 0 to 100; may overshoot.
     pub used_percent: f64,
     /// At the wall. Said in words beside the number, never in colour alone.
     pub exhausted: bool,
@@ -101,6 +102,47 @@ pub fn wants_refresh(snapshot: Option<&PlanSnapshot>, now: i64) -> bool {
         None => true,
         Some(snapshot) => now - snapshot.observed_at > STALE_AFTER_SECS,
     }
+}
+
+/// How full the active login's tightest window must be before another login
+/// is suggested.
+pub const SUGGEST_AT_PERCENT: f64 = 90.0;
+
+/// How much more room another login must have, in percentage points of its
+/// tightest window, to be worth suggesting.
+pub const SUGGEST_MARGIN_PERCENT: f64 = 25.0;
+
+/// Another login of `active`'s provider to suggest when `active` is near its
+/// wall: the one with the most room in its tightest window (MonoCode 0.4.0).
+///
+/// Only a suggestion — switching stays the reader's (`docs/accounts.md` §7)
+/// — and only on evidence: the active login at [`SUGGEST_AT_PERCENT`] or
+/// more, the other with a fresh reading, not signed out, and at least
+/// [`SUGGEST_MARGIN_PERCENT`] points emptier.
+pub fn suggest_account<'a>(
+    accounts: &'a [Account],
+    plans: &[PlanSnapshot],
+    active: &Account,
+    now: i64,
+) -> Option<&'a Account> {
+    let used = |account: &Account| {
+        let snapshot = snapshot_of(plans, &account.id)?;
+        if wants_refresh(Some(snapshot), now) {
+            return None;
+        }
+        snapshot.usage.tightest().map(|window| window.used_percent)
+    };
+    let current = used(active)?;
+    if current < SUGGEST_AT_PERCENT {
+        return None;
+    }
+    accounts_for(accounts, active.provider.as_str())
+        .into_iter()
+        .filter(|account| account.id != active.id && account.signed_in != Some(false))
+        .filter_map(|account| used(account).map(|percent| (account, percent)))
+        .filter(|(_, percent)| current - percent >= SUGGEST_MARGIN_PERCENT)
+        .min_by(|(_, left), (_, right)| left.total_cmp(right))
+        .map(|(account, _)| account)
 }
 
 #[cfg(test)]
@@ -153,6 +195,84 @@ mod tests {
             observed_at,
             source: PlanSource::Fetched,
         }
+    }
+
+    #[test]
+    fn a_login_near_its_wall_suggests_the_one_with_the_most_left() {
+        // MonoCode 0.4.0: a suggestion beside the gauge, never a silent
+        // switch (`docs/accounts.md` §7 rules out rotating by itself).
+        let mut accounts = accounts();
+        accounts.push(account("claude-team", ProviderKind::Claude, false));
+        let now = 10_000;
+        let plans = vec![
+            snapshot("claude", 95.0, now),
+            snapshot("claude-work", 60.0, now),
+            snapshot("claude-team", 20.0, now),
+        ];
+        let active = &accounts[0];
+        assert_eq!(
+            suggest_account(&accounts, &plans, active, now).map(|a| a.id.0.as_str()),
+            Some("claude-team")
+        );
+
+        let easy = vec![
+            snapshot("claude", 70.0, now),
+            snapshot("claude-team", 5.0, now),
+        ];
+        assert_eq!(
+            suggest_account(&accounts, &easy, active, now),
+            None,
+            "below the threshold there is nothing to suggest"
+        );
+    }
+
+    #[test]
+    fn a_suggestion_needs_a_fresh_reading_a_signed_in_login_and_real_room() {
+        let mut accounts = accounts();
+        let now = 100_000;
+        let active = accounts[0].clone();
+        // Only a stale reading for the other login: no claim about it.
+        let stale = vec![
+            snapshot("claude", 97.0, now),
+            snapshot("claude-work", 10.0, now - STALE_AFTER_SECS - 1),
+        ];
+        assert_eq!(suggest_account(&accounts, &stale, &active, now), None);
+
+        let fresh = vec![
+            snapshot("claude", 97.0, now),
+            snapshot("claude-work", 10.0, now),
+        ];
+        accounts[1].signed_in = Some(false);
+        assert_eq!(
+            suggest_account(&accounts, &fresh, &active, now),
+            None,
+            "a signed-out login is not somewhere to go"
+        );
+
+        accounts[1].signed_in = Some(true);
+        let barely = vec![
+            snapshot("claude", 97.0, now),
+            snapshot("claude-work", 92.0, now),
+        ];
+        assert_eq!(
+            suggest_account(&accounts, &barely, &active, now),
+            None,
+            "moving from 97 % to 92 % is not worth a suggestion"
+        );
+        assert_eq!(
+            suggest_account(&accounts, &fresh, &active, now).map(|a| a.id.0.as_str()),
+            Some("claude-work")
+        );
+        // Another provider's login is never offered.
+        assert!(
+            suggest_account(
+                &accounts,
+                &[snapshot("claude", 97.0, now), snapshot("codex", 0.0, now)],
+                &active,
+                now
+            )
+            .is_none()
+        );
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 /// The contract version this build speaks. A mismatch fails the handshake
 /// loudly: a client and daemon that disagree about the wire will otherwise
 /// half-work, which is far harder to diagnose than a refusal.
-pub const PROTOCOL_VERSION: u32 = 41;
+pub const PROTOCOL_VERSION: u32 = 42;
 
 /// Largest message either side will accept. Attachments travel over this
 /// socket, so the cap has to clear the largest upload the daemon takes — and
@@ -35,20 +35,28 @@ pub enum ClientMessage {
     /// has been accepted: a connection that has not identified itself has no
     /// business asking questions.
     Hello {
+        /// The [`PROTOCOL_VERSION`] the client was built against.
         protocol_version: u32,
+        /// The daemon's bearer token, as the handshake file records it.
         token: String,
     },
     /// A request expecting exactly one [`ServerMessage::Response`] or
     /// [`ServerMessage::Error`] with the same `id`.
     Request {
+        /// Echoed on the answer, so replies can arrive out of order.
         id: RequestId,
+        /// What the client is asking for.
         payload: Box<Request>,
     },
     /// Replay the event stream from after `after`.
     ///
     /// Sent immediately after connecting by a client that has state to catch
     /// up; a fresh client sends `after: 0` or nothing at all.
-    Resume { after: Seq },
+    Resume {
+        /// The last sequence number the client has applied; `0` asks for
+        /// everything still replayable.
+        after: Seq,
+    },
 }
 
 /// A frame from the daemon to a client.
@@ -65,32 +73,54 @@ pub enum ServerMessage {
     /// earlier run has to re-read the world rather than resume, because
     /// sequence numbers start again per run.
     Welcome {
+        /// The [`PROTOCOL_VERSION`] the daemon speaks.
         protocol_version: u32,
+        /// The daemon's build version, for display and bug reports.
         version: String,
+        /// Identifies this daemon run; changes on every restart.
         epoch: u64,
+        /// The daemon's current event position.
         seq: Seq,
     },
     /// The handshake was refused, with the reason named so the client can say
     /// something better than "could not connect".
-    Rejected { reason: HandshakeRejection },
+    Rejected {
+        /// Why the handshake was refused.
+        reason: HandshakeRejection,
+    },
     /// A successful answer to the request with this `id`.
     Response {
+        /// The `id` of the request this answers.
         id: RequestId,
+        /// The answer itself.
         payload: Box<Response>,
     },
     /// A failed answer. Kept separate from [`ServerMessage::Response`] because
     /// `Result` serialises as `{"Ok":…}`/`{"Err":…}`, which is a Rust detail no
     /// other client should have to know about.
-    Error { id: RequestId, error: RpcError },
+    Error {
+        /// The `id` of the request that failed.
+        id: RequestId,
+        /// What went wrong.
+        error: RpcError,
+    },
     /// An unsolicited push. Every event carries a `seq` so gaps are detectable.
-    Event { seq: Seq, payload: DaemonEvent },
+    Event {
+        /// Position of this push in the daemon's stream.
+        seq: Seq,
+        /// What happened.
+        payload: DaemonEvent,
+    },
     /// The cursor in a [`ClientMessage::Resume`] is older than the daemon's
     /// replay window, so the events in between are gone.
     ///
     /// A client that gets this must re-read what it cares about rather than
     /// carrying on patching: a short replay would leave it believing it was
     /// caught up. `oldest` is the earliest sequence number still replayable.
-    Gap { oldest: Seq },
+    Gap {
+        /// The earliest sequence number still replayable.
+        oldest: Seq,
+    },
 }
 
 /// Why a connection was refused.
@@ -100,7 +130,10 @@ pub enum ServerMessage {
 pub enum HandshakeRejection {
     /// The daemon speaks a different contract. Carries the daemon's version so
     /// the client can tell the user which side is behind.
-    VersionMismatch { daemon: u32 },
+    VersionMismatch {
+        /// The [`PROTOCOL_VERSION`] the daemon speaks.
+        daemon: u32,
+    },
     /// Wrong or missing token. Deliberately says nothing else.
     BadToken,
     /// Something other than a hello arrived first.
@@ -121,7 +154,9 @@ impl ServerMessage {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RpcError {
+    /// Stable, machine-matchable reason: `not_found`, `failed` or `malformed`.
     pub code: String,
+    /// Human-readable detail; wording may change between builds.
     pub message: String,
 }
 

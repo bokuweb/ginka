@@ -3,10 +3,14 @@
 use crate::assets::icon;
 use gpui_component::{Icon, IconName};
 
+/// One kind of tab the right panel's dock can hold; the arrangement persists per workspace.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Surface {
+    /// The workspace's daemon terminals, drawn here instead of in the dock while this tab is on screen.
     Terminal,
+    /// Status, diff, staging, commit, history and pull-request checks.
     Git,
+    /// The file tree, project search and editor tabs.
     Files,
     /// The selected workspace's embedded browser and design feedback tools.
     Browser,
@@ -28,6 +32,8 @@ impl Surface {
         Surface::Skills,
     ];
 
+    /// The surface's stable English name, used as an element id; what the
+    /// reader sees is [`Surface::title`].
     pub fn label(self) -> &'static str {
         match self {
             Self::Terminal => "Terminal",
@@ -37,6 +43,17 @@ impl Surface {
             Self::Reports => "Reports",
             Self::Skills => "Skills",
         }
+    }
+
+    /// The surface's name in its tab and the chooser, in the window's
+    /// language.
+    pub fn title(self) -> String {
+        self.title_in(&rust_i18n::locale())
+    }
+
+    /// [`Surface::title`] in a given locale.
+    pub fn title_in(self, locale: &str) -> String {
+        rust_i18n::t!(format!("surface.name.{}", self.key()), locale = locale).to_string()
     }
 
     /// Stable lowercase value stored in per-workspace app settings.
@@ -97,6 +114,7 @@ impl Surface {
         Self::ALL[index]
     }
 
+    /// The mark in the surface's tab and on its chooser button.
     pub fn icon(self) -> Icon {
         match self {
             Self::Terminal => Icon::new(IconName::SquareTerminal),
@@ -127,6 +145,18 @@ impl Surface {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_surface_has_a_title_in_each_language() {
+        for surface in Surface::ALL {
+            let key = format!("surface.name.{}", surface.key());
+            for locale in ["en", "ja"] {
+                let title = surface.title_in(locale);
+                assert!(!title.is_empty() && title != key, "{key} in {locale}");
+            }
+        }
+        assert_eq!(Surface::Files.title_in("ja"), "ファイル");
+    }
 
     #[test]
     fn every_surface_is_offered_and_labelled() {

@@ -19,6 +19,18 @@ use nucleo_matcher::{Config, Matcher};
 /// What choosing an entry does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Do one of the sidebar row menu's actions to the selected workspace.
+    Row(RowAction),
+    /// Do one of the project menu's actions to the selected project.
+    Project(ProjectAction),
+    /// Show the agents board across projects.
+    OpenBoard,
+    /// Show the next conversation in the session list.
+    NextSession,
+    /// Show the previous conversation in the session list.
+    PreviousSession,
+    /// Close every conversation tab.
+    CloseAllTabs,
     /// Open or close one of the window's panels.
     TogglePanel(Panel),
     /// Show a surface in the right panel, opening it if it is closed.
@@ -33,6 +45,8 @@ pub enum Command {
     FindTerminal,
     /// Copy the active terminal's visible output to the clipboard.
     CopyTerminalOutput,
+    /// Copy the last lines of the terminal's output, scrollback included.
+    CopyTerminalContext,
     /// Quote the active terminal selection into the chat composer.
     QuoteTerminalSelection,
     /// Quote the selected transcript text into the chat composer.
@@ -69,6 +83,145 @@ pub enum Command {
     SearchEverywhere,
     /// Bring in a conversation started in an agent's own CLI.
     ResumeFromCli,
+}
+
+/// The sidebar row menu's actions, offered here so a keyboard reaches them
+/// too (`docs/ui.md` §6). Deleting a conversation is left to the menu, whose
+/// second click is the confirmation the palette has no place for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowAction {
+    /// Give the selected conversation a title of the reader's own.
+    Rename,
+    /// Write or clear the selected workspace's status note.
+    StatusNote,
+    /// Pin or unpin the selected workspace.
+    TogglePin,
+    /// Move the selected workspace to the archived section.
+    Archive,
+    /// Hand the selected workspace's merge conflicts to an agent.
+    ResolveConflicts,
+}
+
+/// The row actions that apply to `row`, the workspace selected in the
+/// sidebar: renaming needs a conversation, resolving needs conflicts, and an
+/// archived row has only its own controls.
+pub fn row_entries(row: Option<&SessionRow>) -> Vec<Entry> {
+    let Some(row) = row.filter(|row| !row.archived) else {
+        return Vec::new();
+    };
+    let entry = |id: &str, key: &str, action: RowAction| Entry {
+        id: format!("row:{id}"),
+        label: rust_i18n::t!(key).to_string(),
+        hint: None,
+        command: Command::Row(action),
+    };
+    let mut entries = Vec::new();
+    if row.status.conflict {
+        entries.push(entry(
+            "resolve",
+            "palette.row.resolve",
+            RowAction::ResolveConflicts,
+        ));
+    }
+    if row.session.is_some() {
+        entries.push(entry("rename", "palette.row.rename", RowAction::Rename));
+    }
+    entries.push(entry("note", "palette.row.note", RowAction::StatusNote));
+    entries.push(entry(
+        "pin",
+        if row.pinned {
+            "palette.row.unpin"
+        } else {
+            "palette.row.pin"
+        },
+        RowAction::TogglePin,
+    ));
+    entries.push(entry("archive", "palette.row.archive", RowAction::Archive));
+    entries
+}
+
+/// The project menu's actions, offered here for a keyboard. Removing a
+/// project is left to the menu, whose second click is its confirmation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectAction {
+    /// Show the selected project under another name.
+    Rename,
+    /// Put the selected project one place earlier in the rail.
+    MoveUp,
+    /// Put the selected project one place later in the rail.
+    MoveDown,
+    /// Mute the selected project's notifications for a while.
+    Mute(crate::notify::MuteFor),
+    /// Lift the selected project's mute.
+    Unmute,
+}
+
+/// Where the selected project stands, for [`project_entries`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProjectPlace {
+    /// Its position in the rail, 0 first.
+    pub index: usize,
+    /// How many projects the rail has.
+    pub count: usize,
+    /// Whether its notifications are muted now.
+    pub muted: bool,
+}
+
+/// The project actions that apply to the selected project: moving only
+/// where there is somewhere to move, muting or unmuting by its state.
+pub fn project_entries(project: Option<ProjectPlace>) -> Vec<Entry> {
+    let Some(project) = project else {
+        return Vec::new();
+    };
+    let entry = |id: String, label: String, action: ProjectAction| Entry {
+        id: format!("project:{id}"),
+        label,
+        hint: None,
+        command: Command::Project(action),
+    };
+    let mut entries = vec![entry(
+        "rename".into(),
+        rust_i18n::t!("palette.project.rename").to_string(),
+        ProjectAction::Rename,
+    )];
+    if project.index > 0 {
+        entries.push(entry(
+            "up".into(),
+            rust_i18n::t!("palette.project.move_up").to_string(),
+            ProjectAction::MoveUp,
+        ));
+    }
+    if project.index + 1 < project.count {
+        entries.push(entry(
+            "down".into(),
+            rust_i18n::t!("palette.project.move_down").to_string(),
+            ProjectAction::MoveDown,
+        ));
+    }
+    if project.muted {
+        entries.push(entry(
+            "unmute".into(),
+            rust_i18n::t!("palette.project.unmute").to_string(),
+            ProjectAction::Unmute,
+        ));
+    } else {
+        for choice in crate::notify::MuteFor::CHOICES {
+            let how_long = match choice {
+                crate::notify::MuteFor::Hours(hours) => {
+                    rust_i18n::t!("sidebar.action.mute_hours", hours = hours).to_string()
+                }
+                crate::notify::MuteFor::UntilResumed => {
+                    rust_i18n::t!("sidebar.action.mute_forever").to_string()
+                }
+            };
+            entries.push(entry(
+                format!("mute:{choice:?}"),
+                rust_i18n::t!("palette.project.mute", how_long = how_long).to_string(),
+                ProjectAction::Mute(choice),
+            ));
+        }
+    }
+    entries
 }
 
 /// The saved commands the palette offers, where there is a workspace to run
@@ -159,10 +312,19 @@ pub fn terminal_entries(state: TerminalActions) -> Vec<Entry> {
                 command: Command::CopyTerminalOutput,
             },
         );
+        entries.insert(
+            3,
+            Entry {
+                id: "terminal:copy-context".into(),
+                label: rust_i18n::t!("terminal.copy_context").to_string(),
+                hint: None,
+                command: Command::CopyTerminalContext,
+            },
+        );
     }
     if state.has_selection {
         entries.insert(
-            3,
+            4.min(entries.len()),
             Entry {
                 id: "terminal:quote-selection".into(),
                 label: rust_i18n::t!("terminal.quote_selection").to_string(),
@@ -254,9 +416,11 @@ fn previous_terminal_shortcut() -> &'static str {
 pub struct Entry {
     /// Stable across a filter, so a view can key an element by it.
     pub id: String,
+    /// What the line says, already localized; the text the filter matches against.
     pub label: String,
     /// The keystroke that does the same thing, or where the entry leads.
     pub hint: Option<String>,
+    /// What choosing the line does.
     pub command: Command,
 }
 
@@ -294,6 +458,33 @@ pub fn entries(
             command: Command::ShowSurface(*surface),
         });
     }
+    // MonoCode's next/previous session: only where there is somewhere to go.
+    if rows.iter().filter(|row| !row.archived).count() > 1 {
+        all.push(Entry {
+            id: "session:next".into(),
+            label: rust_i18n::t!("palette.session.next").to_string(),
+            hint: Some("⌥⌘↓".into()),
+            command: Command::NextSession,
+        });
+        all.push(Entry {
+            id: "session:previous".into(),
+            label: rust_i18n::t!("palette.session.previous").to_string(),
+            hint: Some("⌥⌘↑".into()),
+            command: Command::PreviousSession,
+        });
+    }
+    all.push(Entry {
+        id: "place:board".into(),
+        label: rust_i18n::t!("palette.board").to_string(),
+        hint: None,
+        command: Command::OpenBoard,
+    });
+    all.push(Entry {
+        id: "tabs:close-all".into(),
+        label: rust_i18n::t!("palette.tabs.close_all").to_string(),
+        hint: None,
+        command: Command::CloseAllTabs,
+    });
     if can_go_back {
         all.push(Entry {
             id: "navigation:back".into(),
@@ -432,6 +623,77 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_row_menu_is_reachable_from_the_palette_for_the_selected_row() {
+        let commands = |row: Option<&SessionRow>| -> Vec<Command> {
+            row_entries(row)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect()
+        };
+        assert!(commands(None).is_empty(), "nothing selected, nothing to do");
+
+        let mut row = SessionRow::samples().remove(0);
+        row.pinned = false;
+        row.status.conflict = false;
+        let offered = commands(Some(&row));
+        assert!(offered.contains(&Command::Row(RowAction::StatusNote)));
+        assert!(offered.contains(&Command::Row(RowAction::TogglePin)));
+        assert!(offered.contains(&Command::Row(RowAction::Archive)));
+        assert!(!offered.contains(&Command::Row(RowAction::ResolveConflicts)));
+        assert_eq!(
+            offered.contains(&Command::Row(RowAction::Rename)),
+            row.session.is_some()
+        );
+
+        row.status.conflict = true;
+        assert!(commands(Some(&row)).contains(&Command::Row(RowAction::ResolveConflicts)));
+
+        row.archived = true;
+        assert!(
+            commands(Some(&row)).is_empty(),
+            "an archived row has its own controls"
+        );
+    }
+
+    #[test]
+    fn the_project_menu_is_reachable_from_the_palette() {
+        let commands = |place: Option<ProjectPlace>| -> Vec<Command> {
+            project_entries(place)
+                .into_iter()
+                .map(|entry| entry.command)
+                .collect()
+        };
+        assert!(commands(None).is_empty());
+
+        let first = commands(Some(ProjectPlace {
+            index: 0,
+            count: 2,
+            muted: false,
+        }));
+        assert!(first.contains(&Command::Project(ProjectAction::Rename)));
+        assert!(!first.contains(&Command::Project(ProjectAction::MoveUp)));
+        assert!(first.contains(&Command::Project(ProjectAction::MoveDown)));
+        assert!(first.contains(&Command::Project(ProjectAction::Mute(
+            crate::notify::MuteFor::Hours(1)
+        ))));
+        assert!(!first.contains(&Command::Project(ProjectAction::Unmute)));
+
+        let last_muted = commands(Some(ProjectPlace {
+            index: 1,
+            count: 2,
+            muted: true,
+        }));
+        assert!(last_muted.contains(&Command::Project(ProjectAction::MoveUp)));
+        assert!(!last_muted.contains(&Command::Project(ProjectAction::MoveDown)));
+        assert!(last_muted.contains(&Command::Project(ProjectAction::Unmute)));
+        assert!(
+            !last_muted
+                .iter()
+                .any(|command| matches!(command, Command::Project(ProjectAction::Mute(_))))
+        );
+    }
+
+    #[test]
     fn saved_commands_are_offered_only_where_they_can_run() {
         use ginka_protocol::model::{QuickCommand, QuickCommandKind};
         let commands = vec![
@@ -499,6 +761,10 @@ mod tests {
                     .any(|entry| entry.command == Command::ShowSurface(*surface))
             );
         }
+        assert!(
+            all.iter().any(|entry| entry.command == Command::OpenBoard),
+            "the agents board is mouse-only without an entry"
+        );
     }
 
     #[test]
@@ -569,6 +835,21 @@ mod tests {
             .find(|entry| entry.command == Command::IndexWorkspace)
             .unwrap();
         assert_ne!(index.label, reindex.label);
+    }
+
+    #[test]
+    fn session_stepping_needs_two_sessions_and_tabs_can_all_be_closed() {
+        let one = vec![crate::workspace::SessionRow::samples().remove(0)];
+        let many = crate::workspace::SessionRow::samples();
+        let has = |entries: &[Entry], command: Command| {
+            entries.iter().any(|entry| entry.command == command)
+        };
+        let lonely = entries(&layout(), &one, None, true, false, false);
+        assert!(!has(&lonely, Command::NextSession), "nowhere to step to");
+        let crowded = entries(&layout(), &many, None, true, false, false);
+        assert!(has(&crowded, Command::NextSession));
+        assert!(has(&crowded, Command::PreviousSession));
+        assert!(has(&lonely, Command::CloseAllTabs));
     }
 
     #[test]
@@ -686,6 +967,7 @@ mod tests {
             Command::ToggleTerminalSplit,
             Command::FindTerminal,
             Command::CopyTerminalOutput,
+            Command::CopyTerminalContext,
             Command::QuoteTerminalSelection,
             Command::TerminalToLive,
             Command::CloseTerminal,
@@ -742,7 +1024,9 @@ mod tests {
         });
         assert!(!entries.iter().any(|entry| matches!(
             entry.command,
-            Command::CopyTerminalOutput | Command::QuoteTerminalSelection
+            Command::CopyTerminalOutput
+                | Command::CopyTerminalContext
+                | Command::QuoteTerminalSelection
         )));
     }
 }

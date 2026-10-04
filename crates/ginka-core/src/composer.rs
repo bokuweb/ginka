@@ -26,9 +26,19 @@ pub const FILTER_CAP: usize = 64;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Trigger {
     /// A slash command. `start` is the byte offset of the `/`.
-    Slash { query: String, start: usize },
+    Slash {
+        /// Text between the `/` and the caret.
+        query: String,
+        /// Byte offset of the `/` in the composer text.
+        start: usize,
+    },
     /// A file mention. `start` is the byte offset of the `@`.
-    File { query: String, start: usize },
+    File {
+        /// Text between the `@` and the caret.
+        query: String,
+        /// Byte offset of the `@` in the composer text.
+        start: usize,
+    },
 }
 
 impl Trigger {
@@ -67,6 +77,7 @@ impl Trigger {
         None
     }
 
+    /// The text typed after the `/` or `@`, up to the caret; empty right after it.
     pub fn query(&self) -> &str {
         match self {
             Self::Slash { query, .. } | Self::File { query, .. } => query,
@@ -86,14 +97,19 @@ pub enum CommandScope {
     User,
 }
 
+/// A command the composer can offer after `/`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlashCommand {
+    /// Command name without the leading `/`; the key merging and filtering match on.
     pub name: String,
+    /// One-line summary for the picker; `None` when the source gave none.
     pub description: Option<String>,
+    /// Where the command came from; decides which copy wins a name collision.
     pub scope: CommandScope,
 }
 
 impl SlashCommand {
+    /// A command with no description.
     pub fn new(name: impl Into<String>, scope: CommandScope) -> Self {
         Self {
             name: name.into(),
@@ -102,6 +118,7 @@ impl SlashCommand {
         }
     }
 
+    /// Attach the summary the picker shows beside the name.
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
@@ -128,12 +145,16 @@ pub fn merge_commands(
     merged
 }
 
+/// Fuzzy-rank commands by name against `query`, best first, at most
+/// [`FILTER_CAP`]. An empty query returns them in input order.
 pub fn filter_commands<'a>(commands: &'a [SlashCommand], query: &str) -> Vec<&'a SlashCommand> {
     rank(commands, query, Config::DEFAULT, |command| {
         command.name.as_str()
     })
 }
 
+/// Fuzzy-rank workspace paths against `query`, weighting the file name, at most
+/// [`FILTER_CAP`]. An empty query returns them in input order.
 pub fn filter_files<'a>(paths: &'a [String], query: &str) -> Vec<&'a String> {
     // Path scoring weighs the segment after the last separator, which is where
     // people aim when they type a file name.
@@ -229,6 +250,7 @@ impl FileIndex {
         Ok(Self { paths, truncated })
     }
 
+    /// Indexed paths relative to the workspace root, sorted, at most the cap.
     pub fn paths(&self) -> &[String] {
         &self.paths
     }

@@ -45,13 +45,19 @@ impl Ledger {
 /// One thing a connector meant to post.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Delivery {
+    /// Row id in `connector_deliveries`, which `delivered` and `attempted` take.
     pub id: i64,
+    /// Which connector owes it, e.g. `slack`.
     pub connector: String,
+    /// Platform channel id to post into.
     pub channel: String,
+    /// Root message id of the thread to post into.
     pub thread: String,
     /// The [`super::fold::Outbound`] as JSON.
     pub payload: String,
+    /// Tries so far, counting the first; past [`MAX_ATTEMPTS`] it is given up on.
     pub attempts: u32,
+    /// When it was first recorded, in Unix seconds.
     pub created_at: i64,
 }
 

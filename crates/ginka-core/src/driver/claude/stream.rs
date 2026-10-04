@@ -44,6 +44,9 @@ impl ClaudeStream {
         self.session_id.as_deref()
     }
 
+    /// Read one line of the CLI's stream-json output into normalized events. A
+    /// blank line yields none; a line that is not JSON, or misses a field this
+    /// build relies on, is an error.
     pub fn push_line(&mut self, line: &str) -> Result<Vec<AgentEvent>, DriverError> {
         let line = line.trim();
         if line.is_empty() {

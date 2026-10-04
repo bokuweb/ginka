@@ -9,12 +9,13 @@
 //! this adds is the shape a view can draw without knowing anything about
 //! alacritty's grid.
 
-// `VoidListener` is alacritty's own do-nothing sink: the events it would
-// carry — bell, title changes, clipboard requests — are for a terminal
-// application to act on, and this screen only draws.
-use alacritty_terminal::event::VoidListener;
+// Of the events alacritty raises — bell, title changes, clipboard requests —
+// the screen keeps one: a program's OSC 52 write to the clipboard, which the
+// window hands to the system clipboard. Reads are never answered.
+use alacritty_terminal::event::{Event as TermEvent, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::ClipboardType;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor};
@@ -216,6 +217,7 @@ fn numeric_suffix(value: &str) -> (Option<&str>, Option<u32>) {
 /// One character on the screen, with how it should be drawn.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenCell {
+    /// The character drawn; a space for an empty cell.
     pub text: char,
     /// Whether this grid column only occupies the second half of a wide glyph.
     pub wide_spacer: bool,
@@ -223,8 +225,11 @@ pub struct ScreenCell {
     pub foreground: Option<TerminalColor>,
     /// `None` means the terminal's own background.
     pub background: Option<TerminalColor>,
+    /// Drawn in the bold weight.
     pub bold: bool,
+    /// Drawn in the italic style.
     pub italic: bool,
+    /// Drawn with an underline.
     pub underline: bool,
     /// Whether the cursor is sitting on this cell.
     pub cursor: bool,
@@ -240,7 +245,9 @@ pub struct ScreenCell {
 /// against.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminalColor {
+    /// A palette index the theme resolves: 0–15 are the named ANSI colours, higher ones the 256-colour palette.
     Named(u8),
+    /// An exact 24-bit colour the program asked for.
     Rgb(u8, u8, u8),
 }
 
@@ -315,10 +322,33 @@ pub fn copy_shortcut(is_macos: bool) -> &'static str {
 
 /// A terminal's screen, fed by the bytes its shell prints.
 pub struct TerminalScreen {
-    term: Term<VoidListener>,
+    term: Term<ClipboardSink>,
     parser: Processor,
     rows: u16,
     cols: u16,
+    /// The last OSC 52 write not yet handed to the window.
+    clipboard: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+}
+
+/// Largest OSC 52 write passed on, in bytes of decoded text: a yank, not a
+/// program trying to stuff the clipboard.
+pub const MAX_OSC52_BYTES: usize = 1 << 20;
+
+/// Keeps the last clipboard write a program asked for (Orca's OSC 52). Only
+/// the clipboard proper — `c` — and only within [`MAX_OSC52_BYTES`]; the
+/// primary selection is not the clipboard, and reads are denied by the
+/// emulator's default (`Osc52::OnlyCopy`).
+#[derive(Clone)]
+struct ClipboardSink(std::sync::Arc<std::sync::Mutex<Option<String>>>);
+
+impl EventListener for ClipboardSink {
+    fn send_event(&self, event: TermEvent) {
+        if let TermEvent::ClipboardStore(ClipboardType::Clipboard, text) = event
+            && text.len() <= MAX_OSC52_BYTES
+        {
+            *self.0.lock().unwrap_or_else(|e| e.into_inner()) = Some(text);
+        }
+    }
 }
 
 /// The size a terminal was told it has.
@@ -347,18 +377,22 @@ impl TerminalScreen {
             rows: rows.max(1) as usize,
             cols: cols.max(1) as usize,
         };
+        let clipboard = std::sync::Arc::new(std::sync::Mutex::new(None));
         Self {
-            term: Term::new(Config::default(), &size, VoidListener),
+            term: Term::new(Config::default(), &size, ClipboardSink(clipboard.clone())),
             parser: Processor::new(),
             rows: rows.max(1),
             cols: cols.max(1),
+            clipboard,
         }
     }
 
+    /// Visible screen height in rows; never zero.
     pub fn rows(&self) -> u16 {
         self.rows
     }
 
+    /// Visible screen width in columns; never zero.
     pub fn cols(&self) -> u16 {
         self.cols
     }
@@ -577,6 +611,24 @@ impl TerminalScreen {
         self.parser.advance(&mut self.term, data.as_bytes());
     }
 
+    /// Draw output the daemon replayed to a window that came back to the
+    /// terminal. It is history: a clipboard write in it already happened
+    /// once, and doing it again would overwrite whatever the reader copied
+    /// since. A write still waiting from live output is kept.
+    pub fn feed_replay(&mut self, data: &str) {
+        let waiting = self.take_clipboard();
+        self.feed(data);
+        *self.clipboard.lock().unwrap_or_else(|e| e.into_inner()) = waiting;
+    }
+
+    /// The text a program last asked to put on the clipboard (OSC 52), once.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
+    }
+
     /// Tell it the window is a different size now.
     ///
     /// The daemon has to be told separately — it owns the pty, and the shell
@@ -659,6 +711,28 @@ impl TerminalScreen {
             .to_string()
     }
 
+    /// The last `max_lines` lines of output, scrollback included, as plain
+    /// text — Orca's "Copy context". Read from the whole grid rather than the
+    /// viewport, so it is the same whether or not the reader has scrolled
+    /// back; blank rows below the last output are left off.
+    pub fn context_text(&self, max_lines: usize) -> String {
+        let grid = self.term.grid();
+        let mut lines: Vec<String> = (grid.topmost_line().0..=grid.bottommost_line().0)
+            .map(|line| {
+                (0..self.cols as usize)
+                    .map(|column| grid[Point::new(Line(line), Column(column))].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        while lines.last().is_some_and(|line| line.is_empty()) {
+            lines.pop();
+        }
+        let start = lines.len().saturating_sub(max_lines);
+        lines[start..].join("\n")
+    }
+
     /// Copy an inclusive visible-grid selection without right-side padding.
     pub fn selection_text(&self, selection: TerminalSelection) -> Option<String> {
         if selection.anchor == selection.head {
@@ -708,8 +782,11 @@ fn colour(from: Color) -> Option<TerminalColor> {
 
 /// One shell in the dock: what it is called, and the screen it draws on.
 pub struct TerminalTab {
+    /// The daemon's id for the pty this tab draws.
     pub id: TerminalId,
+    /// The tab's label, as the daemon last reported it.
     pub title: String,
+    /// The local emulator the pty's output is fed into.
     pub screen: TerminalScreen,
 }
 
@@ -738,6 +815,7 @@ pub struct TerminalTabs {
 }
 
 impl TerminalTabs {
+    /// An empty strip with no tabs.
     pub fn new() -> Self {
         Self::default()
     }
@@ -747,6 +825,7 @@ impl TerminalTabs {
         &self.tabs
     }
 
+    /// Whether no shell is open in the dock.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
@@ -766,6 +845,7 @@ impl TerminalTabs {
         self.tabs.get(self.active)
     }
 
+    /// The tab in front, mutably, to feed it output or resize it.
     pub fn active_mut(&mut self) -> Option<&mut TerminalTab> {
         self.tabs.get_mut(self.active)
     }
@@ -961,6 +1041,25 @@ impl TerminalTabs {
             }
             None => false,
         }
+    }
+
+    /// [`TerminalScreen::feed_replay`] for the terminal with this id.
+    pub fn feed_replay(&mut self, id: &TerminalId, data: &str) -> bool {
+        match self.tabs.iter_mut().find(|tab| &tab.id == id) {
+            Some(tab) => {
+                tab.screen.feed_replay(data);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// [`TerminalScreen::take_clipboard`] for the terminal with this id.
+    pub fn take_clipboard(&mut self, id: &TerminalId) -> Option<String> {
+        self.tabs
+            .iter_mut()
+            .find(|tab| &tab.id == id)
+            .and_then(|tab| tab.screen.take_clipboard())
     }
 
     /// Take on the shells the daemon says are running in this workspace.
@@ -1234,6 +1333,73 @@ mod tests {
         screen.resize(4, 20);
         assert_eq!(screen.cols(), 20);
         assert_eq!(screen.rows_of_cells()[0].len(), 20);
+    }
+
+    #[test]
+    fn a_program_can_put_text_on_the_clipboard_once_through_osc_52() {
+        // Orca's OSC 52: vim's or tmux's yank reaches the system clipboard.
+        let mut screen = TerminalScreen::new(5, 40);
+        screen.feed("before\x1b]52;c;aGVsbG8=\x07after");
+        assert_eq!(screen.take_clipboard().as_deref(), Some("hello"));
+        assert_eq!(screen.take_clipboard(), None, "a write is handed over once");
+        assert!(
+            screen.text().contains("beforeafter"),
+            "the escape draws nothing"
+        );
+
+        // Asking to *read* the clipboard is never answered: a program in a
+        // terminal does not get to see what the reader copied elsewhere.
+        screen.feed("\x1b]52;c;?\x07");
+        assert_eq!(screen.take_clipboard(), None);
+    }
+
+    #[test]
+    fn replayed_output_and_oversized_writes_never_reach_the_clipboard() {
+        let mut screen = TerminalScreen::new(5, 40);
+        // A window reattaching is shown history, not asked to redo it.
+        screen.feed_replay("\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(screen.take_clipboard(), None);
+
+        use base64::Engine as _;
+        let huge =
+            base64::engine::general_purpose::STANDARD.encode("x".repeat(MAX_OSC52_BYTES + 1));
+        screen.feed(&format!("\x1b]52;c;{huge}\x07"));
+        assert_eq!(
+            screen.take_clipboard(),
+            None,
+            "past the bound it is dropped"
+        );
+
+        // The primary selection is not the clipboard; only `c` is honoured.
+        screen.feed("\x1b]52;p;aGVsbG8=\x07");
+        assert_eq!(screen.take_clipboard(), None);
+    }
+
+    #[test]
+    fn copied_context_reaches_into_the_scrollback_and_is_bounded() {
+        // Orca's "Copy context": what scrolled off is usually the part that
+        // explains the error still on screen.
+        let mut screen = TerminalScreen::new(5, 40);
+        let output = (1..=60)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\r\n");
+        screen.feed(&output);
+        screen.feed("\r\n\r\n");
+
+        let all = screen.context_text(1_000);
+        assert!(all.starts_with("line 1\n"), "{all:.40}");
+        assert!(all.ends_with("line 60"), "trailing blank rows are trimmed");
+        assert!(screen.text().len() < all.len(), "more than the viewport");
+
+        let tail = screen.context_text(10);
+        assert_eq!(tail.lines().count(), 10);
+        assert!(tail.starts_with("line 51\n"));
+        assert!(tail.ends_with("line 60"));
+
+        // Browsing the scrollback does not change what is copied.
+        screen.scroll(20);
+        assert_eq!(screen.context_text(10), tail);
     }
 
     #[test]

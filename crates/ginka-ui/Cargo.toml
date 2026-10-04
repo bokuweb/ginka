@@ -20,7 +20,10 @@ serde.workspace = true
 serde_json.workspace = true
 url.workspace = true
 
+shlex.workspace = true
+
 [dev-dependencies]
+base64.workspace = true
 tempfile = "3"
 
 [lints]

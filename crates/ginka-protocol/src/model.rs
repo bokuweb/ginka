@@ -41,6 +41,7 @@ pub struct Project {
     pub label: Option<String>,
     /// Ascending display order within the sidebar.
     pub sort_order: i64,
+    /// Whether git features apply to it.
     pub kind: ProjectKind,
     /// `None` means "not probed yet", and is treated as `true` so the first CI
     /// poll after a cold boot still runs.
@@ -83,11 +84,13 @@ impl ProjectKind {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Worktree {
+    /// The project this worktree belongs to.
     pub project: ProjectName,
     /// Immutable identity, assigned once at creation. See [`WorkspaceId`].
     pub name: String,
     /// The live branch, reconciled against git on each sync tick.
     pub branch: String,
+    /// Where the worktree is checked out. A daemon-host path.
     pub path: PathBuf,
     /// The checked-out commit, absent for a worktree that has never had one.
     pub head: Option<String>,
@@ -152,6 +155,7 @@ pub struct PullRequest {
     pub number: u32,
     /// Where it is read.
     pub url: String,
+    /// Where it stands on the host.
     pub state: PullRequestState,
 }
 
@@ -159,7 +163,9 @@ pub struct PullRequest {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Session {
+    /// Stable key every session request names.
     pub id: SessionId,
+    /// The workspace the agent runs in; fixed for the session's life.
     pub workspace: WorkspaceId,
     /// The driver's id: `claude`, `codex`, …
     pub agent: String,
@@ -167,6 +173,7 @@ pub struct Session {
     /// reference: a session outlives the account it ran on, and still says
     /// which one that was.
     pub account: AccountId,
+    /// Provider model id; `None` runs the provider's default.
     pub model: Option<String>,
     /// Provider reasoning level reused by every turn in this conversation.
     #[serde(default)]
@@ -174,6 +181,7 @@ pub struct Session {
     /// Provider service tier reused by every turn in this conversation.
     #[serde(default)]
     pub service_tier: Option<String>,
+    /// Where it is in its lifecycle.
     pub state: SessionState,
     /// What this conversation is about.
     ///
@@ -359,6 +367,7 @@ pub struct TranscriptEntry {
     pub seq: u64,
     /// Unix seconds.
     pub at: i64,
+    /// Who produced it, and what it says.
     pub payload: TranscriptPayload,
 }
 
@@ -368,14 +377,25 @@ pub struct TranscriptEntry {
 #[serde(tag = "source", rename_all = "snake_case")]
 pub enum TranscriptPayload {
     /// Something the user sent: the opening prompt, or a follow-up.
-    User { text: String },
+    User {
+        /// The prompt as sent, attachment references included.
+        text: String,
+    },
     /// An answer delivered to an interaction inside a running turn.
     ///
     /// This is distinct from a follow-up because the request id is what lets
     /// a replay close exactly the card that was answered.
-    Response { request_id: String, text: String },
+    Response {
+        /// The `id` of the agent event that was answered.
+        request_id: String,
+        /// The answer as sent.
+        text: String,
+    },
     /// Anything the driver emitted, already normalized.
-    Agent { event: crate::event::AgentEvent },
+    Agent {
+        /// The normalized event.
+        event: crate::event::AgentEvent,
+    },
 }
 
 /// One file in a workspace, as a picker shows it.
@@ -398,9 +418,13 @@ pub struct FileEntry {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct UsageTotals {
+    /// Prompt tokens sent.
     pub input_tokens: u64,
+    /// Tokens the models generated.
     pub output_tokens: u64,
+    /// Prompt tokens served from a provider's cache.
     pub cache_read_tokens: u64,
+    /// Tokens spent on hidden reasoning, where vendors report them.
     pub reasoning_tokens: u64,
     /// `None` when no vendor involved priced its work; `Some(0.0)` would claim
     /// it was free.
@@ -423,6 +447,7 @@ pub struct UsageTotals {
 pub struct UsageRow {
     /// What this row is about: a date, an agent's id, or a session's title.
     pub label: String,
+    /// What it cost.
     pub totals: UsageTotals,
 }
 
@@ -433,7 +458,9 @@ pub struct UsageRow {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Account {
+    /// Stable slug that sessions and requests name it by.
     pub id: AccountId,
+    /// The provider whose CLI signs into it.
     pub provider: ProviderKind,
     /// What the chip says.
     pub label: String,
@@ -467,6 +494,7 @@ pub struct Account {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccountIdentity {
+    /// The address the login is signed in as.
     pub email: Option<String>,
     /// The organisation the login bills to.
     pub organization: Option<String>,
@@ -503,8 +531,11 @@ impl AccountIdentity {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginCommand {
+    /// The executable to run.
     pub program: String,
+    /// Its arguments, in order.
     pub args: Vec<String>,
+    /// Variables to set, as name and value pairs.
     pub env: Vec<(String, String)>,
 }
 
@@ -514,6 +545,7 @@ pub struct LoginCommand {
 pub struct PlanWindow {
     /// What the vendor calls it, or what its length says: `5h`, `week`.
     pub label: String,
+    /// How much of the window is spent, from 0 to 100; may overshoot.
     pub used_percent: f64,
     /// Unix seconds, when the provider tells us.
     pub resets_at: Option<i64>,
@@ -557,6 +589,7 @@ impl PlanWindow {
 pub struct PlanUsage {
     /// The vendor's name for the plan, when it says: `pro`, `max`.
     pub plan: Option<String>,
+    /// Each window the vendor reported, in its order.
     pub windows: Vec<PlanWindow>,
 }
 
@@ -589,10 +622,13 @@ pub enum PlanSource {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanSnapshot {
+    /// The account this reading is for.
     pub account: AccountId,
+    /// The windows as read.
     pub usage: PlanUsage,
     /// Unix seconds.
     pub observed_at: i64,
+    /// Whether a turn reported it or a request fetched it.
     pub source: PlanSource,
 }
 
@@ -611,13 +647,23 @@ pub enum DiffSide {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewComment {
+    /// Stable id that
+    /// [`Request::RemoveReviewComment`](crate::rpc::Request::RemoveReviewComment)
+    /// names.
     pub id: String,
+    /// The workspace whose diff it is on.
     pub workspace: WorkspaceId,
     /// Relative to the worktree root.
     pub path: String,
     /// `None` is a comment on the file as a whole, which people write.
     pub line: Option<u32>,
+    /// The last line of a comment that covers several, after `line`;
+    /// `None` for a comment on one line or the whole file.
+    #[serde(default)]
+    pub end_line: Option<u32>,
+    /// Which side of the diff `line` counts on.
     pub side: DiffSide,
+    /// What the reviewer wrote, sent to the agent as is.
     pub text: String,
     /// Unix seconds.
     pub created_at: i64,
@@ -644,6 +690,7 @@ pub enum CommandScope {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BranchInfo {
+    /// Short branch name, without `refs/heads/`.
     pub name: String,
     /// Checked out in the workspace that was asked.
     pub current: bool,
@@ -670,10 +717,12 @@ pub struct SkillInstall {
     /// The root it was found under, as the library names it: `claude`,
     /// `codex`, `agents`, or a project's name.
     pub root_label: String,
+    /// Whether it belongs to the user or to a project.
     pub scope: SkillScope,
     /// The skill's own directory, not the file inside it. A daemon-host path
     /// (`docs/roadmap.md` §4.1).
     pub directory: PathBuf,
+    /// Whether its `SKILL.md` is in place; a disabled copy has it renamed.
     pub enabled: bool,
 }
 
@@ -687,10 +736,12 @@ pub struct SkillInstall {
 pub struct Skill {
     /// From the file's front matter, or the directory's name.
     pub name: String,
+    /// From the front matter, when it has one.
     pub description: Option<String>,
     /// True only when every copy is enabled: a skill half-hidden is a skill
     /// the user cannot rely on, and the toggle should say so.
     pub enabled: bool,
+    /// Every copy found, one per root.
     pub installs: Vec<SkillInstall>,
 }
 
@@ -702,6 +753,7 @@ pub struct SlashCommand {
     pub name: String,
     /// One line, from the file's frontmatter or its first heading.
     pub description: String,
+    /// Where it was defined, which decides which of two same-named commands runs.
     pub scope: CommandScope,
     /// What the command expects after its name, when it says.
     pub argument_hint: Option<String>,
@@ -711,8 +763,11 @@ pub struct SlashCommand {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionMatch {
+    /// The session whose transcript matched.
     pub session: SessionId,
+    /// The workspace that session runs in.
     pub workspace: WorkspaceId,
+    /// The session's title, when it has one.
     pub title: Option<String>,
     /// The transcript position, so the client can page straight to it.
     pub seq: u64,
@@ -747,8 +802,11 @@ pub struct CliSession {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Checkpoint {
+    /// Stable key a restore or a diff names.
     pub id: CheckpointId,
+    /// The session whose turn it ends.
     pub session: SessionId,
+    /// The workspace it snapshots.
     pub workspace: WorkspaceId,
     /// The turn this snapshot was taken at the end of, from 1.
     pub turn: u32,
@@ -816,17 +874,36 @@ pub enum ChangeSource {
     /// What is staged for the next commit.
     Staged,
     /// What has happened since a checkpoint, including later worktree edits.
-    SinceCheckpoint { checkpoint: CheckpointId },
+    SinceCheckpoint {
+        /// The checkpoint to measure from.
+        checkpoint: CheckpointId,
+    },
     /// Only the changes made during the completed turn ending at this
     /// checkpoint. Later worktree edits are excluded.
-    Turn { checkpoint: CheckpointId },
+    Turn {
+        /// The checkpoint taken at the end of the turn.
+        checkpoint: CheckpointId,
+    },
     /// What one commit did, against its first parent: what a row of the
     /// history opens. A merge reads as what it brought into the branch.
     ///
     /// `commit` is a hexadecimal object name, never a ref or a range: it is
     /// handed to git as an argument, and anything that could be read as an
     /// option or a revision expression is refused before it gets there.
-    Commit { commit: String },
+    Commit {
+        /// Hexadecimal object name of the commit to show.
+        commit: String,
+    },
+    /// Everything the branch did since it left `base` — its commits and
+    /// whatever is not committed yet — measured from their merge base, so
+    /// later commits on the base are not counted (Orca's base-branch diff).
+    /// `None` is the project's default branch. `base` must name a branch or
+    /// remote-tracking branch; anything else is refused before git runs.
+    Branch {
+        /// The branch to measure from; `None` for the project's default branch.
+        #[serde(default)]
+        base: Option<String>,
+    },
 }
 
 /// How one file changed.
@@ -834,9 +911,13 @@ pub enum ChangeSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChangeKind {
+    /// The file is new.
     Added,
+    /// The file existed and its content changed.
     Modified,
+    /// The file is gone.
     Deleted,
+    /// The file moved, with or without edits; `old_path` says from where.
     Renamed,
 }
 
@@ -847,7 +928,9 @@ pub enum ChangeKind {
 pub enum LineKind {
     /// Unchanged, shown for context.
     Context,
+    /// Present only after the change.
     Added,
+    /// Present only before the change.
     Removed,
 }
 
@@ -858,7 +941,9 @@ pub enum LineKind {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiffLine {
+    /// Whether the line was kept, added or removed.
     pub kind: LineKind,
+    /// The line's content, without its `+`, `-` or space prefix or the newline.
     pub text: String,
     /// The line's number before the change, absent for an added line.
     pub old_line: Option<u32>,
@@ -871,13 +956,20 @@ pub struct DiffLine {
     /// of it. Byte ranges into `text`, in order and not overlapping.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub words: Vec<Span>,
+    /// For an added line in a diff of the worktree: whether an agent's
+    /// turn wrote it (`true`) or a person did (`false`). Absent where it
+    /// was not worked out — other sources, and context or removed lines.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub by_agent: Option<bool>,
 }
 
 /// A range of bytes in a line.
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Span {
+    /// Byte offset of the first byte, inclusive.
     pub start: u32,
+    /// Byte offset just past the last byte, exclusive.
     pub end: u32,
 }
 
@@ -887,6 +979,7 @@ pub struct Span {
 pub struct Hunk {
     /// The `@@ … @@` line, including whatever git put after it.
     pub header: String,
+    /// The hunk's lines in file order.
     pub lines: Vec<DiffLine>,
 }
 
@@ -898,11 +991,15 @@ pub struct FileChange {
     pub path: String,
     /// Where it came from, for a rename.
     pub old_path: Option<String>,
+    /// How the file changed.
     pub kind: ChangeKind,
+    /// Lines added across the file's hunks.
     pub added: u32,
+    /// Lines removed across the file's hunks.
     pub removed: u32,
     /// A binary file has counts but no hunks: there is nothing to read.
     pub binary: bool,
+    /// The file's hunks in order; empty for a binary file.
     pub hunks: Vec<Hunk>,
 }
 
@@ -955,7 +1052,9 @@ impl FileChange {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Changes {
+    /// What the changes were measured against.
     pub source: ChangeSource,
+    /// Every changed file.
     pub files: Vec<FileChange>,
 }
 
@@ -967,6 +1066,7 @@ impl Changes {
         })
     }
 
+    /// Whether no file changed.
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
@@ -1050,7 +1150,9 @@ pub struct FileImage {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TerminalInfo {
+    /// Stable key the terminal requests name.
     pub id: TerminalId,
+    /// The workspace whose dock it belongs to.
     pub workspace: WorkspaceId,
     /// What it is called in the strip: `shell 1`, `shell 2`, per workspace.
     pub title: String,
@@ -1060,7 +1162,9 @@ pub struct TerminalInfo {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceSummary {
+    /// The worktree the workspace is.
     pub worktree: Worktree,
+    /// How it stands against its upstream.
     pub status: BranchStatus,
     /// The most recently updated session, if any.
     pub session: Option<Session>,
@@ -1081,6 +1185,115 @@ pub struct WorkspaceSummary {
     /// MCP, or by a person — and when. Orca's worktree comment.
     #[serde(default)]
     pub status_note: Option<StatusNote>,
+}
+
+/// An MCP server an agent CLI is configured with, outside Ginka.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerEntry {
+    /// The name the CLI's configuration gives it.
+    pub name: String,
+    /// Whose configuration names it: `claude`, `codex`.
+    pub provider: String,
+    /// Where it is configured.
+    pub scope: McpScope,
+    /// The command it runs, or the address it is reached at — never its
+    /// arguments or environment, and an address with its user information,
+    /// query and fragment replaced by `…`, since any of them can carry a key.
+    pub target: Option<String>,
+}
+
+/// Whether a newer release of an agent CLI is out.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUpdate {
+    /// The driver id: `claude`, `codex`, …
+    pub agent: String,
+    /// What the probe read from the installed CLI.
+    pub installed: Option<String>,
+    /// The latest published version, when the registry could be read.
+    pub latest: Option<String>,
+    /// Whether `latest` is newer than `installed`.
+    pub update_available: bool,
+    /// The command that updates it, for the reader to run.
+    pub command: String,
+}
+
+/// An MCP server to add to an agent CLI's configuration.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerSpec {
+    /// The name the CLI registers it under.
+    pub name: String,
+    /// Whose configuration it goes into: `claude`, `codex`.
+    pub provider: String,
+    /// Where it is written; Codex has user scope only.
+    pub scope: McpScope,
+    /// How it is reached.
+    pub target: McpTarget,
+}
+
+/// How an MCP server is reached.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum McpTarget {
+    /// A program the agent starts and speaks to over stdio.
+    Command {
+        /// The program, found on the agent's PATH.
+        program: String,
+        /// Its arguments, as given.
+        args: Vec<String>,
+    },
+    /// A streamable HTTP server.
+    Url {
+        /// An `http://` or `https://` address.
+        url: String,
+    },
+}
+
+/// Where an MCP server is configured.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpScope {
+    /// For every project, in the user's own configuration.
+    User,
+    /// Checked into the repository (`.mcp.json`).
+    Project,
+    /// For this project only, in the user's configuration.
+    Local,
+}
+
+/// One check on a pull request, as `gh pr checks` reports it.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CheckRun {
+    /// The check's name as the host shows it.
+    pub name: String,
+    /// The workflow it belongs to, when it is an Actions job.
+    pub workflow: Option<String>,
+    /// Where it stands.
+    pub state: CheckState,
+    /// Where its log is.
+    pub link: Option<String>,
+}
+
+/// Where a check stands.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    /// It ran and succeeded.
+    Passed,
+    /// It ran and failed: what "Fix failing checks" hands over.
+    Failed,
+    /// Queued or running — or a state this build does not know.
+    Pending,
+    /// Its conditions did not apply, so it did not run.
+    Skipped,
+    /// It was stopped before it finished.
+    Cancelled,
 }
 
 /// A short, free-text line saying where a workspace's work stands.
@@ -1282,8 +1495,11 @@ mod tests {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Note {
+    /// Stable key that edits and removal name.
     pub id: String,
+    /// The project it belongs to; `None` for a note that belongs to none.
     pub project: Option<ProjectName>,
+    /// One line, shown in the list.
     pub title: String,
     /// Markdown.
     pub body: String,
@@ -1330,8 +1546,11 @@ impl QuickCommandKind {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VisitedPage {
+    /// The address as kept, with credentials and secrets stripped.
     pub url: String,
+    /// The page title, when it reported one.
     pub title: Option<String>,
+    /// How many times it was loaded; feeds the frecency ranking.
     pub visits: u32,
     /// Unix seconds.
     pub last_visited_at: i64,
@@ -1341,6 +1560,7 @@ pub struct VisitedPage {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BundledSkillInstall {
+    /// The skill's name, which is also its directory's.
     pub name: String,
     /// The `SKILL.md` it concerns, on the daemon's host.
     pub path: String,
@@ -1422,13 +1642,22 @@ impl CronOutcome {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CronJob {
+    /// Stable key that edits, runs and removal name.
     pub id: i64,
+    /// The project it runs for.
     pub project: ProjectName,
+    /// The workspace it runs in; `None` runs in the project's own checkout.
     pub workspace: Option<WorkspaceId>,
+    /// The conversation a chat job continues, instead of starting a new
+    /// one each time — a reminder.
+    #[serde(default)]
+    pub session: Option<SessionId>,
+    /// What lists call it.
     pub name: String,
     /// Five cron fields or `@daily` and the like on the daemon host's clock,
     /// or `@once <RFC3339 timestamp with time zone>` for one firing.
     pub schedule: String,
+    /// Whether the body is a prompt or a shell command.
     pub via: CronVia,
     /// The driver a chat job starts. Absent for a terminal job.
     pub agent: Option<String>,
@@ -1438,6 +1667,7 @@ pub struct CronJob {
     /// a non-zero exit, or no answer within a minute, skips that firing.
     #[serde(default)]
     pub precheck: Option<String>,
+    /// Whether the schedule fires it; a disabled job only runs when asked.
     pub enabled: bool,
     /// Unix seconds of the next firing; absent while disabled.
     pub next_run_at: Option<i64>,
@@ -1449,12 +1679,15 @@ pub struct CronJob {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CronRun {
+    /// Stable key of this firing.
     pub id: i64,
+    /// The [`CronJob::id`] that fired.
     pub job: i64,
     /// Unix seconds.
     pub started_at: i64,
     /// Unix seconds; set when a terminal job's terminal closed.
     pub finished_at: Option<i64>,
+    /// What the firing came to.
     pub outcome: CronOutcome,
     /// Why it failed, or the conversation or terminal it started.
     pub detail: Option<String>,
@@ -1465,10 +1698,13 @@ pub struct CronRun {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuickCommand {
+    /// Stable key that edits, runs and removal name.
     pub id: String,
+    /// The project it belongs to; `None` offers it in every project.
     pub project: Option<ProjectName>,
     /// What the menu and the palette call it.
     pub name: String,
+    /// Whether running it opens a terminal or sends a prompt.
     pub kind: QuickCommandKind,
     /// The shell command line, or the prompt text.
     pub body: String,
@@ -1517,6 +1753,7 @@ impl TicketState {
 #[cfg_attr(feature = "export", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Ticket {
+    /// Stable key that starting and dismissing name.
     pub id: String,
     /// Where it was raised, and where it runs unless a branch is asked for.
     pub workspace: WorkspaceId,
@@ -1529,6 +1766,7 @@ pub struct Ticket {
     /// What the new session is told. Self-contained: the session that reads
     /// it has none of the conversation that raised it.
     pub prompt: String,
+    /// Whether it is open, started or dismissed.
     pub state: TicketState,
     /// The session started from it.
     pub session: Option<SessionId>,

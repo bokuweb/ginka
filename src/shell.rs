@@ -31,6 +31,7 @@ use ginka_ui::workspace::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::TextSelection;
+use gpui_component::Selectable as _;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -69,7 +70,11 @@ actions!(
         NewTab,
         CloseTab,
         NextTab,
-        PreviousTab
+        PreviousTab,
+        NextSession,
+        PreviousSession,
+        CloseAllTabs,
+        OpenBoard
     ]
 );
 
@@ -147,7 +152,58 @@ struct CronForm {
     error: Option<String>,
 }
 
+/// The settings page's MCP server form: what to add, and which row's
+/// removal is waiting for its second click.
+struct McpForm {
+    name: Entity<InputState>,
+    /// A URL, or a command line split the way a shell would.
+    target: Entity<InputState>,
+    provider: &'static str,
+    scope: ginka_protocol::model::McpScope,
+    /// The `(provider, name, scope)` armed for removal.
+    removing: Option<(String, String, ginka_protocol::model::McpScope)>,
+    error: Option<String>,
+}
+
 const CONTEXT: &str = "Shell";
+
+/// Apply the reader's `keymap.json` over the defaults [`init`] bound
+/// (`ginka_ui::keymap`): each entry binds its keys to a named action in the
+/// shell's context, or frees them with `NoAction`.
+pub fn apply_keymap(cx: &mut App, overrides: &[ginka_ui::keymap::Override]) {
+    let bindings: Vec<KeyBinding> = overrides
+        .iter()
+        .map(|entry| {
+            let keys = entry.keys.as_str();
+            let context = Some(CONTEXT);
+            match entry.action.as_deref() {
+                None => KeyBinding::new(keys, gpui::NoAction, context),
+                Some("toggle_sidebar") => KeyBinding::new(keys, ToggleSidebar, context),
+                Some("toggle_right_panel") => KeyBinding::new(keys, ToggleRightPanel, context),
+                Some("toggle_terminal_dock") => KeyBinding::new(keys, ToggleTerminalDock, context),
+                Some("toggle_palette") => KeyBinding::new(keys, TogglePalette, context),
+                Some("search_everywhere") => KeyBinding::new(keys, SearchEverywhere, context),
+                Some("find_transcript") => KeyBinding::new(keys, FindTranscript, context),
+                Some("next_surface") => KeyBinding::new(keys, NextSurface, context),
+                Some("previous_surface") => KeyBinding::new(keys, PreviousSurface, context),
+                Some("new_tab") => KeyBinding::new(keys, NewTab, context),
+                Some("close_tab") => KeyBinding::new(keys, CloseTab, context),
+                Some("close_all_tabs") => KeyBinding::new(keys, CloseAllTabs, context),
+                Some("next_tab") => KeyBinding::new(keys, NextTab, context),
+                Some("previous_tab") => KeyBinding::new(keys, PreviousTab, context),
+                Some("next_session") => KeyBinding::new(keys, NextSession, context),
+                Some("previous_session") => KeyBinding::new(keys, PreviousSession, context),
+                Some("navigate_back") => KeyBinding::new(keys, NavigateBack, context),
+                Some("navigate_forward") => KeyBinding::new(keys, NavigateForward, context),
+                Some("open_settings") => KeyBinding::new(keys, OpenSettings, context),
+                Some("open_board") => KeyBinding::new(keys, OpenBoard, context),
+                // `ginka_ui::keymap::parse` refused anything else.
+                Some(_) => KeyBinding::new(keys, gpui::NoAction, context),
+            }
+        })
+        .collect();
+    cx.bind_keys(bindings);
+}
 
 /// Bind the panel toggles.
 ///
@@ -223,6 +279,15 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-w", CloseTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-tab", NextTab, Some(CONTEXT)),
         KeyBinding::new("ctrl-shift-tab", PreviousTab, Some(CONTEXT)),
+        // MonoCode's next/previous session, down and up the list.
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-down", NextSession, Some(CONTEXT)),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-alt-up", PreviousSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-down", NextSession, Some(CONTEXT)),
+        #[cfg(not(target_os = "macos"))]
+        KeyBinding::new("alt-shift-up", PreviousSession, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-,", OpenSettings, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
@@ -309,6 +374,10 @@ const TERMINAL_TEXT: f32 = 11.5;
 
 /// The line height the terminal's grid is drawn at, in pixels.
 const TERMINAL_LINE_HEIGHT: f32 = 15.5;
+
+/// How many lines "Copy context" takes from a terminal: enough for a build
+/// or test failure and its cause, not a whole session's log.
+const TERMINAL_CONTEXT_LINES: usize = 400;
 
 /// Width of one monospace cell in the terminal grid: 0.6 of the text size,
 /// the advance of the system monospace faces.
@@ -574,6 +643,13 @@ pub struct Shell {
     agents: Vec<AgentStatus>,
     /// Provider settings from the daemon, shown in Settings.
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
+    /// The MCP servers the agent CLIs are configured with, for Settings.
+    mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
+    /// The daemon's on/off settings the page offers, as last read.
+    daemon_toggles: Vec<(&'static str, bool)>,
+    /// The last update check's answer, and whether one is on its way.
+    agent_updates: Option<Vec<ginka_protocol::model::AgentUpdate>>,
+    checking_updates: bool,
     /// The provider executable editor, when open in Settings.
     provider_program: Option<ProviderProgramForm>,
     /// Every login of every provider, as the daemon lists them.
@@ -763,7 +839,10 @@ pub struct Shell {
     quick_form: QuickForm,
     /// The scheduled jobs of the project on screen.
     cron_jobs: Vec<ginka_protocol::model::CronJob>,
+    /// The job whose run history is open, and its firings, newest first.
+    cron_history: Option<(i64, Vec<ginka_protocol::model::CronRun>)>,
     cron_form: CronForm,
+    mcp_form: McpForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
     notes: Entity<crate::notes::NotesView>,
     /// The GitHub client, built the first time the Inbox is opened: it
@@ -842,6 +921,20 @@ impl Shell {
             editing: None,
             error: None,
         };
+        let mcp_form = McpForm {
+            name: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.mcp_servers.name").to_string())
+            }),
+            target: cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(rust_i18n::t!("settings.mcp_servers.target").to_string())
+            }),
+            provider: "claude",
+            scope: ginka_protocol::model::McpScope::User,
+            removing: None,
+            error: None,
+        };
         let restored_tabs = ginka_ui::tabs::Tabs::restore(
             settings
                 .open_tabs
@@ -856,7 +949,12 @@ impl Shell {
             InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
         });
-        let sidebar = cx.new(|_| SessionSidebar::new(rows, sidebar_search.clone(), local_paths));
+        let muted = settings.muted_projects.clone();
+        let sidebar = cx.new(|cx| {
+            let mut sidebar = SessionSidebar::new(rows, sidebar_search.clone(), local_paths);
+            sidebar.set_muted(muted, cx);
+            sidebar
+        });
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx, local_paths));
 
         let sidebar_search_changed =
@@ -934,15 +1032,108 @@ impl Shell {
                     then,
                     amend,
                 } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
-                crate::surfaces::SurfaceEvent::Comment { path, line, text } => {
-                    this.leave_comment(path.clone(), *line, text.clone(), cx)
-                }
+                crate::surfaces::SurfaceEvent::Comment {
+                    path,
+                    line,
+                    end_line,
+                    text,
+                } => this.leave_comment(path.clone(), *line, *end_line, text.clone(), cx),
                 crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+                crate::surfaces::SurfaceEvent::RemoveComment { id } => {
+                    this.remove_comment(id.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
+                crate::surfaces::SurfaceEvent::PushWithLease => {
+                    this.sync_git(RemoteAction::PushWithLease, cx)
+                }
+                crate::surfaces::SurfaceEvent::LoadImageDiff {
+                    path,
+                    old_path,
+                    source,
+                } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, surfaces) = (this.link.clone(), this.surfaces.clone());
+                        let (path, old_path, source) =
+                            (path.clone(), old_path.clone(), source.clone());
+                        cx.spawn(async move |_, cx| {
+                            let (asked, asked_source) = (path.clone(), source.clone());
+                            let (before, after) = cx
+                                .background_spawn(async move {
+                                    link.image_diff(&workspace, &asked, old_path, asked_source)
+                                        .await
+                                })
+                                .await;
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_image_diff(&source, path, before, after, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::LoadChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |_, cx| {
+                            let read = {
+                                let workspace = workspace.clone();
+                                cx.background_spawn(async move {
+                                    link.pull_request_checks(&workspace).await
+                                })
+                                .await
+                            };
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_checks(&workspace, read, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::FixChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |this, cx| {
+                            let sent = cx
+                                .background_spawn(async move { link.fix_checks(&workspace).await })
+                                .await;
+                            match sent {
+                                // Nothing failed, or no pull request: say so
+                                // where the button was.
+                                Err(error) => {
+                                    surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_git_sync_result(Some(error), cx)
+                                    });
+                                }
+                                Ok(()) => {
+                                    this.update(cx, |this, cx| {
+                                        this.after_row_change(async { Ok(()) }, cx)
+                                    })
+                                    .ok();
+                                }
+                            }
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::FixCommit { message, output } => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let (link, message, output) =
+                            (this.link.clone(), message.clone(), output.clone());
+                        this.after_row_change(
+                            async move { link.fix_commit(&workspace, message, output).await },
+                            cx,
+                        );
+                    }
+                }
                 crate::surfaces::SurfaceEvent::Sync => this.sync_git(RemoteAction::Sync, cx),
                 crate::surfaces::SurfaceEvent::RefreshHistory => this.refresh_history(cx),
                 crate::surfaces::SurfaceEvent::OpenCommit(commit) => {
@@ -952,6 +1143,9 @@ impl Shell {
                     this.open_turn(checkpoint.clone(), cx)
                 }
                 crate::surfaces::SurfaceEvent::CreatePullRequest => this.create_pull_request(cx),
+                crate::surfaces::SurfaceEvent::CreateGeneratedPullRequest => {
+                    this.create_generated_pull_request(cx)
+                }
                 crate::surfaces::SurfaceEvent::Stage { path, staged } => {
                     this.stage(path.clone(), *staged, cx)
                 }
@@ -1065,6 +1259,25 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::MuteProject { project, until } => {
+                        match until {
+                            Some(until) => {
+                                this.settings
+                                    .muted_projects
+                                    .insert(project.0.clone(), *until);
+                            }
+                            None => {
+                                this.settings.muted_projects.remove(&project.0);
+                            }
+                        }
+                        // Gone mutes are dropped as the map is written.
+                        let now = chrono::Utc::now().timestamp();
+                        this.settings.muted_projects.retain(|_, until| *until > now);
+                        this.save_settings();
+                        let muted = this.settings.muted_projects.clone();
+                        this.sidebar
+                            .update(cx, |sidebar, cx| sidebar.set_muted(muted, cx));
+                    }
                     SidebarEvent::LabelProject { project, label } => {
                         let (link, project, label) =
                             (this.link.clone(), project.clone(), label.clone());
@@ -1077,6 +1290,45 @@ impl Shell {
                         let (link, project, index) = (this.link.clone(), project.clone(), *index);
                         this.after_row_change(
                             async move { link.move_project(&project, index).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::SetStatusNote { workspace, note } => {
+                        let (link, workspace, note) =
+                            (this.link.clone(), workspace.clone(), note.clone());
+                        this.after_row_change(
+                            async move { link.set_status_note(&workspace, note).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveProject { project } => {
+                        let (link, project) = (this.link.clone(), project.clone());
+                        this.after_row_change(
+                            async move { link.remove_project(&project).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveSession { session } => {
+                        // The conversation on screen is going: drop what is
+                        // drawn of it, so the refresh shows whatever the
+                        // workspace holds next rather than a stale transcript.
+                        if this.transcript_of.as_ref() == Some(session) {
+                            this.transcript = Transcript::new();
+                            this.transcript_of = None;
+                            this.transcript_search = None;
+                            this.session_state = None;
+                            this.follow_transcript();
+                        }
+                        let (link, session) = (this.link.clone(), session.clone());
+                        this.after_row_change(
+                            async move { link.remove_session(&session).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveWorkspace { workspace } => {
+                        let (link, workspace) = (this.link.clone(), workspace.clone());
+                        this.after_row_change(
+                            async move { link.remove_workspace(&workspace).await },
                             cx,
                         );
                     }
@@ -1456,6 +1708,29 @@ impl Shell {
                         }
                         // The agent's commit message, for the box that asked
                         // for it — if it is still the workspace on screen.
+                        DaemonEvent::PullRequestOpened {
+                            workspace,
+                            url,
+                            error,
+                        } => this
+                            .update(cx, |this, cx| {
+                                if this.session.as_ref().map(|row| &row.workspace)
+                                    == Some(&workspace)
+                                {
+                                    let result = url.ok_or_else(|| error.unwrap_or_default());
+                                    this.surfaces.update(cx, |surfaces, cx| {
+                                        surfaces.set_pull_request(result, cx)
+                                    });
+                                }
+                            })
+                            .map_err(|_| ()),
+                        DaemonEvent::AgentUpdatesChecked { updates } => this
+                            .update(cx, |this, cx| {
+                                this.checking_updates = false;
+                                this.agent_updates = Some(updates);
+                                cx.notify();
+                            })
+                            .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
                             message,
@@ -1478,6 +1753,11 @@ impl Shell {
                         DaemonEvent::TerminalOutput { terminal, data } => this
                             .update(cx, |this, cx| {
                                 if this.terminals.feed(&terminal, &data) {
+                                    // A program's own yank (OSC 52), from
+                                    // live output only.
+                                    if let Some(text) = this.terminals.take_clipboard(&terminal) {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                    }
                                     this.refresh_terminal_search(&terminal, cx);
                                     cx.notify();
                                 }
@@ -1542,6 +1822,10 @@ impl Shell {
             prompt_outline_open: false,
             agents: Vec::new(),
             provider_settings: Vec::new(),
+            mcp_servers: Vec::new(),
+            daemon_toggles: Vec::new(),
+            agent_updates: None,
+            checking_updates: false,
             provider_program: None,
             accounts: Vec::new(),
             plans: Vec::new(),
@@ -1635,7 +1919,9 @@ impl Shell {
             quick_menu_open: false,
             quick_form,
             cron_jobs: Vec::new(),
+            cron_history: None,
             cron_form,
+            mcp_form,
             #[cfg(feature = "github")]
             inbox: None,
             _subscriptions: vec![
@@ -2400,6 +2686,33 @@ impl Shell {
         .detach();
     }
 
+    /// Open a job's run history under its row, or close it if it is open.
+    fn toggle_cron_history(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self
+            .cron_history
+            .as_ref()
+            .is_some_and(|(open, _)| *open == id)
+        {
+            self.cron_history = None;
+            cx.notify();
+            return;
+        }
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let runs = cx
+                .background_spawn(async move {
+                    link.cron_runs(id, ginka_ui::scheduled::HISTORY_LIMIT).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.cron_history = Some((id, runs));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Fill the settings form from a job in the selected project.
     fn edit_cron_job(
         &mut self,
@@ -2511,6 +2824,7 @@ impl Shell {
             id: Some(job.id),
             project: job.project,
             workspace: job.workspace,
+            session: None,
             name: job.name,
             schedule: job.schedule,
             via: job.via,
@@ -2622,6 +2936,39 @@ impl Shell {
         if let Some(index) = self.tabs.active_index() {
             self.close_tab(index, window, cx);
         }
+    }
+
+    /// Close every conversation tab and show the home screen.
+    fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tabs.close_all() > 0 {
+            self.show_tab(None, window, cx);
+        }
+    }
+
+    /// Bring up the agents board, as its rail row does.
+    fn open_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_place(crate::sidebar::Place::Board, cx)
+        });
+        self.open_place(crate::sidebar::Place::Board, window, cx);
+    }
+
+    fn on_open_board(&mut self, _: &OpenBoard, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_board(window, cx);
+    }
+
+    fn on_close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_all_tabs(window, cx);
+    }
+
+    fn on_next_session(&mut self, _: &NextSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(true, cx));
+    }
+
+    fn on_previous_session(&mut self, _: &PreviousSession, _: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.select_adjacent(false, cx));
     }
 
     fn on_next_tab(&mut self, _: &NextTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -2977,7 +3324,7 @@ impl Shell {
                     let after = match (&committed, then) {
                         (Err(_), _) | (Ok(_), CommitThen::Nothing) => None,
                         (Ok(_), CommitThen::Push) => {
-                            Some(link.push(&workspace).await.map(|_| None))
+                            Some(link.push(&workspace, false).await.map(|_| None))
                         }
                         (Ok(_), CommitThen::PullRequest) => {
                             Some(link.create_pull_request(&workspace).await.map(Some))
@@ -3013,14 +3360,20 @@ impl Shell {
             let outcome = cx
                 .background_spawn(async move {
                     match action {
-                        RemoteAction::Push => link.push(&workspace).await,
+                        RemoteAction::Push => link.push(&workspace, false).await,
+                        RemoteAction::PushWithLease => link.push(&workspace, true).await,
                         RemoteAction::Pull => link.pull(&workspace).await,
                         RemoteAction::Sync => link.sync(&workspace).await,
                     }
                 })
                 .await;
-            surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_git_sync_result(outcome.err(), cx)
+            surfaces.update(cx, |surfaces, cx| match action {
+                RemoteAction::Push | RemoteAction::PushWithLease => surfaces.set_push_result(
+                    outcome.err(),
+                    action == RemoteAction::PushWithLease,
+                    cx,
+                ),
+                _ => surfaces.set_git_sync_result(outcome.err(), cx),
             });
         })
         .detach();
@@ -3234,6 +3587,34 @@ impl Shell {
     }
 
     /// Push the branch and open a pull request for it (`gh pr create`).
+    /// Ask the daemon to have an agent write the pull request and open it.
+    /// Only a refusal to start comes back here; the outcome is the
+    /// `PullRequestOpened` event.
+    fn create_generated_pull_request(&mut self, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            self.surfaces.update(cx, |surfaces, cx| {
+                surfaces.set_pull_request(
+                    Err(rust_i18n::t!("surface.git.create_pr.no_workspace").to_string()),
+                    cx,
+                )
+            });
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let started = cx
+                .background_spawn(
+                    async move { link.create_generated_pull_request(&workspace).await },
+                )
+                .await;
+            if let Err(error) = started {
+                surfaces.update(cx, |surfaces, cx| surfaces.set_pull_request(Err(error), cx));
+            }
+        })
+        .detach();
+    }
+
     fn create_pull_request(&mut self, cx: &mut Context<Self>) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             self.surfaces.update(cx, |surfaces, cx| {
@@ -4105,7 +4486,7 @@ impl Shell {
                     .await;
                 if let Some(history) = history {
                     this.update(cx, |this, cx| {
-                        this.terminals.feed(&terminal, &history);
+                        this.terminals.feed_replay(&terminal, &history);
                         cx.notify();
                     })
                     .ok();
@@ -4224,6 +4605,20 @@ impl Shell {
                 .map(|tab| tab.screen.text())
                 .filter(|text| !text.is_empty())
         }) {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Copy the last [`TERMINAL_CONTEXT_LINES`] lines of the active
+    /// terminal, scrollback included — what explains the error on screen is
+    /// usually what scrolled off it.
+    fn copy_terminal_context(&self, cx: &mut Context<Self>) {
+        if let Some(text) = self
+            .terminals
+            .active()
+            .map(|tab| tab.screen.context_text(TERMINAL_CONTEXT_LINES))
+            .filter(|text| !text.is_empty())
+        {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
         }
     }
@@ -4483,6 +4878,7 @@ impl Shell {
         &mut self,
         path: String,
         line: Option<u32>,
+        end_line: Option<u32>,
         text: String,
         cx: &mut Context<Self>,
     ) {
@@ -4494,7 +4890,27 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let comments = cx
                 .background_spawn(async move {
-                    link.add_comment(&workspace, &path, line, text).await;
+                    link.add_comment(&workspace, &path, line, end_line, text)
+                        .await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
+    /// Take a waiting comment back.
+    fn remove_comment(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.remove_comment(id).await;
                     link.comments(&workspace).await
                 })
                 .await;
@@ -5201,12 +5617,24 @@ impl Shell {
         notable: ginka_ui::notify::Notable,
         cx: &mut Context<Self>,
     ) {
-        let title = self
+        let row = self
             .sidebar
             .read(cx)
             .rows()
             .iter()
             .find(|row| row.session.as_ref() == Some(session))
+            .cloned();
+        // A muted project stays quiet until its mute runs out.
+        if let Some(row) = &row
+            && ginka_ui::notify::muted(
+                &self.settings.muted_projects,
+                &row.origin,
+                chrono::Utc::now().timestamp(),
+            )
+        {
+            return;
+        }
+        let title = row
             .map(|row| row.title.to_string())
             .unwrap_or_else(|| "Ginka".to_string());
         let script = ginka_ui::notify::applescript_with_sound(
@@ -5240,6 +5668,9 @@ impl Shell {
             let outcome = cx.background_spawn(change).await;
             if let Err(error) = outcome {
                 tracing::warn!(%error, "the daemon refused a sidebar change");
+                // In the daemon's words: a refused rename or delete that
+                // only reached the log looks like a click that did nothing.
+                this.update(cx, |this, cx| this.show_notice(error, cx)).ok();
             }
             pull_rows(&this, &link, cx).await.ok();
         })
@@ -5274,7 +5705,8 @@ impl Shell {
                     self.inbox = Some(inbox);
                 }
             }
-            Place::Settings | Place::Workspace | Place::Board => {}
+            Place::Settings => self.refresh_mcp_servers(cx),
+            Place::Workspace | Place::Board => {}
         }
         let _ = window;
         cx.notify();
@@ -5285,6 +5717,153 @@ impl Shell {
             sidebar.set_place(crate::sidebar::Place::Settings, cx)
         });
         self.open_place(crate::sidebar::Place::Settings, window, cx);
+    }
+
+    /// Add the server the settings form describes, through the vendor's CLI,
+    /// then read the list again.
+    fn add_mcp_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let name = self.mcp_form.name.read(cx).value().trim().to_string();
+        let target = self.mcp_form.target.read(cx).value().trim().to_string();
+        let target = ginka_ui::mcp_servers::target(&target);
+        let spec = ginka_protocol::model::McpServerSpec {
+            name,
+            provider: self.mcp_form.provider.to_string(),
+            scope: self.mcp_form.scope,
+            target,
+        };
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        let link = self.link.clone();
+        let (name_field, target_field) = (self.mcp_form.name.clone(), self.mcp_form.target.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let added = cx
+                .background_spawn(async move { link.add_mcp_server(workspace, spec).await })
+                .await;
+            this.update_in(cx, |this, window, cx| {
+                match added {
+                    Ok(()) => {
+                        this.mcp_form.error = None;
+                        for field in [&name_field, &target_field] {
+                            field.update(cx, |state, cx| state.set_value("", window, cx));
+                        }
+                    }
+                    Err(error) => this.mcp_form.error = Some(error),
+                }
+                this.refresh_mcp_servers(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Remove a listed server through the vendor's CLI — on the second
+    /// click, since the first only arms it.
+    fn remove_mcp_server(
+        &mut self,
+        server: &ginka_protocol::model::McpServerEntry,
+        cx: &mut Context<Self>,
+    ) {
+        let key = (server.provider.clone(), server.name.clone(), server.scope);
+        if self.mcp_form.removing.as_ref() != Some(&key) {
+            self.mcp_form.removing = Some(key);
+            cx.notify();
+            return;
+        }
+        self.mcp_form.removing = None;
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        let link = self.link.clone();
+        let (provider, name, scope) = key;
+        cx.spawn(async move |this, cx| {
+            let removed = cx
+                .background_spawn(async move {
+                    link.remove_mcp_server(workspace, provider, name, Some(scope))
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.mcp_form.error = removed.err();
+                this.refresh_mcp_servers(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Ask the daemon to check npm for newer agent CLIs; the answer comes
+    /// back as `AgentUpdatesChecked`.
+    fn check_agent_updates(&mut self, cx: &mut Context<Self>) {
+        self.checking_updates = true;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let asked = cx
+                .background_spawn(async move { link.check_agent_updates().await })
+                .await;
+            if asked.is_err() {
+                this.update(cx, |this, cx| {
+                    this.checking_updates = false;
+                    cx.notify();
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    /// Read the MCP servers the agent CLIs are configured with, for the
+    /// settings page: the user's, and the workspace on screen's project's.
+    fn refresh_mcp_servers(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        let workspace = self.session.as_ref().map(|row| row.workspace.clone());
+        cx.spawn(async move |this, cx| {
+            let servers = cx
+                .background_spawn(async move { link.mcp_servers(workspace).await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.mcp_servers = servers;
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        self.refresh_daemon_toggles(cx);
+    }
+
+    /// Read the daemon's on/off settings for the settings page.
+    fn refresh_daemon_toggles(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let json = cx
+                .background_spawn(async move { link.daemon_settings().await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.daemon_toggles = ginka_ui::daemon_settings::toggles(&json);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Flip one of the daemon's settings, then read them back: what the page
+    /// shows is what the daemon took, and a refusal says why.
+    fn set_daemon_toggle(&mut self, key: &'static str, on: bool, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let set = cx
+                .background_spawn(async move {
+                    link.update_daemon_setting(key, ginka_ui::daemon_settings::value(on))
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = set {
+                    this.show_notice(error, cx);
+                }
+                this.refresh_daemon_toggles(cx);
+            })
+            .ok();
+        })
+        .detach();
     }
 
     /// The settings page: appearance and language. `docs/ui.md` §3.7.
@@ -5373,6 +5952,157 @@ impl Shell {
             .into_any_element();
         let quick_section = self.quick_settings(cx);
         let cron_section = self.cron_settings(cx);
+        // MonoCode's Settings → MCP, read-only: what each agent CLI is
+        // configured with beside what Ginka hands it.
+        let mcp_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.mcp_servers").to_string()),
+            )
+            .when(self.mcp_servers.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(tokens.colors().text_muted)
+                        .child(rust_i18n::t!("settings.mcp_servers.none").to_string()),
+                )
+            })
+            .children(self.mcp_servers.iter().map(|server| {
+                let scope = match server.scope {
+                    ginka_protocol::model::McpScope::User => {
+                        rust_i18n::t!("settings.mcp_servers.user").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Project => {
+                        rust_i18n::t!("settings.mcp_servers.project").to_string()
+                    }
+                    ginka_protocol::model::McpScope::Local => {
+                        rust_i18n::t!("settings.mcp_servers.local").to_string()
+                    }
+                };
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .text_size(px(12.5))
+                            .text_color(tokens.colors().text_primary)
+                            .truncate()
+                            .child(server.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .child(format!("{} · {scope}", server.provider)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .truncate()
+                            .child(server.target.clone().unwrap_or_default()),
+                    )
+                    .child({
+                        let armed = self.mcp_form.removing.as_ref()
+                            == Some(&(server.provider.clone(), server.name.clone(), server.scope));
+                        let server = server.clone();
+                        Button::new(SharedString::from(format!(
+                            "mcp-remove:{}:{}:{:?}",
+                            server.provider, server.name, server.scope
+                        )))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(if armed {
+                            rust_i18n::t!("settings.mcp_servers.remove_confirm").to_string()
+                        } else {
+                            rust_i18n::t!("settings.mcp_servers.remove").to_string()
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.remove_mcp_server(&server, cx)),
+                        )
+                    })
+            }))
+            .child(self.mcp_add_form(cx));
+        // The daemon's own switches, the ones `ginka settings set` flips.
+        let daemon_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.daemon").to_string()),
+            )
+            .children(self.daemon_toggles.iter().map(|&(key, on)| {
+                let control = h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().bg_surface)
+                    .children(
+                        [(true, "settings.on"), (false, "settings.off")]
+                            .into_iter()
+                            .map(|(value, label)| {
+                                choice(
+                                    format!("daemon:{key}:{value}"),
+                                    rust_i18n::t!(label).to_string(),
+                                    on == value,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if on != value {
+                                            this.set_daemon_toggle(key, value, cx);
+                                        }
+                                    },
+                                ))
+                            }),
+                    );
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(tokens.colors().text_primary)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}")).to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}.help"))
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(control)
+            }));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -5382,6 +6112,52 @@ impl Shell {
                     .text_size(px(11.5))
                     .text_color(tokens.colors().text_muted)
                     .child(rust_i18n::t!("settings.providers").to_string()),
+            )
+            // MonoCode's update check, on request only: the answer names
+            // the command, and nothing is installed from here.
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Button::new("check-agent-updates")
+                            .ghost()
+                            .compact()
+                            .small()
+                            .disabled(self.checking_updates)
+                            .label(if self.checking_updates {
+                                rust_i18n::t!("settings.updates.checking").to_string()
+                            } else {
+                                rust_i18n::t!("settings.updates.check").to_string()
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.check_agent_updates(cx))),
+                    )
+                    .children(self.agent_updates.as_ref().map(|updates| {
+                        let behind: Vec<String> = updates
+                            .iter()
+                            .filter(|update| update.update_available)
+                            .map(|update| {
+                                rust_i18n::t!(
+                                    "settings.updates.available",
+                                    agent = update.agent.clone(),
+                                    installed = update.installed.clone().unwrap_or_default(),
+                                    latest = update.latest.clone().unwrap_or_default(),
+                                    command = update.command.clone()
+                                )
+                                .to_string()
+                            })
+                            .collect();
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .when(behind.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.updates.none").to_string())
+                            })
+                            .children(behind)
+                    })),
             )
             .children(self.provider_settings.iter().map(|setting| {
                 let provider = setting.provider;
@@ -5637,9 +6413,113 @@ impl Shell {
                             ))
                             .child(quick_section)
                             .child(provider_section)
+                            .child(daemon_section)
+                            .child(mcp_section)
                             .child(cron_section),
                     ),
             )
+    }
+
+    /// The form under the MCP server list: which agent, which scope, a name
+    /// and a URL or command line. Environment variables are left to the
+    /// vendor's own CLI, because that is where tokens go.
+    fn mcp_add_form(&self, cx: &mut Context<Self>) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let chip = |id: String, label: String, on: bool| {
+            div()
+                .id(SharedString::from(id))
+                .px_2()
+                .py_0p5()
+                .rounded(px(5.))
+                .text_xs()
+                .cursor_pointer()
+                .when(on, |this| this.bg(tokens.colors().row_active()))
+                .hover(|this| this.bg(tokens.colors().row_hover()))
+                .text_color(if on {
+                    tokens.colors().text_primary
+                } else {
+                    tokens.colors().text_muted
+                })
+                .child(label)
+        };
+        use ginka_protocol::model::McpScope;
+        let scopes: &[McpScope] = if self.mcp_form.provider == "codex" {
+            &[McpScope::User]
+        } else {
+            &[McpScope::User, McpScope::Project, McpScope::Local]
+        };
+        v_flex()
+            .w_full()
+            .pt_2()
+            .gap_1p5()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .children(["claude", "codex"].into_iter().map(|provider| {
+                        chip(
+                            format!("mcp-provider:{provider}"),
+                            provider.to_string(),
+                            self.mcp_form.provider == provider,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mcp_form.provider = provider;
+                            if provider == "codex" {
+                                this.mcp_form.scope = McpScope::User;
+                            }
+                            cx.notify();
+                        }))
+                    }))
+                    .child(div().w(px(12.)))
+                    .children(scopes.iter().map(|scope| {
+                        let scope = *scope;
+                        let label = match scope {
+                            McpScope::User => rust_i18n::t!("settings.mcp_servers.user"),
+                            McpScope::Project => rust_i18n::t!("settings.mcp_servers.project"),
+                            McpScope::Local => rust_i18n::t!("settings.mcp_servers.local"),
+                        }
+                        .to_string();
+                        chip(
+                            format!("mcp-scope:{scope:?}"),
+                            label,
+                            self.mcp_form.scope == scope,
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.mcp_form.scope = scope;
+                            cx.notify();
+                        }))
+                    })),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .child(
+                        div()
+                            .w(px(160.))
+                            .child(ginka_ui::field::input(&self.mcp_form.name)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(ginka_ui::field::input(&self.mcp_form.target)),
+                    )
+                    .child(
+                        Button::new("mcp-add")
+                            .compact()
+                            .small()
+                            .label(rust_i18n::t!("settings.mcp_servers.add").to_string())
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.add_mcp_server(window, cx)),
+                            ),
+                    ),
+            )
+            .children(self.mcp_form.error.clone().map(|error| {
+                div()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(error)
+            }))
+            .into_any_element()
     }
 
     /// The settings page's quick commands: the project's and the global ones,
@@ -5898,17 +6778,21 @@ impl Shell {
                     .as_ref()
                     .map(|run| run.outcome.as_str().to_string())
                     .unwrap_or_default();
+                let history = self
+                    .cron_history
+                    .as_ref()
+                    .filter(|(open, _)| *open == id)
+                    .map(|(_, runs)| runs.clone());
+                let history_open = history.is_some();
                 let scope = job.workspace.as_ref().map_or_else(
                     || rust_i18n::t!("settings.cron.project_checkout").to_string(),
                     |workspace| workspace.0.clone(),
                 );
-                h_flex()
+                let row = h_flex()
                     .w_full()
                     .py_1p5()
                     .gap_3()
                     .items_center()
-                    .border_b_1()
-                    .border_color(tokens.colors().border_subtle)
                     .child(
                         div()
                             .w(px(110.))
@@ -5981,6 +6865,16 @@ impl Shell {
                             })),
                     )
                     .child(
+                        Button::new(SharedString::from(format!("cron-history-{id}")))
+                            .ghost()
+                            .compact()
+                            .selected(history_open)
+                            .label(rust_i18n::t!("settings.cron.history").to_string())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_cron_history(id, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("cron-remove-{id}")))
                             .ghost()
                             .compact()
@@ -5997,7 +6891,34 @@ impl Shell {
                                     cx,
                                 )
                             })),
-                    )
+                    );
+                v_flex()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(row)
+                    .children(history.map(|runs| {
+                        v_flex()
+                            .w_full()
+                            .pl(px(110.))
+                            .pb_1p5()
+                            .gap_0p5()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .when(runs.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.cron.no_runs").to_string())
+                            })
+                            .children(runs.iter().map(|run| {
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .when(
+                                        run.outcome == ginka_protocol::model::CronOutcome::Failed,
+                                        |this| this.text_color(tokens.colors().status_error),
+                                    )
+                                    .child(ginka_ui::scheduled::run_line(run, now))
+                            }))
+                    }))
                     .into_any_element()
             })
             .collect();
@@ -6872,6 +7793,12 @@ impl Shell {
             can_go_back,
             can_go_forward,
         );
+        entries.extend(ginka_ui::palette::row_entries(
+            self.sidebar.read(cx).selected_row(),
+        ));
+        entries.extend(ginka_ui::palette::project_entries(
+            self.sidebar.read(cx).selected_project_place(),
+        ));
         entries.extend(ginka_ui::palette::quick_command_entries(
             &self.quick_commands,
             self.session.is_some(),
@@ -6977,6 +7904,7 @@ impl Shell {
                 self.open_terminal_search(window, cx);
             }
             Command::CopyTerminalOutput => self.copy_terminal_output(cx),
+            Command::CopyTerminalContext => self.copy_terminal_context(cx),
             Command::QuoteTerminalSelection => self.quote_terminal_selection(window, cx),
             Command::QuoteTranscriptSelection => {
                 if let Some(selection) = selected_text {
@@ -7010,6 +7938,16 @@ impl Shell {
             Command::TogglePromptOutline => {
                 self.prompt_outline_open = !self.prompt_outline_open;
             }
+            Command::NextSession => self.on_next_session(&NextSession, window, cx),
+            Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
+            Command::CloseAllTabs => self.close_all_tabs(window, cx),
+            Command::OpenBoard => self.open_board(window, cx),
+            Command::Project(action) => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.act_on_selected_project(action, window, cx)
+            }),
+            Command::Row(action) => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.act_on_selected(action, window, cx)
+            }),
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -8315,8 +9253,20 @@ impl Shell {
     }
 
     /// Copy the conversation through `after` onto another agent and show it.
-    fn fork_from(&mut self, after: u64, agent: String, cx: &mut Context<Self>) {
-        self.fork_from_as(after, agent, ginka_ui::handoff::ForkAction::Continue, cx);
+    fn fork_from(
+        &mut self,
+        after: u64,
+        agent: String,
+        model: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.fork_from_as(
+            after,
+            agent,
+            model,
+            ginka_ui::handoff::ForkAction::Continue,
+            cx,
+        );
     }
 
     /// Whether a fan-out can start from here: a project to cut worktrees in,
@@ -8914,6 +9864,7 @@ impl Shell {
         &mut self,
         after: u64,
         agent: String,
+        model: Option<String>,
         action: ginka_ui::handoff::ForkAction,
         cx: &mut Context<Self>,
     ) {
@@ -8937,7 +9888,7 @@ impl Shell {
             let result = cx
                 .background_spawn(async move {
                     let fork = requesting
-                        .fork_session(&session, after, agent)
+                        .fork_session(&session, after, agent, model)
                         .await
                         .map_err(|error| {
                             rust_i18n::t!("transcript.fork.failed", error = error).to_string()
@@ -9021,7 +9972,12 @@ impl Shell {
             .as_ref()
             .map(|row| row.agent.driver_id())
             .unwrap_or_default();
-        let targets = ginka_ui::handoff::fork_targets(&self.agents, current_agent);
+        let current_model = self.session.as_ref().and_then(|row| row.model.clone());
+        let targets = ginka_ui::handoff::model_fork_targets(
+            &self.agents,
+            current_agent,
+            current_model.as_deref(),
+        );
         let has_targets = !targets.is_empty();
         let (fork_open, fork_busy, fork_error) = self
             .forking
@@ -9048,9 +10004,11 @@ impl Shell {
                     "transcript.build",
                 ),
             ] {
-                let id = agent.id.clone();
+                let id = agent.agent.id.clone();
+                let model = agent.model.map(|model| model.id.clone());
+                let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
                 action_buttons.push(
-                    Button::new(SharedString::from(format!("{button_id}-{turn}-{id}")))
+                    Button::new(SharedString::from(format!("{button_id}-{turn}-{key}")))
                         // The toolkit draws a button's hover itself; a second
                         // one trips its debug assertion.
                         .ghost()
@@ -9063,17 +10021,19 @@ impl Shell {
                         .when(!fork_busy, |this| {
                             this.cursor_pointer()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.fork_from_as(seq, id.clone(), action, cx)
+                                    this.fork_from_as(seq, id.clone(), model.clone(), action, cx)
                                 }))
                         })
-                        .child(rust_i18n::t!(label, agent = agent.display_name.clone()).to_string())
+                        .child(rust_i18n::t!(label, agent = agent.label()).to_string())
                         .into_any_element(),
                 );
             }
         }
-        let target_buttons = targets.into_iter().map(|agent| {
-            let id = agent.id.clone();
-            Button::new(SharedString::from(format!("fork-{turn}-{id}")))
+        let target_buttons = targets.into_iter().map(|target| {
+            let id = target.agent.id.clone();
+            let model = target.model.map(|model| model.id.clone());
+            let key = format!("{id}-{}", model.as_deref().unwrap_or("default"));
+            Button::new(SharedString::from(format!("fork-{turn}-{key}")))
                 // The toolkit draws a button's hover itself; a second
                 // one trips its debug assertion.
                 .ghost()
@@ -9084,11 +10044,12 @@ impl Shell {
                 .text_xs()
                 .text_color(tokens.colors().text_primary)
                 .when(!fork_busy, |this| {
-                    this.cursor_pointer().on_click(
-                        cx.listener(move |this, _, _, cx| this.fork_from(seq, id.clone(), cx)),
-                    )
+                    this.cursor_pointer()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.fork_from(seq, id.clone(), model.clone(), cx)
+                        }))
                 })
-                .child(agent.display_name.clone())
+                .child(target.label())
                 .into_any_element()
         });
         let rule = || {
@@ -10260,6 +11221,9 @@ impl Shell {
                         }
                         "btw" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
                             rust_i18n::t!("composer.command.btw.description").to_string()
+                        }
+                        "plan" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.plan.description").to_string()
                         }
                         _ => command.description.clone(),
                     };
@@ -11693,6 +12657,17 @@ impl Shell {
             (Some(headroom), _) => (Some(headroom.summary()), tokens.colors().text_secondary),
             (None, _) => (None, tokens.colors().text_secondary),
         };
+        // Near the wall, name a login with room — in words beside the
+        // number; switching stays the reader's click.
+        let note =
+            match ginka_ui::accounts::suggest_account(&self.accounts, &self.plans, account, now) {
+                Some(other) => Some(format!(
+                    "{} · {}",
+                    note.unwrap_or_default(),
+                    rust_i18n::t!("composer.account.suggest", account = other.label.clone())
+                )),
+                None => note,
+            };
         let label = account.label.clone();
 
         Some(
@@ -14061,8 +15036,20 @@ impl Render for Shell {
         // reveal has walked out so far.
         self.write_a_little_more(window);
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
+            // Whether the branch has an open pull request whose checks the
+            // Git surface can offer to fix.
+            let open_pull_request = self.session.as_ref().is_some_and(|row| {
+                row.pull_request.as_ref().is_some_and(|pull_request| {
+                    matches!(
+                        pull_request.state,
+                        ginka_protocol::model::PullRequestState::Open
+                            | ginka_protocol::model::PullRequestState::Draft
+                    )
+                })
+            });
             self.surfaces.update(cx, |surfaces, cx| {
-                surfaces.set_workspace(workspace, window, cx)
+                surfaces.set_workspace(workspace, window, cx);
+                surfaces.set_open_pull_request(open_pull_request);
             });
         }
         // Copied out: the headers below bind listeners through `cx`, and a
@@ -14152,6 +15139,10 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_open_settings))
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
+            .on_action(cx.listener(Self::on_close_all_tabs))
+            .on_action(cx.listener(Self::on_open_board))
+            .on_action(cx.listener(Self::on_next_session))
+            .on_action(cx.listener(Self::on_previous_session))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_previous_tab))
             .size_full()
@@ -14544,10 +15535,11 @@ fn apply_theme(mode: ginka_ui::Mode, cx: &mut App) {
 }
 
 /// What the Git surface asks of the workspace's remote.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum RemoteAction {
     Pull,
     Push,
+    PushWithLease,
     Sync,
 }
 

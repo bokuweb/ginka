@@ -17,7 +17,9 @@ pub const REORDER: Duration = Duration::from_millis(260);
 /// Which way a row went.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Moved {
+    /// Towards the top of the list, e.g. a session that now needs the reader.
     Up,
+    /// Towards the bottom of the list.
     Down,
 }
 

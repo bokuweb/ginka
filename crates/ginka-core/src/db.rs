@@ -1,3 +1,5 @@
+//! The SQLite store: opening the database and applying the embedded migrations.
+
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::Path;
@@ -100,6 +102,14 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0023_conversation_commands",
         include_str!("../../../db/migrations/0023_conversation_commands.sql"),
     ),
+    (
+        "0024_review_comment_ranges",
+        include_str!("../../../db/migrations/0024_review_comment_ranges.sql"),
+    ),
+    (
+        "0025_cron_session_target",
+        include_str!("../../../db/migrations/0025_cron_session_target.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.
@@ -157,6 +167,44 @@ fn migrate(conn: &mut Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_writer_waits_for_the_first_instead_of_failing() {
+        // More than one connection writes the database — the service's, the
+        // chat connectors' ledger, `ginka doctor` — and WAL still lets only
+        // one write at a time. rusqlite's default busy timeout (5 s) is what
+        // makes the second wait its turn; this pins it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ginka.db");
+        let first = open(&path).unwrap();
+        let second = open(&path).unwrap();
+        first.execute_batch("BEGIN IMMEDIATE").unwrap();
+        first
+            .execute(
+                "INSERT INTO projects (name, path, kind, default_branch) VALUES ('a', '/a', 'git', 'main')",
+                [],
+            )
+            .unwrap();
+
+        let writing = std::thread::spawn(move || {
+            second.execute(
+                "INSERT INTO projects (name, path, kind, default_branch) VALUES ('b', '/b', 'git', 'main')",
+                [],
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        first.execute_batch("COMMIT").unwrap();
+
+        assert_eq!(
+            writing.join().unwrap().unwrap(),
+            1,
+            "the second write went in"
+        );
+        let count: i64 = first
+            .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
 
     #[test]
     fn migrations_create_the_schema() {

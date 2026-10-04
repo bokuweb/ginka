@@ -292,6 +292,8 @@ pub fn transcript_tail(
     Ok(entries)
 }
 
+/// Stored events of a session with `seq` greater than `after` (from the start
+/// when `None`), oldest first, at most `limit` (all when `None`). Reads SQLite.
 pub fn transcript(
     conn: &Connection,
     id: &SessionId,

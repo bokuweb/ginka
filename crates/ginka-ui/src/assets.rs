@@ -9,6 +9,7 @@
 use gpui::{AssetSource, Result, SharedString};
 use std::borrow::Cow;
 
+/// The app's asset source: its own icons first, then `gpui-component`'s.
 pub struct Assets;
 
 /// Icons this app ships. Paths match what `Icon::path` is given.
@@ -121,27 +122,39 @@ const ICONS: &[(&str, &str)] = &[
 
 /// Our icons, addressed the way [`gpui_component::Icon::path`] expects.
 pub mod icon {
+    /// A workspace's branch, beside its name.
     pub const GIT_BRANCH: &str = "icons/git-branch.svg";
+    /// Attaching a file to the composer.
     pub const PAPERCLIP: &str = "icons/paperclip.svg";
     /// The compose mark on "new chat": a page with a pen on it, which is what
     /// every other agent client uses for the same thing.
     pub const SQUARE_PEN: &str = "icons/square-pen.svg";
+    /// Gemini's glyph in agent rows.
     pub const AGENT_CUBE: &str = "icons/agent-cube.svg";
+    /// Codex's glyph in agent rows.
     pub const AGENT_ORBIT: &str = "icons/agent-orbit.svg";
+    /// Claude's glyph in agent rows.
     pub const AGENT_SPARK: &str = "icons/agent-spark.svg";
+    /// OpenCode's glyph in agent rows.
     pub const AGENT_PROMPT: &str = "icons/agent-prompt.svg";
     /// Each provider's own mark, where the reader is choosing between
     /// vendors rather than scanning rows: the model picker's provider rail and
     /// its chip. Drawn here, single-colour, and tinted by the caller.
     pub const LOGO_CLAUDE: &str = "icons/logo-claude.svg";
+    /// OpenAI Codex's mark.
     pub const LOGO_CODEX: &str = "icons/logo-codex.svg";
+    /// Google Gemini's mark.
     pub const LOGO_GEMINI: &str = "icons/logo-gemini.svg";
+    /// OpenCode's mark.
     pub const LOGO_OPENCODE: &str = "icons/logo-opencode.svg";
     /// The four marks on the home screen's starters, one per kind of first
     /// question: explore, build, review, fix.
     pub const COMPASS: &str = "icons/compass.svg";
+    /// The "build" starter.
     pub const HAMMER: &str = "icons/hammer.svg";
+    /// The "review" starter.
     pub const LIST_CHECK: &str = "icons/list-check.svg";
+    /// The "fix" starter.
     pub const BUG: &str = "icons/bug.svg";
     /// The Reports surface: how close each login is to its wall.
     pub const GAUGE: &str = "icons/gauge.svg";
@@ -151,14 +164,18 @@ pub mod icon {
     pub const FILE_PLUS: &str = "icons/file-plus.svg";
     /// Access modes: a closed lock for asking first, an open one for none.
     pub const LOCK: &str = "icons/lock.svg";
+    /// The access mode that asks for nothing.
     pub const LOCK_OPEN: &str = "icons/lock-open.svg";
     /// Quoting a message into the composer: a bar beside the lines it quotes.
     pub const QUOTE: &str = "icons/quote.svg";
     /// A workspace's pull request, one mark per state: open, draft, merged
     /// and closed.
     pub const GIT_PULL_REQUEST: &str = "icons/git-pull-request.svg";
+    /// A draft pull request.
     pub const GIT_PULL_REQUEST_DRAFT: &str = "icons/git-pull-request-draft.svg";
+    /// A merged pull request.
     pub const GIT_MERGE: &str = "icons/git-merge.svg";
+    /// A pull request closed without merging.
     pub const GIT_PULL_REQUEST_CLOSED: &str = "icons/git-pull-request-closed.svg";
     /// The agents board, in the project rail: three columns of cards.
     pub const BOARD: &str = "icons/board.svg";

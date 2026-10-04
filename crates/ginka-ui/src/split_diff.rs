@@ -68,6 +68,7 @@ mod tests {
             old_line: None,
             new_line: None,
             words: Vec::new(),
+            by_agent: None,
         }
     }
 
