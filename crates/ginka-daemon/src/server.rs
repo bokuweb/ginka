@@ -708,8 +708,32 @@ impl Connection {
         let service = self.service.clone();
         // Locked only while state is touched: a push or a `gh` call waits
         // on the network with the service free for everyone else.
-        smol::unblock(move || ginka_core::service::handle_shared(&service, request)).await
+        smol::unblock(move || contained(|| ginka_core::service::handle_shared(&service, request)))
+            .await
     }
+}
+
+/// Run one request's handling so that a panic in it becomes that request's
+/// error instead of the connection's end.
+///
+/// A bug in one request must not cost the client its connection — and with
+/// it every push it is waiting on — or leave it waiting forever for an
+/// answer that will never come. The service's lock recovers from the poison
+/// a panic leaves (see [`ginka_core::service::handle_shared`]).
+fn contained(
+    handle: impl FnOnce() -> Result<ginka_protocol::rpc::Response, RpcError>,
+) -> Result<ginka_protocol::rpc::Response, RpcError> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(handle)).unwrap_or_else(|panic| {
+        let why = panic
+            .downcast_ref::<&str>()
+            .map(|why| why.to_string())
+            .or_else(|| panic.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "no message".to_string());
+        tracing::error!(%why, "a request panicked");
+        Err(RpcError::failed(format!(
+            "the daemon hit an internal error handling this request: {why}"
+        )))
+    })
 }
 
 /// Apply the protocol's message bound to everything received from a client.
@@ -726,6 +750,21 @@ fn wire_config() -> WebSocketConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_that_panics_is_answered_with_an_error() {
+        let answered = contained(|| panic!("a bug in one request"));
+        let error = answered.expect_err("a panic is that request's error");
+        assert_eq!(error.code, "failed");
+        assert!(
+            error.message.contains("a bug in one request"),
+            "{}",
+            error.message
+        );
+
+        let fine = contained(|| Ok(ginka_protocol::rpc::Response::Ack));
+        assert!(matches!(fine, Ok(ginka_protocol::rpc::Response::Ack)));
+    }
 
     #[test]
     fn the_daemon_bounds_client_messages_and_their_frames() {
