@@ -275,10 +275,18 @@ active conversation. With nothing selected, the rail stands alone.
   tool lifecycle sit beneath the original brief, with explicit working,
   completed and failed words and glyphs. The fold retains at most 300 steps;
   the view shows the newest 12 and states how many earlier steps are hidden.
-  Each completed turn exposes a compact *Fork* action when another installed,
-  signed-in agent is available. Choosing one copies the transcript through
-  that exact turn and continues in the same workspace with the receiving
-  agent; the turn's transcript sequence, not its visual index, is the boundary.
+  Each completed turn exposes a compact *Fork* action. Its first choice,
+  *Fork here on <agent>*, is Claude Code's fork: the same conversation
+  carried on in a new one on the same agent, the original left as it is.
+  From the last turn on an agent that can branch its own thread (Claude, with
+  `--fork-session`), the fork keeps the agent's memory and gets a thread of
+  its own on its first turn; from an earlier turn, or on another agent, the
+  fork starts a fresh thread and is handed the record up to that turn, since
+  the agent's thread remembers past it. The other choices, when another
+  installed, signed-in agent or model is available, continue in the same
+  workspace with that one; the turn's transcript sequence, not its visual
+  index, is the boundary. `/fork [message]` in the composer forks the whole
+  conversation and sends the message there.
   The same divider retains the provider, model, reasoning effort and service
   tier captured when that process started. A provider-reported actual model
   refines a requested alias, while later option changes cannot rewrite an

@@ -110,6 +110,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0025_cron_session_target",
         include_str!("../../../db/migrations/0025_cron_session_target.sql"),
     ),
+    (
+        "0026_fork_thread",
+        include_str!("../../../db/migrations/0026_fork_thread.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

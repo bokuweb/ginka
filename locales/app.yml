@@ -671,8 +671,8 @@ transcript.fork.label:
   en: Fork
   ja: フォーク
 transcript.fork.hint:
-  en: Continue from this turn with another agent
-  ja: このターンから別のエージェントで続ける
+  en: Carry the conversation on from this turn, here or with another agent
+  ja: このターンから会話を分岐して続ける（同じエージェントでも別のエージェントでも）
 transcript.fork.working:
   en: Forking…
   ja: フォーク中…
@@ -2469,3 +2469,9 @@ question.answered:
 question.answer_below:
   en: Answer in the form below the conversation
   ja: 会話の下のフォームで回答してください
+composer.command.fork.description:
+  en: Carry this conversation on in a new one, leaving this one as it is
+  ja: この会話を新しい会話に分岐して続ける（元の会話はそのまま）
+transcript.fork.same:
+  en: "Fork here on %{agent}"
+  ja: "ここから %{agent} のまま分岐"

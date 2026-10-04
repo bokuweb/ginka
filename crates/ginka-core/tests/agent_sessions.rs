@@ -1452,9 +1452,9 @@ fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
 
     assert_eq!(forked.workspace, fixture.workspace);
     assert_eq!(
-        forked.vendor_session_id.as_deref(),
-        Some("vendor-1"),
-        "continuing a fork continues the agent's own conversation"
+        forked.vendor_session_id, None,
+        "the agent's own thread remembers past the fork point, so the fork \
+         starts a thread of its own from the record instead"
     );
     assert_eq!(forked.title.as_deref(), Some("the original (fork)"));
 
@@ -1464,6 +1464,129 @@ fn a_fork_keeps_the_conversation_up_to_the_point_it_was_taken() {
 
     // The original is untouched.
     assert_eq!(fixture.transcript(&session).len(), original.len());
+}
+
+#[test]
+fn a_fork_from_the_end_branches_the_agents_thread_and_leaves_the_original_alone() {
+    // Claude Code's fork: the same conversation, carried on two ways. Both
+    // halves resuming one vendor thread would write into each other.
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "the original",
+    );
+    fixture.settle(&session);
+    let forked = match fixture.ask(Request::ForkSession {
+        session: session.clone(),
+        after: None,
+        agent: None,
+        model: None,
+        account: None,
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(forked.vendor_session_id.as_deref(), Some("vendor-1"));
+
+    // The fork's first turn asks the agent for a branch of its thread.
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-2"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{args_json}}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-2"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fixture.ask(Request::SendMessage {
+        session: forked.id.clone(),
+        text: "the other way".into(),
+    });
+    let said = spoken(&fixture.wait_for_said(&forked.id, "--fork-session"));
+    assert!(said.contains("--resume vendor-1"), "{said}");
+    fixture.settle(&forked.id);
+    assert_eq!(
+        fixture.stored(&forked.id).vendor_session_id.as_deref(),
+        Some("vendor-2"),
+        "the branch is the fork's own from then on"
+    );
+
+    // The original carries on in its own thread, and so does the fork.
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{args_json}}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "the first way".into(),
+    });
+    let said = spoken(&fixture.wait_for_said(&session, "--resume vendor-1"));
+    assert!(!said.contains("--fork-session"), "{said}");
+    fixture.settle(&session);
+    fixture.ask(Request::SendMessage {
+        session: forked.id.clone(),
+        text: "and on".into(),
+    });
+    spoken(&fixture.wait_for_said(&forked.id, "--resume vendor-2"));
+}
+
+#[test]
+fn slash_fork_branches_the_conversation_and_sends_the_rest_there() {
+    let mut fixture = Fixture::new();
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"vendor-1"}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-1"}"#,
+        ]
+        .join("\n"),
+        "the original",
+    );
+    fixture.settle(&session);
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"vendor-3"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{args_json}}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"vendor-3"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    let forked = match fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "/fork try the other approach".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("/fork answers with the branch, got {other:?}"),
+    };
+    assert_ne!(forked.id, session);
+    fixture.wait_for_said(&forked.id, "--fork-session");
+    fixture.settle(&forked.id);
+    assert!(
+        !spoken(&fixture.transcript(&session)).contains("try the other approach"),
+        "the original never hears what went to the branch"
+    );
+
+    // On its own, /fork opens a branch and waits.
+    let idle = match fixture.ask(Request::SendMessage {
+        session: session.clone(),
+        text: "/fork".into(),
+    }) {
+        Response::Session { session } => session,
+        other => panic!("expected a session, got {other:?}"),
+    };
+    assert_eq!(fixture.state(&idle.id), SessionState::Idle);
 }
 
 #[test]
@@ -2193,7 +2316,7 @@ fn a_review_goes_back_to_the_agent_as_one_message() {
     let session = fixture.start(
         &[
             r#"{"type":"system","subtype":"init","session_id":"v"}"#,
-            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"[{args}]"}]}}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{args_json}}]}}"#,
             r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
         ]
         .join("\n"),
