@@ -18,12 +18,22 @@ use gpui_component::{
 #[derive(IntoElement)]
 pub struct Field {
     state: Entity<InputState>,
+    disabled: bool,
 }
 
 /// A [`Field`] over `state`.
 pub fn input(state: &Entity<InputState>) -> Field {
     Field {
         state: state.clone(),
+        disabled: false,
+    }
+}
+
+impl Field {
+    /// Disable editing while keeping the field's shared focus treatment.
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
     }
 }
 
@@ -35,6 +45,7 @@ impl RenderOnce for Field {
             .focus_handle(cx)
             .contains_focused(window, cx);
         Input::new(&self.state)
+            .disabled(self.disabled)
             .focus_bordered(false)
             .when(focused, |input| input.border_color(cx.theme().ring))
     }

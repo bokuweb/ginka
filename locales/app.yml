@@ -1761,6 +1761,414 @@ board.empty:
 board.conflicted:
   en: Stopped on conflicts
   ja: コンフリクトで停止中
+aws.title:
+  en: AWS · SQS
+  ja: AWS · SQS
+aws.services:
+  en: SERVICES
+  ja: サービス
+aws.connection:
+  en: CONNECTION
+  ja: 接続
+aws.copy_code:
+  en: Copy
+  ja: コピー
+aws.open_login_url:
+  en: Open sign-in page
+  ja: ログインページを開く
+aws.login_complete:
+  en: Signed in. Refreshing queues…
+  ja: ログインしました。キューを更新中…
+aws.sqs.queue_settings:
+  en: Queue settings
+  ja: キュー設定
+aws.sqs.queue_actions:
+  en: Queue actions
+  ja: キューの操作
+aws.profile:
+  en: Profile
+  ja: プロファイル
+aws.profile_placeholder:
+  en: default
+  ja: default
+aws.region:
+  en: Region
+  ja: リージョン
+aws.region_placeholder:
+  en: e.g. ap-northeast-1
+  ja: 例：ap-northeast-1
+aws.start_url:
+  en: IAM Identity Center start URL
+  ja: IAM Identity Center の開始 URL
+aws.start_url_placeholder:
+  en: https://your-portal.awsapps.com/start
+  ja: https://your-portal.awsapps.com/start
+aws.sso_region:
+  en: Identity Center region
+  ja: Identity Center のリージョン
+aws.sso_region_placeholder:
+  en: e.g. ap-northeast-1
+  ja: 例：ap-northeast-1
+aws.login_fields_required:
+  en: Enter the start URL, Identity Center region, and SQS region.
+  ja: 開始 URL、Identity Center のリージョン、SQS のリージョンを入力してください。
+aws.choose_account:
+  en: Choose an AWS account.
+  ja: AWS アカウントを選択してください。
+aws.account:
+  en: Account
+  ja: アカウント
+aws.loading_roles:
+  en: Loading assigned roles…
+  ja: 割り当てられたロールを読み込み中…
+aws.choose_role:
+  en: Choose a role.
+  ja: ロールを選択してください。
+aws.role:
+  en: Role
+  ja: ロール
+aws.loading_credentials:
+  en: Connecting to SQS…
+  ja: SQS に接続中…
+aws.change_login:
+  en: Change login
+  ja: ログインを変更
+aws.login:
+  en: Open browser to sign in
+  ja: ブラウザでログイン
+aws.login_device_action:
+  en: Sign in with device code
+  ja: デバイスコードでログイン
+aws.connection_settings:
+  en: Connection settings and other sign-in options
+  ja: 接続設定とその他のログイン方法
+aws.hide_connection_settings:
+  en: Hide connection settings
+  ja: 接続設定を閉じる
+aws.login_pkce:
+  en: Browser (PKCE)
+  ja: この端末のブラウザ (PKCE)
+aws.login_device:
+  en: Device code
+  ja: デバイスコード
+aws.pkce_hint:
+  en: Sign in in a browser on this computer. The app receives the result automatically.
+  ja: この端末のブラウザでログインします。結果はアプリに自動で戻ります。
+aws.device_hint:
+  en: Use a code to sign in, including from another device.
+  ja: 表示されるコードでログインします。別の端末からも操作できます。
+aws.login_in_progress:
+  en: Starting AWS sign-in…
+  ja: AWS ログインを開始中…
+aws.login_failed:
+  en: Sign-in could not start.
+  ja: ログインを開始できませんでした。
+aws.sso_not_configured:
+  en: This profile has no IAM Identity Center settings. Configure SSO in a terminal, then sign in again.
+  ja: このプロファイルには IAM Identity Center の設定がありません。ターミナルで SSO を設定してから、再度ログインしてください。
+aws.sso_setup:
+  en: Copy setup command
+  ja: 設定コマンドをコピー
+aws.device_prompt:
+  en: Enter this code on the AWS sign-in page
+  ja: AWS ログインページでこのコードを入力
+aws.sign_in_title:
+  en: Connect to AWS
+  ja: AWS に接続
+aws.sign_in_hint:
+  en: Sign in with IAM Identity Center, then choose an account and role to browse SQS.
+  ja: IAM Identity Center でログインし、アカウントとロールを選択して SQS を表示します。
+aws.console_login:
+  en: AWS Console
+  ja: AWS コンソール
+aws.identity_center_login:
+  en: IAM Identity Center
+  ja: IAM Identity Center
+aws.console_hint:
+  en: Open AWS in your browser and sign in with your Console account to browse SQS.
+  ja: ブラウザで AWS を開き、コンソールのアカウントでログインして SQS を表示します。
+aws.console_requirements:
+  en: Requires AWS CLI 2.32 or later and Console sign-in access. IAM users and federated roles need SignInLocalDevelopmentAccess.
+  ja: AWS CLI 2.32 以降とコンソールへのログイン権限が必要です。IAM ユーザーとフェデレーションロールには SignInLocalDevelopmentAccess が必要です。
+aws.console_login_action:
+  en: Open AWS browser sign-in
+  ja: ブラウザで AWS にログイン
+aws.refresh:
+  en: Refresh queues
+  ja: キューを更新
+aws.sqs.queues:
+  en: Queues
+  ja: キュー
+aws.sqs.queue_url_placeholder:
+  en: Queue URL
+  ja: キュー URL
+aws.sqs.queue_url_required:
+  en: Enter a queue URL
+  ja: キュー URL を入力してください
+aws.sqs.open_queue_url:
+  en: Open queue URL
+  ja: キュー URL を開く
+aws.sqs.filter_placeholder:
+  en: Filter queues…
+  ja: キューを絞り込み…
+aws.sqs.no_match:
+  en: No matching queues
+  ja: 一致するキューはありません
+aws.sqs.refresh_for_identity:
+  en: Refresh queues for this account, role, and region
+  ja: このアカウント、ロール、リージョンのキューを更新してください
+aws.sqs.no_queues:
+  en: No queues in this region
+  ja: このリージョンにキューはありません
+aws.sqs.new_queue_name:
+  en: New queue name (add .fifo for FIFO)
+  ja: 新しいキュー名（FIFO は .fifo で終える）
+aws.sqs.create_queue:
+  en: Create queue
+  ja: キューを作成
+aws.sqs.created:
+  en: Queue created
+  ja: キューを作成しました
+aws.sqs.select_queue:
+  en: Select a queue
+  ja: キューを選択
+aws.sqs.select_queue_hint:
+  en: Choose a queue from the list or create one to start working with messages.
+  ja: 一覧からキューを選ぶか、新しいキューを作成してメッセージを操作できます。
+aws.sqs.refresh_attributes:
+  en: Refresh details
+  ja: 詳細を更新
+aws.sqs.overview:
+  en: Overview
+  ja: 概要
+aws.sqs.dead_letter_queue:
+  en: Dead-letter queue
+  ja: デッドレターキュー
+aws.sqs.open_dead_letter_queue:
+  en: Open dead-letter queue
+  ja: デッドレターキューを開く
+aws.sqs.back_to_source_queue:
+  en: Back to source queue
+  ja: 元のキューに戻る
+aws.sqs.redrive_destination:
+  en: Redrive destination
+  ja: 再投入先
+aws.sqs.redrive_dead_letter_queue:
+  en: Redrive messages
+  ja: メッセージを再投入
+aws.sqs.confirm_redrive:
+  en: Confirm redrive
+  ja: 再投入を確定
+aws.sqs.redrive_warning:
+  en: SQS moves every available message in this dead-letter queue to the destination, including messages from other source queues. Confirm the destination before continuing.
+  ja: このデッドレターキュー内の受信可能な全メッセージを再投入先へ移動します。他の元キューから来たメッセージも含まれます。再投入先を確認してください。
+aws.sqs.redrive_started:
+  en: Redrive task started. Refresh both queues to check progress.
+  ja: 再投入タスクを開始しました。両方のキューを更新して進行状況を確認してください。
+aws.sqs.available:
+  en: Available
+  ja: 受信可能
+aws.sqs.in_flight:
+  en: In flight
+  ja: 処理中
+aws.sqs.delayed:
+  en: Delayed
+  ja: 遅延中
+aws.sqs.queue_delay_current:
+  en: Queue delay
+  ja: キューの遅延
+aws.sqs.queue_delay_placeholder:
+  en: New queue delay (seconds, 0–900)
+  ja: 新しいキュー遅延（秒、0〜900）
+aws.sqs.apply_queue_delay:
+  en: Apply queue delay
+  ja: キューの遅延を適用
+aws.sqs.invalid_queue_delay:
+  en: Enter a queue delay from 0 to 900 seconds.
+  ja: キューの遅延は 0〜900 秒で入力してください。
+aws.sqs.queue_delay_changed:
+  en: Queue delay set to %{seconds} seconds; propagation may take up to 60 seconds.
+  ja: キューの遅延を %{seconds} 秒に設定しました。反映まで最大 60 秒かかる場合があります。
+aws.sqs.queue_visibility_current:
+  en: Queue visibility timeout
+  ja: キューの可視性タイムアウト
+aws.sqs.queue_visibility_placeholder:
+  en: New queue visibility (seconds, 0–43200)
+  ja: 新しいキュー可視性（秒、0〜43200）
+aws.sqs.apply_queue_visibility:
+  en: Apply queue visibility
+  ja: キューの可視性を適用
+aws.sqs.invalid_queue_visibility:
+  en: Enter a queue visibility timeout from 0 to 43200 seconds.
+  ja: キューの可視性タイムアウトは 0〜43200 秒で入力してください。
+aws.sqs.queue_visibility_changed:
+  en: Queue visibility timeout set to %{seconds} seconds; propagation may take up to 60 seconds.
+  ja: キューの可視性タイムアウトを %{seconds} 秒に設定しました。反映まで最大 60 秒かかる場合があります。
+aws.sqs.queue_receive_wait_current:
+  en: Queue receive wait
+  ja: キューの受信待ち時間
+aws.sqs.queue_receive_wait_placeholder:
+  en: New queue receive wait (seconds, 0–20)
+  ja: 新しいキュー受信待ち時間（秒、0〜20）
+aws.sqs.apply_queue_receive_wait:
+  en: Apply queue receive wait
+  ja: キューの受信待ち時間を適用
+aws.sqs.invalid_queue_receive_wait:
+  en: Enter a queue receive wait from 0 to 20 seconds.
+  ja: キューの受信待ち時間は 0〜20 秒で入力してください。
+aws.sqs.queue_receive_wait_changed:
+  en: Queue receive wait set to %{seconds} seconds; propagation may take up to 60 seconds.
+  ja: キューの受信待ち時間を %{seconds} 秒に設定しました。反映まで最大 60 秒かかる場合があります。
+aws.sqs.queue_message_retention_current:
+  en: Message retention
+  ja: メッセージ保持期間
+aws.sqs.queue_message_retention_placeholder:
+  en: New retention (seconds, 60–1209600)
+  ja: 新しい保持期間（秒、60〜1209600）
+aws.sqs.apply_queue_message_retention:
+  en: Apply retention
+  ja: 保持期間を適用
+aws.sqs.confirm_queue_message_retention:
+  en: Confirm retention change
+  ja: 保持期間の変更を確定
+aws.sqs.invalid_queue_message_retention:
+  en: Enter a retention period from 60 to 1209600 seconds.
+  ja: 保持期間は 60〜1209600 秒で入力してください。
+aws.sqs.queue_message_retention_warning:
+  en: Shortening retention may permanently expire older messages. Confirm the value with a second click.
+  ja: 保持期間を短くすると古いメッセージが消える場合があります。値を確認し、もう一度クリックしてください。
+aws.sqs.queue_message_retention_changed:
+  en: Message retention set to %{seconds} seconds; propagation may take up to 15 minutes.
+  ja: メッセージ保持期間を %{seconds} 秒に設定しました。反映まで最大 15 分かかる場合があります。
+aws.sqs.purge_queue:
+  en: Purge messages
+  ja: メッセージを全消去
+aws.sqs.confirm_purge_queue:
+  en: Confirm purge
+  ja: 全消去を確定
+aws.sqs.delete_queue:
+  en: Delete queue
+  ja: キューを削除
+aws.sqs.confirm_delete_queue:
+  en: Confirm queue deletion
+  ja: キュー削除を確定
+aws.sqs.cancel_queue_action:
+  en: Cancel
+  ja: キャンセル
+aws.sqs.queue_action_warning:
+  en: This action cannot be undone.
+  ja: この操作は元に戻せません。
+aws.sqs.purged:
+  en: Purge started; messages may take up to 60 seconds to disappear.
+  ja: 全消去を開始しました。完了まで最大 60 秒かかる場合があります。
+aws.sqs.queue_deleted:
+  en: Queue deleted
+  ja: キューを削除しました
+aws.sqs.message_body:
+  en: Message body
+  ja: メッセージ本文
+aws.sqs.message_attributes_label:
+  en: String message attributes (JSON object, optional)
+  ja: 文字列メッセージ属性（JSON オブジェクト、省略可）
+aws.sqs.message_attributes_placeholder:
+  en: '{"orderId":"42"}'
+  ja: '{"orderId":"42"}'
+aws.sqs.message_attributes_received:
+  en: Message attributes
+  ja: メッセージ属性
+aws.sqs.send_delay_label:
+  en: Send delay (seconds, 0–900)
+  ja: 送信遅延（秒、0〜900）
+aws.sqs.send_delay_placeholder:
+  en: Queue default
+  ja: キューの既定値
+aws.sqs.invalid_send_delay:
+  en: Enter a send delay from 0 to 900 seconds, or leave it blank.
+  ja: 送信遅延は 0〜900 秒で入力するか、空欄にしてください。
+aws.sqs.group_id:
+  en: FIFO message group ID
+  ja: FIFO メッセージグループ ID
+aws.sqs.deduplication_id:
+  en: FIFO deduplication ID (optional with content-based deduplication)
+  ja: FIFO 重複排除 ID（内容ベースの重複排除が有効なら省略可）
+aws.sqs.send:
+  en: Send message
+  ja: メッセージを送信
+aws.sqs.messages:
+  en: Received messages
+  ja: 受信したメッセージ
+aws.sqs.receive_count:
+  en: Receive count
+  ja: 受信回数
+aws.sqs.sent_at:
+  en: Sent at
+  ja: 送信日時
+aws.sqs.received_group_id:
+  en: FIFO group ID
+  ja: FIFO グループ ID
+aws.sqs.receive:
+  en: Receive
+  ja: 受信
+aws.sqs.receive_count_label:
+  en: Max messages
+  ja: 最大受信件数
+aws.sqs.receive_count_placeholder:
+  en: 1–10
+  ja: 1〜10
+aws.sqs.invalid_receive_count:
+  en: "Max messages must be a whole number from 1 to 10"
+  ja: "最大受信件数は 1〜10 の整数で指定してください"
+aws.sqs.receive_wait_short:
+  en: "Receive wait: Short poll (0s)"
+  ja: "受信待ち：短いポーリング（0 秒）"
+aws.sqs.receive_wait_long:
+  en: "Receive wait: Long poll (20s)"
+  ja: "受信待ち：長いポーリング（20 秒）"
+aws.sqs.receive_wait_queue_default:
+  en: "Receive wait: Queue default"
+  ja: "受信待ち：キューの既定値"
+aws.sqs.visibility_timeout_label:
+  en: Visibility timeout (s)
+  ja: 可視性タイムアウト（秒）
+aws.sqs.visibility_timeout_placeholder:
+  en: Queue default
+  ja: キュー既定値
+aws.sqs.invalid_visibility_timeout:
+  en: "Visibility timeout must be a whole number from 0 to 43200 seconds"
+  ja: "可視性タイムアウトは 0〜43200 秒の整数で指定してください"
+aws.sqs.message_visibility_label:
+  en: Change message visibility (s)
+  ja: メッセージの可視性を変更（秒）
+aws.sqs.message_visibility_placeholder:
+  en: 0–43200
+  ja: 0〜43200
+aws.sqs.apply_visibility:
+  en: Apply visibility
+  ja: 可視性を適用
+aws.sqs.visibility_changed:
+  en: "Message hidden for %{seconds} seconds from now"
+  ja: "メッセージを今から %{seconds} 秒間非表示にしました"
+aws.sqs.delete:
+  en: Delete
+  ja: 削除
+aws.sqs.release:
+  en: Make available again
+  ja: 再び受信可能にする
+aws.sqs.released:
+  en: Message is available again
+  ja: メッセージを再び受信可能にしました
+aws.sqs.confirm_delete:
+  en: Confirm delete
+  ja: 削除を確定
+aws.sqs.received:
+  en: "Received %{count} messages"
+  ja: "%{count} 件受信しました"
+aws.sqs.sent:
+  en: Message sent
+  ja: メッセージを送信しました
+aws.sqs.deleted:
+  en: Message deleted
+  ja: メッセージを削除しました
 surface.git.push_lease:
   en: Force push…
   ja: 強制プッシュ…

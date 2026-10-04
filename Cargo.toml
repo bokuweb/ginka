@@ -7,6 +7,9 @@ publish = false
 
 [workspace]
 members = [
+    "crates/aws",
+    "crates/aws-sqs",
+    "crates/aws-views",
     "crates/ginka-bundle",
     "crates/ginka-client",
     "crates/ginka-cli",
@@ -28,6 +31,8 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+aws-sqs = { path = "crates/aws-sqs" }
+aws-views = { path = "crates/aws-views" }
 shlex = "1.3"
 ginka-client = { path = "crates/ginka-client" }
 ginka-core = { path = "crates/ginka-core" }
