@@ -271,6 +271,7 @@ fn server_request(
                 cut(&asked_command(params))
             )),
             options: vec![ALLOW.into(), ALLOW_SESSION.into(), DENY.into()],
+            questions: Vec::new(),
         }],
         "item/fileChange/requestApproval" => {
             let files = state
@@ -290,50 +291,41 @@ fn server_request(
                 id: card("file", json!({})),
                 question: with_reason(format!("Codex wants to change:\n{files}")),
                 options: vec![ALLOW.into(), ALLOW_SESSION.into(), DENY.into()],
+                questions: Vec::new(),
             }]
         }
         "item/tool/requestUserInput" => {
-            let questions: Vec<&Value> = params
-                .get("questions")
+            let asked = params.get("questions");
+            let questions = super::questions_in(asked);
+            // Answers go back by each question's id; the card keeps the id
+            // beside the text the form answers by.
+            let ids: Vec<Value> = asked
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
+                .filter_map(|question| {
+                    Some(json!({
+                        "id": question.get("id")?.as_str()?,
+                        "question": question.get("question").and_then(Value::as_str).unwrap_or_default(),
+                    }))
+                })
                 .collect();
-            let ids: Vec<&str> = questions
-                .iter()
-                .filter_map(|question| question.get("id").and_then(Value::as_str))
-                .collect();
-            let text = |question: &Value| {
-                question
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            let (question, options) = match questions.as_slice() {
-                [only] => (
-                    text(only),
-                    only.get("options")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|option| option.get("label").and_then(Value::as_str))
-                        .map(str::to_string)
-                        .collect(),
-                ),
-                several => (
-                    several
-                        .iter()
-                        .map(|question| text(question))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    Vec::new(),
-                ),
-            };
             vec![AgentEvent::AskUser {
                 id: card("input", json!({"questions": ids})),
-                question,
-                options,
+                question: questions
+                    .iter()
+                    .map(|question| question.question.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                options: match questions.as_slice() {
+                    [only] => only
+                        .options
+                        .iter()
+                        .map(|choice| choice.label.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                },
+                questions,
             }]
         }
         _ => {
@@ -364,13 +356,33 @@ pub fn response(card: &str, answer: &str) -> Option<String> {
             _ => "decline",
         }}),
         "input" => {
+            // One answer each when the form answered them, the same words for
+            // all when they were answered in words.
+            let structured = ginka_protocol::question::Answers::decode(answer);
             let answers: serde_json::Map<String, Value> = card
                 .get("questions")
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(Value::as_str)
-                .map(|question| (question.to_string(), json!({"answers": [answer]})))
+                .filter_map(|question| {
+                    // Written as `{id, question}`; a bare id is how a card
+                    // written by an earlier build said it.
+                    let (id, text) = match question {
+                        Value::String(id) => (id.as_str(), ""),
+                        _ => (
+                            question.get("id")?.as_str()?,
+                            question
+                                .get("question")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default(),
+                        ),
+                    };
+                    let given: Vec<String> = match &structured {
+                        Some(answers) => answers.answers.get(text).cloned().unwrap_or_default(),
+                        None => vec![answer.to_string()],
+                    };
+                    Some((id.to_string(), json!({"answers": given})))
+                })
                 .collect();
             json!({"answers": answers})
         }
@@ -768,6 +780,7 @@ mod tests {
                 id,
                 question,
                 options,
+                ..
             },
         ] = events.as_slice()
         else {
@@ -821,6 +834,7 @@ mod tests {
                 id,
                 question,
                 options,
+                ..
             },
         ] = events.as_slice()
         else {
@@ -831,6 +845,49 @@ mod tests {
         let answered = sent(&response(id, "SQLite").unwrap());
         assert_eq!(answered["id"], 7);
         assert_eq!(answered["result"]["answers"]["db"]["answers"][0], "SQLite");
+    }
+
+    #[test]
+    fn several_questions_are_answered_one_each_by_question_id() {
+        let mut state = ParseState::default();
+        begin(&spec(AccessMode::Ask), None, &mut state);
+        let events = feed(
+            &mut state,
+            r#"{"method":"item/tool/requestUserInput","id":8,"params":{"threadId":"th-1","turnId":"tu-1","itemId":"i","isBlocking":true,"questions":[{"id":"db","header":"DB","question":"Which database?","options":[{"label":"SQLite","description":"local"},{"label":"Postgres","description":"server"}]},{"id":"name","header":"Name","question":"What is it called?","options":[]}]}}"#,
+        );
+        let [AgentEvent::AskUser { id, questions, .. }] = events.as_slice() else {
+            panic!("expected a card, got {events:?}");
+        };
+        assert_eq!(questions.len(), 2);
+        assert_eq!(
+            questions[0].options[1].description.as_deref(),
+            Some("server")
+        );
+        assert!(questions[1].options.is_empty(), "a free-text question");
+
+        let mut answers = ginka_protocol::question::Answers::default();
+        answers
+            .answers
+            .insert("Which database?".into(), vec!["Postgres".into()]);
+        answers
+            .answers
+            .insert("What is it called?".into(), vec!["ledger".into()]);
+        let answered = sent(&response(id, &answers.encode()).unwrap());
+        assert_eq!(
+            answered["result"]["answers"]["db"]["answers"][0],
+            "Postgres"
+        );
+        assert_eq!(
+            answered["result"]["answers"]["name"]["answers"][0],
+            "ledger"
+        );
+
+        let skipped = ginka_protocol::question::Answers::skipped(questions);
+        let declined = sent(&response(id, &skipped.encode()).unwrap());
+        assert_eq!(
+            declined["result"]["answers"]["db"]["answers"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

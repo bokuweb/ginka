@@ -2037,3 +2037,27 @@ cli.doctor.gh_missing:
 cli.doctor.agent_missing:
   en: not installed
   ja: 未インストール
+question.other:
+  en: Other
+  ja: その他
+question.other.placeholder:
+  en: An answer of your own
+  ja: 自分で答える
+question.several:
+  en: pick any
+  ja: 複数選択可
+question.keys:
+  en: "1–9 pick · ↑↓ question · ⌘↩ send"
+  ja: "1–9 で選択 · ↑↓ で質問移動 · ⌘↩ で送信"
+question.skip:
+  en: Skip
+  ja: スキップ
+question.send:
+  en: Send
+  ja: 送信
+question.answered:
+  en: Answered
+  ja: 回答済み
+question.answer_below:
+  en: Answer in the form below the conversation
+  ja: 会話の下のフォームで回答してください

@@ -110,6 +110,7 @@ impl AgentDriver for ResponseDriver {
                 id: "ask-1".into(),
                 question: question.into(),
                 options: vec!["SQLite".into(), "Postgres".into()],
+                questions: Vec::new(),
             }];
         }
         self.inner.parse_line(line, state)
@@ -3272,6 +3273,7 @@ fn claude_asks_before_a_command_and_the_readers_choice_goes_back_on_its_input() 
                         id,
                         question,
                         options,
+                        ..
                     },
             } => Some((id, question, options)),
             _ => None,
@@ -3307,6 +3309,7 @@ fn codex_asks_before_a_command_over_its_app_server_and_carries_on_in_the_thread(
                         id,
                         question,
                         options,
+                        ..
                     },
             } => Some((id, question, options)),
             _ => None,
