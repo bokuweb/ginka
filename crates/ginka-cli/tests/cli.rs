@@ -920,3 +920,58 @@ fn every_command_is_in_the_cli_reference() {
     }
     assert!(missing.is_empty(), "missing from docs/cli.md: {missing:?}");
 }
+
+#[test]
+fn a_refused_commit_is_handed_to_the_agent_with_fix_with_agent() {
+    // What the app's "Ask the agent to fix it" does, from a terminal: the
+    // refusal is printed, and a conversation in the workspace is asked to
+    // sort it out.
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "refused"]);
+    // Never a real agent in a test: the conversation starts, and the
+    // "agent" exits at once.
+    home.ok(&[
+        "settings",
+        "provider",
+        "claude",
+        "--program",
+        "/usr/bin/false",
+    ]);
+    let hooks = home.root().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-commit");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'lint: trailing space' >&2\nexit 1\n",
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    git(
+        &repository,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let worktree = home.root().join("worktrees").join("comet").join("refused");
+    std::fs::write(worktree.join("added.rs"), "fn new() {} \n").unwrap();
+
+    let without = home.run(&["commit", "comet/refused", "add it"]);
+    assert!(!without.status.success(), "the hook refused it");
+    assert!(
+        !home.ok(&["session", "list"]).contains("comet/refused"),
+        "a plain commit hands nothing over"
+    );
+
+    let handed = home.run(&["commit", "comet/refused", "add it", "--fix-with-agent"]);
+    let said = String::from_utf8_lossy(&handed.stdout).to_string()
+        + &String::from_utf8_lossy(&handed.stderr);
+    assert!(said.contains("lint: trailing space"), "{said}");
+    assert!(said.contains("asked to fix"), "{said}");
+    assert!(
+        home.ok(&["session", "list"]).contains("comet/refused"),
+        "a conversation was started in the workspace"
+    );
+}
