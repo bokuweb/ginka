@@ -370,6 +370,7 @@ fn agent_events_are_tagged_by_kind() {
                 id: "ask_1".into(),
                 question: "Which database?".into(),
                 options: vec!["sqlite".into(), "postgres".into()],
+                questions: Vec::new(),
             },
             "ask_user",
         ),

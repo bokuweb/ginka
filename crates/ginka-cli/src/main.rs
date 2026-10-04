@@ -1096,7 +1096,16 @@ enum SessionCommand {
         /// The request id shown in the transcript.
         request_id: String,
         /// The answer: an option's text, free text, or the approval decision.
-        response: String,
+        /// Words answer every question a card asks.
+        #[arg(required_unless_present_any = ["answer", "skip"])]
+        response: Option<String>,
+        /// Answer one of a card's questions: `"Which database?=SQLite"`.
+        /// Repeat it for several questions, or for several picks in one.
+        #[arg(long, conflicts_with_all = ["response", "skip"])]
+        answer: Vec<String>,
+        /// Skip the card's questions without answering them.
+        #[arg(long, conflicts_with = "response")]
+        skip: bool,
     },
     /// Replace provider options for later turns. Omitted options use the
     /// provider default.
@@ -2301,10 +2310,16 @@ fn request_for(command: Command) -> Result<Request> {
             session,
             request_id,
             response,
+            answer,
+            skip,
         }) => Request::RespondToAgent {
             session: SessionId(session),
             request_id,
-            response,
+            response: match response {
+                Some(words) => words,
+                None if skip => ginka_protocol::question::Answers::default().encode(),
+                None => ginka_cli_format::answers(&answer)?.encode(),
+            },
         },
         Command::Session(SessionCommand::Options {
             session,
@@ -3596,6 +3611,23 @@ mod ginka_cli_format {
     }
 
     /// One transcript entry as a line of output.
+    /// Answers from `--answer "Question=choice"` pairs; a question named more
+    /// than once gets every choice, in the order given.
+    pub fn answers(pairs: &[String]) -> anyhow::Result<ginka_protocol::question::Answers> {
+        let mut answers = ginka_protocol::question::Answers::default();
+        for pair in pairs {
+            let (question, choice) = pair.split_once('=').ok_or_else(|| {
+                anyhow::anyhow!("--answer takes \"question=choice\", not {pair:?}")
+            })?;
+            answers
+                .answers
+                .entry(question.trim().to_string())
+                .or_default()
+                .push(choice.trim().to_string());
+        }
+        Ok(answers)
+    }
+
     pub fn transcript_line(entry: &TranscriptEntry) -> String {
         match &entry.payload {
             TranscriptPayload::User { text } => format!("{:>4}  you  {text}", entry.seq),
@@ -3646,10 +3678,36 @@ mod ginka_cli_format {
                 )
             }
             // The id in brackets is what `session respond` answers.
+            AgentEvent::AskUser { id, questions, .. } if !questions.is_empty() => {
+                let mut lines = vec![format!("? [{id}]")];
+                for question in questions {
+                    let header = question
+                        .header
+                        .as_deref()
+                        .map(|header| format!("{header}: "))
+                        .unwrap_or_default();
+                    let several = if question.multi_select {
+                        " (pick any)"
+                    } else {
+                        ""
+                    };
+                    lines.push(format!("  {header}{}{several}", question.question));
+                    for (number, choice) in question.options.iter().enumerate() {
+                        lines.push(match &choice.description {
+                            Some(description) => {
+                                format!("    {}. {} — {description}", number + 1, choice.label)
+                            }
+                            None => format!("    {}. {}", number + 1, choice.label),
+                        });
+                    }
+                }
+                lines.join("\n")
+            }
             AgentEvent::AskUser {
                 id,
                 question,
                 options,
+                ..
             } => {
                 if options.is_empty() {
                     format!("? {question} [{id}]")
@@ -3707,6 +3765,22 @@ mod ginka_cli_format {
 
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn answer_pairs_become_answers_per_question() {
+            let answers = super::answers(&[
+                "Which database?=SQLite".into(),
+                "Which features? = Auth".into(),
+                "Which features?=Billing".into(),
+            ])
+            .unwrap();
+            assert_eq!(answers.line("Which database?").as_deref(), Some("SQLite"));
+            assert_eq!(
+                answers.line("Which features?").as_deref(),
+                Some("Auth, Billing")
+            );
+            assert!(super::answers(&["no equals sign".into()]).is_err());
+        }
+
         use super::*;
         use crate::{ChangeSource, Cli, Request, request_for};
         use clap::Parser;
@@ -3779,10 +3853,28 @@ mod ginka_cli_format {
                 id: "q-7".into(),
                 question: "Which parser?".into(),
                 options: vec!["serde".into(), "hand-written".into()],
+                questions: Vec::new(),
             }));
             assert!(asked.contains("Which parser?"), "{asked}");
             assert!(asked.contains("[q-7]"), "{asked}");
             assert!(asked.contains("serde / hand-written"), "{asked}");
+            let form = transcript_line(&entry(AgentEvent::AskUser {
+                id: "q-8".into(),
+                question: "Which database?".into(),
+                options: Vec::new(),
+                questions: vec![ginka_protocol::question::Question {
+                    header: Some("DB".into()),
+                    question: "Which database?".into(),
+                    options: vec![ginka_protocol::question::Choice {
+                        label: "SQLite".into(),
+                        description: Some("a local file".into()),
+                    }],
+                    multi_select: true,
+                }],
+            }));
+            assert!(form.contains("[q-8]"), "{form}");
+            assert!(form.contains("DB: Which database? (pick any)"), "{form}");
+            assert!(form.contains("1. SQLite — a local file"), "{form}");
             let permission = transcript_line(&entry(AgentEvent::Permission {
                 id: "p-1".into(),
                 request: "run cargo test".into(),

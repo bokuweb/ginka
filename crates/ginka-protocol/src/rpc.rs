@@ -342,7 +342,10 @@ pub enum Request {
         session: SessionId,
         /// The `id` from the event being answered.
         request_id: String,
-        /// The answer: an option's text, free text, or the approval decision.
+        /// The answer: an option's text, free text, or the approval decision
+        /// — or, for a card with structured questions, what
+        /// [`crate::question::Answers::encode`] wrote. Words answer every
+        /// question asked.
         response: String,
     },
     /// Rename a conversation. An empty title clears it back to none.

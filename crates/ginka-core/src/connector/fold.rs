@@ -166,6 +166,7 @@ impl TurnState {
                 id,
                 question,
                 options,
+                ..
             } => self.question(
                 id.clone(),
                 QuestionKind::Ask,
@@ -408,6 +409,7 @@ mod tests {
                 id: "q1".into(),
                 question: "Which file?".into(),
                 options: vec!["a.rs".into(), "b.rs".into()],
+                questions: Vec::new(),
             },
             0,
         );

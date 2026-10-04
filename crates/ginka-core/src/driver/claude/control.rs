@@ -56,38 +56,25 @@ pub fn request(message: &Value) -> (Vec<AgentEvent>, Option<String>) {
         |kind: &str| json!({"control": request_id, "kind": kind, "input": input}).to_string();
     let event = match tool {
         "AskUserQuestion" => {
-            let questions = input
-                .get("questions")
-                .and_then(Value::as_array)
-                .cloned()
-                .unwrap_or_default();
-            let text = |question: &Value| {
-                question
-                    .get("question")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string()
-            };
-            match questions.as_slice() {
-                // One question is a card with its choices as buttons.
-                [only] => AgentEvent::AskUser {
-                    id: card("question"),
-                    question: text(only),
-                    options: only
-                        .get("options")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|option| option.get("label").and_then(Value::as_str))
-                        .map(str::to_string)
+            let questions = crate::driver::questions_in(input.get("questions"));
+            AgentEvent::AskUser {
+                id: card("question"),
+                question: questions
+                    .iter()
+                    .map(|question| question.question.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                // One question keeps its choices as plain buttons too, for a
+                // client that does not draw the form.
+                options: match questions.as_slice() {
+                    [only] => only
+                        .options
+                        .iter()
+                        .map(|choice| choice.label.clone())
                         .collect(),
+                    _ => Vec::new(),
                 },
-                // Several are asked together and answered in words.
-                several => AgentEvent::AskUser {
-                    id: card("question"),
-                    question: several.iter().map(text).collect::<Vec<_>>().join("\n"),
-                    options: Vec::new(),
-                },
+                questions,
             }
         }
         "ExitPlanMode" => AgentEvent::PlanProposal {
@@ -102,6 +89,7 @@ pub fn request(message: &Value) -> (Vec<AgentEvent>, Option<String>) {
             id: card("tool"),
             question: describe(tool, &input),
             options: vec![ALLOW.to_string(), DENY.to_string()],
+            questions: Vec::new(),
         },
     };
     (vec![event], None)
@@ -123,7 +111,15 @@ pub fn response(card: &str, answer: &str) -> Option<String> {
         "plan" => json!({"behavior": "deny", "message": answer}),
         "question" => {
             // The answers go back beside the questions, keyed by each
-            // question's text; one answer covers every question asked.
+            // question's text: one each when the form answered them, the
+            // same words for all when they were answered in words.
+            let structured = ginka_protocol::question::Answers::decode(answer);
+            if structured.as_ref().is_some_and(|answers| answers.is_skip()) {
+                return Some(reply(
+                    request_id,
+                    json!({"behavior": "deny", "message": "The user skipped these questions."}),
+                ));
+            }
             let mut input = input;
             let answers: serde_json::Map<String, Value> = input
                 .get("questions")
@@ -131,7 +127,13 @@ pub fn response(card: &str, answer: &str) -> Option<String> {
                 .into_iter()
                 .flatten()
                 .filter_map(|question| question.get("question").and_then(Value::as_str))
-                .map(|question| (question.to_string(), Value::from(answer)))
+                .map(|question| {
+                    let given = match &structured {
+                        Some(answers) => answers.line(question).unwrap_or_default(),
+                        None => answer.to_string(),
+                    };
+                    (question.to_string(), Value::from(given))
+                })
                 .collect();
             if let Some(object) = input.as_object_mut() {
                 object.insert("answers".into(), Value::Object(answers));
@@ -140,13 +142,16 @@ pub fn response(card: &str, answer: &str) -> Option<String> {
         }
         _ => return None,
     };
-    Some(
-        json!({
-            "type": "control_response",
-            "response": {"subtype": "success", "request_id": request_id, "response": decision},
-        })
-        .to_string(),
-    )
+    Some(reply(request_id, decision))
+}
+
+/// A successful control response carrying `decision`.
+fn reply(request_id: &str, decision: Value) -> String {
+    json!({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": request_id, "response": decision},
+    })
+    .to_string()
 }
 
 /// A control request this client does not take, refused.
@@ -244,6 +249,7 @@ mod tests {
                 id,
                 question,
                 options,
+                ..
             },
         ] = events.as_slice()
         else {
@@ -259,6 +265,87 @@ mod tests {
             "SQLite"
         );
         assert_eq!(decision["updatedInput"]["questions"][0]["header"], "DB");
+    }
+
+    #[test]
+    fn several_questions_keep_their_shape_and_get_an_answer_each() {
+        let input = json!({"questions": [
+            {
+                "question": "Which database?",
+                "header": "DB",
+                "options": [
+                    {"label": "SQLite", "description": "a local file"},
+                    {"label": "Postgres", "description": "a server"},
+                ],
+                "multiSelect": false,
+            },
+            {
+                "question": "Which features?",
+                "options": [{"label": "Auth"}, {"label": "Billing"}],
+                "multiSelect": true,
+            },
+        ]});
+        let (events, _) = request(&asked("AskUserQuestion", input));
+        let [
+            AgentEvent::AskUser {
+                id,
+                question,
+                options,
+                questions,
+            },
+        ] = events.as_slice()
+        else {
+            panic!("expected one card, got {events:?}");
+        };
+        assert_eq!(question, "Which database?\nWhich features?");
+        assert!(
+            options.is_empty(),
+            "several questions are answered per question"
+        );
+        assert_eq!(questions.len(), 2);
+        assert_eq!(questions[0].header.as_deref(), Some("DB"));
+        assert_eq!(
+            questions[0].options[0].description.as_deref(),
+            Some("a local file")
+        );
+        assert!(questions[1].multi_select);
+
+        let mut answers = ginka_protocol::question::Answers::default();
+        answers
+            .answers
+            .insert("Which database?".into(), vec!["Postgres".into()]);
+        answers.answers.insert(
+            "Which features?".into(),
+            vec!["Auth".into(), "audit logs".into()],
+        );
+        let answered = sent(&response(id, &answers.encode()).unwrap());
+        let decision = &answered["response"]["response"];
+        assert_eq!(decision["behavior"], "allow");
+        assert_eq!(
+            decision["updatedInput"]["answers"]["Which database?"],
+            "Postgres"
+        );
+        assert_eq!(
+            decision["updatedInput"]["answers"]["Which features?"],
+            "Auth, audit logs"
+        );
+    }
+
+    #[test]
+    fn a_skipped_question_is_declined_rather_than_answered_with_nothing() {
+        let input = json!({"questions": [{"question": "Which database?", "options": []}]});
+        let (events, _) = request(&asked("AskUserQuestion", input));
+        let AgentEvent::AskUser { id, questions, .. } = &events[0] else {
+            panic!("expected a card, got {events:?}");
+        };
+        let skipped = ginka_protocol::question::Answers::skipped(questions);
+        let answered = sent(&response(id, &skipped.encode()).unwrap());
+        let decision = &answered["response"]["response"];
+        assert_eq!(decision["behavior"], "deny");
+        assert!(
+            decision["message"].as_str().unwrap().contains("skipped"),
+            "{decision}"
+        );
     }
 
     #[test]

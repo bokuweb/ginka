@@ -457,6 +457,7 @@ fn permission_request(id: &Value, params: &Value, state: &mut ParseState) -> Vec
         id: request.to_string(),
         question,
         options: options.into_iter().map(|(name, _, _)| name).collect(),
+        questions: Vec::new(),
     }]
 }
 
@@ -757,6 +758,7 @@ mod tests {
                 id,
                 question,
                 options,
+                ..
             },
         ] = &events[..]
         else {

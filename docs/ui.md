@@ -245,7 +245,15 @@ active conversation. With nothing selected, the rail stands alone.
   window reads as a mistake rather than as a measure. Virtualized markdown:
   paragraphs, inline code chips, fenced code with tree-sitter highlighting,
   tool-call cards, reasoning blocks (dimmed), diff sidecars, plan-approval and
-  ask-user cards with inline buttons. The reader's own words are a tinted
+  ask-user cards with inline buttons. Structured questions (Claude's
+  `AskUserQuestion`, Codex's `requestUserInput`) are answered in a form
+  pinned above the composer: each question's choices as numbered rows with
+  their descriptions, *pick any* where several are allowed, an *Other* field
+  for an answer of one's own, and *Skip* / *Send*. A number key picks in the
+  current question, the number after the last choice moves to *Other*, ↑/↓
+  change question and ⌘↩ sends; the form takes keyboard focus when it
+  appears only if the composer is empty. The card left in the transcript
+  keeps the questions and says where to answer, then *Answered*. The reader's own words are a tinted
   bubble, right-aligned within the column. User messages and visible answers
   carry compact copy and quote actions. Quote prefers an exact non-blank text
   selection, falling back to the complete visible message, and normalizes it
