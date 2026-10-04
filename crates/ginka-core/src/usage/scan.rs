@@ -39,13 +39,16 @@ impl Format {
 pub struct Record {
     /// Unique across every log: the same request read twice is one record.
     pub key: String,
+    /// The driver id it is filed under: `claude` or `codex`.
     pub agent: &'static str,
     /// The vendor's id for the conversation — what Ginka stores as a
     /// session's `vendor_session_id` when it ran the conversation itself.
     pub vendor_session: String,
+    /// Model id as the log recorded it; empty when the log never named one.
     pub model: String,
     /// Where the agent ran.
     pub cwd: PathBuf,
+    /// That one request's tokens, not a running total.
     pub tokens: TokenTotals,
     /// Unix seconds.
     pub at: i64,

@@ -73,6 +73,23 @@ pub enum SidebarEvent {
         project: ProjectName,
         label: String,
     },
+    /// Forget a project; its checkout and worktrees stay on disk.
+    RemoveProject {
+        project: ProjectName,
+    },
+    /// Forget a conversation, its transcript and checkpoints.
+    RemoveSession {
+        session: SessionId,
+    },
+    /// Delete an archived workspace's worktree.
+    RemoveWorkspace {
+        workspace: WorkspaceId,
+    },
+    /// Write a workspace's status note, or clear it with `None`.
+    SetStatusNote {
+        workspace: WorkspaceId,
+        note: Option<String>,
+    },
     /// Mute a project's notifications until a Unix second (`i64::MAX` for
     /// until lifted), or lift the mute with `None`.
     MuteProject {
@@ -84,6 +101,14 @@ pub enum SidebarEvent {
         project: ProjectName,
         index: u32,
     },
+}
+
+/// What has been asked to be removed once and waits for the second click.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Removal {
+    Project(ProjectName),
+    Workspace(WorkspaceId),
+    Session(SessionId),
 }
 
 /// Where the window is, as the project rail offers it (`docs/ui.md` §3.2).
@@ -170,6 +195,11 @@ pub struct SessionSidebar {
     labelling: Option<(ProjectName, Entity<InputState>)>,
     /// The conversation being renamed, and the field its title is typed in.
     renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
+    /// The workspace whose status note is being written, and its field.
+    noting: Option<(WorkspaceId, Entity<InputState>)>,
+    /// A project or archived workspace asked to be removed once; the
+    /// second click removes it.
+    removing: Option<Removal>,
 }
 
 impl SessionSidebar {
@@ -199,6 +229,8 @@ impl SessionSidebar {
             project_menu_for: None,
             labelling: None,
             renaming: None,
+            noting: None,
+            removing: None,
         }
     }
 
@@ -275,6 +307,15 @@ impl SessionSidebar {
 
     /// Replace the projects after a refresh.
     pub fn set_projects(&mut self, projects: Vec<ProjectRow>, cx: &mut Context<Self>) {
+        // A project removed — here or from another window — is no longer
+        // somewhere the rail can be.
+        if self
+            .selected_project
+            .as_ref()
+            .is_some_and(|selected| !projects.iter().any(|project| &project.name == selected))
+        {
+            self.selected_project = None;
+        }
         self.projects = projects;
         cx.notify();
     }
@@ -750,11 +791,42 @@ impl SessionSidebar {
                     );
                 }
             }
+            // Forgetting is not deleting: the checkout stays, and adding the
+            // folder again brings the project back. Still asked twice, since
+            // its conversations go from the rail with it.
+            let armed = self.removing == Some(Removal::Project(project.clone()));
+            let remove = project.clone();
+            items.push(
+                menu_item(
+                    &tokens,
+                    format!("project-remove:{}", project.0),
+                    Icon::new(IconName::Delete),
+                    if armed {
+                        rust_i18n::t!("sidebar.action.remove_project.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("sidebar.action.remove_project").to_string()
+                    },
+                )
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    cx.stop_propagation();
+                    if armed {
+                        this.removing = None;
+                        this.project_menu_for = None;
+                        cx.emit(SidebarEvent::RemoveProject {
+                            project: remove.clone(),
+                        });
+                    } else {
+                        this.removing = Some(Removal::Project(remove.clone()));
+                    }
+                    cx.notify();
+                })),
+            );
             floating_menu(
                 &tokens,
                 items,
                 cx.listener(|this, _, _, cx| {
                     this.project_menu_for = None;
+                    this.removing = None;
                     cx.notify();
                 }),
             )
@@ -1001,6 +1073,12 @@ impl SessionSidebar {
             .filter(|(renaming, _, _)| renaming == &row.workspace)
             .map(|(_, _, field)| field.clone());
 
+        let note_field = self
+            .noting
+            .as_ref()
+            .filter(|(noting, _)| noting == &row.workspace)
+            .map(|(_, field)| field.clone());
+
         let menu_workspace = row.workspace.clone();
 
         v_flex()
@@ -1168,17 +1246,20 @@ impl SessionSidebar {
                                 })),
                         )
                     })
-                    .children(row.status_note.clone().map(|note| {
-                        // What the agent says it is doing, in its own words;
-                        // the title says what it was asked.
-                        div()
-                            .w_full()
-                            .text_xs()
-                            .italic()
-                            .text_color(tokens.colors().text_muted)
-                            .truncate()
-                            .child(note)
-                    })),
+                    .map(|this| match note_field {
+                        Some(field) => this.child(ginka_ui::field::input(&field)),
+                        None => this.children(row.status_note.clone().map(|note| {
+                            // What the agent says it is doing, in its own
+                            // words; the title says what it was asked.
+                            div()
+                                .w_full()
+                                .text_xs()
+                                .italic()
+                                .text_color(tokens.colors().text_muted)
+                                .truncate()
+                                .child(note)
+                        })),
+                    }),
             )
     }
 
@@ -1217,6 +1298,142 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Where the selected project stands in the rail, for the palette.
+    pub fn selected_project_place(&self) -> Option<ginka_ui::palette::ProjectPlace> {
+        let selected = self.selected_project()?;
+        let index = self
+            .projects
+            .iter()
+            .position(|project| &project.name == selected)?;
+        let now = chrono::Utc::now().timestamp();
+        Some(ginka_ui::palette::ProjectPlace {
+            index,
+            count: self.projects.len(),
+            muted: ginka_ui::notify::muted(&self.muted, &selected.0, now),
+        })
+    }
+
+    /// Do one of the project menu's actions to the selected project: the
+    /// palette's way into the menu, for a keyboard.
+    pub fn act_on_selected_project(
+        &mut self,
+        action: ginka_ui::palette::ProjectAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::ProjectAction;
+        let Some(place) = self.selected_project_place() else {
+            return;
+        };
+        let Some(project) = self.projects.get(place.index).cloned() else {
+            return;
+        };
+        match action {
+            ProjectAction::Rename => self.start_labelling(project.name, project.label, window, cx),
+            ProjectAction::MoveUp if place.index > 0 => cx.emit(SidebarEvent::MoveProject {
+                project: project.name,
+                index: place.index as u32 - 1,
+            }),
+            ProjectAction::MoveDown if place.index + 1 < place.count => {
+                cx.emit(SidebarEvent::MoveProject {
+                    project: project.name,
+                    index: place.index as u32 + 1,
+                })
+            }
+            ProjectAction::MoveUp | ProjectAction::MoveDown => {}
+            ProjectAction::Mute(choice) => cx.emit(SidebarEvent::MuteProject {
+                project: project.name,
+                until: Some(choice.until(chrono::Utc::now().timestamp())),
+            }),
+            ProjectAction::Unmute => cx.emit(SidebarEvent::MuteProject {
+                project: project.name,
+                until: None,
+            }),
+        }
+    }
+
+    /// Do one of the row menu's actions to the selected row: the palette's
+    /// way into the menu, for a keyboard (`ginka_ui::palette::RowAction`).
+    pub fn act_on_selected(
+        &mut self,
+        action: ginka_ui::palette::RowAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use ginka_ui::palette::RowAction;
+        let Some(row) = self.selected_row().cloned() else {
+            return;
+        };
+        match action {
+            RowAction::Rename => {
+                if let Some(session) = row.session.clone() {
+                    self.start_rename(
+                        row.workspace.clone(),
+                        session,
+                        row.title.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            }
+            RowAction::StatusNote => {
+                self.start_note(row.workspace.clone(), row.status_note.clone(), window, cx)
+            }
+            RowAction::TogglePin => cx.emit(SidebarEvent::Pin {
+                workspace: row.workspace.clone(),
+                pinned: !row.pinned,
+            }),
+            RowAction::Archive => cx.emit(SidebarEvent::Archive {
+                workspace: row.workspace.clone(),
+                archived: true,
+            }),
+            RowAction::ResolveConflicts => cx.emit(SidebarEvent::ResolveConflicts {
+                workspace: row.workspace.clone(),
+            }),
+        }
+    }
+
+    /// Start writing a workspace's status note, with the current one in a
+    /// focused field. Enter saves; an empty field clears the note.
+    fn start_note(
+        &mut self,
+        workspace: WorkspaceId,
+        note: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("sidebar.note.placeholder").to_string());
+            if let Some(note) = &note {
+                state.set_value(note.to_string(), window, cx);
+            }
+            state
+        });
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let text = field.read(cx).value().trim().to_string();
+                if let Some((workspace, _)) = this.noting.take() {
+                    cx.emit(SidebarEvent::SetStatusNote {
+                        workspace,
+                        note: (!text.is_empty()).then_some(text),
+                    });
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.noting = None;
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.menu_for = None;
+        self.noting = Some((workspace, field));
+        cx.notify();
+    }
+
     /// The row's actions, under it while its menu is open.
     fn row_actions(&self, row: &SessionRow, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
@@ -1244,6 +1461,22 @@ impl SessionSidebar {
                 );
             }))
         });
+        // The same note an agent writes over MCP: the reader's own word on
+        // where this workspace stands.
+        let note = {
+            let workspace = row.workspace.clone();
+            let current = row.status_note.clone();
+            menu_item(
+                &tokens,
+                format!("note:{key}"),
+                Icon::empty().path(ginka_ui::assets::icon::SQUARE_PEN),
+                rust_i18n::t!("sidebar.action.note").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.start_note(workspace.clone(), current.clone(), window, cx);
+            }))
+        };
         // The id `ginka session …` and MCP take, for a reader driving this
         // conversation from a terminal or another agent.
         let copy_id = row.session.clone().map(|session| {
@@ -1319,15 +1552,46 @@ impl SessionSidebar {
                 cx.notify();
             }))
         });
+        // Forgetting is for good — the transcript and its checkpoints go,
+        // and a running turn is stopped — so it asks twice.
+        let forget = row.session.clone().map(|session| {
+            let armed = self.removing == Some(Removal::Session(session.clone()));
+            menu_item(
+                &tokens,
+                format!("forget:{key}"),
+                Icon::new(IconName::Delete),
+                if armed {
+                    rust_i18n::t!("sidebar.action.forget.confirm").to_string()
+                } else {
+                    rust_i18n::t!("sidebar.action.forget").to_string()
+                },
+            )
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if armed {
+                    this.removing = None;
+                    this.menu_for = None;
+                    cx.emit(SidebarEvent::RemoveSession {
+                        session: session.clone(),
+                    });
+                } else {
+                    this.removing = Some(Removal::Session(session.clone()));
+                }
+                cx.notify();
+            }))
+        });
         floating_menu(
             &tokens,
             resolve
                 .into_iter()
                 .chain(rename)
+                .chain([note])
                 .chain(copy_id)
-                .chain([pin, archive]),
+                .chain([pin, archive])
+                .chain(forget),
             cx.listener(|this, _, _, cx| {
                 this.menu_for = None;
+                this.removing = None;
                 cx.notify();
             }),
         )
@@ -1493,6 +1757,41 @@ impl SessionSidebar {
                         });
                     }))
                     .child(rust_i18n::t!("sidebar.action.restore").to_string())
+            })
+            .child({
+                // Deleting the worktree is for good, so it asks twice; the
+                // daemon refuses one with uncommitted work either way.
+                let workspace = row.workspace.clone();
+                let armed = self.removing == Some(Removal::Workspace(workspace.clone()));
+                div()
+                    .id(("delete", index))
+                    .px_2()
+                    .py_0p5()
+                    .rounded(px(tokens.radius.control()))
+                    .text_xs()
+                    .text_color(if armed {
+                        tokens.colors().status_error
+                    } else {
+                        tokens.colors().text_muted
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_active()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if armed {
+                            this.removing = None;
+                            cx.emit(SidebarEvent::RemoveWorkspace {
+                                workspace: workspace.clone(),
+                            });
+                        } else {
+                            this.removing = Some(Removal::Workspace(workspace.clone()));
+                        }
+                        cx.notify();
+                    }))
+                    .child(if armed {
+                        rust_i18n::t!("sidebar.action.delete.confirm").to_string()
+                    } else {
+                        rust_i18n::t!("sidebar.action.delete").to_string()
+                    })
             })
     }
 

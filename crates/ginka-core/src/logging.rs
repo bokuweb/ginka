@@ -1,3 +1,5 @@
+//! Tracing setup shared by the daemon, the CLI and the app.
+
 use crate::Paths;
 use anyhow::Result;
 use tracing_appender::non_blocking::WorkerGuard;

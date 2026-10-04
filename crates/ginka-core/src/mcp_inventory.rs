@@ -44,6 +44,33 @@ pub fn discover(home: &Path, project: Option<&Path>) -> Vec<McpServerEntry> {
     found
 }
 
+/// A server address with whatever could be a credential taken out: the
+/// user information before `@`, the query and the fragment. Servers are
+/// often addressed with a key in the URL, and this list reaches agents over
+/// MCP. A command is returned as it is — its arguments were never read.
+pub fn redact(target: &str) -> String {
+    let Some((scheme, rest)) = target.split_once("://") else {
+        return target.to_string();
+    };
+    let (rest, fragment) = match rest.split_once('#') {
+        Some((rest, _)) => (rest, "#…"),
+        None => (rest, ""),
+    };
+    let (rest, query) = match rest.split_once('?') {
+        Some((rest, _)) => (rest, "?…"),
+        None => (rest, ""),
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(at) => rest.split_at(at),
+        None => (rest, ""),
+    };
+    let authority = match authority.rsplit_once('@') {
+        Some((_, host)) => format!("…@{host}"),
+        None => authority.to_string(),
+    };
+    format!("{scheme}://{authority}{path}{query}{fragment}")
+}
+
 fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
 }
@@ -56,7 +83,7 @@ fn claude_servers(servers: &Value, scope: McpScope, found: &mut Vec<McpServerEnt
         let target = server["command"]
             .as_str()
             .or_else(|| server["url"].as_str())
-            .map(str::to_string);
+            .map(redact);
         found.push(McpServerEntry {
             name: name.clone(),
             provider: "claude".into(),
@@ -103,7 +130,7 @@ pub fn codex_servers(text: &str) -> Vec<McpServerEntry> {
                 .strip_prefix('"')
                 .and_then(|rest| rest.strip_suffix('"'))
             {
-                found[index].target = Some(text.to_string());
+                found[index].target = Some(redact(text));
             }
         }
     }
@@ -234,6 +261,36 @@ fn check_url(url: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_url_never_carries_its_credentials_out() {
+        assert_eq!(
+            redact("https://mcp.example/sse?apiKey=s3cret&x=1"),
+            "https://mcp.example/sse?…"
+        );
+        assert_eq!(
+            redact("https://me:pw@mcp.example/mcp"),
+            "https://…@mcp.example/mcp"
+        );
+        assert_eq!(
+            redact("https://mcp.example/mcp#token=abc"),
+            "https://mcp.example/mcp#…"
+        );
+        assert_eq!(redact("https://mcp.example/mcp"), "https://mcp.example/mcp");
+        assert_eq!(redact("npx"), "npx", "a command is not a URL");
+
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".claude.json"),
+            r#"{"mcpServers": {"x": {"url": "https://u:p@h.example/mcp?key=k"}}}"#,
+        )
+        .unwrap();
+        let found = discover(dir.path(), None);
+        assert_eq!(
+            found[0].target.as_deref(),
+            Some("https://…@h.example/mcp?…")
+        );
+    }
 
     fn spec(provider: &str, scope: McpScope, target: McpTarget) -> McpServerSpec {
         McpServerSpec {

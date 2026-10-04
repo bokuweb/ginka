@@ -49,7 +49,10 @@ use std::sync::Arc;
 /// on its own.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanUsageProbe {
+    /// The process to start; spawned, never waited on.
     pub command: CommandSpec,
+    /// Lines written to its stdin once it starts, in order (JSON-RPC messages
+    /// for Codex's app server).
     pub input: Vec<String>,
 }
 
@@ -81,7 +84,9 @@ pub struct CompactionSpec {
 /// assert which flags a driver chose without spawning anything.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CommandSpec {
+    /// Executable to run: a path, or a bare name resolved on `PATH`.
     pub program: String,
+    /// Arguments, in order, not passed through a shell.
     pub args: Vec<String>,
     /// Extra environment for the child, on top of the sanitized inherited one.
     pub env: Vec<(String, String)>,
@@ -131,6 +136,7 @@ pub struct SessionSpec {
     /// the digest of a conversation moved here from another agent
     /// (`crate::handoff`). Sent once, on the turn that carries it.
     pub preamble: Option<String>,
+    /// Model id to run; `None` lets the CLI pick its default.
     pub model: Option<String>,
     /// Provider reasoning level passed on every turn.
     pub reasoning_effort: Option<String>,

@@ -8,6 +8,8 @@
 //! It owns the database connection and is not `Sync`: the daemon serialises
 //! requests through it. That is deliberate — SQLite writes are serialised
 //! anyway, and one owner means no half-applied mutation can be observed.
+//! What waits on the network is the exception: [`handle_shared`] runs that
+//! wait with the service unlocked, between two locked steps.
 
 use crate::agent::Supervisor;
 use crate::checkpoint;
@@ -15,7 +17,7 @@ use crate::connector::{self, ConnectorControl};
 use crate::driver::{AgentDriver, Registry, SessionSpec};
 use crate::registry;
 use crate::{Paths, git, project, session};
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use ginka_protocol::event::{AgentEvent, DaemonEvent};
 use ginka_protocol::ids::slugify;
 use ginka_protocol::model::TranscriptPayload;
@@ -45,6 +47,153 @@ impl EventSink for NullSink {
     fn emit(&self, _event: DaemonEvent) {}
 }
 
+/// What becomes of a request's network outcome, run with the service
+/// locked again.
+type Finish = Box<dyn FnOnce(&mut Service) -> Result<Response, RpcError> + Send>;
+
+/// How far [`Service::begin`] got with a request.
+// Large only because `Response` is: a step lives for one request, never in
+// a collection, so boxing the answer would buy nothing.
+#[allow(clippy::large_enum_variant)]
+enum Step {
+    /// Answered, under the lock.
+    Done(Result<Response, RpcError>),
+    /// Waiting on the network is left: run it unlocked, then its [`Finish`]
+    /// locked.
+    Away(Box<dyn FnOnce() -> Finish + Send>),
+}
+
+/// Check out `branch` from `base` as a new worktree at `path`, with the
+/// ignored files the repository asks every worktree to start with. Returns
+/// the path as git records it, which on macOS differs from the one asked for
+/// (/var against /private/var).
+fn check_out(
+    project: &std::path::Path,
+    path: &std::path::Path,
+    branch: &str,
+    base: &str,
+) -> Result<std::path::PathBuf> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    git::add_worktree(project, path, branch, base)?;
+    // `.worktreeinclude`, best-effort: a missing `.env` should not cost the
+    // reader the worktree itself.
+    match crate::worktree_include::copy_included(project, path) {
+        Ok(copied) if !copied.is_empty() => {
+            tracing::info!(count = copied.len(), "copied .worktreeinclude files");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
+    }
+    // …and the heavy ignored directories it shares rather than copies
+    // (`.worktreeshare`), on the same terms.
+    match crate::worktree_include::link_shared(project, path) {
+        Ok(linked) if !linked.is_empty() => {
+            tracing::info!(?linked, "linked .worktreeshare directories");
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "could not link .worktreeshare directories"),
+    }
+    Ok(path.canonicalize().unwrap_or_else(|_| path.to_path_buf()))
+}
+
+/// Search a project's worktrees for paths and lines matching `query`, up
+/// to `limit` of each across all of them, in the order given.
+fn search_worktrees(
+    worktrees: &[Worktree],
+    query: &str,
+    limit: Option<u32>,
+) -> Result<(
+    Vec<ginka_protocol::model::WorkspaceFileMatch>,
+    Vec<ginka_protocol::model::WorkspaceContentMatch>,
+)> {
+    let limit = limit
+        .map(|limit| limit as usize)
+        .unwrap_or(crate::files::DEFAULT_LIMIT);
+    let mut remaining_files = limit;
+    let mut remaining_matches = limit;
+    let mut files = Vec::new();
+    let mut matches = Vec::new();
+    for worktree in worktrees {
+        if remaining_files == 0 && remaining_matches == 0 {
+            break;
+        }
+        let workspace = worktree.workspace_id();
+        if remaining_files > 0 {
+            let paths = crate::files::list(&worktree.path)?;
+            let found = crate::files::search(&paths, query, remaining_files);
+            remaining_files = remaining_files.saturating_sub(found.len());
+            files.extend(
+                found
+                    .into_iter()
+                    .map(|file| ginka_protocol::model::WorkspaceFileMatch {
+                        workspace: workspace.clone(),
+                        path: file.path,
+                    }),
+            );
+        }
+        let found = crate::files::search_content(&worktree.path, query, remaining_matches)?;
+        remaining_matches = remaining_matches.saturating_sub(found.len());
+        matches.extend(
+            found
+                .into_iter()
+                .map(|hit| ginka_protocol::model::WorkspaceContentMatch {
+                    workspace: workspace.clone(),
+                    path: hit.path,
+                    line: hit.line,
+                    text: hit.text,
+                }),
+        );
+    }
+    Ok((files, matches))
+}
+
+/// Each worktree's git status, or `None` where git could not say.
+fn read_statuses(
+    worktrees: Vec<(WorkspaceId, std::path::PathBuf)>,
+) -> Vec<(WorkspaceId, Option<ginka_protocol::model::BranchStatus>)> {
+    worktrees
+        .into_iter()
+        .map(|(id, path)| (id, git::branch_status(&path).ok()))
+        .collect()
+}
+
+/// [`Service::poll_statuses`] for a service shared between connections: the
+/// worktrees are listed under the lock, their statuses read without it.
+pub fn poll_statuses_shared(service: &Mutex<Service>) {
+    let lock = || {
+        service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    let worktrees = lock().status_plan();
+    let read = read_statuses(worktrees);
+    lock().take_statuses(read);
+}
+
+/// Answer a request for a service shared between connections, holding its
+/// lock only while state is read or written.
+///
+/// A push, a pull, a sync, opening a pull request and reading its checks
+/// wait on a remote for as long as it takes, a commit or a merge on the
+/// project's hooks, and a checkout, a search, a diff or the workspace list on
+/// the size of the repository; the service is unlocked for that wait, so every other window and command is still answered. What the
+/// wait found is recorded under the lock again.
+pub fn handle_shared(service: &Mutex<Service>, request: Request) -> Result<Response, RpcError> {
+    let lock = || {
+        service
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    };
+    let work = match lock().begin(request) {
+        Step::Done(answer) => return answer,
+        Step::Away(work) => work,
+    };
+    let finish = work();
+    finish(&mut lock())
+}
+
 /// The daemon's request handler.
 pub struct Service {
     paths: Paths,
@@ -69,6 +218,12 @@ pub struct Service {
     /// Filled by the daemon's poller from `gh`, never by a listing: the
     /// sidebar must not wait on the network to draw.
     pull_requests: std::collections::HashMap<WorkspaceId, ginka_protocol::model::PullRequest>,
+    /// What each recent turn added, for line attribution — read once per
+    /// turn, since its snapshots never change.
+    turn_lines: crate::attribution::TurnLinesCache,
+    /// Workspaces whose worktree is being deleted or rewound off the lock,
+    /// and which; closed to every other request until that is done.
+    busy: std::collections::HashMap<WorkspaceId, &'static str>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -156,6 +311,8 @@ impl Service {
             drivers: Arc::new(Registry::with_defaults()),
             statuses: std::collections::HashMap::new(),
             pull_requests: std::collections::HashMap::new(),
+            turn_lines: Default::default(),
+            busy: Default::default(),
             agents: None,
             settings,
             accounts: None,
@@ -429,8 +586,435 @@ impl Service {
     /// boundary, so a client has to be able to match on `code` instead of
     /// reading a sentence.
     pub fn handle(&mut self, request: Request) -> Result<Response, RpcError> {
+        match self.begin(request) {
+            Step::Done(answer) => answer,
+            Step::Away(work) => work()(self),
+        }
+    }
+
+    /// Start a request: answer it, or — when it has to wait on the network —
+    /// hand back the waiting to be done with the service unlocked
+    /// ([`handle_shared`]) and what to do with its outcome afterwards.
+    fn begin(&mut self, request: Request) -> Step {
+        match request {
+            Request::Push {
+                workspace,
+                force_with_lease,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    if force_with_lease {
+                        git::push_with_lease(path)
+                    } else {
+                        git::push(path)
+                    }
+                },
+                |service, worktree, _| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
+            // The project's hooks run in a commit, for as long as they like —
+            // and one may itself ask the daemon something.
+            Request::Commit {
+                workspace,
+                message,
+                all,
+                amend,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    if amend {
+                        git::amend(path, &message, all)
+                    } else {
+                        anyhow::ensure!(!message.trim().is_empty(), "a commit needs a message");
+                        git::commit(path, &message, all)
+                    }
+                },
+                |service, worktree, commit| {
+                    // The branch moved, so what the sidebar says about it is stale.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Committed { commit })
+                },
+            ),
+            Request::MergeWorkspace {
+                workspace,
+                into,
+                message,
+            } => {
+                let planned = self.worktree(&workspace).and_then(|worktree| {
+                    let project = self.project(&worktree.project)?;
+                    Ok((worktree, project))
+                });
+                let (worktree, project) = match planned {
+                    Ok(planned) => planned,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                let into = into
+                    .filter(|branch| !branch.trim().is_empty())
+                    .or_else(|| git::current_branch(&project.path))
+                    .unwrap_or_else(|| project.default_branch.clone());
+                if into == worktree.branch {
+                    return Step::Done(Err(RpcError::failed(format!(
+                        "{into} is this workspace's own branch; choose another to merge into"
+                    ))));
+                }
+                // Both the commit of what is left and the merge run the
+                // project's hooks.
+                Step::Away(Box::new(move || {
+                    let merged = (|| {
+                        if git::branch_status(&worktree.path)?.dirty {
+                            let message = message
+                                .filter(|message| !message.trim().is_empty())
+                                .context(
+                                    "the workspace has uncommitted work; give a message to commit it with",
+                                )?;
+                            git::commit(&worktree.path, &message, true)?;
+                        }
+                        git::merge_into(&project.path, &worktree.branch, &into)
+                    })();
+                    Box::new(move |service: &mut Service| {
+                        let outcome = merged.map_err(failed)?;
+                        service.events.emit(DaemonEvent::WorkspacesChanged {
+                            project: worktree.project.clone(),
+                        });
+                        Ok(Response::Merged { outcome })
+                    })
+                }))
+            }
+            // Searching walks and reads the whole worktree, which in a large
+            // repository is long enough to stall every other client — and the
+            // reader is typing, so it is asked again on every keystroke.
+            Request::WorkspaceFiles {
+                workspace,
+                query,
+                limit,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    let paths = crate::files::list(path)?;
+                    Ok(crate::files::search(
+                        &paths,
+                        query.as_deref().unwrap_or_default(),
+                        limit
+                            .map(|limit| limit as usize)
+                            .unwrap_or(crate::files::DEFAULT_LIMIT),
+                    ))
+                },
+                |_, _, files| Ok(Response::Files { files }),
+            ),
+            Request::SearchContent {
+                workspace,
+                query,
+                limit,
+            } => self.away_in(
+                &workspace,
+                move |path| {
+                    let limit = limit
+                        .map(|limit| limit as usize)
+                        .unwrap_or(crate::files::DEFAULT_LIMIT);
+                    crate::files::search_content(path, &query, limit)
+                },
+                |_, _, matches| Ok(Response::Matches { matches }),
+            ),
+            Request::SearchProject {
+                project,
+                query,
+                limit,
+            } => {
+                let planned = self
+                    .project(&project)
+                    .and_then(|_| project::list_worktrees(&self.conn(), &project).map_err(failed));
+                let worktrees: Vec<Worktree> = match planned {
+                    Ok(worktrees) => worktrees
+                        .into_iter()
+                        .filter(|worktree| !worktree.archived)
+                        .collect(),
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                Step::Away(Box::new(move || {
+                    let found = search_worktrees(&worktrees, &query, limit);
+                    Box::new(move |_: &mut Service| {
+                        let (files, matches) = found.map_err(failed)?;
+                        Ok(Response::WorkspaceMatches { files, matches })
+                    })
+                }))
+            }
+            // Every window asks on its polling interval, and each worktree
+            // is a `git status`: with a few large repositories that is long
+            // enough to stall every other request. The worktrees are listed
+            // under the lock, read without it, and summed up under it again.
+            Request::ListWorkspaces { project } => {
+                let listed = (|| {
+                    let projects = match project {
+                        Some(name) => vec![self.project(&name)?],
+                        None => self.projects()?,
+                    };
+                    let mut worktrees = Vec::new();
+                    for project in &projects {
+                        registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
+                        worktrees.extend(
+                            project::list_worktrees(&self.conn(), &project.name).map_err(failed)?,
+                        );
+                    }
+                    Ok(worktrees)
+                })();
+                let worktrees = match listed {
+                    Ok(worktrees) => worktrees,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                Step::Away(Box::new(move || {
+                    let read: Vec<(Worktree, GitState)> = worktrees
+                        .into_iter()
+                        .map(|worktree| {
+                            let state = GitState::read(&worktree.path);
+                            (worktree, state)
+                        })
+                        .collect();
+                    Box::new(move |service: &mut Service| {
+                        Ok(Response::Workspaces {
+                            workspaces: read
+                                .into_iter()
+                                .map(|(worktree, state)| service.summarize_with(worktree, state))
+                                .collect(),
+                        })
+                    })
+                }))
+            }
+            // Polled by the Git surface — staged and unstaged, from every
+            // window showing it — and a `git diff` per turn for attribution
+            // the first time a turn is seen.
+            Request::WorkspaceChanges {
+                workspace,
+                source,
+                context_lines,
+            } => match self.plan_changes(workspace, source, context_lines) {
+                Ok(plan) => Step::Away(Box::new(move || {
+                    let read = plan.read();
+                    Box::new(move |service: &mut Service| read.finish(service))
+                })),
+                Err(error) => Step::Done(Err(error)),
+            },
+            // A checkout of a large repository, its post-checkout hook and
+            // the files `.worktreeinclude` copies take as long as they take.
+            Request::CreateWorkspace {
+                project,
+                branch,
+                base,
+            } => {
+                let project = match self.project(&project) {
+                    Ok(project) => project,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                if project.kind == ProjectKind::Plain {
+                    return Step::Done(Err(RpcError::failed(format!(
+                        "{} is a plain folder and has no worktrees",
+                        project.name
+                    ))));
+                }
+                let base = base.unwrap_or_else(|| project.default_branch.clone());
+                // Worktrees live under Ginka's own directory rather than beside
+                // the user's checkout, so the app never litters the repository
+                // it was pointed at.
+                let path = self
+                    .paths
+                    .worktrees()
+                    .join(&project.name.0)
+                    .join(slugify(&branch));
+                Step::Away(Box::new(move || {
+                    let checked_out = check_out(&project.path, &path, &branch, &base);
+                    Box::new(move |service: &mut Service| {
+                        let path = checked_out.map_err(failed)?;
+                        service.adopt_worktree(&project, &path, &branch)
+                    })
+                }))
+            }
+            Request::WorkspaceHistory { workspace, limit } => {
+                let limit = limit.unwrap_or(50).min(200) as usize;
+                self.away_in(
+                    &workspace,
+                    move |path| git::history(path, limit),
+                    |_, _, commits| Ok(Response::History { commits }),
+                )
+            }
+            // A worktree per attempt, each a checkout.
+            Request::FanOut {
+                project,
+                branch_prefix,
+                base,
+                prompt,
+                attempts,
+            } => self.fan_out(project, &branch_prefix, base, prompt, attempts),
+            // The post-checkout hook runs for as long as it likes.
+            Request::CheckoutBranch {
+                workspace,
+                branch,
+                create,
+            } => self.away_in(
+                &workspace,
+                move |path| git::checkout(path, &branch, create),
+                |service, worktree, _| {
+                    // The workspace keeps its id; only its live branch moved,
+                    // and the next listing reconciles that against git.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
+            // Deleting a large worktree takes as long as the disk does. The
+            // workspace is closed to every other request meanwhile, so no
+            // agent is started in a directory halfway through its deletion.
+            Request::RemoveWorkspace { workspace, force } => {
+                let planned = self.worktree(&workspace).and_then(|worktree| {
+                    self.refuse_while_running(|running| *running == workspace)?;
+                    let project = self.project(&worktree.project)?;
+                    Ok((worktree, project))
+                });
+                let (worktree, project) = match planned {
+                    Ok(planned) => planned,
+                    Err(error) => return Step::Done(Err(error)),
+                };
+                self.busy.insert(workspace.clone(), "being removed");
+                Step::Away(Box::new(move || {
+                    let removed = git::remove_worktree(&project.path, &worktree.path, force);
+                    Box::new(move |service: &mut Service| {
+                        service.busy.remove(&workspace);
+                        removed.map_err(failed)?;
+                        registry::sync_worktrees(&service.conn(), &project).map_err(failed)?;
+                        service.events.emit(DaemonEvent::WorkspacesChanged {
+                            project: project.name,
+                        });
+                        Ok(Response::Ack)
+                    })
+                }))
+            }
+            Request::RestoreCheckpoint { checkpoint } => match self.plan_restore(&checkpoint) {
+                Ok(plan) => plan,
+                Err(error) => Step::Done(Err(error)),
+            },
+            Request::Pull { workspace } => self.away_in(
+                &workspace,
+                git::pull_fast_forward,
+                |service, worktree, _| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Ack)
+                },
+            ),
+            Request::Sync { workspace } => {
+                self.away_in(&workspace, git::sync, |service, worktree, synced| {
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::Synced {
+                        pulled: synced.pulled,
+                        pushed: synced.pushed,
+                    })
+                })
+            }
+            Request::CreatePullRequest { workspace, draft } => self.away_in(
+                &workspace,
+                move |path| git::create_pull_request(path, draft),
+                move |service, worktree, url| {
+                    // Known at once rather than on the poller's next beat: the
+                    // reader just asked for it and is looking at the row.
+                    if let Some(number) = git::pull_request_number(&url) {
+                        let state = if draft {
+                            ginka_protocol::model::PullRequestState::Draft
+                        } else {
+                            ginka_protocol::model::PullRequestState::Open
+                        };
+                        let pull_request = ginka_protocol::model::PullRequest {
+                            number,
+                            url: url.clone(),
+                            state,
+                        };
+                        service.note_pull_request(worktree.workspace_id(), Some(pull_request));
+                    }
+                    // The push moved the branch's upstream, which the sidebar shows.
+                    service.events.emit(DaemonEvent::WorkspacesChanged {
+                        project: worktree.project.clone(),
+                    });
+                    Ok(Response::PullRequest { url })
+                },
+            ),
+            Request::PullRequestChecks { workspace } => {
+                self.away_in(&workspace, crate::checks::read, |_, _, checks| {
+                    Ok(Response::Checks { checks })
+                })
+            }
+            Request::FixFailingChecks { workspace, agent } => self.away_in(
+                &workspace,
+                crate::checks::read,
+                move |service, worktree, checks| {
+                    let workspace = worktree.workspace_id();
+                    let Some(prompt) = crate::checks::fix_prompt(&checks) else {
+                        return Err(RpcError::failed(format!(
+                            "no check on {workspace}'s pull request has failed"
+                        )));
+                    };
+                    service.hand_to_agent(workspace, agent, prompt)
+                },
+            ),
+            other => Step::Done(self.answer(other)),
+        }
+    }
+
+    /// Plan network work on a workspace's worktree: the worktree is resolved
+    /// now, under the lock; `work` runs on its path without it; `finish`
+    /// takes the lock back to record what came of it. A failed `work` is the
+    /// request's error and `finish` does not run.
+    fn away_in<T: Send + 'static>(
+        &mut self,
+        workspace: &WorkspaceId,
+        work: impl FnOnce(&std::path::Path) -> Result<T> + Send + 'static,
+        finish: impl FnOnce(&mut Service, Worktree, T) -> Result<Response, RpcError> + Send + 'static,
+    ) -> Step {
+        let worktree = match self.worktree(workspace) {
+            Ok(worktree) => worktree,
+            Err(error) => return Step::Done(Err(error)),
+        };
+        Step::Away(Box::new(move || {
+            let outcome = work(&worktree.path);
+            Box::new(move |service: &mut Service| {
+                let outcome = outcome.map_err(failed)?;
+                finish(service, worktree, outcome)
+            })
+        }))
+    }
+
+    /// Answer a request that needs nothing from the network, start to end
+    /// under the lock.
+    fn answer(&mut self, request: Request) -> Result<Response, RpcError> {
         match request {
             Request::Ping => Ok(Response::Ack),
+            // Waiting on a remote or the project's hooks: [`Service::begin`]
+            // splits these.
+            Request::Commit { .. }
+            | Request::MergeWorkspace { .. }
+            | Request::Push { .. }
+            | Request::Pull { .. }
+            | Request::Sync { .. }
+            | Request::CreatePullRequest { .. }
+            | Request::PullRequestChecks { .. }
+            | Request::FixFailingChecks { .. }
+            | Request::CreateWorkspace { .. }
+            | Request::FanOut { .. }
+            | Request::CheckoutBranch { .. }
+            | Request::RemoveWorkspace { .. }
+            | Request::RestoreCheckpoint { .. }
+            | Request::ListWorkspaces { .. }
+            | Request::WorkspaceChanges { .. }
+            | Request::WorkspaceHistory { .. }
+            | Request::WorkspaceFiles { .. }
+            | Request::SearchContent { .. }
+            | Request::SearchProject { .. } => self.handle(request),
 
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
@@ -462,6 +1046,9 @@ impl Service {
                 Ok(Response::Project { project })
             }
             Request::RemoveProject { project } => {
+                self.refuse_while_running(|workspace| {
+                    workspace.parts().is_some_and(|(owner, _)| owner == project)
+                })?;
                 if !project::remove_project(&self.conn(), &project).map_err(failed)? {
                     return Err(self.no_such_project(&project));
                 }
@@ -469,94 +1056,6 @@ impl Service {
                 Ok(Response::Ack)
             }
 
-            Request::ListWorkspaces { project } => {
-                let projects = match project {
-                    Some(name) => vec![self.project(&name)?],
-                    None => self.projects()?,
-                };
-                let mut workspaces = Vec::new();
-                for project in &projects {
-                    registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
-                    // Bound to a local first: a guard taken in a `for`'s
-                    // iterator expression lives for the whole loop body, and
-                    // `summarize` needs the connection too.
-                    let worktrees =
-                        project::list_worktrees(&self.conn(), &project.name).map_err(failed)?;
-                    for worktree in worktrees {
-                        workspaces.push(self.summarize(worktree));
-                    }
-                }
-                Ok(Response::Workspaces { workspaces })
-            }
-            Request::CreateWorkspace {
-                project,
-                branch,
-                base,
-            } => {
-                let project = self.project(&project)?;
-                if project.kind == ProjectKind::Plain {
-                    return Err(RpcError::failed(format!(
-                        "{} is a plain folder and has no worktrees",
-                        project.name
-                    )));
-                }
-                let base = base.unwrap_or_else(|| project.default_branch.clone());
-                // Worktrees live under Ginka's own directory rather than beside
-                // the user's checkout, so the app never litters the repository
-                // it was pointed at.
-                let path = self
-                    .paths
-                    .worktrees()
-                    .join(&project.name.0)
-                    .join(slugify(&branch));
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(failed)?;
-                }
-                git::add_worktree(&project.path, &path, &branch, &base).map_err(failed)?;
-                // The ignored files the repository asks every worktree to
-                // start with (`.worktreeinclude`). Best-effort: a missing
-                // `.env` should not cost the reader the worktree itself.
-                match crate::worktree_include::copy_included(&project.path, &path) {
-                    Ok(copied) if !copied.is_empty() => {
-                        tracing::info!(count = copied.len(), "copied .worktreeinclude files");
-                    }
-                    Ok(_) => {}
-                    Err(error) => tracing::warn!(%error, "could not copy .worktreeinclude files"),
-                }
-                // …and the heavy ignored directories it shares rather than
-                // copies (`.worktreeshare`), on the same best-effort terms.
-                match crate::worktree_include::link_shared(&project.path, &path) {
-                    Ok(linked) if !linked.is_empty() => {
-                        tracing::info!(?linked, "linked .worktreeshare directories");
-                    }
-                    Ok(_) => {}
-                    Err(error) => {
-                        tracing::warn!(%error, "could not link .worktreeshare directories")
-                    }
-                }
-                // git records the resolved path, which on macOS differs from
-                // the one we asked for (/var against /private/var).
-                let path = path.canonicalize().unwrap_or(path);
-                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: project.name.clone(),
-                });
-
-                let worktree = project::list_worktrees(&self.conn(), &project.name)
-                    .map_err(failed)?
-                    .into_iter()
-                    .find(|worktree| worktree.path == path || worktree.branch == branch)
-                    .ok_or_else(|| {
-                        RpcError::failed(format!(
-                            "created {} but git did not report it as a worktree",
-                            path.display()
-                        ))
-                    })?;
-                self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
-                Ok(Response::Workspace {
-                    workspace: self.summarize(worktree),
-                })
-            }
             Request::CreateScratchWorkspace { name } => {
                 let project = registry::create_scratch_workspace(
                     &self.conn(),
@@ -580,16 +1079,6 @@ impl Service {
                 Ok(Response::Workspace {
                     workspace: self.summarize(worktree),
                 })
-            }
-            Request::RemoveWorkspace { workspace, force } => {
-                let worktree = self.worktree(&workspace)?;
-                let project = self.project(&worktree.project)?;
-                git::remove_worktree(&project.path, &worktree.path, force).map_err(failed)?;
-                registry::sync_worktrees(&self.conn(), &project).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: project.name,
-                });
-                Ok(Response::Ack)
             }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
@@ -767,13 +1256,6 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
-            Request::FanOut {
-                project,
-                branch_prefix,
-                base,
-                prompt,
-                attempts,
-            } => self.fan_out(project, &branch_prefix, base, &prompt, &attempts),
             Request::SendMessage { session, text } => self.send_message(&session, text),
             Request::QueuedMessages { session } => {
                 self.session(&session)?;
@@ -956,145 +1438,6 @@ impl Service {
                 })
             }
 
-            Request::WorkspaceChanges {
-                workspace,
-                source,
-                context_lines,
-            } => {
-                let context_lines = context_lines.unwrap_or(3);
-                if context_lines > 25 {
-                    return Err(RpcError::failed("diff context exceeds 25 lines"));
-                }
-                let worktree = self.worktree(&workspace)?;
-                let files = match &source {
-                    // A checkpoint names a commit, and the commit is what git
-                    // can be asked about.
-                    ChangeSource::SinceCheckpoint { checkpoint } => {
-                        let stored = checkpoint::get(&self.conn(), checkpoint)
-                            .map_err(failed)?
-                            .filter(|stored| stored.workspace == workspace)
-                            .ok_or_else(|| {
-                                RpcError::not_found(format!(
-                                    "no checkpoint with id {} in workspace {}",
-                                    checkpoint.0, workspace.0
-                                ))
-                            })?;
-                        git::changes_since_with_context(
-                            &worktree.path,
-                            &stored.commit,
-                            context_lines,
-                        )
-                        .map_err(failed)?
-                    }
-                    ChangeSource::Turn { checkpoint } => {
-                        let conn = self.conn();
-                        let stored = checkpoint::get(&conn, checkpoint)
-                            .map_err(failed)?
-                            .filter(|stored| stored.workspace == workspace)
-                            .ok_or_else(|| {
-                                RpcError::not_found(format!(
-                                    "no checkpoint with id {} in workspace {}",
-                                    checkpoint.0, workspace.0
-                                ))
-                            })?;
-                        match checkpoint::turn_commits(&conn, &stored.id).map_err(failed)? {
-                            Some((start, end)) => git::changes_between_with_context(
-                                &worktree.path,
-                                &start,
-                                &end,
-                                context_lines,
-                            )
-                            .map_err(failed)?,
-                            None => {
-                                return Err(RpcError::not_found(format!(
-                                    "checkpoint {} has no saved turn start",
-                                    checkpoint.0
-                                )));
-                            }
-                        }
-                    }
-                    ChangeSource::Branch { base } => {
-                        let base = match base {
-                            Some(base) => base.clone(),
-                            None => self.project(&worktree.project)?.default_branch,
-                        };
-                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
-                        git::changes_since_with_context(&worktree.path, &fork, context_lines)
-                            .map_err(failed)?
-                    }
-                    other => git::changes_with_context(&worktree.path, other, context_lines)
-                        .map_err(failed)?,
-                };
-                let mut files = files;
-                // Orca's line attribution, for diffs of the worktree: which
-                // added lines the turns since the last commit wrote.
-                if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
-                    self.attribute(&workspace, &worktree.path, &mut files);
-                }
-                Ok(Response::Changes {
-                    changes: Changes { source, files },
-                })
-            }
-            Request::WorkspaceHistory { workspace, limit } => {
-                let worktree = self.worktree(&workspace)?;
-                let limit = limit.unwrap_or(50).min(200) as usize;
-                let commits = git::history(&worktree.path, limit).map_err(failed)?;
-                Ok(Response::History { commits })
-            }
-            Request::Commit {
-                workspace,
-                message,
-                all,
-                amend,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let commit = if amend {
-                    git::amend(&worktree.path, &message, all).map_err(failed)?
-                } else {
-                    if message.trim().is_empty() {
-                        return Err(RpcError::failed("a commit needs a message"));
-                    }
-                    git::commit(&worktree.path, &message, all).map_err(failed)?
-                };
-                // The branch moved, so what the sidebar says about it is stale.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Committed { commit })
-            }
-            Request::MergeWorkspace {
-                workspace,
-                into,
-                message,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let project = self.project(&worktree.project)?;
-                let into = into
-                    .filter(|branch| !branch.trim().is_empty())
-                    .or_else(|| git::current_branch(&project.path))
-                    .unwrap_or_else(|| project.default_branch.clone());
-                if into == worktree.branch {
-                    return Err(RpcError::failed(format!(
-                        "{into} is this workspace's own branch; choose another to merge into"
-                    )));
-                }
-                if git::branch_status(&worktree.path).map_err(failed)?.dirty {
-                    let message = message
-                        .filter(|message| !message.trim().is_empty())
-                        .ok_or_else(|| {
-                            RpcError::failed(
-                                "the workspace has uncommitted work; give a message to commit it with",
-                            )
-                        })?;
-                    git::commit(&worktree.path, &message, true).map_err(failed)?;
-                }
-                let outcome =
-                    git::merge_into(&project.path, &worktree.branch, &into).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Merged { outcome })
-            }
             Request::StageFile {
                 workspace,
                 path,
@@ -1139,45 +1482,6 @@ impl Service {
                     project: worktree.project.clone(),
                 });
                 Ok(Response::Ack)
-            }
-            Request::Push {
-                workspace,
-                force_with_lease,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                if force_with_lease {
-                    git::push_with_lease(&worktree.path).map_err(failed)?;
-                } else {
-                    git::push(&worktree.path).map_err(failed)?;
-                }
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
-            }
-            Request::CreatePullRequest { workspace, draft } => {
-                let worktree = self.worktree(&workspace)?;
-                let url = git::create_pull_request(&worktree.path, draft).map_err(failed)?;
-                // Known at once rather than on the poller's next beat: the
-                // reader just asked for it and is looking at the row.
-                if let Some(number) = git::pull_request_number(&url) {
-                    let state = if draft {
-                        ginka_protocol::model::PullRequestState::Draft
-                    } else {
-                        ginka_protocol::model::PullRequestState::Open
-                    };
-                    let pull_request = ginka_protocol::model::PullRequest {
-                        number,
-                        url: url.clone(),
-                        state,
-                    };
-                    self.note_pull_request(worktree.workspace_id(), Some(pull_request));
-                }
-                // The push moved the branch's upstream, which the sidebar shows.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::PullRequest { url })
             }
             Request::ListNotes {
                 project,
@@ -1527,42 +1831,6 @@ impl Service {
                 Ok(Response::Ack)
             }
             Request::MessageSession { from, to, text } => self.message_session(&from, &to, &text),
-            Request::Pull { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                git::pull_fast_forward(&worktree.path).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
-            }
-            Request::Sync { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                let synced = git::sync(&worktree.path).map_err(failed)?;
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Synced {
-                    pulled: synced.pulled,
-                    pushed: synced.pushed,
-                })
-            }
-            Request::WorkspaceFiles {
-                workspace,
-                query,
-                limit,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let paths = crate::files::list(&worktree.path).map_err(failed)?;
-                Ok(Response::Files {
-                    files: crate::files::search(
-                        &paths,
-                        query.as_deref().unwrap_or_default(),
-                        limit
-                            .map(|limit| limit as usize)
-                            .unwrap_or(crate::files::DEFAULT_LIMIT),
-                    ),
-                })
-            }
             Request::SlashCommands { workspace, query } => {
                 let worktree = self.worktree(&workspace)?;
                 // The user's own commands live in their home, which is theirs
@@ -1616,20 +1884,6 @@ impl Service {
                 Ok(Response::Branches {
                     branches: git::list_branches(&worktree.path).map_err(failed)?,
                 })
-            }
-            Request::CheckoutBranch {
-                workspace,
-                branch,
-                create,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                git::checkout(&worktree.path, &branch, create).map_err(failed)?;
-                // The workspace keeps its id; only its live branch moved, and
-                // the next listing reconciles that against git.
-                self.events.emit(DaemonEvent::WorkspacesChanged {
-                    project: worktree.project.clone(),
-                });
-                Ok(Response::Ack)
             }
             Request::ListSkills { project } => {
                 let catalog = self.skills(project.as_ref())?;
@@ -1746,9 +2000,48 @@ impl Service {
                 old_path,
             } => {
                 let worktree = self.worktree(&workspace)?;
-                let (before, after) =
-                    crate::image_diff::sides(&worktree.path, &source, &path, old_path.as_deref())
-                        .map_err(failed)?;
+                let old_path = old_path.as_deref();
+                // Sources that name a checkpoint or a base are resolved to
+                // commits here, where the database and the project are.
+                let between = |from: &str, to: Option<&str>| {
+                    crate::image_diff::sides_between(&worktree.path, from, to, &path, old_path)
+                        .map_err(failed)
+                };
+                let (before, after) = match &source {
+                    ChangeSource::Turn { checkpoint } => {
+                        let pair = checkpoint::turn_commits(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "checkpoint {} has no saved turn start",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        between(&pair.0, Some(&pair.1))?
+                    }
+                    ChangeSource::SinceCheckpoint { checkpoint } => {
+                        let stored = checkpoint::get(&self.conn(), checkpoint)
+                            .map_err(failed)?
+                            .filter(|stored| stored.workspace == workspace)
+                            .ok_or_else(|| {
+                                RpcError::not_found(format!(
+                                    "no checkpoint with id {}",
+                                    checkpoint.0
+                                ))
+                            })?;
+                        between(&stored.commit, None)?
+                    }
+                    ChangeSource::Branch { base } => {
+                        let base = match base {
+                            Some(base) => base.clone(),
+                            None => self.project(&worktree.project)?.default_branch,
+                        };
+                        let fork = git::fork_point(&worktree.path, &base).map_err(failed)?;
+                        between(&fork, None)?
+                    }
+                    other => crate::image_diff::sides(&worktree.path, other, &path, old_path)
+                        .map_err(failed)?,
+                };
                 Ok(Response::ImageDiff { before, after })
             }
             Request::ListMcpServers { workspace } => {
@@ -1783,22 +2076,6 @@ impl Service {
                 )?;
                 Ok(Response::Ack)
             }
-            Request::PullRequestChecks { workspace } => {
-                let worktree = self.worktree(&workspace)?;
-                Ok(Response::Checks {
-                    checks: crate::checks::read(&worktree.path).map_err(failed)?,
-                })
-            }
-            Request::FixFailingChecks { workspace, agent } => {
-                let worktree = self.worktree(&workspace)?;
-                let checks = crate::checks::read(&worktree.path).map_err(failed)?;
-                let Some(prompt) = crate::checks::fix_prompt(&checks) else {
-                    return Err(RpcError::failed(format!(
-                        "no check on {workspace}'s pull request has failed"
-                    )));
-                };
-                self.hand_to_agent(workspace, agent, prompt)
-            }
             Request::FixCommitFailure {
                 workspace,
                 message,
@@ -1831,7 +2108,6 @@ impl Service {
                     checkpoints: checkpoint::list(&self.conn(), &workspace).map_err(failed)?,
                 })
             }
-            Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
 
             Request::UploadAttachment { name, data_base64 } => {
                 use base64::Engine as _;
@@ -1876,68 +2152,6 @@ impl Service {
                     .open(&workspace, &worktree.path, rows, cols)
                     .map_err(failed)?;
                 Ok(Response::Terminal { terminal })
-            }
-            Request::SearchContent {
-                workspace,
-                query,
-                limit,
-            } => {
-                let worktree = self.worktree(&workspace)?;
-                let limit = limit
-                    .map(|limit| limit as usize)
-                    .unwrap_or(crate::files::DEFAULT_LIMIT);
-                Ok(Response::Matches {
-                    matches: crate::files::search_content(&worktree.path, &query, limit)
-                        .map_err(failed)?,
-                })
-            }
-            Request::SearchProject {
-                project,
-                query,
-                limit,
-            } => {
-                self.project(&project)?;
-                let limit = limit
-                    .map(|limit| limit as usize)
-                    .unwrap_or(crate::files::DEFAULT_LIMIT);
-                let mut remaining_files = limit;
-                let mut remaining_matches = limit;
-                let mut files = Vec::new();
-                let mut matches = Vec::new();
-                for worktree in project::list_worktrees(&self.conn(), &project)
-                    .map_err(failed)?
-                    .into_iter()
-                    .filter(|worktree| !worktree.archived)
-                {
-                    if remaining_files == 0 && remaining_matches == 0 {
-                        break;
-                    }
-                    let workspace = worktree.workspace_id();
-                    if remaining_files > 0 {
-                        let paths = crate::files::list(&worktree.path).map_err(failed)?;
-                        let found = crate::files::search(&paths, &query, remaining_files);
-                        remaining_files = remaining_files.saturating_sub(found.len());
-                        files.extend(found.into_iter().map(|file| {
-                            ginka_protocol::model::WorkspaceFileMatch {
-                                workspace: workspace.clone(),
-                                path: file.path,
-                            }
-                        }));
-                    }
-                    let found =
-                        crate::files::search_content(&worktree.path, &query, remaining_matches)
-                            .map_err(failed)?;
-                    remaining_matches = remaining_matches.saturating_sub(found.len());
-                    matches.extend(found.into_iter().map(|hit| {
-                        ginka_protocol::model::WorkspaceContentMatch {
-                            workspace: workspace.clone(),
-                            path: hit.path,
-                            line: hit.line,
-                            text: hit.text,
-                        }
-                    }));
-                }
-                Ok(Response::WorkspaceMatches { files, matches })
             }
             Request::ReadFile { workspace, path } => {
                 let worktree = self.worktree(&workspace)?;
@@ -2736,7 +2950,9 @@ impl Service {
             // The one the turn took, not a later "before restoring" snapshot.
             .min_by_key(|checkpoint| checkpoint.created_at);
         if let Some(checkpoint) = before {
-            self.restore(&checkpoint.id)?;
+            self.handle(Request::RestoreCheckpoint {
+                checkpoint: checkpoint.id,
+            })?;
         }
         let fork =
             match self.fork_session(id, Some(seq.saturating_sub(1)), None, None, None, true)? {
@@ -3139,31 +3355,45 @@ impl Service {
     /// Restoring is destructive — files written since are removed — so the
     /// state being replaced is snapshotted first. A rewind must never be the
     /// thing that loses work, including work the user wanted after all.
-    fn restore(&mut self, id: &CheckpointId) -> Result<Response, RpcError> {
+    ///
+    /// Both the snapshot and the rewind read and write the whole worktree, so
+    /// they run without the service held; the workspace answers "being
+    /// restored" to every other request meanwhile, and the snapshot is stored
+    /// afterwards — even if the rewind then failed.
+    fn plan_restore(&mut self, id: &CheckpointId) -> Result<Step, RpcError> {
         let checkpoint = checkpoint::get(&self.conn(), id)
             .map_err(failed)?
             .ok_or_else(|| RpcError::not_found(format!("no checkpoint with id {}", id.0)))?;
         let worktree = self.worktree(&checkpoint.workspace)?;
-
-        checkpoint::take(
-            &self.conn(),
-            &worktree.path,
-            checkpoint::TurnRef {
-                workspace: &checkpoint.workspace,
-                session: &checkpoint.session,
-                turn: checkpoint.turn,
-            },
-            &format!("before restoring: {}", checkpoint.label),
-            None,
-            now(),
-        )
-        .map_err(failed)?;
-
-        git::restore_snapshot(&worktree.path, &checkpoint.commit).map_err(failed)?;
-        self.events.emit(DaemonEvent::WorkspacesChanged {
-            project: worktree.project.clone(),
-        });
-        Ok(Response::Ack)
+        self.busy
+            .insert(checkpoint.workspace.clone(), "being restored");
+        Ok(Step::Away(Box::new(move || {
+            let kept = checkpoint::snapshot(
+                &worktree.path,
+                checkpoint::TurnRef {
+                    workspace: &checkpoint.workspace,
+                    session: &checkpoint.session,
+                    turn: checkpoint.turn,
+                },
+                &format!("before restoring: {}", checkpoint.label),
+                now(),
+            );
+            // Nothing is rewound unless what it replaces was kept.
+            let restored = match &kept {
+                Ok(_) => git::restore_snapshot(&worktree.path, &checkpoint.commit),
+                Err(_) => Ok(()),
+            };
+            Box::new(move |service: &mut Service| {
+                service.busy.remove(&checkpoint.workspace);
+                let kept = kept.map_err(failed)?;
+                checkpoint::insert(&service.conn(), &kept).map_err(failed)?;
+                restored.map_err(failed)?;
+                service.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            })
+        })))
     }
 
     /// Write a pull request's details on a cheap model and open it with them,
@@ -3303,38 +3533,114 @@ impl Service {
     }
 
     /// Resolve a session, or say it is not there.
-    /// Mark which added lines in `files` the workspace's recent turns wrote
-    /// (`crate::attribution`). Only turns since the last commit count — an
-    /// older turn's lines are in the commit, not the diff — and at most the
-    /// newest [`ATTRIBUTION_TURNS`], so a long session does not make every
-    /// refresh re-read its whole history. Failing to work it out leaves the
-    /// lines unmarked rather than failing the diff.
-    fn attribute(
-        &self,
-        workspace: &WorkspaceId,
+    /// Record a worktree [`check_out`] made, set it up as the project asks,
+    /// and answer with its summary.
+    fn adopt_worktree(
+        &mut self,
+        project: &Project,
         path: &std::path::Path,
-        files: &mut [ginka_protocol::model::FileChange],
-    ) {
-        let since = git::last_commit_time(path).unwrap_or(i64::MIN);
-        let conn = self.conn();
-        let Ok(checkpoints) = checkpoint::list(&conn, workspace) else {
-            return;
-        };
-        let turns: Vec<(String, String)> = checkpoints
-            .iter()
-            .filter(|checkpoint| checkpoint.has_turn_start && checkpoint.created_at >= since)
-            .take(ATTRIBUTION_TURNS)
-            .filter_map(|checkpoint| {
-                checkpoint::turn_commits(&conn, &checkpoint.id)
-                    .ok()
-                    .flatten()
-            })
-            .collect();
-        drop(conn);
-        match crate::attribution::turn_added_lines(path, &turns) {
-            Ok(by_agent) => crate::attribution::mark(files, &by_agent),
-            Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+        branch: &str,
+    ) -> Result<Response, RpcError> {
+        registry::sync_worktrees(&self.conn(), project).map_err(failed)?;
+        self.events.emit(DaemonEvent::WorkspacesChanged {
+            project: project.name.clone(),
+        });
+        let worktree = project::list_worktrees(&self.conn(), &project.name)
+            .map_err(failed)?
+            .into_iter()
+            .find(|worktree| worktree.path == path || worktree.branch == branch)
+            .ok_or_else(|| {
+                RpcError::failed(format!(
+                    "created {} but git did not report it as a worktree",
+                    path.display()
+                ))
+            })?;
+        self.set_up(&project.path, &worktree.path, &worktree.workspace_id());
+        Ok(Response::Workspace {
+            workspace: self.summarize(worktree),
+        })
+    }
+
+    /// Everything a diff needs from the database, worked out under the
+    /// lock, so that git can be read without it ([`ChangesPlan::read`]).
+    fn plan_changes(
+        &self,
+        workspace: WorkspaceId,
+        source: ChangeSource,
+        context_lines: Option<u8>,
+    ) -> Result<ChangesPlan, RpcError> {
+        let context_lines = context_lines.unwrap_or(3);
+        if context_lines > 25 {
+            return Err(RpcError::failed("diff context exceeds 25 lines"));
         }
+        let worktree = self.worktree(&workspace)?;
+        let checkpoint_in_workspace = |checkpoint: &CheckpointId| {
+            checkpoint::get(&self.conn(), checkpoint)
+                .map_err(failed)?
+                .filter(|stored| stored.workspace == workspace)
+                .ok_or_else(|| {
+                    RpcError::not_found(format!(
+                        "no checkpoint with id {} in workspace {}",
+                        checkpoint.0, workspace.0
+                    ))
+                })
+        };
+        let diff = match &source {
+            // A checkpoint names a commit, and the commit is what git can be
+            // asked about.
+            ChangeSource::SinceCheckpoint { checkpoint } => {
+                DiffPlan::Since(checkpoint_in_workspace(checkpoint)?.commit)
+            }
+            ChangeSource::Turn { checkpoint } => {
+                let stored = checkpoint_in_workspace(checkpoint)?;
+                match checkpoint::turn_commits(&self.conn(), &stored.id).map_err(failed)? {
+                    Some((start, end)) => DiffPlan::Between(start, end),
+                    None => {
+                        return Err(RpcError::not_found(format!(
+                            "checkpoint {} has no saved turn start",
+                            checkpoint.0
+                        )));
+                    }
+                }
+            }
+            ChangeSource::Branch { base } => DiffPlan::ForkOf(match base {
+                Some(base) => base.clone(),
+                None => self.project(&worktree.project)?.default_branch,
+            }),
+            other => DiffPlan::Worktree(other.clone()),
+        };
+        // Orca's line attribution, for diffs of the worktree: the turns whose
+        // added lines may be in it, newest first, and which of them were
+        // read before. Which are since the last commit is git's to say.
+        let turns = if matches!(source, ChangeSource::Uncommitted | ChangeSource::Unstaged) {
+            let conn = self.conn();
+            let turns: Vec<Turn> = checkpoint::list(&conn, &workspace)
+                .unwrap_or_default()
+                .iter()
+                .filter(|checkpoint| checkpoint.has_turn_start)
+                .filter_map(|checkpoint| {
+                    let (start, end) = checkpoint::turn_commits(&conn, &checkpoint.id)
+                        .ok()
+                        .flatten()?;
+                    Some(Turn {
+                        created_at: checkpoint.created_at,
+                        known: self.turn_lines.contains(&start, &end),
+                        start,
+                        end,
+                    })
+                })
+                .collect();
+            Some(turns)
+        } else {
+            None
+        };
+        Ok(ChangesPlan {
+            path: worktree.path,
+            source,
+            context_lines,
+            diff,
+            turns,
+        })
     }
 
     /// Run `provider`'s own CLI with `args` (`mcp add …` / `mcp remove …`),
@@ -3391,6 +3697,28 @@ impl Service {
     /// working — or, when `agent` names another or there is none, to a new
     /// conversation on that agent. The conversation that did the work knows
     /// why it did it, which is most of fixing what went wrong with it.
+    /// Refuse to take away somewhere an agent is working: a removal waits
+    /// until every session running in a workspace `affected` picks has
+    /// stopped, and says which.
+    fn refuse_while_running(
+        &self,
+        affected: impl Fn(&WorkspaceId) -> bool,
+    ) -> Result<(), RpcError> {
+        let running: Vec<String> = session::list(&self.conn(), None)
+            .map_err(failed)?
+            .into_iter()
+            .filter(|session| affected(&session.workspace) && self.sessions.is_running(&session.id))
+            .map(|session| session.id.0)
+            .collect();
+        if running.is_empty() {
+            return Ok(());
+        }
+        Err(RpcError::failed(format!(
+            "an agent is still running there ({}); stop it first",
+            running.join(", ")
+        )))
+    }
+
     fn hand_to_agent(
         &mut self,
         workspace: WorkspaceId,
@@ -3735,6 +4063,9 @@ impl Service {
 
     /// Resolve a workspace id to the worktree it names.
     fn worktree(&self, workspace: &WorkspaceId) -> Result<Worktree, RpcError> {
+        if let Some(doing) = self.busy.get(workspace) {
+            return Err(RpcError::failed(format!("{workspace} is {doing}")));
+        }
         project::find_worktree(&self.conn(), workspace)
             .map_err(failed)?
             .ok_or_else(|| RpcError::not_found(format!("no workspace named {workspace}")))
@@ -3774,8 +4105,18 @@ impl Service {
     /// has been deleted under us reports a default status rather than failing
     /// the whole listing.
     fn summarize(&self, worktree: Worktree) -> WorkspaceSummary {
-        let status = git::branch_status(&worktree.path).unwrap_or_default();
-        let last_commit_at = git::last_commit_time(&worktree.path);
+        let state = GitState::read(&worktree.path);
+        self.summarize_with(worktree, state)
+    }
+
+    /// A workspace's summary from what git said about it, read beforehand
+    /// and possibly without the service held.
+    fn summarize_with(&self, worktree: Worktree, state: GitState) -> WorkspaceSummary {
+        let GitState {
+            status,
+            last_commit_at,
+            indexed,
+        } = state;
         let session = session::latest_for_workspace(&self.conn(), &worktree.workspace_id())
             .unwrap_or_default();
         let queued = session
@@ -3784,7 +4125,7 @@ impl Service {
             .unwrap_or(0);
         let id = worktree.workspace_id();
         WorkspaceSummary {
-            indexed: crate::tools::is_indexed(&worktree.path),
+            indexed,
             worktree,
             status,
             session,
@@ -3792,6 +4133,145 @@ impl Service {
             queued,
             pull_request: self.pull_requests.get(&id).cloned(),
             status_note: project::status_note(&self.conn(), &id).unwrap_or_default(),
+        }
+    }
+}
+
+/// Which revisions a diff compares.
+enum DiffPlan {
+    /// The worktree against a commit.
+    Since(String),
+    /// Two snapshots: a turn's start and end.
+    Between(String, String),
+    /// The worktree against where it forked from this branch.
+    ForkOf(String),
+    /// The worktree's own staged, unstaged or uncommitted changes.
+    Worktree(ChangeSource),
+}
+
+/// A turn whose added lines may be in a worktree diff.
+struct Turn {
+    created_at: i64,
+    start: String,
+    end: String,
+    /// Already in the service's [`crate::attribution::TurnLinesCache`].
+    known: bool,
+}
+
+/// A diff to read, resolved under the lock ([`Service::plan_changes`]).
+struct ChangesPlan {
+    path: std::path::PathBuf,
+    source: ChangeSource,
+    context_lines: u8,
+    diff: DiffPlan,
+    /// For a worktree diff, the turns to attribute its lines to.
+    turns: Option<Vec<Turn>>,
+}
+
+/// A diff read off the lock, and the turns read for it.
+struct ChangesRead {
+    source: ChangeSource,
+    files: Result<Vec<ginka_protocol::model::FileChange>>,
+    /// The turns to attribute with, and what was read of those not cached.
+    turns: Vec<(String, String)>,
+    fresh: Vec<(String, String, crate::attribution::TurnLines)>,
+    path: std::path::PathBuf,
+}
+
+impl ChangesPlan {
+    /// Read the diff, and the lines any turn not read before added. Only
+    /// turns since the last commit count — an older turn's lines are in the
+    /// commit, not the diff — and at most the newest [`ATTRIBUTION_TURNS`].
+    fn read(self) -> ChangesRead {
+        let path = &self.path;
+        let files = match &self.diff {
+            DiffPlan::Since(commit) => {
+                git::changes_since_with_context(path, commit, self.context_lines)
+            }
+            DiffPlan::Between(start, end) => {
+                git::changes_between_with_context(path, start, end, self.context_lines)
+            }
+            DiffPlan::ForkOf(base) => git::fork_point(path, base)
+                .and_then(|fork| git::changes_since_with_context(path, &fork, self.context_lines)),
+            DiffPlan::Worktree(source) => {
+                git::changes_with_context(path, source, self.context_lines)
+            }
+        };
+        let mut turns = Vec::new();
+        let mut fresh = Vec::new();
+        if let (Ok(_), Some(candidates)) = (&files, self.turns) {
+            let since = git::last_commit_time(path).unwrap_or(i64::MIN);
+            for turn in candidates
+                .into_iter()
+                .filter(|turn| turn.created_at >= since)
+                .take(ATTRIBUTION_TURNS)
+            {
+                if !turn.known {
+                    match crate::attribution::turn_lines(path, &turn.start, &turn.end) {
+                        Ok(lines) => fresh.push((turn.start.clone(), turn.end.clone(), lines)),
+                        // Failing to work it out leaves the lines unmarked
+                        // rather than failing the diff.
+                        Err(error) => {
+                            tracing::debug!(%error, "could not attribute the diff's lines");
+                            turns.clear();
+                            fresh.clear();
+                            break;
+                        }
+                    }
+                }
+                turns.push((turn.start, turn.end));
+            }
+        }
+        ChangesRead {
+            source: self.source,
+            files,
+            turns,
+            fresh,
+            path: self.path,
+        }
+    }
+}
+
+impl ChangesRead {
+    /// Keep what was read of new turns and mark the diff's lines.
+    fn finish(self, service: &mut Service) -> Result<Response, RpcError> {
+        let mut files = self.files.map_err(failed)?;
+        for (start, end, lines) in self.fresh {
+            service.turn_lines.keep(start, end, lines);
+        }
+        if !self.turns.is_empty() {
+            // Everything is cached by now; a read here is only the rare turn
+            // the cache let go of in between.
+            let path = self.path;
+            let read = |start: &str, end: &str| crate::attribution::turn_lines(&path, start, end);
+            match service.turn_lines.added_lines(&self.turns, read) {
+                Ok(by_agent) => crate::attribution::mark(&mut files, &by_agent),
+                Err(error) => tracing::debug!(%error, "could not attribute the diff's lines"),
+            }
+        }
+        Ok(Response::Changes {
+            changes: Changes {
+                source: self.source,
+                files,
+            },
+        })
+    }
+}
+
+/// What a workspace summary needs from the worktree itself: everything that
+/// takes a subprocess or a disk read, so it can be read off the lock.
+struct GitState {
+    status: ginka_protocol::model::BranchStatus,
+    last_commit_at: Option<i64>,
+    indexed: bool,
+}
+
+impl GitState {
+    fn read(worktree: &std::path::Path) -> Self {
+        Self {
+            status: git::branch_status(worktree).unwrap_or_default(),
+            last_commit_at: git::last_commit_time(worktree),
+            indexed: crate::tools::is_indexed(worktree),
         }
     }
 }
@@ -3877,57 +4357,108 @@ fn today() -> String {
 impl Service {
     /// Ask the same question in one worktree per attempt.
     ///
-    /// Each arm goes through the same requests a person would send, so an arm
-    /// gets the project's setup and its own checkpoint exactly as a hand-made
-    /// workspace does. An arm that fails is reported and the rest carry on:
+    /// Each arm goes the way a hand-made workspace does — [`check_out`] off
+    /// the lock, [`Service::adopt_worktree`] and `StartSession` on it — so it
+    /// gets the project's setup and its own checkpoint the same way. An arm that fails is reported and the rest carry on:
     /// two answers are worth having even when the third never started.
     fn fan_out(
         &mut self,
         project: ProjectName,
         prefix: &str,
         base: Option<String>,
-        prompt: &str,
-        attempts: &[ginka_protocol::rpc::Attempt],
-    ) -> Result<Response, RpcError> {
+        prompt: String,
+        attempts: Vec<ginka_protocol::rpc::Attempt>,
+    ) -> Step {
         if attempts.is_empty() {
-            return Err(RpcError::failed("a fan-out needs at least one attempt"));
+            return Step::Done(Err(RpcError::failed(
+                "a fan-out needs at least one attempt",
+            )));
         }
-        let mut started = Vec::new();
-        let mut failed = Vec::new();
-        for (index, attempt) in attempts.iter().enumerate() {
-            let branch = format!("{prefix}-{}", index + 1);
-            let workspace = match self.handle(Request::CreateWorkspace {
-                project: project.clone(),
-                branch: branch.clone(),
-                base: base.clone(),
-            }) {
-                Ok(Response::Workspace { workspace }) => workspace,
-                Ok(other) => {
-                    failed.push(format!("{branch}: unexpected answer {other:?}"));
-                    continue;
-                }
-                Err(error) => {
-                    failed.push(format!("{branch}: {}", error.message));
-                    continue;
-                }
-            };
-            match self.handle(Request::StartSession {
-                workspace: workspace.worktree.workspace_id(),
-                agent: attempt.agent.clone(),
-                prompt: prompt.to_string(),
-                model: attempt.model.clone(),
-                reasoning_effort: None,
-                service_tier: None,
-                account: attempt.account.clone(),
-                access_mode: None,
-                origin: None,
-            }) {
-                Ok(Response::Session { session }) => started.push(session),
-                Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
-                Err(error) => failed.push(format!("{branch}: {}", error.message)),
-            }
+        let project = match self.project(&project) {
+            Ok(project) => project,
+            Err(error) => return Step::Done(Err(error)),
+        };
+        if project.kind == ProjectKind::Plain {
+            return Step::Done(Err(RpcError::failed(format!(
+                "{} is a plain folder and has no worktrees",
+                project.name
+            ))));
         }
-        Ok(Response::FannedOut { started, failed })
+        let base = base.unwrap_or_else(|| project.default_branch.clone());
+        let planned: Vec<(String, std::path::PathBuf, ginka_protocol::rpc::Attempt)> = attempts
+            .into_iter()
+            .enumerate()
+            .map(|(index, attempt)| {
+                let branch = format!("{prefix}-{}", index + 1);
+                let path = self
+                    .paths
+                    .worktrees()
+                    .join(&project.name.0)
+                    .join(slugify(&branch));
+                (branch, path, attempt)
+            })
+            .collect();
+        Step::Away(Box::new(move || {
+            // The checkouts, without the service held; the sessions after,
+            // with it.
+            let checked_out: Vec<_> = planned
+                .into_iter()
+                .map(|(branch, path, attempt)| {
+                    let outcome = check_out(&project.path, &path, &branch, &base);
+                    (branch, outcome, attempt)
+                })
+                .collect();
+            Box::new(move |service: &mut Service| {
+                let mut started = Vec::new();
+                let mut failed = Vec::new();
+                for (branch, outcome, attempt) in checked_out {
+                    let workspace =
+                        match outcome.map_err(|error| error.to_string()).and_then(|path| {
+                            service
+                                .adopt_worktree(&project, &path, &branch)
+                                .map_err(|error| error.message)
+                        }) {
+                            Ok(Response::Workspace { workspace }) => workspace,
+                            Ok(other) => {
+                                failed.push(format!("{branch}: unexpected answer {other:?}"));
+                                continue;
+                            }
+                            Err(error) => {
+                                failed.push(format!("{branch}: {error}"));
+                                continue;
+                            }
+                        };
+                    match service.handle(Request::StartSession {
+                        workspace: workspace.worktree.workspace_id(),
+                        agent: attempt.agent.clone(),
+                        prompt: prompt.clone(),
+                        model: attempt.model.clone(),
+                        reasoning_effort: None,
+                        service_tier: None,
+                        account: attempt.account.clone(),
+                        access_mode: None,
+                        origin: None,
+                    }) {
+                        Ok(Response::Session { session }) => started.push(session),
+                        Ok(other) => failed.push(format!("{branch}: unexpected answer {other:?}")),
+                        Err(error) => failed.push(format!("{branch}: {}", error.message)),
+                    }
+                }
+                Ok(Response::FannedOut { started, failed })
+            })
+        }))
+    }
+
+    /// Stop every agent turn and close every terminal, and say how many
+    /// agents were running.
+    ///
+    /// Agents run in process groups of their own, so nothing else ends them
+    /// when the daemon exits; left behind they keep editing worktrees and
+    /// spending tokens with nobody watching. The daemon calls this on its way
+    /// out.
+    pub fn stop_everything(&mut self) -> usize {
+        self.terminals.close_all();
+        self.sessions.cancel_all()
     }
 
     /// Reconcile every project's worktrees against git.
@@ -3966,29 +4497,43 @@ impl Service {
     /// and a push per workspace per minute would be a push that clients learn
     /// to ignore.
     pub fn poll_statuses(&mut self) {
+        let worktrees = self.status_plan();
+        let read = read_statuses(worktrees);
+        self.take_statuses(read);
+    }
+
+    /// The worktrees whose status the poller reads.
+    fn status_plan(&self) -> Vec<(WorkspaceId, std::path::PathBuf)> {
         let Ok(projects) = self.projects() else {
-            return;
+            return Vec::new();
         };
+        projects
+            .iter()
+            .filter_map(|project| project::list_worktrees(&self.conn(), &project.name).ok())
+            .flatten()
+            .map(|worktree| (worktree.workspace_id(), worktree.path))
+            .collect()
+    }
+
+    /// Keep the statuses read, announcing the ones that changed.
+    fn take_statuses(
+        &mut self,
+        read: Vec<(WorkspaceId, Option<ginka_protocol::model::BranchStatus>)>,
+    ) {
         let mut seen = std::collections::HashSet::new();
-        for project in projects {
-            let Ok(worktrees) = project::list_worktrees(&self.conn(), &project.name) else {
+        for (id, status) in read {
+            seen.insert(id.clone());
+            let Some(status) = status else {
                 continue;
             };
-            for worktree in worktrees {
-                let id = worktree.workspace_id();
-                seen.insert(id.clone());
-                let Ok(status) = git::branch_status(&worktree.path) else {
-                    continue;
-                };
-                if self.statuses.get(&id) == Some(&status) {
-                    continue;
-                }
-                self.statuses.insert(id.clone(), status);
-                self.events.emit(DaemonEvent::WorkspaceStatusChanged {
-                    workspace: id,
-                    status,
-                });
+            if self.statuses.get(&id) == Some(&status) {
+                continue;
             }
+            self.statuses.insert(id.clone(), status);
+            self.events.emit(DaemonEvent::WorkspaceStatusChanged {
+                workspace: id,
+                status,
+            });
         }
         // A workspace that is gone is not worth remembering the status of.
         self.statuses.retain(|id, _| seen.contains(id));

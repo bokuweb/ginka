@@ -150,6 +150,26 @@ impl DaemonLink {
         }
     }
 
+    /// The daemon's settings document, with secrets left out; empty when
+    /// the daemon cannot be reached.
+    pub async fn daemon_settings(&self) -> String {
+        match self.ask(Request::DaemonSettings).await {
+            Some(Response::DaemonSettings { json }) => json,
+            _ => String::new(),
+        }
+    }
+
+    /// Change one daemon setting to a JSON value; the refusal is the
+    /// daemon's own words.
+    pub async fn update_daemon_setting(&self, key: &str, value: String) -> Result<(), String> {
+        self.ask_result(Request::UpdateDaemonSettings {
+            key: key.to_string(),
+            value,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Persist an executable edit using the same provider settings request as CLI and MCP.
     pub async fn update_provider_settings(&self, request: Request) -> Result<(), String> {
         match self.ask_result(request).await? {
@@ -886,6 +906,11 @@ impl DaemonLink {
         .await;
     }
 
+    /// Take one waiting review comment back.
+    pub async fn remove_comment(&self, comment: String) {
+        self.ask(Request::RemoveReviewComment { comment }).await;
+    }
+
     /// The comments waiting in a workspace, in reading order.
     pub async fn comments(&self, workspace: &WorkspaceId) -> Vec<ReviewComment> {
         match self
@@ -1204,6 +1229,20 @@ impl DaemonLink {
         self.ask_result(Request::RunCronJob { id })
             .await
             .map(|_| ())
+    }
+
+    /// A scheduled job's latest firings, newest first.
+    pub async fn cron_runs(&self, id: i64, limit: u32) -> Vec<ginka_protocol::model::CronRun> {
+        match self
+            .ask(Request::CronRuns {
+                id,
+                limit: Some(limit),
+            })
+            .await
+        {
+            Some(Response::CronRuns { runs }) => runs,
+            _ => Vec::new(),
+        }
     }
 
     /// Forget a quick command.
@@ -1582,20 +1621,15 @@ impl DaemonLink {
         .map(|_| ())
     }
 
-    /// A changed image's two sides as `data:` URLs, from the staged or the
-    /// unstaged changes. A side that is not a previewable image is `None`.
+    /// A changed image's two sides as `data:` URLs under `source`. A side
+    /// that is not a previewable image is `None`.
     pub async fn image_diff(
         &self,
         workspace: &WorkspaceId,
         path: &str,
         old_path: Option<String>,
-        staged: bool,
+        source: ginka_protocol::model::ChangeSource,
     ) -> (Option<String>, Option<String>) {
-        let source = if staged {
-            ginka_protocol::model::ChangeSource::Staged
-        } else {
-            ginka_protocol::model::ChangeSource::Unstaged
-        };
         match self
             .ask(Request::ImageDiff {
                 workspace: workspace.clone(),
@@ -1675,6 +1709,23 @@ impl DaemonLink {
         })
         .await
         .map(|_| ())
+    }
+
+    /// The checks of the pull request open from the workspace's branch, or
+    /// why they could not be read (`gh` missing, signed out, no pull request).
+    pub async fn pull_request_checks(
+        &self,
+        workspace: &WorkspaceId,
+    ) -> Result<Vec<ginka_protocol::model::CheckRun>, String> {
+        match self
+            .ask_result(Request::PullRequestChecks {
+                workspace: workspace.clone(),
+            })
+            .await?
+        {
+            Response::Checks { checks } => Ok(checks),
+            other => Err(format!("unexpected answer: {other:?}")),
+        }
     }
 
     /// Hand a refused commit to the workspace's latest conversation.
@@ -1772,6 +1823,50 @@ impl DaemonLink {
         self.ask_result(Request::RenameSession {
             session: session.clone(),
             title,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a project. Its checkout and worktrees stay on disk.
+    pub async fn remove_project(&self, project: &ProjectName) -> Result<(), String> {
+        self.ask_result(Request::RemoveProject {
+            project: project.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Forget a conversation, its transcript and checkpoints, stopping it
+    /// first if it is running.
+    pub async fn remove_session(&self, session: &SessionId) -> Result<(), String> {
+        self.ask_result(Request::RemoveSession {
+            session: session.clone(),
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Delete a workspace's worktree; refused while it has uncommitted work.
+    pub async fn remove_workspace(&self, workspace: &WorkspaceId) -> Result<(), String> {
+        self.ask_result(Request::RemoveWorkspace {
+            workspace: workspace.clone(),
+            force: false,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Write a workspace's status note, or clear it with `None`.
+    pub async fn set_status_note(
+        &self,
+        workspace: &WorkspaceId,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceStatus {
+            workspace: Some(workspace.clone()),
+            path: None,
+            note,
         })
         .await
         .map(|_| ())

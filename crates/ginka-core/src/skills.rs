@@ -19,7 +19,9 @@ use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// The file whose presence makes a directory a skill, and every tool looks for.
 pub const SKILL_FILE: &str = "SKILL.md";
+/// What `SKILL_FILE` is renamed to while the skill is turned off.
 pub const DISABLED_SKILL_FILE: &str = "SKILL.md.disabled";
 
 /// Upper bound on skills collected in one pass. Past this the library is
@@ -37,11 +39,15 @@ pub use ginka_protocol::model::{Skill, SkillInstall, SkillScope};
 pub struct SkillRoot {
     /// How this root is named in the UI — usually the ecosystem it belongs to.
     pub label: String,
+    /// The directory whose immediate subdirectories are skills; a missing one is
+    /// simply empty.
     pub path: PathBuf,
+    /// Whether the root is the user's or a project's, carried onto each install.
     pub scope: SkillScope,
 }
 
 impl SkillRoot {
+    /// A root as given; nothing is read until [`discover`].
     pub fn new(label: impl Into<String>, path: impl Into<PathBuf>, scope: SkillScope) -> Self {
         Self {
             label: label.into(),
@@ -61,10 +67,12 @@ pub fn disabled_path(install: &SkillInstall) -> PathBuf {
     install.directory.join(DISABLED_SKILL_FILE)
 }
 
+/// The skills found across a set of roots, grouped by name.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SkillCatalog {
     /// Sorted by name, so the list does not reshuffle between scans.
     pub skills: Vec<Skill>,
+    /// True when the scan stopped at its cap, so the list is partial.
     pub truncated: bool,
 }
 
@@ -99,10 +107,14 @@ pub fn default_roots(home: Option<&Path>, projects: &[(String, PathBuf)]) -> Vec
     roots
 }
 
+/// Read every root with the default cap. Reads directories and front matter,
+/// so run it off the UI thread; a missing root is empty, an unreadable one is an error.
 pub fn discover(roots: &[SkillRoot]) -> Result<SkillCatalog> {
     discover_with_cap(roots, DEFAULT_SCAN_CAP)
 }
 
+/// [`discover`] with an explicit cap on distinct skill names. An install of a
+/// name already collected never counts against the cap.
 pub fn discover_with_cap(roots: &[SkillRoot], cap: usize) -> Result<SkillCatalog> {
     let mut grouped: BTreeMap<String, Skill> = BTreeMap::new();
     let mut truncated = false;
@@ -385,6 +397,7 @@ fn parse_front_matter(text: &str) -> BTreeMap<String, String> {
 /// One skill that ships in the binary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Bundled {
+    /// Directory name it installs under, and the skill's name.
     pub name: &'static str,
     /// The whole `SKILL.md`.
     pub text: &'static str,

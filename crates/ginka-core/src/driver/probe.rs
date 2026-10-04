@@ -23,6 +23,7 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 /// What a probe learned.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProbeResult {
+    /// Whether the binary could be started at all within the probe timeout.
     pub installed: bool,
     /// `None` when the CLI answered in a shape we could not read — which is
     /// not a reason to call it missing.
@@ -139,6 +140,9 @@ fn is_executable(path: &Path) -> bool {
 // Asking a driver whether it is usable, which is a different question from
 // where its binary is: a CLI can be installed and not signed in.
 
+/// Probe a driver's CLI under the daemon's own environment: its version,
+/// whether it is signed in, and its model list. Runs the CLI several times
+/// and blocks, each run bounded by a timeout.
 pub fn probe_driver(driver: &dyn AgentDriver) -> AgentStatus {
     probe_driver_with_env(driver, &[])
 }

@@ -375,6 +375,7 @@ impl ChatTransport for SlackApi {
 /// What the socket thread reports.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SocketStatus {
+    /// Whether a Socket Mode connection is open right now.
     pub connected: bool,
     /// Unix seconds when the current connection came up.
     pub since: Option<i64>,
@@ -396,6 +397,8 @@ pub struct Envelope {
 
 /// Shared between the socket thread and the runner.
 pub struct SocketMode {
+    /// The latest report. The runner reads it for `ginka slack status`, and
+    /// records sign-in failures in it before the socket is ever opened.
     pub status: Mutex<SocketStatus>,
     /// Set to stop the thread at its next read.
     pub stop: AtomicBool,
@@ -409,6 +412,8 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl SocketMode {
+    /// A socket that is not running yet. `on_change` is called on the socket
+    /// thread after every status change.
     pub fn new(on_change: Box<dyn Fn() + Send + Sync>) -> Self {
         Self {
             status: Mutex::new(SocketStatus::default()),

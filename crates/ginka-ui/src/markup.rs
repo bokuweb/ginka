@@ -75,7 +75,12 @@ pub enum MarkupShape {
     /// Ellipse described by opposing corners.
     Ellipse([Point; 2]),
     /// Text anchored at a point.
-    Text { at: Point, text: String },
+    Text {
+        /// The anchor, the baseline start of the SVG text, in image-local logical pixels.
+        at: Point,
+        /// The words drawn on the image.
+        text: String,
+    },
 }
 
 impl MarkupShape {

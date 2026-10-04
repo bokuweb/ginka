@@ -13,7 +13,9 @@ use std::sync::Mutex;
 /// One event with the position it was published at.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sequenced {
+    /// Monotonic within one daemon run, starting at one.
     pub seq: Seq,
+    /// What was published.
     pub event: DaemonEvent,
 }
 

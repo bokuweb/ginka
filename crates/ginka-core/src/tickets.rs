@@ -17,10 +17,17 @@ const MAX_TITLE: usize = 80;
 
 /// Everything a new ticket is raised with.
 pub struct NewTicket<'a> {
+    /// Where it was raised, and where it runs unless a branch is asked for.
     pub workspace: &'a WorkspaceId,
+    /// The session that raised it, when an agent did; `None` for a person.
     pub from_session: Option<&'a SessionId>,
+    /// The card's heading; blank takes the prompt's first line. Cut to 80
+    /// characters.
     pub title: &'a str,
+    /// One or two sentences for the card: why now, and what it will do. Trimmed.
     pub summary: &'a str,
+    /// What the new session is told, self-contained. Must not be blank:
+    /// [`raise`] refuses it.
     pub prompt: &'a str,
 }
 

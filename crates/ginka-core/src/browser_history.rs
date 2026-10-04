@@ -14,8 +14,12 @@ use rusqlite::Connection;
 /// One page the address bar can offer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Visited {
+    /// The page's URL with credentials, fragment and secret-looking query
+    /// parameters already stripped.
     pub url: String,
+    /// The last non-blank title the page reported; `None` if it never gave one.
     pub title: Option<String>,
+    /// How many times the page was visited in this workspace; feeds frecency.
     pub visits: u32,
     /// Unix seconds.
     pub last_visited_at: i64,

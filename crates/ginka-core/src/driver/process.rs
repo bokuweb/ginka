@@ -88,6 +88,7 @@ impl AgentProcess {
         self.session_id.lock().ok().and_then(|id| id.clone())
     }
 
+    /// True until the reader thread has seen stdout close and reaped the child.
     pub fn is_running(&self) -> bool {
         !self.finished.load(Ordering::Acquire)
     }

@@ -17,7 +17,10 @@ pub enum Delivery {
     Duplicate,
     /// Something was missed. The client must re-read rather than render a
     /// transcript with a hole in it.
-    Gap { expected: Seq },
+    Gap {
+        /// The sequence number that should have come next.
+        expected: Seq,
+    },
     /// A different daemon run. Everything the client knows is from a stream
     /// that no longer exists.
     Resync,
@@ -31,10 +34,13 @@ pub struct EventCursor {
 }
 
 impl EventCursor {
+    /// The last sequence number delivered; zero before the first event or
+    /// after a resync.
     pub fn last_seq(&self) -> Seq {
         self.last_seq
     }
 
+    /// The daemon run the cursor follows; `None` until the first event.
     pub fn epoch(&self) -> Option<u64> {
         self.epoch
     }

@@ -1125,6 +1125,9 @@ cli.changes.total:
 cli.committed:
   en: "committed %{commit}"
   ja: "%{commit} をコミットしました"
+cli.amended:
+  en: "amended the last commit, now %{commit}"
+  ja: "直前のコミットを修正しました（%{commit}）"
 cli.cron.off:
   en: "off"
   ja: "停止中"
@@ -1173,6 +1176,12 @@ settings.cron.resume:
 settings.cron.run:
   en: "Run now"
   ja: "今すぐ実行"
+settings.cron.history:
+  en: History
+  ja: 履歴
+settings.cron.no_runs:
+  en: It has not run yet.
+  ja: まだ実行されていません。
 settings.cron.edit:
   en: "Edit"
   ja: "編集"
@@ -1539,6 +1548,30 @@ sidebar.action.move_down:
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
+sidebar.action.note:
+  en: Status note…
+  ja: ステータスメモ…
+sidebar.note.placeholder:
+  en: Where this stands — empty clears it
+  ja: いまの状況（空にすると消えます）
+sidebar.action.remove_project:
+  en: Remove from Ginka
+  ja: Ginka から外す
+sidebar.action.remove_project.confirm:
+  en: Remove — the folder stays on disk
+  ja: 外す（フォルダはディスクに残ります）
+sidebar.action.forget:
+  en: Delete conversation
+  ja: 会話を削除
+sidebar.action.forget.confirm:
+  en: Delete it and its checkpoints?
+  ja: 会話とチェックポイントを削除？
+sidebar.action.delete:
+  en: Delete
+  ja: 削除
+sidebar.action.delete.confirm:
+  en: Delete the worktree?
+  ja: ワークツリーを削除？
 sidebar.action.pin:
   en: Pin
   ja: ピン留め
@@ -1866,3 +1899,141 @@ settings.updates.available:
 settings.updates.none:
   en: Every agent is up to date.
   ja: すべてのエージェントは最新です。
+palette.board:
+  en: "Open the agents board"
+  ja: "エージェントボードを開く"
+cli.commit.handed_over:
+  en: "the commit was refused; conversation %{session} has been asked to fix it"
+  ja: "コミットが拒否されたので、会話 %{session} に修正を依頼しました"
+checks.count.failed:
+  en: "%{n} failed"
+  ja: "失敗 %{n}"
+checks.count.cancelled:
+  en: "%{n} cancelled"
+  ja: "中止 %{n}"
+checks.count.running:
+  en: "%{n} running"
+  ja: "実行中 %{n}"
+checks.count.passed:
+  en: "%{n} passed"
+  ja: "成功 %{n}"
+checks.state.failed:
+  en: failed
+  ja: 失敗
+checks.state.cancelled:
+  en: cancelled
+  ja: 中止
+checks.state.running:
+  en: running
+  ja: 実行中
+checks.state.passed:
+  en: passed
+  ja: 成功
+checks.state.skipped:
+  en: skipped
+  ja: スキップ
+surface.git.comment_remove:
+  en: Take this comment back
+  ja: このコメントを取り消す
+settings.daemon:
+  en: Daemon
+  ja: デーモン
+settings.daemon.keep_awake:
+  en: Keep the Mac awake while an agent works
+  ja: エージェントの作業中は Mac をスリープさせない
+settings.daemon.keep_awake.help:
+  en: Lets the machine sleep again once the agent has finished. macOS only.
+  ja: エージェントが終わると再びスリープできます。macOS のみ。
+settings.daemon.resume_after_limit:
+  en: Resume after a usage limit resets
+  ja: 利用上限がリセットされたら再開する
+settings.daemon.resume_after_limit.help:
+  en: Holds the queue when a turn hits a limit with a known reset time, and lets it go then.
+  ja: リセット時刻が分かる上限に当たったらキューを止め、リセット時に再開します。
+settings.daemon.fetch_rates:
+  en: Fetch the public rate table
+  ja: 公開料金表を取得する
+settings.daemon.fetch_rates.help:
+  en: At most daily, to price turns a vendor does not. Off, costs are only what vendors report.
+  ja: ベンダーが料金を返さないターンの見積もりに、最大1日1回取得します。オフならベンダー報告分のみ。
+settings.daemon.scan_vendor_logs:
+  en: Count agents run outside Ginka
+  ja: Ginka 外で動いたエージェントも集計する
+settings.daemon.scan_vendor_logs.help:
+  en: Reads Claude Code's and Codex's own session logs, read only, so Reports covers the whole plan.
+  ja: Claude Code と Codex のセッションログを読み取り専用で読み、レポートにプラン全体を反映します。
+surface.git.checks:
+  en: Checks
+  ja: チェック
+surface.git.checks_tooltip:
+  en: List the pull request's checks, failures first; a check with a log opens it
+  ja: プルリクエストのチェックを失敗から順に一覧します。ログがあるチェックはクリックで開きます
+surface.git.checks.loading:
+  en: Reading the checks…
+  ja: チェックを読み込み中…
+surface.git.checks.none:
+  en: This pull request has no checks.
+  ja: このプルリクエストにはチェックがありません。
+surface.name.terminal:
+  en: Terminal
+  ja: ターミナル
+surface.name.git:
+  en: Git
+  ja: Git
+surface.name.files:
+  en: Files
+  ja: ファイル
+surface.name.browser:
+  en: Browser
+  ja: ブラウザ
+surface.name.reports:
+  en: Reports
+  ja: レポート
+surface.name.skills:
+  en: Skills
+  ja: スキル
+palette.row.rename:
+  en: Rename this conversation
+  ja: この会話の名前を変更
+palette.row.note:
+  en: Write this workspace's status note
+  ja: このワークスペースのステータスメモを書く
+palette.row.pin:
+  en: Pin this workspace
+  ja: このワークスペースをピン留め
+palette.row.unpin:
+  en: Unpin this workspace
+  ja: このワークスペースのピン留めを外す
+palette.row.archive:
+  en: Archive this workspace
+  ja: このワークスペースをアーカイブ
+palette.row.resolve:
+  en: Resolve this workspace's conflicts with the agent
+  ja: このワークスペースのコンフリクトをエージェントで解決
+palette.project.rename:
+  en: Rename this project
+  ja: このプロジェクトの名前を変更
+palette.project.move_up:
+  en: Move this project up
+  ja: このプロジェクトを上へ
+palette.project.move_down:
+  en: Move this project down
+  ja: このプロジェクトを下へ
+palette.project.mute:
+  en: "Mute this project: %{how_long}"
+  ja: "このプロジェクトをミュート: %{how_long}"
+palette.project.unmute:
+  en: Unmute this project
+  ja: このプロジェクトのミュートを解除
+cli.doctor.found:
+  en: found (version not readable)
+  ja: あり（バージョン不明）
+cli.doctor.git_missing:
+  en: "not found — worktrees, diffs and commits need it"
+  ja: "見つかりません — ワークツリー・差分・コミットに必要です"
+cli.doctor.gh_missing:
+  en: "not found — pull requests and their checks need it"
+  ja: "見つかりません — プルリクエストとチェックに必要です"
+cli.doctor.agent_missing:
+  en: not installed
+  ja: 未インストール

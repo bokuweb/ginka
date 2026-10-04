@@ -19,7 +19,9 @@ pub const MAX_BODY_CHARS: usize = 6_000;
 /// What `gh pr create` is given.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PullRequestDetails {
+    /// One line, at most [`MAX_TITLE_CHARS`].
     pub title: String,
+    /// Markdown, at most [`MAX_BODY_CHARS`].
     pub body: String,
 }
 

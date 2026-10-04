@@ -2636,3 +2636,459 @@ fn a_branch_diff_reads_everything_since_it_left_its_base() {
         );
     }
 }
+
+/// A git hook that says it started, then holds git until the test lets it
+/// go: a slow remote or a slow lint, without either. Returns the "started"
+/// and "release" files.
+fn held_hook(fixture: &Fixture, hook: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    let started = fixture.work.path().join(format!("{hook}.started"));
+    let release = fixture.work.path().join(format!("{hook}.release"));
+    let hooks = fixture.work.path().join("hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let path = hooks.join(hook);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    support::git(
+        &fixture.repo(),
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    (started, release)
+}
+
+/// Run `request` through the shared service on another thread while its
+/// hook holds it, and say whether another request was answered meanwhile.
+fn served_while_held(
+    service: Service,
+    request: Request,
+    (started, release): (std::path::PathBuf, std::path::PathBuf),
+) -> (bool, Result<Response, ginka_protocol::RpcError>) {
+    let service = Arc::new(Mutex::new(service));
+    let running = {
+        let service = service.clone();
+        std::thread::spawn(move || ginka_core::service::handle_shared(&service, request))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "the hook never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            served = matches!(
+                service.handle(Request::ListProjects),
+                Ok(Response::Projects { .. })
+            );
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    (served, running.join().unwrap())
+}
+
+#[test]
+fn a_push_leaves_the_service_free_for_other_requests_while_it_waits_on_the_remote() {
+    // The daemon serves every client through one `Service`. A push, a pull
+    // or a `gh` call can wait on the network for as long as the network
+    // likes; holding the service through that would freeze every window.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let remote = fixture.work.path().join("remote.git");
+    support::git(fixture.work.path(), &["init", "--bare", "-q", "remote.git"]);
+    support::git(
+        &fixture.repo(),
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-push".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let hook = held_hook(&fixture, "pre-push");
+
+    let (served, pushed) = served_while_held(
+        fixture.service,
+        Request::Push {
+            workspace,
+            force_with_lease: false,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the push waited");
+    assert!(matches!(pushed, Ok(Response::Ack)), "{pushed:?}");
+    assert!(
+        support::git(&remote, &["branch", "--list", "slow-push"]).contains("slow-push"),
+        "the push reached the remote"
+    );
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}
+
+#[test]
+fn a_commit_leaves_the_service_free_while_its_hooks_run() {
+    // A pre-commit hook is the project's code: a lint that takes a minute,
+    // or one that itself asks `ginka` something — which, with the service
+    // held, would wait on the request it is part of forever.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-hook".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("new.txt"), "new\n").unwrap();
+    let hook = held_hook(&fixture, "pre-commit");
+
+    let (served, committed) = served_while_held(
+        fixture.service,
+        Request::Commit {
+            workspace: workspace.id(),
+            message: "add new".into(),
+            all: true,
+            amend: false,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(
+        matches!(committed, Ok(Response::Committed { .. })),
+        "{committed:?}"
+    );
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}
+
+#[test]
+fn a_merge_leaves_the_service_free_while_its_hooks_run() {
+    // Merging commits uncommitted work first and then merges in the
+    // project's checkout: both run the project's hooks.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-merge".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("merged.txt"), "merged\n").unwrap();
+    let hook = held_hook(&fixture, "pre-commit");
+    let checkout = fixture.repo();
+
+    let (served, merged) = served_while_held(
+        fixture.service,
+        Request::MergeWorkspace {
+            workspace: workspace.id(),
+            into: None,
+            message: Some("add merged".into()),
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(matches!(merged, Ok(Response::Merged { .. })), "{merged:?}");
+    assert!(checkout.join("merged.txt").is_file());
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}
+
+#[test]
+fn listing_workspaces_leaves_the_service_free_while_git_reads_them() {
+    // Every window lists workspaces on its polling interval, and each one is
+    // a `git status`; on a large repository that is long enough to hold up
+    // every other request. A filesystem monitor that waits stands in for a
+    // slow status.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-status".into(),
+        base: None,
+    });
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let (served, listed) = served_while_held(
+        fixture.service,
+        Request::ListWorkspaces {
+            project: Some(project),
+        },
+        (started, release),
+    );
+
+    assert!(
+        served,
+        "the service stayed locked while git read the worktrees"
+    );
+    match listed {
+        Ok(Response::Workspaces { workspaces }) => {
+            assert!(
+                workspaces
+                    .iter()
+                    .any(|workspace| workspace.worktree.branch == "slow-status")
+            )
+        }
+        other => panic!("expected workspaces, got {other:?}"),
+    }
+}
+
+#[test]
+fn reading_a_diff_leaves_the_service_free_while_git_works() {
+    // The Git surface reads the worktree's diff on its polling interval,
+    // twice (staged and unstaged), from every window that shows it.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-diff".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    std::fs::write(workspace.worktree.path.join("README.md"), "changed\n").unwrap();
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let (served, read) = served_while_held(
+        fixture.service,
+        Request::WorkspaceChanges {
+            workspace: workspace.id(),
+            source: ChangeSource::Unstaged,
+            context_lines: None,
+        },
+        (started, release),
+    );
+
+    assert!(served, "the service stayed locked while git read the diff");
+    match read {
+        Ok(Response::Changes { changes }) => {
+            assert!(changes.files.iter().any(|file| file.path == "README.md"))
+        }
+        other => panic!("expected changes, got {other:?}"),
+    }
+}
+
+#[test]
+fn creating_a_workspace_leaves_the_service_free_while_git_checks_it_out() {
+    // A checkout of a large repository, its post-checkout hook and the
+    // files `.worktreeinclude` copies all take as long as they take.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let hook = held_hook(&fixture, "post-checkout");
+
+    let (served, created) = served_while_held(
+        fixture.service,
+        Request::CreateWorkspace {
+            project: project.clone(),
+            branch: "slow-checkout".into(),
+            base: None,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while git checked out");
+    match created {
+        Ok(Response::Workspace { workspace }) => {
+            assert_eq!(workspace.worktree.branch, "slow-checkout");
+            assert!(workspace.worktree.path.join("README.md").is_file());
+        }
+        other => panic!("expected a workspace, got {other:?}"),
+    }
+    assert!(
+        fixture
+            .recorder
+            .taken()
+            .contains(&DaemonEvent::WorkspacesChanged { project })
+    );
+}
+
+#[test]
+fn polling_statuses_leaves_the_service_free_while_git_reads_them() {
+    // The daemon's own tick reads every worktree's status; requests must
+    // not wait for it.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "slow-poll".into(),
+        base: None,
+    });
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+    let recorder = fixture.recorder.clone();
+    recorder.taken();
+
+    let service = Arc::new(Mutex::new(fixture.service));
+    let polling = {
+        let service = service.clone();
+        std::thread::spawn(move || ginka_core::service::poll_statuses_shared(&service))
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "git never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = false;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            served = service.handle(Request::ListProjects).is_ok();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    polling.join().unwrap();
+
+    assert!(
+        served,
+        "the service stayed locked while the poller read git"
+    );
+    assert!(
+        recorder
+            .taken()
+            .iter()
+            .any(|event| matches!(event, DaemonEvent::WorkspaceStatusChanged { .. })),
+        "what the poller read is still announced"
+    );
+}
+
+#[test]
+fn switching_branches_leaves_the_service_free_while_the_hook_runs() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "slow-switch".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let hook = held_hook(&fixture, "post-checkout");
+
+    let (served, switched) = served_while_held(
+        fixture.service,
+        Request::CheckoutBranch {
+            workspace,
+            branch: "elsewhere".into(),
+            create: true,
+        },
+        hook,
+    );
+
+    assert!(served, "the service stayed locked while the hook ran");
+    assert!(matches!(switched, Ok(Response::Ack)), "{switched:?}");
+}
+
+#[test]
+fn removing_a_worktree_leaves_the_service_free_and_the_workspace_closed_meanwhile() {
+    // Deleting a large worktree takes as long as the disk does. Other
+    // requests are answered meanwhile, and the workspace being removed is
+    // refused rather than handed to an agent halfway through its deletion.
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project: project.clone(),
+        branch: "slow-removal".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let (started, release) = held_hook(&fixture, "fsmonitor");
+    support::git(&fixture.repo(), &["config", "--unset", "core.hooksPath"]);
+    let monitor = fixture.work.path().join("hooks").join("fsmonitor");
+    support::git(
+        &fixture.repo(),
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let service = Arc::new(Mutex::new(fixture.service));
+    let removing = {
+        let service = service.clone();
+        let workspace = workspace.id();
+        std::thread::spawn(move || {
+            ginka_core::service::handle_shared(
+                &service,
+                Request::RemoveWorkspace {
+                    workspace,
+                    force: false,
+                },
+            )
+        })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !started.exists() {
+        assert!(std::time::Instant::now() < deadline, "git never ran");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut served = None;
+    while std::time::Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            let other = service.handle(Request::ListProjects).is_ok();
+            let same = service.handle(Request::WorkspaceHistory {
+                workspace: workspace.id(),
+                limit: None,
+            });
+            served = Some((other, same));
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    let removed = removing.join().unwrap();
+
+    let (other, same) = served.expect("the service stayed locked while git removed the worktree");
+    assert!(other);
+    let error = same.expect_err("a workspace being removed is not worked on");
+    assert!(error.message.contains("being removed"), "{}", error.message);
+    assert!(matches!(removed, Ok(Response::Ack)), "{removed:?}");
+    assert!(!workspace.worktree.path.exists());
+}

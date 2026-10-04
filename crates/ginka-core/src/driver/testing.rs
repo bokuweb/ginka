@@ -10,6 +10,9 @@ use ginka_protocol::provider::{OptionOutcome, SessionOptions};
 
 use super::AgentSession;
 
+/// An [`AgentSession`] that records what it was asked and refuses or accepts
+/// steering and option changes as configured. Starts refusing steers and
+/// requiring a restart for option changes.
 #[derive(Debug, Default, Clone)]
 pub struct ScriptedSession {
     supports_steer: bool,
@@ -21,16 +24,19 @@ pub struct ScriptedSession {
 }
 
 impl ScriptedSession {
+    /// A session that refuses steers and needs a restart for any option change.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Set whether [`AgentSession::steer`] is accepted.
     #[must_use]
     pub fn steering(mut self, supported: bool) -> Self {
         self.supports_steer = supported;
         self
     }
 
+    /// Set whether option changes are absorbed live or need a restart.
     #[must_use]
     pub fn absorbs_options(mut self, absorbs: bool) -> Self {
         self.absorbs_options = absorbs;
@@ -44,14 +50,17 @@ impl ScriptedSession {
         self
     }
 
+    /// Messages accepted by `steer`, in order.
     pub fn steered(&self) -> &[String] {
         &self.steered
     }
 
+    /// Every option set passed to `apply_options` that did not fail, in order.
     pub fn applied(&self) -> Vec<SessionOptions> {
         self.applied.clone()
     }
 
+    /// How many times `cancel` was called.
     pub fn cancels(&self) -> usize {
         self.cancels
     }

@@ -24,6 +24,7 @@ use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::dock::{
     BasePanel, DockArea, DockEvent, DockLayout, Panel, PanelControl, PanelEvent, panel_handle,
@@ -137,12 +138,17 @@ pub struct SurfacePanel {
     /// The workspace's branch has an open pull request, so its checks can
     /// be handed to the agent.
     open_pull_request: bool,
+    /// The pull request's checks are listed under the remote actions.
+    checks_open: bool,
+    /// Its checks, failures first, or why they could not be read; `None`
+    /// while they are being read.
+    checks: Option<Result<Vec<ginka_protocol::model::CheckRun>, SharedString>>,
     /// The file being opened was picked with a single click, so it goes in
     /// the preview tab.
     preview_next: bool,
-    /// Changed images read for a side-by-side look, by staged-ness and
+    /// Changed images read for a side-by-side look, by change source and
     /// path: the image before and after (Orca's image diff).
-    image_diffs: HashMap<(bool, String), (Option<String>, Option<String>)>,
+    image_diffs: HashMap<(String, String), (Option<String>, Option<String>)>,
     /// The file whose diff is expanded. A review starts as a list of files:
     /// twelve diffs at once is not a review, it is a wall.
     expanded: Option<String>,
@@ -306,12 +312,15 @@ pub enum SurfaceEvent {
     FixCommit { message: String, output: String },
     /// Hand the failing checks of the branch's pull request to the agent.
     FixChecks,
-    /// Read a changed image's two sides, from the staged or the unstaged
-    /// changes.
+    /// Read the checks of the branch's pull request; they come back
+    /// through [`Surfaces::set_checks`].
+    LoadChecks,
+    /// Read a changed image's two sides under the change source it is
+    /// shown in: staged, unstaged, a commit or a turn.
     LoadImageDiff {
         path: String,
         old_path: Option<String>,
-        staged: bool,
+        source: ginka_protocol::model::ChangeSource,
     },
     /// Refresh recent commits after the reader expands history.
     RefreshHistory,
@@ -335,6 +344,8 @@ pub enum SurfaceEvent {
     },
     /// Send every waiting comment back to the agent.
     SendReview,
+    /// Take a waiting review comment back before it is sent.
+    RemoveComment { id: String },
     /// Look for files whose path matches this.
     FindFiles(String),
     /// Read a file and show it.
@@ -513,6 +524,8 @@ impl SurfacePanel {
             lease_push: None,
             commit_refused: false,
             open_pull_request: false,
+            checks_open: false,
+            checks: None,
             preview_next: false,
             image_diffs: HashMap::new(),
             expanded: None,
@@ -834,6 +847,9 @@ impl SurfacePanel {
         let mode = *mode;
         self.opening = None;
         let Some(file) = file else {
+            // A failed read opens nothing, so the preview it was for is not
+            // left waiting to catch the next, unrelated open.
+            self.preview_next = false;
             self.definition = None;
             cx.notify();
             return;
@@ -1206,19 +1222,132 @@ impl SurfacePanel {
     /// A changed image's two sides arrived, as `data:` URLs.
     pub fn set_image_diff(
         &mut self,
-        staged: bool,
+        source: &ginka_protocol::model::ChangeSource,
         path: String,
         before: Option<String>,
         after: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.image_diffs.insert((staged, path), (before, after));
+        self.image_diffs
+            .insert((image_source_key(source), path), (before, after));
         cx.notify();
+    }
+
+    /// A binary file's expanded row: its images side by side once read,
+    /// and until then the word "binary" and a way to read them (Orca's image
+    /// diff). `source` is the change the row is shown under.
+    fn image_diff_view(
+        &self,
+        file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let tokens = Tokens::global(cx).clone();
+        let key = (image_source_key(source), file.path.clone());
+        match self.image_diffs.get(&key).cloned() {
+            Some((before, after)) => h_flex()
+                .w_full()
+                .px_3()
+                .py_2()
+                .gap_3()
+                .children(
+                    [
+                        (
+                            rust_i18n::t!("surface.git.image_before").to_string(),
+                            before,
+                        ),
+                        (rust_i18n::t!("surface.git.image_after").to_string(), after),
+                    ]
+                    .into_iter()
+                    .map(|(label, url)| {
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(label),
+                            )
+                            .child(match url {
+                                Some(url) => div()
+                                    .h(px(180.))
+                                    .rounded(px(tokens.radius.row))
+                                    .bg(tokens.colors().bg_surface)
+                                    .child(
+                                        img(SharedString::from(url))
+                                            .size_full()
+                                            .object_fit(ObjectFit::Contain),
+                                    )
+                                    .into_any_element(),
+                                None => div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("surface.git.image_missing").to_string())
+                                    .into_any_element(),
+                            })
+                    }),
+                )
+                .into_any_element(),
+            None => {
+                let (path, old_path, source) =
+                    (file.path.clone(), file.old_path.clone(), source.clone());
+                h_flex()
+                    .px_3()
+                    .py_2()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(rust_i18n::t!("surface.git.binary").to_string()),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!(
+                            "show-images:{}:{}",
+                            key.0, file.path
+                        )))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .label(rust_i18n::t!("surface.git.show_images").to_string())
+                        .on_click(cx.listener(move |_, _, _, cx| {
+                            cx.emit(SurfaceEvent::LoadImageDiff {
+                                path: path.clone(),
+                                old_path: old_path.clone(),
+                                source: source.clone(),
+                            })
+                        })),
+                    )
+                    .into_any_element()
+            }
+        }
     }
 
     /// Whether the workspace's branch has an open pull request.
     pub fn set_open_pull_request(&mut self, open: bool) {
         self.open_pull_request = open;
+    }
+
+    /// The checks read for `workspace`'s pull request, or why they could
+    /// not be. Dropped when the reader has moved to another workspace since.
+    pub fn set_checks(
+        &mut self,
+        workspace: &WorkspaceId,
+        checks: Result<Vec<ginka_protocol::model::CheckRun>, String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.browser_workspace.as_ref() != Some(workspace) {
+            return;
+        }
+        self.checks = Some(
+            checks
+                .map(|checks| ginka_ui::checks::ordered(&checks))
+                .map_err(SharedString::from),
+        );
+        cx.notify();
     }
 
     /// Say how a push went: a refused plain push offers the lease push,
@@ -1503,6 +1632,9 @@ impl SurfacePanel {
         if self.browser_workspace.as_ref() == Some(&workspace) {
             return;
         }
+        // Another workspace, another pull request.
+        self.checks_open = false;
+        self.checks = None;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let _ = window;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -1732,7 +1864,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_primary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .on_click(cx.listener(move |this, _, _, cx| this.show(surface, cx)))
     }
@@ -1809,6 +1941,7 @@ impl SurfacePanel {
                 .flex_1()
                 .child(self.git_remote_actions(cx))
                 .children(self.pull_request_line(cx))
+                .children(self.git_checks(cx))
                 .when(self.history_open, |this| this.child(self.git_history(cx)))
                 .when(self.turns_open, |this| this.child(self.git_turns(cx)))
                 .child(self.diff_filter_input(cx))
@@ -1844,6 +1977,7 @@ impl SurfacePanel {
             .overflow_y_scroll()
             .child(self.git_remote_actions(cx))
             .children(self.pull_request_line(cx))
+            .children(self.git_checks(cx))
             .when(self.history_open, |this| this.child(self.git_history(cx)))
             .when(self.turns_open, |this| this.child(self.git_turns(cx)))
             .child(self.diff_filter_input(cx))
@@ -2028,6 +2162,7 @@ impl SurfacePanel {
         let tokens = Tokens::global(cx).clone();
         let history_open = self.history_open;
         let turns_open = self.turns_open;
+        let checks_open = self.checks_open;
         h_flex()
             .w_full()
             .px_3()
@@ -2117,6 +2252,23 @@ impl SurfacePanel {
                         .tooltip(rust_i18n::t!("surface.git.fix_checks_tooltip").to_string())
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(SurfaceEvent::FixChecks))),
                 )
+                .child(
+                    Button::new("git-checks")
+                        .ghost()
+                        .compact()
+                        .small()
+                        .selected(checks_open)
+                        .label(rust_i18n::t!("surface.git.checks").to_string())
+                        .tooltip(rust_i18n::t!("surface.git.checks_tooltip").to_string())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.checks_open = !checks_open;
+                            if this.checks_open {
+                                this.checks = None;
+                                cx.emit(SurfaceEvent::LoadChecks);
+                            }
+                            cx.notify();
+                        })),
+                )
             })
             .child(
                 Button::new("git-create-pr-written")
@@ -2160,6 +2312,80 @@ impl SurfacePanel {
                         cx.notify();
                     })),
             )
+    }
+
+    /// The pull request's checks, failures first, under a line that sums
+    /// them up; a check with a log opens it.
+    fn git_checks(&self, cx: &App) -> Option<impl IntoElement + use<>> {
+        if !(self.checks_open && self.open_pull_request) {
+            return None;
+        }
+        let tokens = Tokens::global(cx);
+        let body = v_flex()
+            .id("git-checks-list")
+            .w_full()
+            .px_3()
+            .py_1()
+            .gap_0p5()
+            .text_xs()
+            .border_b_1()
+            .border_color(tokens.colors().border_subtle);
+        Some(match &self.checks {
+            None => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.loading").to_string()),
+            Some(Err(error)) => body
+                .text_color(tokens.colors().status_error)
+                .child(error.clone()),
+            Some(Ok(checks)) if checks.is_empty() => body
+                .text_color(tokens.colors().text_muted)
+                .child(rust_i18n::t!("surface.git.checks.none").to_string()),
+            Some(Ok(checks)) => body
+                .children(ginka_ui::checks::summary(checks).map(|summary| {
+                    div()
+                        .text_color(tokens.colors().text_secondary)
+                        .child(summary)
+                }))
+                .children(checks.iter().enumerate().map(|(index, check)| {
+                    let failed = matches!(
+                        check.state,
+                        ginka_protocol::model::CheckState::Failed
+                            | ginka_protocol::model::CheckState::Cancelled
+                    );
+                    let link = check.link.clone();
+                    h_flex()
+                        .id(("git-check", index))
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            div()
+                                .w(px(84.))
+                                .flex_shrink_0()
+                                .text_color(if failed {
+                                    tokens.colors().status_error
+                                } else {
+                                    tokens.colors().text_muted
+                                })
+                                .child(ginka_ui::checks::label(check.state)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(if link.is_some() {
+                                    tokens.colors().accent
+                                } else {
+                                    tokens.colors().text_secondary
+                                })
+                                .child(ginka_ui::checks::title(check)),
+                        )
+                        .when_some(link, |row, url| {
+                            row.cursor_pointer()
+                                .on_click(move |_, _, cx| cx.open_url(&url))
+                        })
+                })),
+        })
     }
 
     /// Where the last pull request is, or why it could not be opened: a link
@@ -2497,7 +2723,10 @@ impl SurfacePanel {
                         .files
                         .iter()
                         .filter(|file| self.diff_filter.matches(file))
-                        .map(|file| self.file_row_read_only(file, cx).into_any_element()),
+                        .map(|file| {
+                            self.file_row_read_only(file, &changes.source, cx)
+                                .into_any_element()
+                        }),
                 );
                 rows
             }
@@ -2646,8 +2875,10 @@ impl SurfacePanel {
             .iter()
             .filter(|comment| comment.path == path && comment.line == line)
             .map(|comment| {
-                div()
+                let id = comment.id.clone();
+                h_flex()
                     .w_full()
+                    .gap_2()
                     .px_3()
                     .py_1()
                     .ml_8()
@@ -2656,14 +2887,32 @@ impl SurfacePanel {
                     .bg(tokens.colors().row_hover())
                     .text_xs()
                     .text_color(tokens.colors().text_primary)
-                    .child(match (comment.line, comment.end_line) {
-                        (Some(start), Some(end)) => format!(
-                            "{} · {}",
-                            ginka_ui::comment_range::label(start, Some(end)),
-                            comment.text
-                        ),
-                        _ => comment.text.clone(),
-                    })
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(match (comment.line, comment.end_line) {
+                                (Some(start), Some(end)) => format!(
+                                    "{} · {}",
+                                    ginka_ui::comment_range::label(start, Some(end)),
+                                    comment.text
+                                ),
+                                _ => comment.text.clone(),
+                            }),
+                    )
+                    .child(
+                        // Taken back before it is sent: a comment that turned
+                        // out wrong should not reach the agent.
+                        Button::new(SharedString::from(format!("remove-comment:{}", comment.id)))
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .icon(IconName::Close)
+                            .tooltip(rust_i18n::t!("surface.git.comment_remove").to_string())
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(SurfaceEvent::RemoveComment { id: id.clone() })
+                            })),
+                    )
                     .into_any_element()
             })
             .collect();
@@ -3056,8 +3305,11 @@ impl SurfacePanel {
     fn file_row_read_only(
         &self,
         file: &ginka_protocol::model::FileChange,
+        source: &ginka_protocol::model::ChangeSource,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
+        let image_view = (file.binary && self.expanded.as_deref() == Some(file.path.as_str()))
+            .then(|| self.image_diff_view(file, source, cx));
         let tokens = Tokens::global(cx).clone();
         let expanded = self.expanded.as_deref() == Some(file.path.as_str());
         let path = file.path.clone();
@@ -3116,6 +3368,7 @@ impl SurfacePanel {
                             .child(format!("-{}", file.removed)),
                     ),
             )
+            .children(image_view)
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
                     v_flex()
@@ -3237,86 +3490,12 @@ impl SurfacePanel {
                     .children(self.file_actions(file, staged, cx)),
             )
             .when(expanded && file.binary, |this| {
-                match self.image_diffs.get(&(staged, file.path.clone())).cloned() {
-                    // Orca's image diff: as it was beside as it is.
-                    Some((before, after)) => this.child(
-                        h_flex().w_full().px_3().py_2().gap_3().children(
-                            [
-                                (
-                                    rust_i18n::t!("surface.git.image_before").to_string(),
-                                    before,
-                                ),
-                                (rust_i18n::t!("surface.git.image_after").to_string(), after),
-                            ]
-                            .into_iter()
-                            .map(|(label, url)| {
-                                v_flex()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .gap_1()
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(tokens.colors().text_muted)
-                                            .child(label),
-                                    )
-                                    .child(match url {
-                                        Some(url) => div()
-                                            .h(px(180.))
-                                            .rounded(px(tokens.radius.row))
-                                            .bg(tokens.colors().bg_surface)
-                                            .child(
-                                                img(SharedString::from(url))
-                                                    .size_full()
-                                                    .object_fit(ObjectFit::Contain),
-                                            )
-                                            .into_any_element(),
-                                        None => div()
-                                            .text_xs()
-                                            .text_color(tokens.colors().text_muted)
-                                            .child(
-                                                rust_i18n::t!("surface.git.image_missing")
-                                                    .to_string(),
-                                            )
-                                            .into_any_element(),
-                                    })
-                            }),
-                        ),
-                    ),
-                    None => {
-                        let (path, old_path) = (file.path.clone(), file.old_path.clone());
-                        this.child(
-                            h_flex()
-                                .px_3()
-                                .py_2()
-                                .gap_2()
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(tokens.colors().text_muted)
-                                        .child(rust_i18n::t!("surface.git.binary").to_string()),
-                                )
-                                .child(
-                                    Button::new(SharedString::from(format!(
-                                        "show-images:{staged}:{}",
-                                        file.path
-                                    )))
-                                    .ghost()
-                                    .compact()
-                                    .small()
-                                    .label(rust_i18n::t!("surface.git.show_images").to_string())
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.emit(SurfaceEvent::LoadImageDiff {
-                                            path: path.clone(),
-                                            old_path: old_path.clone(),
-                                            staged,
-                                        })
-                                    })),
-                                ),
-                        )
-                    }
-                }
+                let source = if staged {
+                    ginka_protocol::model::ChangeSource::Staged
+                } else {
+                    ginka_protocol::model::ChangeSource::Unstaged
+                };
+                this.child(self.image_diff_view(file, &source, cx))
             })
             .when(expanded && !file.binary, |this| {
                 this.children(file.hunks.iter().map(|hunk| {
@@ -3524,7 +3703,7 @@ impl SurfacePanel {
                 div()
                     .text_sm()
                     .text_color(tokens.colors().text_secondary)
-                    .child(surface.label()),
+                    .child(surface.title()),
             )
             .child(
                 div()
@@ -5030,6 +5209,12 @@ fn split_row(
         .into_any_element()
 }
 
+/// How a change source keys the image-diff cache: its debug form, which
+/// names the kind and the commit, checkpoint or base it is measured from.
+fn image_source_key(source: &ginka_protocol::model::ChangeSource) -> String {
+    format!("{source:?}")
+}
+
 /// One line of a diff, with the parts that actually changed marked.
 ///
 /// The marks are why the line is split at all: a one-word edit reads as a
@@ -5193,11 +5378,11 @@ impl Panel for SurfaceTab {
             .gap(px(6.))
             .items_center()
             .child(ginka_ui::chrome::tab_icon(self.surface.icon(), active, cx))
-            .child(ginka_ui::chrome::tab_label(self.surface.label()))
+            .child(ginka_ui::chrome::tab_label(self.surface.title()))
     }
 
     fn tab_name(&self, _: &App) -> Option<SharedString> {
-        Some(self.surface.label().into())
+        Some(self.surface.title().into())
     }
 
     fn zoom_control(&self, _: &App) -> Option<PanelControl> {

@@ -9,6 +9,7 @@
 pub struct Quoted {
     /// Who said it, as a display name.
     pub who: String,
+    /// What they wrote, as the platform delivered it.
     pub text: String,
 }
 

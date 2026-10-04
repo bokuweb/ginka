@@ -65,6 +65,7 @@ pub struct ProjectRow {
     /// What a new worktree here would be cut from. Empty for a plain folder,
     /// which has no branches at all.
     pub default_branch: SharedString,
+    /// Git repository or plain folder; a plain folder hides branch, pull-request and worktree controls.
     pub kind: ProjectKind,
 }
 
@@ -226,9 +227,13 @@ pub fn relative_age(now: i64, then: i64) -> String {
 /// recognisable at 12px where text is not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agent {
+    /// Anthropic's Claude Code; also what an unknown driver id reads as.
     Claude,
+    /// OpenAI's Codex CLI.
     Codex,
+    /// Google's Gemini CLI.
     Gemini,
+    /// The OpenCode CLI.
     OpenCode,
 }
 
@@ -260,6 +265,7 @@ impl Agent {
         }
     }
 
+    /// The single-colour mark a sidebar row carries for this agent.
     pub fn glyph(self) -> Icon {
         Icon::empty().path(match self {
             Self::Claude => icon::AGENT_SPARK,
@@ -294,6 +300,7 @@ impl Agent {
         }
     }
 
+    /// The agent's product name, as pickers and row details print it.
     pub fn label(self) -> &'static str {
         match self {
             Self::Claude => "Claude Code",
@@ -349,7 +356,9 @@ pub struct SessionRow {
     pub workspace: WorkspaceId,
     /// The session running in it, when there is one.
     pub session: Option<SessionId>,
+    /// The row's headline: the session's title, or the worktree name made readable when it has none.
     pub title: SharedString,
+    /// The agent whose glyph the row carries.
     pub agent: Agent,
     /// Model used by the latest session in this workspace.
     pub model: Option<String>,
@@ -368,9 +377,11 @@ pub struct SessionRow {
     pub origin: SharedString,
     /// The worktree branch, truncated from the left when it does not fit.
     pub branch: SharedString,
+    /// What the agent is doing, which sets the row's status mark and its place in the attention sort.
     pub state: AgentState,
     /// Relative time, shown when the row is not running.
     pub age: SharedString,
+    /// Whether the worktree is archived; archived rows are left out of the list and of next/previous stepping.
     pub archived: bool,
     /// Kept at the top of its project's list, in a section of its own.
     pub pinned: bool,
@@ -641,17 +652,18 @@ impl SessionRow {
         ]
     }
 
-    /// Working first, then rows waiting on the user, then everything else.
-    ///
-    /// The reorder animates on the standard curve (`docs/ui.md` §3.2). Sorting
-    /// is stable so equal rows keep their relative order and nothing jumps
-    /// under the cursor for no reason.
     /// The order the session list uses: pinned rows first — the reader put
     /// them there — and then the attention sort within each part.
     pub fn list_rank(&self) -> (bool, u8) {
         (!self.pinned, self.attention_rank())
     }
 
+    /// The attention sort's key: working first (0), then rows waiting on the
+    /// user (1), then everything else (2).
+    ///
+    /// The reorder animates on the standard curve (`docs/ui.md` §3.2). Sorting
+    /// is stable so equal rows keep their relative order and nothing jumps
+    /// under the cursor for no reason.
     pub fn attention_rank(&self) -> u8 {
         match self.state {
             AgentState::Working => 0,
@@ -748,10 +760,14 @@ pub fn adjacent_session(
 /// status filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StatusFilter {
+    /// Every session, whatever it is doing.
     #[default]
     All,
+    /// Only sessions whose agent is running.
     Working,
+    /// Only sessions waiting on the user.
     NeedsAttention,
+    /// Only sessions with nothing running and nothing asked.
     Idle,
 }
 

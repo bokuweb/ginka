@@ -32,6 +32,8 @@ pub struct TurnId {
 }
 
 impl TurnId {
+    /// Identify turn `turn` of `session`; the session id is slugified so it is a
+    /// valid ref component.
     pub fn new(session: impl AsRef<str>, turn: usize) -> Self {
         Self {
             session: slugify(session.as_ref()),
@@ -39,10 +41,12 @@ impl TurnId {
         }
     }
 
+    /// The slugified session id, as it appears in the refs.
     pub fn session(&self) -> &str {
         &self.session
     }
 
+    /// The turn's number within its session.
     pub fn turn(&self) -> usize {
         self.turn
     }
@@ -54,14 +58,20 @@ impl TurnId {
         )
     }
 
+    /// `refs/ginka/session/<session>/turn/<n>/start`: the working tree as the agent
+    /// was handed it.
     pub fn start_ref(&self) -> String {
         self.ref_for("start")
     }
 
+    /// `refs/ginka/session/<session>/turn/<n>/end`: the working tree when the turn
+    /// settled.
     pub fn end_ref(&self) -> String {
         self.ref_for("end")
     }
 
+    /// `refs/ginka/session/<session>/turn/<n>/base`: the commit `HEAD` pointed at
+    /// when the turn started.
     pub fn base_ref(&self) -> String {
         self.ref_for("base")
     }
@@ -88,6 +98,8 @@ pub struct Checkpoints {
 }
 
 impl Checkpoints {
+    /// Checkpoints for the worktree at `worktree`. Touches nothing until a
+    /// capture or restore runs git there.
     pub fn new(worktree: impl Into<PathBuf>) -> Self {
         let root = worktree.into();
         Self {
@@ -96,6 +108,7 @@ impl Checkpoints {
         }
     }
 
+    /// The worktree root every capture and restore runs in.
     pub fn worktree(&self) -> &Path {
         &self.root
     }

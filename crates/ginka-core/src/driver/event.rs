@@ -13,14 +13,22 @@ pub enum DriverError {
     /// The agent wrote something that is not a message at all — a panic, a
     /// warning on stdout, a truncated line.
     #[error("the agent produced a line that is not JSON: {line}")]
-    Malformed { line: String },
+    Malformed {
+        /// The offending line, trimmed and cut to `MAX_REPORTED_LINE` bytes.
+        line: String,
+    },
     /// A message we recognise, shaped in a way we do not. Names the field so
     /// the report says which part of the contract moved.
     #[error(
         "the agent's {shape} message has no {field}; this build may be too old \
          for the installed CLI"
     )]
-    MissingField { shape: String, field: &'static str },
+    MissingField {
+        /// The message's `type`, e.g. `assistant`.
+        shape: String,
+        /// The field that was absent or of the wrong type.
+        field: &'static str,
+    },
 }
 
 impl DriverError {
@@ -28,6 +36,8 @@ impl DriverError {
     /// a megabyte on one line and it would otherwise all land in the log.
     pub const MAX_REPORTED_LINE: usize = 300;
 
+    /// A [`DriverError::Malformed`] for `line`, trimmed and cut to
+    /// [`DriverError::MAX_REPORTED_LINE`] bytes on a character boundary.
     pub fn malformed(line: &str) -> Self {
         let line = line.trim();
         let mut cut = Self::MAX_REPORTED_LINE.min(line.len());

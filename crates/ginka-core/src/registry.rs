@@ -150,12 +150,16 @@ fn next_sort_order(conn: &Connection) -> Result<i64> {
 /// What a reconciliation changed, for logging and for tests.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct SyncReport {
+    /// Worktrees git has that were not stored yet, now adopted.
     pub added: usize,
+    /// Stored worktrees whose branch or head changed.
     pub updated: usize,
+    /// Stored worktrees git no longer lists, now forgotten.
     pub removed: usize,
 }
 
 impl SyncReport {
+    /// True when the reconciliation changed nothing.
     pub fn is_empty(&self) -> bool {
         *self == Self::default()
     }

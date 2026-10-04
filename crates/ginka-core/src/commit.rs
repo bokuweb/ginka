@@ -32,6 +32,7 @@ pub struct MessageModel {
     /// cheap tier by name, and guessing an id that does not exist is worse
     /// than letting the CLI choose.
     pub model: Option<String>,
+    /// Reasoning effort to ask for; `None` where the provider has no such knob.
     pub reasoning_effort: Option<String>,
 }
 
@@ -227,13 +228,19 @@ pub fn build_prompt(files: &[String], diff: &str) -> String {
     prompt
 }
 
+/// A commit message read from a model's answer, ready for git.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitMessage {
+    /// One line, quotes and fences stripped, cut on a word to
+    /// [`CommitMessage::MAX_SUBJECT_CHARS`]. Never empty.
     pub subject: String,
+    /// Everything after the subject line, trimmed; `None` when the model gave
+    /// only a subject.
     pub body: Option<String>,
 }
 
 impl CommitMessage {
+    /// Longest subject kept, in characters; longer ones are cut on a word.
     pub const MAX_SUBJECT_CHARS: usize = 72;
 
     /// Read a model's answer into a commit message.

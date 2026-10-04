@@ -41,6 +41,7 @@ pub fn fork_targets<'a>(agents: &'a [AgentStatus], current: &str) -> Vec<&'a Age
 /// model, or — when there is no other agent — another model of this one.
 #[derive(Clone, Copy, Debug)]
 pub struct ForkTarget<'a> {
+    /// The installed, signed-in agent that receives the fork.
     pub agent: &'a AgentStatus,
     /// `None` is the agent's own default.
     pub model: Option<&'a ginka_protocol::provider::ProviderModel>,

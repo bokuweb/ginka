@@ -25,7 +25,9 @@ pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// One tool, as `tools/list` describes it.
 pub struct Tool {
+    /// The name an agent calls it by, e.g. `ginka_workspace_status`.
     pub name: &'static str,
+    /// What the agent is told the tool does and when to use it.
     pub description: &'static str,
     /// The JSON Schema of its arguments.
     pub schema: Value,
@@ -670,6 +672,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_cron_runs",
+            description: "A scheduled job's latest firings, newest first: when each started, how it went and why a failed one failed.",
+            schema: json!({
+                "type": "object",
+                "properties": {"id": {"type": "integer"}, "limit": {"type": "integer", "minimum": 1}},
+                "required": ["id"],
+            }),
+        },
+        Tool {
             name: "ginka_project_label",
             description: "Label a project the way the reader groups it; an empty label clears it.",
             schema: json!({
@@ -1248,6 +1259,13 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 .and_then(Value::as_i64)
                 .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
         },
+        "ginka_cron_runs" => Request::CronRuns {
+            id: arguments
+                .get("id")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| anyhow!("{tool} needs an `id`"))?,
+            limit: number("limit").map(|limit| limit.min(u32::MAX as u64) as u32),
+        },
         "ginka_project_label" => Request::SetProjectLabel {
             project: ProjectName(text("project")?),
             label: text("label")?,
@@ -1449,6 +1467,21 @@ mod tests {
                 .is_err()
             );
         }
+    }
+
+    #[test]
+    fn cron_runs_reads_a_jobs_history_with_an_optional_limit() {
+        let request = request_for("ginka_cron_runs", &json!({"id": 7, "limit": 5})).unwrap();
+        assert!(matches!(
+            request,
+            Request::CronRuns {
+                id: 7,
+                limit: Some(5)
+            }
+        ));
+        let request = request_for("ginka_cron_runs", &json!({"id": 7})).unwrap();
+        assert!(matches!(request, Request::CronRuns { id: 7, limit: None }));
+        assert!(request_for("ginka_cron_runs", &json!({})).is_err());
     }
 
     #[test]

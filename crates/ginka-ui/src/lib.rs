@@ -5,6 +5,8 @@
 //! `rustc` overflows its stack expanding `#[test]` in a crate that also holds
 //! the toolkit's builder chains, so the split is load-bearing, not cosmetic.
 
+#![deny(missing_docs)]
+
 // The strings live in the workspace's own `locales/`, shared by every crate
 // that shows one. English is the fallback, so a key a translator has not
 // reached yet still renders as words.
@@ -15,9 +17,11 @@ pub mod assets;
 pub mod board;
 pub mod branches;
 pub mod browser;
+pub mod checks;
 pub mod chrome;
 pub mod comment_range;
 pub mod composer;
+pub mod daemon_settings;
 pub mod diff_filter;
 pub mod dock;
 pub mod editor;

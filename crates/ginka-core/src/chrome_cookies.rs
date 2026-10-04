@@ -15,36 +15,50 @@ use std::path::{Path, PathBuf};
 pub struct ChromeCookie {
     /// The domain as Chrome keys it: a leading dot for a domain cookie.
     pub host: String,
+    /// Cookie name, as set by the site.
     pub name: String,
+    /// Decrypted plaintext value. Sensitive: never log it.
     pub value: String,
+    /// URL path prefix the cookie is scoped to.
     pub path: String,
     /// When it expires, in seconds since the Unix epoch; `None` for a
     /// session cookie.
     pub expires: Option<i64>,
+    /// Sent only over HTTPS.
     pub secure: bool,
+    /// Hidden from page scripts.
     pub http_only: bool,
+    /// Cross-site sending policy.
     pub same_site: SameSite,
 }
 
 /// A cookie's `SameSite` policy, as Chrome stores it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SameSite {
+    /// No policy recorded; the browser's default applies.
     Unspecified,
+    /// `SameSite=None`: sent cross-site (requires `secure`).
     None,
+    /// `SameSite=Lax`: sent on top-level cross-site navigations only.
     Lax,
+    /// `SameSite=Strict`: never sent cross-site.
     Strict,
 }
 
 /// A Chrome profile: its directory and the name the user gave it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChromeProfile {
+    /// Absolute path of the profile directory, e.g. `<Chrome>/Default`.
     pub dir: PathBuf,
+    /// Display name from `Local State`, falling back to the directory name.
     pub name: String,
 }
 
 /// Why cookies could not be read.
 #[derive(Debug, thiserror::Error)]
 pub enum CookieError {
+    /// The store could not be copied, opened, queried or decrypted; the message
+    /// says which.
     #[error("could not read Chrome's cookie store: {0}")]
     Store(String),
 }

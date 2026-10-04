@@ -30,28 +30,51 @@ pub enum QuestionKind {
 #[serde(tag = "outbound", rename_all = "snake_case")]
 pub enum Outbound {
     /// Put a reaction on the message that triggered the turn.
-    React { glyph: Glyph },
+    React {
+        /// The reaction to add.
+        glyph: Glyph,
+    },
     /// Take one back off.
-    Unreact { glyph: Glyph },
+    Unreact {
+        /// The reaction to remove.
+        glyph: Glyph,
+    },
     /// Post, or replace, the one progress message.
-    Progress { text: String },
+    Progress {
+        /// One short status line, e.g. `Working: <activity>`.
+        text: String,
+    },
     /// Remove the progress message.
     ClearProgress,
     /// The turn's answer, as the agent's Markdown. Chunking and `mrkdwn`
     /// are the adapter's.
-    Reply { markdown: String },
+    Reply {
+        /// The final answer, never the silence token and never blank.
+        markdown: String,
+    },
     /// One line: `3 files changed · checkpoint 7 · ginka review comet`.
     /// Filled in by the runner, which can ask the daemon what changed.
-    Footer { turn: u32 },
+    Footer {
+        /// The turn that just completed, by its number in the session.
+        turn: u32,
+    },
     /// A question with an id the thread answers with.
     Question {
+        /// The short id the thread quotes to answer, minted by the connector;
+        /// the agent's own request id stays inside the fold.
         request_id: String,
+        /// Whether it is a question, a plan or a permission request.
         kind: QuestionKind,
+        /// What the agent asked, as it worded it.
         text: String,
+        /// Choices to offer; empty when the agent offered none.
         options: Vec<String>,
     },
     /// One line the thread should read: a failure, a cancellation.
-    Note { text: String },
+    Note {
+        /// The line itself, e.g. `Stopped.` or the failure reason.
+        text: String,
+    },
 }
 
 /// How often the progress message is edited at most, in seconds.

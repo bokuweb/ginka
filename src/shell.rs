@@ -31,6 +31,7 @@ use ginka_ui::workspace::{
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::TextSelection;
+use gpui_component::Selectable as _;
 use gpui_component::text::TextView;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{
@@ -72,7 +73,8 @@ actions!(
         PreviousTab,
         NextSession,
         PreviousSession,
-        CloseAllTabs
+        CloseAllTabs,
+        OpenBoard
     ]
 );
 
@@ -194,6 +196,7 @@ pub fn apply_keymap(cx: &mut App, overrides: &[ginka_ui::keymap::Override]) {
                 Some("navigate_back") => KeyBinding::new(keys, NavigateBack, context),
                 Some("navigate_forward") => KeyBinding::new(keys, NavigateForward, context),
                 Some("open_settings") => KeyBinding::new(keys, OpenSettings, context),
+                Some("open_board") => KeyBinding::new(keys, OpenBoard, context),
                 // `ginka_ui::keymap::parse` refused anything else.
                 Some(_) => KeyBinding::new(keys, gpui::NoAction, context),
             }
@@ -642,6 +645,8 @@ pub struct Shell {
     provider_settings: Vec<ginka_protocol::rpc::ProviderSetting>,
     /// The MCP servers the agent CLIs are configured with, for Settings.
     mcp_servers: Vec<ginka_protocol::model::McpServerEntry>,
+    /// The daemon's on/off settings the page offers, as last read.
+    daemon_toggles: Vec<(&'static str, bool)>,
     /// The last update check's answer, and whether one is on its way.
     agent_updates: Option<Vec<ginka_protocol::model::AgentUpdate>>,
     checking_updates: bool,
@@ -834,6 +839,8 @@ pub struct Shell {
     quick_form: QuickForm,
     /// The scheduled jobs of the project on screen.
     cron_jobs: Vec<ginka_protocol::model::CronJob>,
+    /// The job whose run history is open, and its firings, newest first.
+    cron_history: Option<(i64, Vec<ginka_protocol::model::CronRun>)>,
     cron_form: CronForm,
     mcp_form: McpForm,
     /// The notebook, for the Notes place (`docs/ui.md` §3.6).
@@ -1032,6 +1039,9 @@ impl Shell {
                     text,
                 } => this.leave_comment(path.clone(), *line, *end_line, text.clone(), cx),
                 crate::surfaces::SurfaceEvent::SendReview => this.send_review(cx),
+                crate::surfaces::SurfaceEvent::RemoveComment { id } => {
+                    this.remove_comment(id.clone(), cx)
+                }
                 crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
                     this.generate_commit_message(*only_staged, cx)
                 }
@@ -1043,21 +1053,43 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::LoadImageDiff {
                     path,
                     old_path,
-                    staged,
+                    source,
                 } => {
                     if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
                     {
                         let (link, surfaces) = (this.link.clone(), this.surfaces.clone());
-                        let (path, old_path, staged) = (path.clone(), old_path.clone(), *staged);
+                        let (path, old_path, source) =
+                            (path.clone(), old_path.clone(), source.clone());
                         cx.spawn(async move |_, cx| {
-                            let asked = path.clone();
+                            let (asked, asked_source) = (path.clone(), source.clone());
                             let (before, after) = cx
                                 .background_spawn(async move {
-                                    link.image_diff(&workspace, &asked, old_path, staged).await
+                                    link.image_diff(&workspace, &asked, old_path, asked_source)
+                                        .await
                                 })
                                 .await;
                             surfaces.update(cx, |surfaces, cx| {
-                                surfaces.set_image_diff(staged, path, before, after, cx)
+                                surfaces.set_image_diff(&source, path, before, after, cx)
+                            });
+                        })
+                        .detach();
+                    }
+                }
+                crate::surfaces::SurfaceEvent::LoadChecks => {
+                    if let Some(workspace) = this.session.as_ref().map(|row| row.workspace.clone())
+                    {
+                        let link = this.link.clone();
+                        let surfaces = this.surfaces.clone();
+                        cx.spawn(async move |_, cx| {
+                            let read = {
+                                let workspace = workspace.clone();
+                                cx.background_spawn(async move {
+                                    link.pull_request_checks(&workspace).await
+                                })
+                                .await
+                            };
+                            surfaces.update(cx, |surfaces, cx| {
+                                surfaces.set_checks(&workspace, read, cx)
                             });
                         })
                         .detach();
@@ -1258,6 +1290,45 @@ impl Shell {
                         let (link, project, index) = (this.link.clone(), project.clone(), *index);
                         this.after_row_change(
                             async move { link.move_project(&project, index).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::SetStatusNote { workspace, note } => {
+                        let (link, workspace, note) =
+                            (this.link.clone(), workspace.clone(), note.clone());
+                        this.after_row_change(
+                            async move { link.set_status_note(&workspace, note).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveProject { project } => {
+                        let (link, project) = (this.link.clone(), project.clone());
+                        this.after_row_change(
+                            async move { link.remove_project(&project).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveSession { session } => {
+                        // The conversation on screen is going: drop what is
+                        // drawn of it, so the refresh shows whatever the
+                        // workspace holds next rather than a stale transcript.
+                        if this.transcript_of.as_ref() == Some(session) {
+                            this.transcript = Transcript::new();
+                            this.transcript_of = None;
+                            this.transcript_search = None;
+                            this.session_state = None;
+                            this.follow_transcript();
+                        }
+                        let (link, session) = (this.link.clone(), session.clone());
+                        this.after_row_change(
+                            async move { link.remove_session(&session).await },
+                            cx,
+                        );
+                    }
+                    SidebarEvent::RemoveWorkspace { workspace } => {
+                        let (link, workspace) = (this.link.clone(), workspace.clone());
+                        this.after_row_change(
+                            async move { link.remove_workspace(&workspace).await },
                             cx,
                         );
                     }
@@ -1752,6 +1823,7 @@ impl Shell {
             agents: Vec::new(),
             provider_settings: Vec::new(),
             mcp_servers: Vec::new(),
+            daemon_toggles: Vec::new(),
             agent_updates: None,
             checking_updates: false,
             provider_program: None,
@@ -1847,6 +1919,7 @@ impl Shell {
             quick_menu_open: false,
             quick_form,
             cron_jobs: Vec::new(),
+            cron_history: None,
             cron_form,
             mcp_form,
             #[cfg(feature = "github")]
@@ -2613,6 +2686,33 @@ impl Shell {
         .detach();
     }
 
+    /// Open a job's run history under its row, or close it if it is open.
+    fn toggle_cron_history(&mut self, id: i64, cx: &mut Context<Self>) {
+        if self
+            .cron_history
+            .as_ref()
+            .is_some_and(|(open, _)| *open == id)
+        {
+            self.cron_history = None;
+            cx.notify();
+            return;
+        }
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let runs = cx
+                .background_spawn(async move {
+                    link.cron_runs(id, ginka_ui::scheduled::HISTORY_LIMIT).await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.cron_history = Some((id, runs));
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// Fill the settings form from a job in the selected project.
     fn edit_cron_job(
         &mut self,
@@ -2843,6 +2943,18 @@ impl Shell {
         if self.tabs.close_all() > 0 {
             self.show_tab(None, window, cx);
         }
+    }
+
+    /// Bring up the agents board, as its rail row does.
+    fn open_board(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_place(crate::sidebar::Place::Board, cx)
+        });
+        self.open_place(crate::sidebar::Place::Board, window, cx);
+    }
+
+    fn on_open_board(&mut self, _: &OpenBoard, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_board(window, cx);
     }
 
     fn on_close_all_tabs(&mut self, _: &CloseAllTabs, window: &mut Window, cx: &mut Context<Self>) {
@@ -4788,6 +4900,25 @@ impl Shell {
         .detach();
     }
 
+    /// Take a waiting comment back.
+    fn remove_comment(&mut self, id: String, cx: &mut Context<Self>) {
+        let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
+            return;
+        };
+        let link = self.link.clone();
+        let surfaces = self.surfaces.clone();
+        cx.spawn(async move |_, cx| {
+            let comments = cx
+                .background_spawn(async move {
+                    link.remove_comment(id).await;
+                    link.comments(&workspace).await
+                })
+                .await;
+            surfaces.update(cx, |surfaces, cx| surfaces.set_comments(comments, cx));
+        })
+        .detach();
+    }
+
     /// Send the waiting comments to the agent as one message.
     fn send_review(&mut self, cx: &mut Context<Self>) {
         let (Some(workspace), Some(session)) = (
@@ -5537,6 +5668,9 @@ impl Shell {
             let outcome = cx.background_spawn(change).await;
             if let Err(error) = outcome {
                 tracing::warn!(%error, "the daemon refused a sidebar change");
+                // In the daemon's words: a refused rename or delete that
+                // only reached the log looks like a click that did nothing.
+                this.update(cx, |this, cx| this.show_notice(error, cx)).ok();
             }
             pull_rows(&this, &link, cx).await.ok();
         })
@@ -5687,6 +5821,45 @@ impl Shell {
             this.update(cx, |this, cx| {
                 this.mcp_servers = servers;
                 cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+        self.refresh_daemon_toggles(cx);
+    }
+
+    /// Read the daemon's on/off settings for the settings page.
+    fn refresh_daemon_toggles(&mut self, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let json = cx
+                .background_spawn(async move { link.daemon_settings().await })
+                .await;
+            this.update(cx, |this, cx| {
+                this.daemon_toggles = ginka_ui::daemon_settings::toggles(&json);
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Flip one of the daemon's settings, then read them back: what the page
+    /// shows is what the daemon took, and a refusal says why.
+    fn set_daemon_toggle(&mut self, key: &'static str, on: bool, cx: &mut Context<Self>) {
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let set = cx
+                .background_spawn(async move {
+                    link.update_daemon_setting(key, ginka_ui::daemon_settings::value(on))
+                        .await
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if let Err(error) = set {
+                    this.show_notice(error, cx);
+                }
+                this.refresh_daemon_toggles(cx);
             })
             .ok();
         })
@@ -5865,6 +6038,71 @@ impl Shell {
                     })
             }))
             .child(self.mcp_add_form(cx));
+        // The daemon's own switches, the ones `ginka settings set` flips.
+        let daemon_section = v_flex()
+            .w_full()
+            .pt_5()
+            .gap_1()
+            .child(
+                div()
+                    .pb_1()
+                    .text_size(px(11.5))
+                    .text_color(tokens.colors().text_muted)
+                    .child(rust_i18n::t!("settings.daemon").to_string()),
+            )
+            .children(self.daemon_toggles.iter().map(|&(key, on)| {
+                let control = h_flex()
+                    .p_0p5()
+                    .gap_0p5()
+                    .rounded(px(tokens.radius.row))
+                    .bg(tokens.colors().bg_surface)
+                    .children(
+                        [(true, "settings.on"), (false, "settings.off")]
+                            .into_iter()
+                            .map(|(value, label)| {
+                                choice(
+                                    format!("daemon:{key}:{value}"),
+                                    rust_i18n::t!(label).to_string(),
+                                    on == value,
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        if on != value {
+                                            this.set_daemon_toggle(key, value, cx);
+                                        }
+                                    },
+                                ))
+                            }),
+                    );
+                h_flex()
+                    .w_full()
+                    .py_1()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_size(px(12.5))
+                                    .text_color(tokens.colors().text_primary)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}")).to_string(),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(
+                                        rust_i18n::t!(format!("settings.daemon.{key}.help"))
+                                            .to_string(),
+                                    ),
+                            ),
+                    )
+                    .child(control)
+            }));
         let provider_section = v_flex()
             .w_full()
             .pt_5()
@@ -6175,6 +6413,7 @@ impl Shell {
                             ))
                             .child(quick_section)
                             .child(provider_section)
+                            .child(daemon_section)
                             .child(mcp_section)
                             .child(cron_section),
                     ),
@@ -6539,17 +6778,21 @@ impl Shell {
                     .as_ref()
                     .map(|run| run.outcome.as_str().to_string())
                     .unwrap_or_default();
+                let history = self
+                    .cron_history
+                    .as_ref()
+                    .filter(|(open, _)| *open == id)
+                    .map(|(_, runs)| runs.clone());
+                let history_open = history.is_some();
                 let scope = job.workspace.as_ref().map_or_else(
                     || rust_i18n::t!("settings.cron.project_checkout").to_string(),
                     |workspace| workspace.0.clone(),
                 );
-                h_flex()
+                let row = h_flex()
                     .w_full()
                     .py_1p5()
                     .gap_3()
                     .items_center()
-                    .border_b_1()
-                    .border_color(tokens.colors().border_subtle)
                     .child(
                         div()
                             .w(px(110.))
@@ -6622,6 +6865,16 @@ impl Shell {
                             })),
                     )
                     .child(
+                        Button::new(SharedString::from(format!("cron-history-{id}")))
+                            .ghost()
+                            .compact()
+                            .selected(history_open)
+                            .label(rust_i18n::t!("settings.cron.history").to_string())
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.toggle_cron_history(id, cx)),
+                            ),
+                    )
+                    .child(
                         Button::new(SharedString::from(format!("cron-remove-{id}")))
                             .ghost()
                             .compact()
@@ -6638,7 +6891,34 @@ impl Shell {
                                     cx,
                                 )
                             })),
-                    )
+                    );
+                v_flex()
+                    .w_full()
+                    .border_b_1()
+                    .border_color(tokens.colors().border_subtle)
+                    .child(row)
+                    .children(history.map(|runs| {
+                        v_flex()
+                            .w_full()
+                            .pl(px(110.))
+                            .pb_1p5()
+                            .gap_0p5()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .when(runs.is_empty(), |this| {
+                                this.child(rust_i18n::t!("settings.cron.no_runs").to_string())
+                            })
+                            .children(runs.iter().map(|run| {
+                                div()
+                                    .w_full()
+                                    .truncate()
+                                    .when(
+                                        run.outcome == ginka_protocol::model::CronOutcome::Failed,
+                                        |this| this.text_color(tokens.colors().status_error),
+                                    )
+                                    .child(ginka_ui::scheduled::run_line(run, now))
+                            }))
+                    }))
                     .into_any_element()
             })
             .collect();
@@ -7513,6 +7793,12 @@ impl Shell {
             can_go_back,
             can_go_forward,
         );
+        entries.extend(ginka_ui::palette::row_entries(
+            self.sidebar.read(cx).selected_row(),
+        ));
+        entries.extend(ginka_ui::palette::project_entries(
+            self.sidebar.read(cx).selected_project_place(),
+        ));
         entries.extend(ginka_ui::palette::quick_command_entries(
             &self.quick_commands,
             self.session.is_some(),
@@ -7655,6 +7941,13 @@ impl Shell {
             Command::NextSession => self.on_next_session(&NextSession, window, cx),
             Command::PreviousSession => self.on_previous_session(&PreviousSession, window, cx),
             Command::CloseAllTabs => self.close_all_tabs(window, cx),
+            Command::OpenBoard => self.open_board(window, cx),
+            Command::Project(action) => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.act_on_selected_project(action, window, cx)
+            }),
+            Command::Row(action) => self.sidebar.update(cx, |sidebar, cx| {
+                sidebar.act_on_selected(action, window, cx)
+            }),
             Command::NavigateBack => self.navigate_history(true, window, cx),
             Command::NavigateForward => self.navigate_history(false, window, cx),
             Command::Switch(workspace) => {
@@ -14847,6 +15140,7 @@ impl Render for Shell {
             .on_action(cx.listener(Self::on_new_tab))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_close_all_tabs))
+            .on_action(cx.listener(Self::on_open_board))
             .on_action(cx.listener(Self::on_next_session))
             .on_action(cx.listener(Self::on_previous_session))
             .on_action(cx.listener(Self::on_next_tab))

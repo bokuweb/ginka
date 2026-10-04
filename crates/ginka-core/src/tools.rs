@@ -50,8 +50,12 @@ pub fn is_indexed(worktree: &Path) -> bool {
 pub struct McpServer {
     /// What the agent calls it; its tools appear as `mcp__<name>__<tool>`.
     pub name: String,
+    /// Program the agent spawns for this stdio server: an absolute path for
+    /// Ginka's own and `zg`, as configured for the user's.
     pub command: String,
+    /// Arguments after `command`.
     pub args: Vec<String>,
+    /// Extra environment for the server process, on top of what the agent inherits.
     pub env: Vec<(String, String)>,
 }
 
@@ -82,9 +86,13 @@ impl Default for ToolSettings {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct McpServerSettings {
+    /// Program to launch as a stdio MCP server; a bare name is looked up on the
+    /// agent's `PATH`.
     pub command: String,
+    /// Arguments after `command`; empty when omitted.
     #[serde(default)]
     pub args: Vec<String>,
+    /// Extra environment for the server process; empty when omitted.
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
 }

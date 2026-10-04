@@ -108,16 +108,22 @@ pub struct Binding {
     pub workspace: Option<WorkspaceId>,
     /// The driver id: `claude`, `codex`.
     pub agent: String,
+    /// Model id to start with; `None` takes the driver's default.
     pub model: Option<String>,
     /// Which login to run on; the provider's active account when absent.
     pub account: Option<AccountId>,
     /// The ceiling for this channel. `auto` has to be written down here in
     /// plain text; nothing said in Slack can raise it.
     pub access_mode: AccessMode,
+    /// When a root message starts a conversation; replies in an owned thread
+    /// never need a mention.
     pub trigger: Trigger,
+    /// Whether conversations share the target's checkout or get a worktree per
+    /// thread.
     pub worktree: WorktreeMode,
     /// Live turns at once. A `shared` binding must say `1`.
     pub max_concurrent: u32,
+    /// Whether the thread gets a progress message edited in place.
     pub progress: Progress,
     /// Delete the progress message when the reply lands, rather than
     /// leaving it collapsed above it.

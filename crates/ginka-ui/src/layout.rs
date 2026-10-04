@@ -57,6 +57,7 @@ pub enum Panel {
 }
 
 impl Panel {
+    /// Every panel, in the order the View menu and palette list them.
     pub const ALL: &'static [Panel] = &[Panel::Sidebar, Panel::RightPanel, Panel::TerminalDock];
 
     /// Shown in tooltips and the command palette.
@@ -69,6 +70,7 @@ impl Panel {
     }
 }
 
+/// Open state and remembered size of each panel; sizes are logical pixels and survive closing.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Layout {
     sidebar_open: bool,
@@ -80,6 +82,7 @@ pub struct Layout {
 }
 
 impl Layout {
+    /// Restore the global arrangement, replacing a sidebar width saved before the two-pane navigator (under 420 px) with the 520 px default.
     pub fn from_settings(settings: &AppSettings) -> Self {
         Self {
             sidebar_open: settings.sidebar_open,
@@ -158,6 +161,7 @@ impl Layout {
         settings.sidebar_width = self.sidebar_width;
     }
 
+    /// Whether `panel` is currently shown.
     pub fn is_open(&self, panel: Panel) -> bool {
         match panel {
             Panel::Sidebar => self.sidebar_open,
@@ -174,6 +178,7 @@ impl Layout {
         true
     }
 
+    /// Show or hide `panel`, keeping its size for when it reopens.
     pub fn set_open(&mut self, panel: Panel, open: bool) {
         match panel {
             Panel::Sidebar => self.sidebar_open = open,
@@ -232,6 +237,7 @@ impl Layout {
         }
     }
 
+    /// The panel's remembered width (or, for the dock, height), open or not.
     pub fn size(&self, panel: Panel) -> Pixels {
         px(match panel {
             Panel::Sidebar => self.sidebar_width,

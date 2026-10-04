@@ -62,6 +62,7 @@ pub fn snapshot_of<'a>(plans: &'a [PlanSnapshot], account: &AccountId) -> Option
 pub struct Headroom {
     /// The window's name: `5h`, `week`.
     pub window: String,
+    /// How much of that window is spent, from 0 to 100; may overshoot.
     pub used_percent: f64,
     /// At the wall. Said in words beside the number, never in colour alone.
     pub exhausted: bool,

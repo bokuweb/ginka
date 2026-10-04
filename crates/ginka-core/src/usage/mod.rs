@@ -325,10 +325,15 @@ pub fn report(
 /// The usage page's reports.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
+    /// Cost per UTC day, as [`by_day`] returns it.
     pub by_day: Vec<UsageRow>,
+    /// Cost per agent, as [`by_agent`] returns it.
     pub by_agent: Vec<UsageRow>,
+    /// Cost per login, as [`by_account`]; work outside Ginka is absent.
     pub by_account: Vec<UsageRow>,
+    /// Cost per model, as [`by_model`] returns it.
     pub by_model: Vec<UsageRow>,
+    /// Cost per project, as [`by_project`] places it.
     pub by_project: Vec<UsageRow>,
 }
 

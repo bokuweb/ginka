@@ -27,10 +27,12 @@ pub struct BlobStore {
 }
 
 impl BlobStore {
+    /// A store rooted at `root`; the directory is created on the first write.
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self { root: root.into() }
     }
 
+    /// The directory blobs are written into.
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -143,6 +145,8 @@ impl BlobStore {
         }
     }
 
+    /// True when no blob is stored, including when the directory does not
+    /// exist yet. Lists the directory.
     pub fn is_empty(&self) -> Result<bool> {
         Ok(self.len()? == 0)
     }

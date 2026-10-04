@@ -38,18 +38,22 @@ impl Tabs {
         tabs
     }
 
+    /// The open tabs, left to right, with no duplicates.
     pub fn tabs(&self) -> &[Tab] {
         &self.tabs
     }
 
+    /// The tab the centre column shows; `None` before the window has picked one or once all are closed.
     pub fn active(&self) -> Option<&Tab> {
         self.tabs.get(self.active?)
     }
 
+    /// The active tab's position in `tabs()`, when there is one.
     pub fn active_index(&self) -> Option<usize> {
         self.active
     }
 
+    /// Whether no tab is open at all.
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }

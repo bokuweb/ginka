@@ -14,15 +14,22 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderKind {
+    /// Anthropic's Claude Code CLI.
     Claude,
+    /// OpenAI's Codex CLI.
     Codex,
+    /// The Amp CLI.
     Amp,
+    /// The OpenCode CLI.
     OpenCode,
+    /// Cursor's command-line agent.
     Cursor,
+    /// Google's Gemini CLI.
     Gemini,
 }
 
 impl ProviderKind {
+    /// Every provider, in the order pickers and settings list them.
     pub const ALL: [Self; 6] = [
         Self::Claude,
         Self::Codex,
@@ -32,6 +39,7 @@ impl ProviderKind {
         Self::Gemini,
     ];
 
+    /// The stable lowercase id, as serialized and as a flag takes it.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Claude => "claude",
@@ -43,6 +51,7 @@ impl ProviderKind {
         }
     }
 
+    /// Read [`ProviderKind::as_str`] back; `None` for an id this build does not know.
     pub fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.as_str() == value)
     }
@@ -118,6 +127,7 @@ pub struct ProviderOption {
 }
 
 impl ProviderOption {
+    /// An option with its provider value and picker label.
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -144,6 +154,7 @@ pub struct ProviderModel {
 }
 
 impl ProviderModel {
+    /// A model that is not the default and accepts no options.
     pub fn new(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             id: id.into(),
@@ -154,12 +165,14 @@ impl ProviderModel {
         }
     }
 
+    /// Mark this model as the provider's default.
     #[must_use]
     pub fn as_default(mut self) -> Self {
         self.is_default = true;
         self
     }
 
+    /// Replace the reasoning levels this model accepts.
     #[must_use]
     pub fn with_reasoning_efforts(
         mut self,
@@ -169,16 +182,19 @@ impl ProviderModel {
         self
     }
 
+    /// Replace the service tiers this model accepts.
     #[must_use]
     pub fn with_service_tiers(mut self, options: impl IntoIterator<Item = ProviderOption>) -> Self {
         self.service_tiers = options.into_iter().collect();
         self
     }
 
+    /// Whether `id` is one of this model's reasoning levels.
     pub fn supports_reasoning_effort(&self, id: &str) -> bool {
         self.reasoning_efforts.iter().any(|option| option.id == id)
     }
 
+    /// Whether `id` is one of this model's service tiers.
     pub fn supports_service_tier(&self, id: &str) -> bool {
         self.service_tiers.iter().any(|option| option.id == id)
     }
@@ -196,9 +212,13 @@ impl ProviderModel {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionOptions {
+    /// Provider model id; `None` uses the provider's default.
     pub model: Option<String>,
+    /// Provider reasoning level; `None` uses the model's default.
     pub reasoning_effort: Option<String>,
+    /// Provider service tier; `None` uses the model's default.
     pub service_tier: Option<String>,
+    /// What the agent may do without asking.
     pub access_mode: AccessMode,
     /// Which login the session runs on; `None` asks the caller to resolve the
     /// provider's active account (`docs/accounts.md` §5).
@@ -206,6 +226,7 @@ pub struct SessionOptions {
 }
 
 impl SessionOptions {
+    /// Whether applying `other` would change anything at all.
     pub fn differs_from(&self, other: &Self) -> bool {
         self != other
     }
@@ -236,6 +257,7 @@ pub enum OptionOutcome {
 }
 
 impl OptionOutcome {
+    /// Whether the running session took the change without a restart.
     pub fn absorbed(self) -> bool {
         matches!(self, Self::Absorbed)
     }

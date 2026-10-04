@@ -20,16 +20,23 @@ use std::path::Path;
 /// a day-old table keeps the page working offline.
 pub const RATES_LIFETIME_SECS: i64 = 24 * 3_600;
 
+/// Token counts in the four classes vendors bill separately. Whether a value
+/// is one request's or a session's running total depends on who built it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TokenTotals {
+    /// Fresh input tokens, excluding anything read from or written to the cache.
     pub input: u64,
+    /// Tokens the model generated, reasoning included.
     pub output: u64,
+    /// Input tokens served from the prompt cache.
     pub cache_read: u64,
+    /// Input tokens written to the prompt cache (Anthropic's cache creation).
     pub cache_write: u64,
 }
 
 impl TokenTotals {
+    /// Every class summed; the figure a usage chip shows.
     pub fn total(&self) -> u64 {
         self.input + self.output + self.cache_read + self.cache_write
     }
@@ -40,6 +47,7 @@ impl TokenTotals {
         self.input + self.cache_read + self.cache_write
     }
 
+    /// Add `other` into this total, class by class.
     pub fn add(&mut self, other: &Self) {
         self.input += other.input;
         self.output += other.output;
@@ -48,21 +56,34 @@ impl TokenTotals {
     }
 }
 
+/// One session's cumulative token totals as of one turn, the unit
+/// [`summarize`] rolls up.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UsageEvent {
+    /// The Ginka session the turn belongs to.
     pub session: String,
+    /// The agent that ran the turn, which decides whose prices apply.
     pub provider: ProviderKind,
+    /// Model id as the vendor reported it, possibly prefixed or dated.
     pub model: String,
+    /// Cumulative totals for the session at this turn.
     pub tokens: TokenTotals,
     /// Unix seconds.
     pub at: i64,
 }
 
+/// A model's prices, in US dollars per million tokens of each class.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct ModelRate {
+    /// Dollars per million fresh input tokens.
     pub input_per_million: f64,
+    /// Dollars per million output tokens.
     pub output_per_million: f64,
+    /// Dollars per million cache-read tokens; the input price when the source
+    /// table gives none.
     pub cache_read_per_million: f64,
+    /// Dollars per million cache-write tokens; the input price when the source
+    /// table gives none.
     pub cache_write_per_million: f64,
 }
 
@@ -78,6 +99,7 @@ pub struct RateTable {
 }
 
 impl RateTable {
+    /// A table with no rates, stamped `fetched_at` (Unix seconds).
     pub fn empty(fetched_at: i64) -> Self {
         Self {
             fetched_at,
@@ -85,10 +107,13 @@ impl RateTable {
         }
     }
 
+    /// Add or replace a model's rate. The key is normalized (vendor prefix
+    /// dropped, lowercased) so lookups match however the vendor spells it.
     pub fn insert(&mut self, model: &str, rate: ModelRate) {
         self.rates.insert(normalize_model(model), rate);
     }
 
+    /// True when no model is priced; an empty table is never cached or used.
     pub fn is_empty(&self) -> bool {
         self.rates.is_empty()
     }
@@ -144,6 +169,8 @@ impl RateTable {
         })
     }
 
+    /// Write the table as JSON to `path`, creating its directory. Not atomic: a
+    /// torn write only costs a refetch, since [`RateTable::load`] treats it as a miss.
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -231,33 +258,49 @@ pub enum CostQuality {
     /// Every model in the range was priced.
     Priced,
     /// Some were not, and these are they.
-    Partial { unpriced_models: Vec<String> },
+    Partial {
+        /// Models with no rate, in model-id order.
+        unpriced_models: Vec<String>,
+    },
     /// No rate table at all.
     Unpriced,
 }
 
+/// One UTC day of usage on the usage page.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DaySlice {
     /// `YYYY-MM-DD`, in UTC. Days are a reporting bucket, not a local clock.
     pub date: String,
+    /// Tokens across every session and model that day.
     pub tokens: TokenTotals,
+    /// Always `None` today: a day's cost is left out rather than under-reported
+    /// when part of it could not be priced.
     pub cost: Option<f64>,
 }
 
+/// One model's usage over the summarized range.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ModelSlice {
+    /// Model id as reported, not normalized.
     pub model: String,
+    /// Tokens across every session on this model.
     pub tokens: TokenTotals,
+    /// Dollars; `None` when the model is not in the rate table or there is no table.
     pub cost: Option<f64>,
 }
 
+/// What a range of usage events adds up to, as [`summarize`] returns it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageSummary {
+    /// Tokens across the whole range.
     pub tokens: TokenTotals,
     /// `None` only when nothing could be priced at all.
     pub cost: Option<f64>,
+    /// How much of `cost` is known; read it before showing `cost` as a total.
     pub quality: CostQuality,
+    /// Per-day buckets in ascending date order.
     pub by_day: Vec<DaySlice>,
+    /// Per-model buckets in model-id order.
     pub by_model: Vec<ModelSlice>,
 }
 
