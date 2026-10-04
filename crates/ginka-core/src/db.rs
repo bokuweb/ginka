@@ -169,6 +169,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_second_writer_waits_for_the_first_instead_of_failing() {
+        // More than one connection writes the database — the service's, the
+        // chat connectors' ledger, `ginka doctor` — and WAL still lets only
+        // one write at a time. rusqlite's default busy timeout (5 s) is what
+        // makes the second wait its turn; this pins it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ginka.db");
+        let first = open(&path).unwrap();
+        let second = open(&path).unwrap();
+        first.execute_batch("BEGIN IMMEDIATE").unwrap();
+        first
+            .execute(
+                "INSERT INTO projects (name, path, kind, default_branch) VALUES ('a', '/a', 'git', 'main')",
+                [],
+            )
+            .unwrap();
+
+        let writing = std::thread::spawn(move || {
+            second.execute(
+                "INSERT INTO projects (name, path, kind, default_branch) VALUES ('b', '/b', 'git', 'main')",
+                [],
+            )
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        first.execute_batch("COMMIT").unwrap();
+
+        assert_eq!(
+            writing.join().unwrap().unwrap(),
+            1,
+            "the second write went in"
+        );
+        let count: i64 = first
+            .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+    }
+
+    #[test]
     fn migrations_create_the_schema() {
         let conn = open_in_memory().unwrap();
         let tables: Vec<String> = conn
