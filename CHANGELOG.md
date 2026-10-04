@@ -1,9 +1,12 @@
 # Changelog
 
-Notable changes, newest first. Ginka has not had a release; everything so
-far is unreleased.
+Notable changes, newest first.
 
 ## Unreleased
+
+## 0.1.0 — 2026-10-04
+
+The first release.
 
 ### Agents and sessions
 - A background daemon owns agents, terminals, git and state; the window, the
@@ -52,6 +55,10 @@ far is unreleased.
 - `.worktreeshare` links heavy ignored directories (`node_modules`) into each
   new worktree instead of copying them.
 - Usage and cost, priced from the public rate table where a vendor does not.
+- An agent's questions are answered in a form above the composer: each
+  question's choices with their descriptions, several picks where allowed,
+  an answer of one's own, and skip — by number key or click
+  (`ginka session respond --answer`, `--skip`).
 
 ### The window
 - Project rail, virtualized session list and transcript, tabs, the home
@@ -78,3 +85,14 @@ far is unreleased.
 ### Robustness
 - Crash reports written to the logs directory, and the daemon's settings
   read again when edited by hand.
+- Pushes, commits, searches, diffs and the workspace list wait on git and
+  the network without holding up every other window and command.
+- Stopping the daemon stops the agents and terminals it started; a request
+  that fails inside the daemon is answered with an error instead of
+  dropping the connection.
+- `ginka doctor` says which git, gh and agent CLIs it can run.
+
+### Also in this repository
+- `aws`, a standalone desktop client for Amazon SQS on the same toolkit:
+  queues, messages, and sign-in through the AWS Console, IAM Identity
+  Center or an existing profile.
