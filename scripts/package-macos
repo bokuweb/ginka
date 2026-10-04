@@ -110,6 +110,13 @@ sign() {
             --sign "$identity" "$1"
     fi
 }
+# Chromium ships its libraries (libEGL, libGLESv2, the Vulkan and
+# SwiftShader ones, the sandbox) ad-hoc signed, and signing the framework
+# does not sign them again. Notarization takes only a Developer ID
+# signature with a secure timestamp, on every Mach-O inside.
+find "$app/Contents/Frameworks" -type f -name '*.dylib' | while IFS= read -r library; do
+    sign "$library"
+done
 sign "$app/Contents/Frameworks/Chromium Embedded Framework.framework"
 for helper in "$app/Contents/Frameworks/"*Helper*.app; do
     sign "$helper"
@@ -120,12 +127,23 @@ done
 sign "$app"
 codesign --verify --strict "$app"
 
+# Whether a notarization was accepted; when it was not, Apple's log says
+# which file failed and why, which the status alone does not.
+accepted() {
+    if jq -e '.status == "Accepted"' "$1" >/dev/null; then
+        return 0
+    fi
+    cat "$1"
+    xcrun notarytool log "$(jq -r '.id' "$1")" --keychain-profile "$GINKA_NOTARY_PROFILE" || true
+    return 1
+}
+
 if $dmg && [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
     ditto -c -k --sequesterRsrc --keepParent "$app" "$work/Ginka-notarization.zip"
     xcrun notarytool submit "$work/Ginka-notarization.zip" \
         --keychain-profile "$GINKA_NOTARY_PROFILE" --wait \
         --output-format json > "$work/app-notary.json"
-    jq -e '.status == "Accepted"' "$work/app-notary.json"
+    accepted "$work/app-notary.json"
     xcrun stapler staple "$app"
     xcrun stapler validate "$app"
     codesign --verify --strict "$app"
@@ -152,7 +170,7 @@ fi
 if [ -n "${GINKA_NOTARY_PROFILE:-}" ]; then
     xcrun notarytool submit "$image" --keychain-profile "$GINKA_NOTARY_PROFILE" \
         --wait --output-format json > "$work/dmg-notary.json"
-    jq -e '.status == "Accepted"' "$work/dmg-notary.json"
+    accepted "$work/dmg-notary.json"
     xcrun stapler staple "$image"
 fi
 (cd "$out_dir" && shasum -a 256 "$(basename "$archive")" "$(basename "$image")" > SHA256SUMS)
