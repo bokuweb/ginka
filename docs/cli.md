@@ -13,6 +13,8 @@ Report where Ginka keeps its state and whether that state is healthy
 
 `ginka doctor`
 
+It also says which `git`, `gh` and agent CLIs it can run and their versions, or what a missing one costs. It reads the state directly and starts nothing, so it works when the daemon will not start.
+
 ## `ginka daemon`
 
 Inspect and control the background daemon

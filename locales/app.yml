@@ -2025,3 +2025,15 @@ palette.project.mute:
 palette.project.unmute:
   en: Unmute this project
   ja: このプロジェクトのミュートを解除
+cli.doctor.found:
+  en: found (version not readable)
+  ja: あり（バージョン不明）
+cli.doctor.git_missing:
+  en: "not found — worktrees, diffs and commits need it"
+  ja: "見つかりません — ワークツリー・差分・コミットに必要です"
+cli.doctor.gh_missing:
+  en: "not found — pull requests and their checks need it"
+  ja: "見つかりません — プルリクエストとチェックに必要です"
+cli.doctor.agent_missing:
+  en: not installed
+  ja: 未インストール

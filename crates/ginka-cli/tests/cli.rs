@@ -123,6 +123,21 @@ fn doctor_reports_where_state_lives_without_starting_a_daemon() {
         "{report}"
     );
     assert!(report.contains("not running"), "{report}");
+    // The tools Ginka leans on, each with what it reported or why it is
+    // missing: git (always here, since the tests use it), gh and the agents.
+    let git_line = report
+        .lines()
+        .find(|line| line.starts_with("git "))
+        .unwrap_or_else(|| panic!("no git line: {report}"));
+    assert!(git_line.chars().any(|c| c.is_ascii_digit()), "{git_line}");
+    assert!(
+        report.lines().any(|line| line.starts_with("gh ")),
+        "{report}"
+    );
+    assert!(
+        report.lines().any(|line| line.starts_with("agent claude")),
+        "{report}"
+    );
     assert!(
         !home.root().join("daemon.json").exists(),
         "doctor must not have started anything"

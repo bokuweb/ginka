@@ -2647,6 +2647,37 @@ fn doctor(paths: &Paths) -> Result<()> {
     println!("appearance    {:?}", app.appearance);
     println!("projects      {}", project::list_projects(&conn)?.len());
     println!("daemon        {}", describe_daemon(paths));
+
+    // What Ginka leans on, asked directly: a missing `git` or `gh` explains
+    // more failures than anything in the state directory.
+    use ginka_core::driver::probe;
+    let tool = |name: &str, missing: &str| {
+        let found = probe::probe(std::path::Path::new(name));
+        match (found.installed, found.version) {
+            (true, Some(version)) => version,
+            (true, None) => rust_i18n::t!("cli.doctor.found").to_string(),
+            (false, _) => missing.to_string(),
+        }
+    };
+    println!(
+        "git           {}",
+        tool("git", &rust_i18n::t!("cli.doctor.git_missing"))
+    );
+    println!(
+        "gh            {}",
+        tool("gh", &rust_i18n::t!("cli.doctor.gh_missing"))
+    );
+    let daemon_settings: settings::DaemonSettings = settings::load(&paths.daemon_settings());
+    let registry = ginka_core::driver::Registry::from_settings(&daemon_settings);
+    for agent in probe::probe_all(&registry) {
+        let state = match (agent.installed, agent.version) {
+            (true, Some(version)) => format!("{version}  {}", agent.program),
+            (true, None) => agent.program,
+            (false, _) => rust_i18n::t!("cli.doctor.agent_missing").to_string(),
+        };
+        // At least one space after the label, however long the agent's id.
+        println!("{:<13} {state}", format!("agent {}", agent.id));
+    }
     Ok(())
 }
 
