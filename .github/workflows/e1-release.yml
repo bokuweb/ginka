@@ -17,6 +17,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      # rust-toolchain.toml pins the compiler the build actually uses, and
+      # the step above added the targets to `stable` only: without this the
+      # universal build has no standard library for the other architecture.
+      - name: Add both macOS targets to the pinned toolchain
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
 
       - name: Check release version
