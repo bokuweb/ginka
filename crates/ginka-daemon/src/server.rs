@@ -443,6 +443,17 @@ impl Daemon {
         )
         .await;
 
+        // Agents and shells run in process groups of their own: nothing ends
+        // them when this process does.
+        let stopped = self
+            .service
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stop_everything();
+        if stopped > 0 {
+            tracing::info!(stopped, "stopped the agents still running");
+        }
+
         // Closing the event streams ends every connection's pump, which closes
         // its write queue, which lets the writer flush what is already in it.
         // Then wait for those writers: the client that asked the daemon to stop

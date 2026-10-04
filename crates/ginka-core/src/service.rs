@@ -4449,6 +4449,18 @@ impl Service {
         }))
     }
 
+    /// Stop every agent turn and close every terminal, and say how many
+    /// agents were running.
+    ///
+    /// Agents run in process groups of their own, so nothing else ends them
+    /// when the daemon exits; left behind they keep editing worktrees and
+    /// spending tokens with nobody watching. The daemon calls this on its way
+    /// out.
+    pub fn stop_everything(&mut self) -> usize {
+        self.terminals.close_all();
+        self.sessions.cancel_all()
+    }
+
     /// Reconcile every project's worktrees against git.
     ///
     /// The daemon's own tick rather than each client's: a worktree added with

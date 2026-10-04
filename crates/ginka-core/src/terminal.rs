@@ -337,6 +337,20 @@ impl Terminals {
         Ok(())
     }
 
+    /// Kill every shell. What the daemon does on its way out.
+    pub fn close_all(&self) {
+        let closing: Vec<_> = self
+            .running
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain()
+            .collect();
+        for (_, mut terminal) in closing {
+            terminal.child.kill().ok();
+            terminal.child.wait().ok();
+        }
+    }
+
     /// How many shells are running. For the daemon's own logging, and tests.
     pub fn count(&self) -> usize {
         self.running.lock().unwrap_or_else(|e| e.into_inner()).len()

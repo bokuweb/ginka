@@ -4319,3 +4319,47 @@ fn a_rewind_leaves_the_service_free_and_the_workspace_closed_while_git_works() {
         "the state the rewind replaced is still kept"
     );
 }
+
+#[test]
+fn stopping_the_daemon_stops_every_agent_and_what_it_started() {
+    // Agents run in process groups of their own, so nothing else ends them
+    // when the daemon exits: left behind, they keep editing worktrees and
+    // spending tokens with no one watching.
+    let mut fixture = Fixture::new();
+    let pidfile = fixture.path("child.pid");
+    let session = fixture.start(
+        &[
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"building"}]}}"#,
+            &format!("#spawn {}", pidfile.display()),
+            "#sleep 60000",
+        ]
+        .join("\n"),
+        "build it",
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !pidfile.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the agent never started its child"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let child: u32 = std::fs::read_to_string(&pidfile)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+
+    let stopped = fixture.service.stop_everything();
+
+    assert_eq!(stopped, 1, "one agent was running");
+    assert_eq!(fixture.settle(&session), SessionState::Cancelled);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while alive(child) {
+        assert!(
+            Instant::now() < deadline,
+            "the agent's child outlived the daemon"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
