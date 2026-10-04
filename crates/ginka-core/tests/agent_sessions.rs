@@ -4210,3 +4210,112 @@ fn a_worktree_or_project_with_a_running_agent_is_not_removed_from_under_it() {
         })
         .expect("once the agent has stopped, the worktree can go");
 }
+
+#[test]
+fn a_rewind_leaves_the_service_free_and_the_workspace_closed_while_git_works() {
+    // A rewind snapshots the whole worktree and then rewrites it, which on a
+    // large repository takes a while. Other requests are answered meanwhile;
+    // the workspace being rewound is not touched by any of them.
+    use std::os::unix::fs::PermissionsExt;
+    let mut fixture = Fixture::new();
+    let path = fixture.workspace_path();
+    let session = fixture.start(
+        r#"{"type":"result","subtype":"success","is_error":false,"session_id":"v"}"#,
+        "leave it alone",
+    );
+    fixture.settle(&session);
+    std::fs::write(path.join("README.md"), "changed since\n").unwrap();
+    let checkpoint = fixture
+        .checkpoints()
+        .into_iter()
+        .find(|point| point.turn == 0)
+        .expect("the pre-flight checkpoint");
+
+    // A filesystem monitor that says it started and then waits: git asks it
+    // on every look at the worktree.
+    let started = fixture.path("monitor.started");
+    let release = fixture.path("monitor.release");
+    let monitor = fixture.path("fsmonitor");
+    std::fs::write(
+        &monitor,
+        format!(
+            "#!/bin/sh\ntouch '{}'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\n",
+            started.display(),
+            release.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&monitor, std::fs::Permissions::from_mode(0o755)).unwrap();
+    support::git(
+        &path,
+        &["config", "core.fsmonitor", monitor.to_str().unwrap()],
+    );
+
+    let workspace = fixture.workspace.clone();
+    let spare = fixture.path("spare");
+    let service = Arc::new(Mutex::new(std::mem::replace(
+        &mut fixture.service,
+        Service::new(
+            Paths::with_root(spare),
+            db::open_in_memory().unwrap(),
+            Arc::new(Recorder::default()),
+        ),
+    )));
+    let rewinding = {
+        let service = service.clone();
+        let checkpoint = checkpoint.id.clone();
+        std::thread::spawn(move || {
+            ginka_core::service::handle_shared(&service, Request::RestoreCheckpoint { checkpoint })
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "git never looked at the worktree"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut served = None;
+    while Instant::now() < deadline {
+        if let Ok(mut service) = service.try_lock() {
+            let other = service.handle(Request::ListProjects).is_ok();
+            let same = service.handle(Request::WorkspaceHistory {
+                workspace: workspace.clone(),
+                limit: None,
+            });
+            served = Some((other, same));
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::fs::write(&release, "").unwrap();
+    let rewound = rewinding.join().unwrap();
+    support::git(&path, &["config", "--unset", "core.fsmonitor"]);
+    fixture.service = Arc::try_unwrap(service)
+        .ok()
+        .expect("the rewind is done with the service")
+        .into_inner()
+        .unwrap();
+
+    let (other, same) = served.expect("the service stayed locked while git rewound");
+    assert!(other);
+    let error = same.expect_err("a workspace being rewound is not worked on");
+    assert!(
+        error.message.contains("being restored"),
+        "{}",
+        error.message
+    );
+    assert!(matches!(rewound, Ok(Response::Ack)), "{rewound:?}");
+    assert_ne!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "changed since\n"
+    );
+    assert!(
+        fixture
+            .checkpoints()
+            .iter()
+            .any(|point| point.label.starts_with("before restoring:")),
+        "the state the rewind replaced is still kept"
+    );
+}

@@ -221,9 +221,9 @@ pub struct Service {
     /// What each recent turn added, for line attribution — read once per
     /// turn, since its snapshots never change.
     turn_lines: crate::attribution::TurnLinesCache,
-    /// Workspaces whose worktree is being deleted off the lock; closed to
-    /// every other request until it is gone.
-    removing: std::collections::HashSet<WorkspaceId>,
+    /// Workspaces whose worktree is being deleted or rewound off the lock,
+    /// and which; closed to every other request until that is done.
+    busy: std::collections::HashMap<WorkspaceId, &'static str>,
     /// The last probe of the agent CLIs, and when it was taken.
     ///
     /// Probing runs two subprocesses per agent, and the sidebar asks on every
@@ -312,7 +312,7 @@ impl Service {
             statuses: std::collections::HashMap::new(),
             pull_requests: std::collections::HashMap::new(),
             turn_lines: Default::default(),
-            removing: Default::default(),
+            busy: Default::default(),
             agents: None,
             settings,
             accounts: None,
@@ -879,11 +879,11 @@ impl Service {
                     Ok(planned) => planned,
                     Err(error) => return Step::Done(Err(error)),
                 };
-                self.removing.insert(workspace.clone());
+                self.busy.insert(workspace.clone(), "being removed");
                 Step::Away(Box::new(move || {
                     let removed = git::remove_worktree(&project.path, &worktree.path, force);
                     Box::new(move |service: &mut Service| {
-                        service.removing.remove(&workspace);
+                        service.busy.remove(&workspace);
                         removed.map_err(failed)?;
                         registry::sync_worktrees(&service.conn(), &project).map_err(failed)?;
                         service.events.emit(DaemonEvent::WorkspacesChanged {
@@ -893,6 +893,10 @@ impl Service {
                     })
                 }))
             }
+            Request::RestoreCheckpoint { checkpoint } => match self.plan_restore(&checkpoint) {
+                Ok(plan) => plan,
+                Err(error) => Step::Done(Err(error)),
+            },
             Request::Pull { workspace } => self.away_in(
                 &workspace,
                 git::pull_fast_forward,
@@ -1004,6 +1008,7 @@ impl Service {
             | Request::FanOut { .. }
             | Request::CheckoutBranch { .. }
             | Request::RemoveWorkspace { .. }
+            | Request::RestoreCheckpoint { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
             | Request::WorkspaceHistory { .. }
@@ -2103,7 +2108,6 @@ impl Service {
                     checkpoints: checkpoint::list(&self.conn(), &workspace).map_err(failed)?,
                 })
             }
-            Request::RestoreCheckpoint { checkpoint } => self.restore(&checkpoint),
 
             Request::UploadAttachment { name, data_base64 } => {
                 use base64::Engine as _;
@@ -2946,7 +2950,9 @@ impl Service {
             // The one the turn took, not a later "before restoring" snapshot.
             .min_by_key(|checkpoint| checkpoint.created_at);
         if let Some(checkpoint) = before {
-            self.restore(&checkpoint.id)?;
+            self.handle(Request::RestoreCheckpoint {
+                checkpoint: checkpoint.id,
+            })?;
         }
         let fork =
             match self.fork_session(id, Some(seq.saturating_sub(1)), None, None, None, true)? {
@@ -3349,31 +3355,45 @@ impl Service {
     /// Restoring is destructive — files written since are removed — so the
     /// state being replaced is snapshotted first. A rewind must never be the
     /// thing that loses work, including work the user wanted after all.
-    fn restore(&mut self, id: &CheckpointId) -> Result<Response, RpcError> {
+    ///
+    /// Both the snapshot and the rewind read and write the whole worktree, so
+    /// they run without the service held; the workspace answers "being
+    /// restored" to every other request meanwhile, and the snapshot is stored
+    /// afterwards — even if the rewind then failed.
+    fn plan_restore(&mut self, id: &CheckpointId) -> Result<Step, RpcError> {
         let checkpoint = checkpoint::get(&self.conn(), id)
             .map_err(failed)?
             .ok_or_else(|| RpcError::not_found(format!("no checkpoint with id {}", id.0)))?;
         let worktree = self.worktree(&checkpoint.workspace)?;
-
-        checkpoint::take(
-            &self.conn(),
-            &worktree.path,
-            checkpoint::TurnRef {
-                workspace: &checkpoint.workspace,
-                session: &checkpoint.session,
-                turn: checkpoint.turn,
-            },
-            &format!("before restoring: {}", checkpoint.label),
-            None,
-            now(),
-        )
-        .map_err(failed)?;
-
-        git::restore_snapshot(&worktree.path, &checkpoint.commit).map_err(failed)?;
-        self.events.emit(DaemonEvent::WorkspacesChanged {
-            project: worktree.project.clone(),
-        });
-        Ok(Response::Ack)
+        self.busy
+            .insert(checkpoint.workspace.clone(), "being restored");
+        Ok(Step::Away(Box::new(move || {
+            let kept = checkpoint::snapshot(
+                &worktree.path,
+                checkpoint::TurnRef {
+                    workspace: &checkpoint.workspace,
+                    session: &checkpoint.session,
+                    turn: checkpoint.turn,
+                },
+                &format!("before restoring: {}", checkpoint.label),
+                now(),
+            );
+            // Nothing is rewound unless what it replaces was kept.
+            let restored = match &kept {
+                Ok(_) => git::restore_snapshot(&worktree.path, &checkpoint.commit),
+                Err(_) => Ok(()),
+            };
+            Box::new(move |service: &mut Service| {
+                service.busy.remove(&checkpoint.workspace);
+                let kept = kept.map_err(failed)?;
+                checkpoint::insert(&service.conn(), &kept).map_err(failed)?;
+                restored.map_err(failed)?;
+                service.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            })
+        })))
     }
 
     /// Write a pull request's details on a cheap model and open it with them,
@@ -4043,8 +4063,8 @@ impl Service {
 
     /// Resolve a workspace id to the worktree it names.
     fn worktree(&self, workspace: &WorkspaceId) -> Result<Worktree, RpcError> {
-        if self.removing.contains(workspace) {
-            return Err(RpcError::failed(format!("{workspace} is being removed")));
+        if let Some(doing) = self.busy.get(workspace) {
+            return Err(RpcError::failed(format!("{workspace} is {doing}")));
         }
         project::find_worktree(&self.conn(), workspace)
             .map_err(failed)?

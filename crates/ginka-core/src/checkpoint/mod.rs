@@ -78,24 +78,17 @@ pub fn take(
         session,
         turn,
     } = at;
-    let id = CheckpointId(uuid::Uuid::new_v4().simple().to_string());
-    let label = trim_label(label);
-    let commit = git::snapshot(
+    let mut checkpoint = snapshot(
         workspace_path,
-        &reference(&id),
-        &format!("ginka checkpoint: {label}"),
-    )?;
-
-    let checkpoint = Checkpoint {
-        id,
-        session: session.clone(),
-        workspace: workspace.clone(),
-        turn,
-        commit,
+        TurnRef {
+            workspace,
+            session,
+            turn,
+        },
         label,
-        has_turn_start: start.is_some(),
-        created_at: now,
-    };
+        now,
+    )?;
+    checkpoint.has_turn_start = start.is_some();
     insert(conn, &checkpoint)?;
     if let Some(start) = start {
         // Written beside the ending commit rather than instead of it: the pair
@@ -107,6 +100,34 @@ pub fn take(
         )?;
     }
     Ok(checkpoint)
+}
+
+/// Snapshot the worktree into a checkpoint without storing it: the git half
+/// of [`take`], which can run without the database (and so without the
+/// daemon's service held). [`insert`] stores it afterwards.
+pub fn snapshot(
+    workspace_path: &Path,
+    at: TurnRef<'_>,
+    label: &str,
+    now: i64,
+) -> Result<Checkpoint> {
+    let id = CheckpointId(uuid::Uuid::new_v4().simple().to_string());
+    let label = trim_label(label);
+    let commit = git::snapshot(
+        workspace_path,
+        &reference(&id),
+        &format!("ginka checkpoint: {label}"),
+    )?;
+    Ok(Checkpoint {
+        id,
+        session: at.session.clone(),
+        workspace: at.workspace.clone(),
+        turn: at.turn,
+        commit,
+        label,
+        has_turn_start: false,
+        created_at: now,
+    })
 }
 
 /// Store a checkpoint that has already been taken.
