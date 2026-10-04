@@ -780,6 +780,49 @@ pub trait AgentSession {
     fn cancel(&mut self) -> Result<()>;
 }
 
+/// The questions in a vendor's request — Claude's `AskUserQuestion` input or
+/// Codex's `requestUserInput` params, which share a shape: each a `question`
+/// with an optional `header`, `options` of `label` and `description`, and
+/// `multiSelect` where several picks are allowed. Anything malformed is
+/// skipped rather than refusing the whole request.
+pub fn questions_in(value: Option<&serde_json::Value>) -> Vec<ginka_protocol::question::Question> {
+    use ginka_protocol::question::{Choice, Question};
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    value
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|question| {
+            Some(Question {
+                header: text(question, "header").filter(|header| !header.is_empty()),
+                question: text(question, "question")?,
+                options: question
+                    .get("options")
+                    .and_then(serde_json::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|option| {
+                        Some(Choice {
+                            label: text(option, "label")?,
+                            description: text(option, "description")
+                                .filter(|description| !description.is_empty()),
+                        })
+                    })
+                    .collect(),
+                multi_select: question
+                    .get("multiSelect")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
 /// Apply an option change to a running session, updating `current` when the
 /// session took it.
 ///

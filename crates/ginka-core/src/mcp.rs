@@ -313,7 +313,7 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_session_respond",
-            description: "Answer a question, plan or permission request inside a running turn. Use the request id from the transcript event.",
+            description: "Answer a question, plan or permission request inside a running turn. Use the request id from the transcript event. Words answer every question a card asks; to answer an ask_user event's `questions` one each, send `{\"answers\": {\"<question text>\": [\"<choice>\", ...]}}` as the response (all lists empty skips them).",
             schema: json!({
                 "type": "object",
                 "properties": {

@@ -87,7 +87,7 @@ Start and steer agent sessions
 - `ginka session queue-pause` — Hold the queue, or let it go with `--resume` (`ginka session queue-pause <SESSION>`)
 - `ginka session queue-clear` — Throw away every queued follow-up (`ginka session queue-clear <SESSION>`)
 - `ginka session compact` — Compact an idle provider conversation's context (`ginka session compact <SESSION>`)
-- `ginka session respond` — Answer a question, plan or permission request in a running turn (`ginka session respond <SESSION> <REQUEST_ID> <RESPONSE>`)
+- `ginka session respond` — Answer a question, plan or permission request in a running turn (`ginka session respond <SESSION> <REQUEST_ID> <RESPONSE>`). A card that asks several questions is answered one at a time with `--answer "Which database?=SQLite"` (repeat it for more questions or more picks), or set aside with `--skip`; the transcript lists each question with its numbered choices and their descriptions
 - `ginka session options` — Replace provider options for later turns. Omitted options use the provider default (`ginka session options <SESSION>`)
 - `ginka session cancel` — Stop an agent's process tree (`ginka session cancel <SESSION>`)
 - `ginka session rename` — Rename a conversation (`ginka session rename <SESSION> <TITLE>`)

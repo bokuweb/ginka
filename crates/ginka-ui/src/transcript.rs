@@ -203,6 +203,11 @@ pub enum Block {
         question: String,
         /// Choices the agent offered; empty for a free-form answer.
         options: Vec<String>,
+        /// The questions as the agent structured them, drawn as a form with
+        /// descriptions, several picks and an *Other* field
+        /// ([`crate::question_form`]); empty for an approval or a plain
+        /// question.
+        questions: Vec<ginka_protocol::question::Question>,
         /// Whether the reader has already replied to it.
         ///
         /// Kept on the block rather than in the view: a transcript re-read
@@ -390,6 +395,20 @@ impl Transcript {
                 unreachable!("prompt indexes are recorded only for user blocks")
             };
             (*index, text.as_str())
+        })
+    }
+
+    /// The newest unanswered card that asks structured questions, with its id:
+    /// what the window pins above the composer as a form.
+    pub fn open_questions(&self) -> Option<(&str, &[ginka_protocol::question::Question])> {
+        self.blocks.iter().rev().find_map(|block| match block {
+            Block::Question {
+                id,
+                questions,
+                answered: false,
+                ..
+            } if !questions.is_empty() => Some((id.as_str(), questions.as_slice())),
+            _ => None,
         })
     }
 
@@ -599,11 +618,13 @@ impl Transcript {
                 id,
                 question,
                 options,
+                questions,
             } => {
                 self.blocks.push(Block::Question {
                     id: id.clone(),
                     question: question.clone(),
                     options: options.clone(),
+                    questions: questions.clone(),
                     answered: false,
                 });
                 Some(self.blocks.len() - 1)
@@ -621,6 +642,7 @@ impl Transcript {
                     id: id.clone(),
                     question: request.clone(),
                     options: Vec::new(),
+                    questions: Vec::new(),
                     answered: false,
                 });
                 Some(self.blocks.len() - 1)
@@ -1236,6 +1258,7 @@ mod tests {
                     id: "q1".into(),
                     question: "which?".into(),
                     options: vec!["a".into()],
+                    questions: Vec::new(),
                 },
             ),
             text(3, "waiting"),
@@ -1423,6 +1446,7 @@ mod tests {
                     id: "database".into(),
                     question: "Which database?".into(),
                     options: Vec::new(),
+                    questions: Vec::new(),
                 },
             ),
             agent(
@@ -1465,6 +1489,7 @@ mod tests {
                     id: "old".into(),
                     question: "First?".into(),
                     options: Vec::new(),
+                    questions: Vec::new(),
                 },
             ),
             agent(
@@ -1473,6 +1498,7 @@ mod tests {
                     id: "new".into(),
                     question: "Second?".into(),
                     options: Vec::new(),
+                    questions: Vec::new(),
                 },
             ),
         ]);
@@ -2234,6 +2260,36 @@ mod tests {
     }
 
     #[test]
+    fn structured_questions_are_open_until_answered() {
+        use ginka_protocol::question::{Choice, Question};
+        let questions = vec![Question {
+            header: Some("DB".into()),
+            question: "Which database?".into(),
+            options: vec![Choice {
+                label: "SQLite".into(),
+                description: Some("local".into()),
+            }],
+            multi_select: false,
+        }];
+        let mut transcript = Transcript::new();
+        transcript.extend(&[agent(
+            1,
+            AgentEvent::AskUser {
+                id: "ask-2".into(),
+                question: "Which database?".into(),
+                options: vec!["SQLite".into()],
+                questions: questions.clone(),
+            },
+        )]);
+        assert_eq!(
+            transcript.open_questions(),
+            Some(("ask-2", questions.as_slice()))
+        );
+        transcript.answer("ask-2");
+        assert_eq!(transcript.open_questions(), None);
+    }
+
+    #[test]
     fn a_question_carries_what_an_answer_is_sent_against() {
         // Without the id there is nothing to answer to, and the card is a
         // paragraph with buttons that do nothing.
@@ -2244,8 +2300,14 @@ mod tests {
                 id: "ask-1".into(),
                 question: "Which one?".into(),
                 options: vec!["this".into(), "that".into()],
+                questions: Vec::new(),
             },
         )]);
+        assert_eq!(
+            transcript.open_questions(),
+            None,
+            "a plain question is answered with buttons, not the form"
+        );
         match transcript.blocks().last().unwrap() {
             Block::Question {
                 id,

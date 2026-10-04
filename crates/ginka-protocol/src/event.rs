@@ -102,10 +102,19 @@ pub enum AgentEvent {
     AskUser {
         /// Correlates the reply sent through `respond_to_agent`.
         id: String,
-        /// What the agent wants to know.
+        /// What the agent wants to know — every question's text, one per
+        /// line, when it asked several.
         question: String,
-        /// Choices offered, in the agent's order.
+        /// Choices offered, in the agent's order — the only question's
+        /// labels; empty when several were asked.
         options: Vec<String>,
+        /// The questions as the agent structured them — headers, choices
+        /// with descriptions, multiple picks — for a client that draws them
+        /// as a form and answers with [`crate::question::Answers`]. Empty for
+        /// a plain question or an approval, and in transcripts written before
+        /// it existed; `question` and `options` say the same in plain form.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        questions: Vec<crate::question::Question>,
     },
     /// The agent proposed a plan and wants it approved before acting.
     PlanProposal {

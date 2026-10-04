@@ -12,6 +12,7 @@
 //! - [`event`] — the normalized agent stream and the daemon's pushes.
 //! - [`handshake`] — how a client finds the daemon in the first place.
 //! - [`rpc`] and [`envelope`] — the request surface and the frames carrying it.
+//! - [`question`] — the structured questions an agent asks, and their answers.
 
 #![deny(missing_docs)]
 
@@ -21,6 +22,7 @@ pub mod handshake;
 pub mod ids;
 pub mod model;
 pub mod provider;
+pub mod question;
 pub mod rpc;
 pub mod session;
 

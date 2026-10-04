@@ -443,6 +443,18 @@ struct ForkMenu {
     error: Option<String>,
 }
 
+/// The agent's open structured questions as the reader fills them in.
+struct OpenQuestionForm {
+    /// The card the answers are sent against.
+    card: String,
+    /// What has been picked and typed.
+    form: ginka_ui::question_form::QuestionForm,
+    /// Each question's *Other* field.
+    others: Vec<Entity<InputState>>,
+    /// Where number keys land while the form has focus.
+    focus: FocusHandle,
+}
+
 /// Find-in-page state for the open persisted conversation.
 struct TranscriptSearch {
     query: Entity<InputState>,
@@ -636,6 +648,9 @@ pub struct Shell {
     transcript_of: Option<SessionId>,
     /// Present while the reader is finding text in the open conversation.
     transcript_search: Option<TranscriptSearch>,
+    /// The agent's open structured questions, pinned above the composer as
+    /// a form until answered.
+    question_form: Option<OpenQuestionForm>,
     /// Whether the turn-sized prompt navigator is expanded above the transcript.
     prompt_outline_open: bool,
     /// What each agent CLI on this machine says about itself, so the composer
@@ -1819,6 +1834,7 @@ impl Shell {
             workspace_sessions: Vec::new(),
             transcript_of: None,
             transcript_search: None,
+            question_form: None,
             prompt_outline_open: false,
             agents: Vec::new(),
             provider_settings: Vec::new(),
@@ -8946,6 +8962,324 @@ impl Shell {
         .detach();
     }
 
+    /// Keep the pinned form in step with the transcript: a new open card gets
+    /// a fresh form, an answered one loses it. Keyboard focus moves to a new
+    /// form only while the composer is empty, so a sentence being typed is
+    /// never interrupted.
+    fn sync_question_form(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let open = self
+            .transcript
+            .open_questions()
+            .map(|(card, questions)| (card.to_string(), questions.to_vec()));
+        let Some((card, questions)) = open else {
+            self.question_form = None;
+            return;
+        };
+        if self
+            .question_form
+            .as_ref()
+            .is_some_and(|form| form.card == card)
+        {
+            return;
+        }
+        let others: Vec<Entity<InputState>> = questions
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                let field = cx.new(|cx| {
+                    InputState::new(window, cx)
+                        .placeholder(rust_i18n::t!("question.other.placeholder").to_string())
+                });
+                cx.subscribe(
+                    &field,
+                    move |this, field, event: &InputEvent, cx| match event {
+                        InputEvent::Change => {
+                            let text = field.read(cx).value().to_string();
+                            if let Some(open) = this.question_form.as_mut() {
+                                open.form.set_other(index, &text);
+                                cx.notify();
+                            }
+                        }
+                        InputEvent::Focus => {
+                            if let Some(open) = this.question_form.as_mut() {
+                                open.form.focus(index);
+                                cx.notify();
+                            }
+                        }
+                        InputEvent::PressEnter { .. } => this.send_question_form(cx),
+                        _ => {}
+                    },
+                )
+                .detach();
+                field
+            })
+            .collect();
+        let focus = cx.focus_handle();
+        if self.composer.read(cx).value().trim().is_empty() {
+            focus.focus(window, cx);
+        }
+        self.question_form = Some(OpenQuestionForm {
+            card,
+            form: ginka_ui::question_form::QuestionForm::new(questions),
+            others,
+            focus,
+        });
+    }
+
+    /// Send the pinned form's answers, if every question has one.
+    fn send_question_form(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.question_form.as_ref() else {
+            return;
+        };
+        if !open.form.is_complete() {
+            return;
+        }
+        let (card, response) = (open.card.clone(), open.form.answers().encode());
+        self.respond(card, response, cx);
+    }
+
+    /// Skip the pinned form: every question answered with nothing.
+    fn skip_question_form(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.question_form.as_ref() else {
+            return;
+        };
+        let (card, response) = (open.card.clone(), open.form.skip().encode());
+        self.respond(card, response, cx);
+    }
+
+    /// The agent's open questions as a form above the composer: each
+    /// question's numbered choices with their descriptions, an *Other* field,
+    /// and *Skip* and *Send*. A number picks in the current question, the
+    /// number after the last choice moves to *Other*, ↑/↓ change question and
+    /// ⌘↩ sends.
+    fn question_form_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let open = self.question_form.as_ref()?;
+        let tokens = Tokens::global(cx).clone();
+        let form = &open.form;
+        let complete = form.is_complete();
+        let questions = form.questions().iter().enumerate().map(|(q, question)| {
+            let current = form.current() == q && form.questions().len() > 1;
+            let choices = question.options.iter().enumerate().map(|(c, choice)| {
+                let picked = form.is_picked(q, c);
+                h_flex()
+                    .id(SharedString::from(format!("question-{q}-{c}")))
+                    .w_full()
+                    .px_3()
+                    .py_2()
+                    .gap_3()
+                    .items_start()
+                    .rounded(px(tokens.radius.row))
+                    .bg(if picked {
+                        tokens.colors().row_active()
+                    } else {
+                        tokens.colors().bg_raised
+                    })
+                    .border_1()
+                    .border_color(if picked {
+                        tokens.colors().accent.opacity(0.6)
+                    } else {
+                        tokens.colors().border_subtle
+                    })
+                    .cursor_pointer()
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if let Some(open) = this.question_form.as_mut() {
+                            open.form.pick(q, c);
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_sm()
+                                    .text_color(tokens.colors().text_primary)
+                                    // A mark as well as the tint: picked is
+                                    // not said by colour alone (§6.4).
+                                    .child(if picked { "✓" } else { " " })
+                                    .child(choice.label.clone()),
+                            )
+                            .children(choice.description.clone().map(|description| {
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(description)
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .px_1p5()
+                            .rounded(px(tokens.radius.control()))
+                            .border_1()
+                            .border_color(tokens.colors().border_subtle)
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child((c + 1).to_string()),
+                    )
+                    .into_any_element()
+            });
+            let other_number = question.options.len() + 1;
+            v_flex()
+                .w_full()
+                .gap_1p5()
+                .when(current, |this| {
+                    this.pl_2()
+                        .border_l_2()
+                        .border_color(tokens.colors().accent.opacity(0.6))
+                })
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .children(question.header.clone().map(|header| {
+                            div()
+                                .px_1p5()
+                                .rounded(px(tokens.radius.control()))
+                                .bg(tokens.colors().row_active())
+                                .text_xs()
+                                .text_color(tokens.colors().text_secondary)
+                                .child(header)
+                        }))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_medium()
+                                .text_color(tokens.colors().text_primary)
+                                .child(question.question.clone()),
+                        )
+                        .when(question.multi_select, |this| {
+                            this.child(
+                                div()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(rust_i18n::t!("question.several").to_string()),
+                            )
+                        }),
+                )
+                .children(choices)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("question.other").to_string()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .child(ginka_ui::field::input(&open.others[q])),
+                        )
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .px_1p5()
+                                .rounded(px(tokens.radius.control()))
+                                .border_1()
+                                .border_color(tokens.colors().border_subtle)
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(other_number.to_string()),
+                        ),
+                )
+                .into_any_element()
+        });
+        Some(
+            v_flex()
+                .id("question-form")
+                .track_focus(&open.focus)
+                .mx_3()
+                .mb_2()
+                .p_3()
+                .gap_3()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(tokens.colors().status_attention.opacity(0.55))
+                .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.question_form_key(event, window, cx)
+                }))
+                .children(questions)
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("question.keys").to_string()),
+                        )
+                        .child(
+                            Button::new("question-skip")
+                                .ghost()
+                                .small()
+                                .label(rust_i18n::t!("question.skip").to_string())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.skip_question_form(cx)),
+                                ),
+                        )
+                        .child(
+                            Button::new("question-send")
+                                .primary()
+                                .small()
+                                .disabled(!complete)
+                                .label(rust_i18n::t!("question.send").to_string())
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.send_question_form(cx)),
+                                ),
+                        ),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// A key on the pinned form: numbers pick, ↑/↓ change question, ⌘↩ sends.
+    fn question_form_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        if keystroke.key == "enter" && keystroke.modifiers.platform {
+            self.send_question_form(cx);
+            return;
+        }
+        let Some(open) = self.question_form.as_mut() else {
+            return;
+        };
+        match keystroke.key.as_str() {
+            "up" => open.form.focus(open.form.current().saturating_sub(1)),
+            "down" => open.form.focus(open.form.current() + 1),
+            digit => {
+                let Some(number) = digit
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|_| !keystroke.modifiers.modified())
+                else {
+                    return;
+                };
+                if open.form.press_number(number) == ginka_ui::question_form::KeyOutcome::Other {
+                    let field = open.others[open.form.current()].clone();
+                    field.read(cx).focus_handle(cx).focus(window, cx);
+                }
+            }
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
     /// Deliver a free-text interaction answer from the composer.
     ///
     /// The text and its draft stay put if the daemon rejects a stale card or
@@ -9171,11 +9505,48 @@ impl Shell {
                 is_error,
                 ..
             } => self.subagent_card(title, steps, summary.as_deref(), *is_error, cx),
+            // Structured questions are answered in the form pinned above the
+            // composer; here they leave what was asked, and where to answer.
+            TranscriptBlock::Question {
+                question,
+                questions,
+                answered,
+                ..
+            } if !questions.is_empty() => v_flex()
+                .w_full()
+                .p_3()
+                .gap_1()
+                .rounded(px(tokens.radius.card))
+                .bg(tokens.colors().bg_surface)
+                .border_1()
+                .border_color(if *answered {
+                    tokens.colors().border_subtle
+                } else {
+                    tokens.colors().status_attention.opacity(0.55)
+                })
+                .child(
+                    div()
+                        .text_size(px(PROSE_SIZE))
+                        .text_color(tokens.colors().text_secondary)
+                        .child(question.clone()),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(if *answered {
+                            rust_i18n::t!("question.answered").to_string()
+                        } else {
+                            rust_i18n::t!("question.answer_below").to_string()
+                        }),
+                )
+                .into_any_element(),
             TranscriptBlock::Question {
                 id,
                 question,
                 options,
                 answered,
+                ..
             } => self.asked(index, id, question, options, *answered, cx),
             TranscriptBlock::Plan { id, plan, answered } => {
                 self.proposed(index, id, plan, *answered, cx)
@@ -14622,6 +14993,7 @@ impl Shell {
                         let conversation = v_flex()
                             .size_full()
                             .child(self.transcript(selected_text, cx))
+                            .children(self.question_form_view(cx))
                             .child(self.composer(cx))
                             .into_any_element();
                         self.attachment_drop_target(conversation, cx)
@@ -15035,6 +15407,7 @@ impl Render for Shell {
         // Before anything is measured: the tail on screen is whatever the
         // reveal has walked out so far.
         self.write_a_little_more(window);
+        self.sync_question_form(window, cx);
         if let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) {
             // Whether the branch has an open pull request whose checks the
             // Git surface can offer to fix.
