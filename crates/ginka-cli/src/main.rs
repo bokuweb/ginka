@@ -8,6 +8,8 @@
 //! `--json` prints the protocol's own response instead of a table, which is
 //! what makes the command line usable by an agent as well as by a person.
 
+#![deny(missing_docs)]
+
 // The CLI prints to a human too, so its own messages are translated. The
 // protocol's shapes, printed by `--json`, are not: those are for programs.
 rust_i18n::i18n!("../../locales", fallback = "en");
@@ -25,6 +27,7 @@ use ginka_protocol::rpc::{Attempt, Request, Response};
 use ginka_protocol::{AccountId, CheckpointId, ProjectName, SessionId, TerminalId, WorkspaceId};
 use std::path::PathBuf;
 
+/// The command line as parsed: global flags and the one request to make.
 #[derive(Parser)]
 #[command(
     name = "ginka",
@@ -36,10 +39,12 @@ struct Cli {
     #[arg(long, global = true)]
     json: bool,
 
+    /// What to do.
     #[command(subcommand)]
     command: Command,
 }
 
+/// Every top-level subcommand; each becomes one daemon request.
 #[derive(Subcommand)]
 enum Command {
     /// Report where Ginka keeps its state and whether that state is healthy.
@@ -276,8 +281,11 @@ enum Command {
     /// The MCP servers Claude Code and Codex are configured with outside
     /// Ginka, and with `--workspace` that repository's own.
     McpServers {
+        /// A workspace id: its repository's servers are listed too, and a
+        /// project or local scope refers to its project.
         #[arg(long, global = true)]
         workspace: Option<String>,
+        /// What to change. Lists the servers when omitted.
         #[command(subcommand)]
         action: Option<McpServersAction>,
     },
@@ -397,6 +405,7 @@ enum Command {
     Checkpoint(CheckpointCommand),
 }
 
+/// `ginka daemon …`.
 #[derive(Subcommand)]
 enum DaemonCommand {
     /// Report whether a daemon is running, and where.
@@ -407,6 +416,7 @@ enum DaemonCommand {
     Stop,
 }
 
+/// `ginka project …`.
 #[derive(Subcommand)]
 enum ProjectCommand {
     /// Register a repository or folder.
@@ -421,20 +431,36 @@ enum ProjectCommand {
     List,
     /// Find literal source lines across every active workspace.
     Search {
+        /// The project's name, as shown by `project list`.
         project: String,
+        /// The text to look for. Taken literally, not as a pattern.
         query: String,
         /// Maximum hits across all workspaces.
         #[arg(long)]
         limit: Option<u32>,
     },
     /// Forget a project. Its files are left alone.
-    Remove { project: String },
+    Remove {
+        /// The project's name, as shown by `project list`.
+        project: String,
+    },
     /// Name a project the way you group it; an empty label clears it.
-    Label { project: String, label: String },
+    Label {
+        /// The project's name, as shown by `project list`.
+        project: String,
+        /// The new label.
+        label: String,
+    },
     /// Put a project at a position in the order, 0 first.
-    Move { project: String, index: u32 },
+    Move {
+        /// The project's name, as shown by `project list`.
+        project: String,
+        /// The zero-based position to move it to.
+        index: u32,
+    },
 }
 
+/// `ginka workspace …`.
 #[derive(Subcommand)]
 enum WorkspaceCommand {
     /// List workspaces, reconciling against git first.
@@ -444,6 +470,7 @@ enum WorkspaceCommand {
     },
     /// Create a worktree on a new branch.
     New {
+        /// The project's name, as shown by `project list`.
         project: String,
         /// The branch to create. Also becomes the workspace's immutable name.
         branch: String,
@@ -461,6 +488,7 @@ enum WorkspaceCommand {
     },
     /// Remove a workspace's worktree.
     Remove {
+        /// The project's name, as shown by `project list`.
         project: String,
         /// The workspace's immutable name, as shown by `workspace list`.
         name: String,
@@ -477,6 +505,7 @@ enum WorkspaceCommand {
     Checkout {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
+        /// The branch to check out.
         branch: String,
         /// Create the branch from HEAD first.
         #[arg(long)]
@@ -526,6 +555,7 @@ enum WorkspaceCommand {
     },
 }
 
+/// `ginka account …`.
 #[derive(Subcommand)]
 enum AccountCommand {
     /// List every login, with whether it is signed in and the latest reading
@@ -548,19 +578,30 @@ enum AccountCommand {
     /// Forget a login. Its directory — the vendor's sign-in — is kept unless
     /// asked otherwise.
     Remove {
+        /// The login's id, as shown by `account list`.
         id: String,
         /// Delete the directory too, sign-in and all.
         #[arg(long)]
         delete_home: bool,
     },
     /// Select the login future sessions of its provider use.
-    Select { id: String },
+    Select {
+        /// The login's id, as shown by `account list`.
+        id: String,
+    },
     /// Run the vendor's own sign-in for a login, here in this terminal.
-    Login { id: String },
+    Login {
+        /// The login's id, as shown by `account list`.
+        id: String,
+    },
     /// Ask the provider how much of a login's rate-limit windows is left.
-    Refresh { id: String },
+    Refresh {
+        /// The login's id, as shown by `account list`.
+        id: String,
+    },
 }
 
+/// `ginka slack …`.
 #[derive(Subcommand)]
 enum SlackCommand {
     /// Whether the connector is configured, connected, and listening where.
@@ -582,18 +623,24 @@ enum SlackCommand {
     },
 }
 
+/// `ginka quick …`.
 #[derive(Subcommand)]
 enum QuickCommand {
     /// List a project's quick commands and the global ones.
     List {
+        /// The project whose own commands to include. Only the global ones
+        /// when omitted.
         #[arg(long)]
         project: Option<String>,
     },
     /// Save a shell command (`--shell`) or a prompt (`--prompt`).
     Add {
+        /// What lists and menus call it.
         name: String,
+        /// The command line, run in a new terminal named after it.
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
+        /// The prompt, sent through the composer.
         #[arg(long)]
         prompt: Option<String>,
         /// The project it belongs to; every project when omitted.
@@ -601,11 +648,20 @@ enum QuickCommand {
         project: Option<String>,
     },
     /// Forget a quick command.
-    Remove { id: String },
+    Remove {
+        /// The quick command's id, as shown by `quick list`.
+        id: String,
+    },
     /// Run a shell quick command in a new terminal in the workspace.
-    Run { workspace: String, id: String },
+    Run {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The quick command's id, as shown by `quick list`.
+        id: String,
+    },
 }
 
+/// `ginka settings …`.
 #[derive(Subcommand)]
 enum SettingsCommand {
     /// Print the daemon's settings as JSON, environment values hidden.
@@ -614,40 +670,67 @@ enum SettingsCommand {
     Providers,
     /// Configure a shipped provider for future turns.
     Provider {
+        /// The provider, as `settings providers` lists it.
         provider: String,
+        /// Make it available again.
         #[arg(long, conflicts_with = "disable")]
         enable: bool,
+        /// Stop offering it for new turns.
         #[arg(long)]
         disable: bool,
+        /// Run this executable instead of the driver's default.
         #[arg(long, conflicts_with = "clear_program")]
         program: Option<String>,
+        /// Forget the executable override and use the driver's default.
         #[arg(long)]
         clear_program: bool,
     },
     /// Change one top-level setting. The value is JSON — `false`, `7`,
     /// `["codex"]` — and anything that is not is taken as a string.
-    Set { key: String, value: String },
+    Set {
+        /// The setting's name, as `settings show` prints it.
+        key: String,
+        /// The new value.
+        value: String,
+    },
 }
 
+/// `ginka terminal …`.
 #[derive(Subcommand)]
 enum TerminalCommand {
     /// The terminals running in a workspace.
-    List { workspace: String },
+    List {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Open a shell in a workspace, and print its id.
-    Open { workspace: String },
+    Open {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Type a line into a terminal, and press Enter unless told not to.
     Send {
+        /// The terminal id, as printed by `terminal open` or `terminal list`.
         terminal: String,
+        /// What to type.
         text: String,
+        /// Type the text without pressing Enter after it.
         #[arg(long)]
         no_enter: bool,
     },
     /// Print what a terminal has shown lately, as plain text.
-    Read { terminal: String },
+    Read {
+        /// The terminal id, as printed by `terminal open` or `terminal list`.
+        terminal: String,
+    },
     /// Close a terminal and stop its shell.
-    Close { terminal: String },
+    Close {
+        /// The terminal id, as printed by `terminal open` or `terminal list`.
+        terminal: String,
+    },
 }
 
+/// `ginka cron …`.
 #[derive(Subcommand)]
 // `Add` carries every field a job has; the arguments are parsed once per run,
 // so boxing it would cost every match for memory no one holds.
@@ -655,6 +738,7 @@ enum TerminalCommand {
 enum CronCommand {
     /// List scheduled jobs, with when each fires next and how it last went.
     List {
+        /// Only this project's jobs.
         #[arg(long)]
         project: Option<String>,
     },
@@ -662,7 +746,9 @@ enum CronCommand {
     /// (`--prompt` with `--agent`), or a reminder: a prompt sent into an
     /// existing conversation (`--prompt` with `--session`).
     Add {
+        /// The project it runs for, by name as `project list` shows it.
         project: String,
+        /// What lists call it.
         name: String,
         /// Five cron fields, or `@hourly`, `@daily`, `@weekly`, `@monthly`.
         #[arg(long, conflicts_with = "at", required_unless_present = "at")]
@@ -674,10 +760,13 @@ enum CronCommand {
             required_unless_present = "schedule"
         )]
         at: Option<String>,
+        /// The command line to run in a terminal.
         #[arg(long, conflicts_with = "prompt", required_unless_present = "prompt")]
         shell: Option<String>,
+        /// The prompt to send; needs `--agent` or `--session`.
         #[arg(long)]
         prompt: Option<String>,
+        /// The driver that starts a new conversation for the prompt.
         #[arg(long, conflicts_with = "session")]
         agent: Option<String>,
         /// Send the prompt into this conversation, by its id, instead of
@@ -696,17 +785,26 @@ enum CronCommand {
         disabled: bool,
     },
     /// Forget a scheduled job and its history.
-    Remove { id: i64 },
+    Remove {
+        /// The job's id, as shown by `cron list`.
+        id: i64,
+    },
     /// Fire a job now, as its schedule would.
-    Run { id: i64 },
+    Run {
+        /// The job's id, as shown by `cron list`.
+        id: i64,
+    },
     /// A job's firings, most recent first.
     Runs {
+        /// The job's id, as shown by `cron list`.
         id: i64,
+        /// Maximum firings to print; 50 when omitted, at most 500.
         #[arg(long)]
         limit: Option<u32>,
     },
 }
 
+/// `ginka notes …`.
 #[derive(Subcommand)]
 enum NotesCommand {
     /// List notes, most recently touched first.
@@ -722,12 +820,16 @@ enum NotesCommand {
         tag: Option<String>,
     },
     /// Print one note's markdown.
-    Show { id: String },
+    Show {
+        /// The note's id, as shown by `notes list`.
+        id: String,
+    },
     /// Write a new note. The body is read from stdin when `--body` is absent.
     Add {
         /// What it is called. Its first line otherwise.
         #[arg(long, default_value = "")]
         title: String,
+        /// The markdown body. Read from stdin when omitted.
         #[arg(long)]
         body: Option<String>,
         /// The project it belongs to.
@@ -740,9 +842,12 @@ enum NotesCommand {
     /// Replace a note's title and body. The body is read from stdin when
     /// `--body` is absent.
     Edit {
+        /// The note's id, as shown by `notes list`.
         id: String,
+        /// What it is called. Its first line otherwise.
         #[arg(long, default_value = "")]
         title: String,
+        /// The markdown body. Read from stdin when omitted.
         #[arg(long)]
         body: Option<String>,
         /// Replace tags; repeat for several tags.
@@ -753,9 +858,13 @@ enum NotesCommand {
         clear_tags: bool,
     },
     /// Forget a note.
-    Remove { id: String },
+    Remove {
+        /// The note's id, as shown by `notes list`.
+        id: String,
+    },
 }
 
+/// `ginka tickets …`.
 #[derive(Subcommand)]
 enum TicketsCommand {
     /// List tickets, newest first: open ones unless `--all`.
@@ -763,17 +872,23 @@ enum TicketsCommand {
         /// Only this workspace's tickets.
         #[arg(long)]
         workspace: Option<String>,
+        /// Include started and dismissed tickets.
         #[arg(long)]
         all: bool,
     },
     /// Raise a ticket. The prompt is read from stdin when `--prompt` is
     /// absent.
     Raise {
+        /// The workspace id, as shown by `workspace list`.
         workspace: String,
+        /// A short imperative, the card's heading. The prompt's first line
+        /// otherwise.
         #[arg(long, default_value = "")]
         title: String,
+        /// One or two sentences for the card: why now, and what it will do.
         #[arg(long, default_value = "")]
         summary: String,
+        /// What the new session is told; self-contained.
         #[arg(long)]
         prompt: Option<String>,
         /// Raise it as this session.
@@ -782,6 +897,7 @@ enum TicketsCommand {
     },
     /// Start an open ticket in a new session.
     Start {
+        /// The ticket's id, as shown by `tickets list`.
         ticket: String,
         /// A driver id; the raising session's agent otherwise.
         #[arg(long)]
@@ -791,9 +907,13 @@ enum TicketsCommand {
         branch: Option<String>,
     },
     /// Decide against an open ticket.
-    Dismiss { ticket: String },
+    Dismiss {
+        /// The ticket's id, as shown by `tickets list`.
+        ticket: String,
+    },
 }
 
+/// `ginka skills …`.
 #[derive(Subcommand)]
 enum SkillsCommand {
     /// List every skill, grouped across the places it was installed.
@@ -804,6 +924,7 @@ enum SkillsCommand {
     },
     /// Create a shared skill under the user or a registered project.
     Create {
+        /// A lowercase slug; the skill's directory is named after it.
         name: String,
         /// Short description shown in skill pickers.
         #[arg(long)]
@@ -817,14 +938,20 @@ enum SkillsCommand {
     },
     /// Turn every copy of a skill on.
     Enable {
+        /// The skill's name, as shown by `skills list`.
         name: String,
+        /// Look only in this project's directories, not every registered
+        /// project's.
         #[arg(long)]
         project: Option<String>,
     },
     /// Hide a skill from every agent by renaming its SKILL.md. Nothing is
     /// deleted.
     Disable {
+        /// The skill's name, as shown by `skills list`.
         name: String,
+        /// Look only in this project's directories, not every registered
+        /// project's.
         #[arg(long)]
         project: Option<String>,
     },
@@ -837,6 +964,7 @@ enum SkillsCommand {
     },
 }
 
+/// `ginka session …`.
 #[derive(Subcommand)]
 enum SessionCommand {
     /// List sessions, most recently active first.
@@ -853,6 +981,7 @@ enum SessionCommand {
         /// Which agent to run.
         #[arg(long, default_value = "claude")]
         agent: String,
+        /// The provider's model id. The provider's default otherwise.
         #[arg(long)]
         model: Option<String>,
         /// Reasoning level advertised for the selected model.
@@ -872,7 +1001,9 @@ enum SessionCommand {
     },
     /// Send a follow-up. Queued if the agent is still working.
     Send {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// The message.
         text: String,
         /// Send it as this session, which the receiver is told, with how to
         /// answer.
@@ -880,74 +1011,132 @@ enum SessionCommand {
         from: Option<String>,
     },
     /// List follow-ups waiting behind the active turn.
-    Queue { session: String },
+    Queue {
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
     /// Replace one queued follow-up without moving it.
     QueueEdit {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// The follow-up's id, as shown by `session queue`.
         id: u64,
+        /// The replacement text.
         text: String,
     },
     /// Remove one queued follow-up.
-    QueueRemove { session: String, id: u64 },
+    QueueRemove {
+        /// The session id, as shown by `session list`.
+        session: String,
+        /// The follow-up's id, as shown by `session queue`.
+        id: u64,
+    },
     /// Move one queued follow-up to a zero-based position.
     QueueMove {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// The follow-up's id, as shown by `session queue`.
         id: u64,
+        /// The zero-based position to move it to.
         index: u32,
     },
     /// Inject one queued follow-up into the active turn when supported.
-    QueueSendNow { session: String, id: u64 },
+    QueueSendNow {
+        /// The session id, as shown by `session list`.
+        session: String,
+        /// The follow-up's id, as shown by `session queue`.
+        id: u64,
+    },
     /// Edit a sent prompt, by the position `session log` shows it at, and
     /// run the conversation again from it in a new session.
     Edit {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// The prompt's transcript position, as `session log` shows it.
         seq: u64,
+        /// The edited prompt.
         text: String,
     },
     /// Queue a follow-up even where the running turn could take it now.
-    QueueAdd { session: String, text: String },
+    QueueAdd {
+        /// The session id, as shown by `session list`.
+        session: String,
+        /// The follow-up's text.
+        text: String,
+    },
     /// Stop the running turn and send this queued follow-up next.
-    QueueInterrupt { session: String, id: u64 },
+    QueueInterrupt {
+        /// The session id, as shown by `session list`.
+        session: String,
+        /// The follow-up's id, as shown by `session queue`.
+        id: u64,
+    },
     /// Hold the queue, or let it go with `--resume`.
     QueuePause {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// Let the held queue go instead of holding it.
         #[arg(long)]
         resume: bool,
     },
     /// Throw away every queued follow-up.
-    QueueClear { session: String },
+    QueueClear {
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
     /// Compact an idle provider conversation's context.
-    Compact { session: String },
+    Compact {
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
     /// Answer a question, plan or permission request in a running turn.
     Respond {
+        /// The session id, as shown by `session list`.
         session: String,
         /// The request id shown in the transcript.
         request_id: String,
+        /// The answer: an option's text, free text, or the approval decision.
         response: String,
     },
     /// Replace provider options for later turns. Omitted options use the
     /// provider default.
     Options {
+        /// The session id, as shown by `session list`.
         session: String,
+        /// The provider's model id.
         #[arg(long)]
         model: Option<String>,
+        /// Reasoning level advertised for the model.
         #[arg(long)]
         reasoning_effort: Option<String>,
+        /// Service tier advertised for the model.
         #[arg(long)]
         service_tier: Option<String>,
     },
     /// Stop an agent's process tree.
-    Cancel { session: String },
+    Cancel {
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
     /// Rename a conversation.
-    Rename { session: String, title: String },
+    Rename {
+        /// The session id, as shown by `session list`.
+        session: String,
+        /// The new title.
+        title: String,
+    },
     /// Forget a session, its transcript and its checkpoints.
-    Remove { session: String },
+    Remove {
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
     /// Take a copy of a conversation as it was, and carry on from there.
     ///
     /// With `--agent` or `--account` the conversation moves: the new agent
     /// cannot continue the old one's thread, so it is handed a digest of the
     /// transcript with its first prompt.
     Fork {
+        /// The session id, as shown by `session list`.
         session: String,
         /// The transcript position to fork at. Defaults to all of it.
         #[arg(long)]
@@ -980,6 +1169,7 @@ enum SessionCommand {
     },
     /// Find what was said, across conversations.
     Search {
+        /// The text to look for.
         query: String,
         /// Limit to one workspace, by id.
         #[arg(long)]
@@ -987,6 +1177,7 @@ enum SessionCommand {
     },
     /// Print a session's transcript.
     Log {
+        /// The session id, as shown by `session list`.
         session: String,
         /// Start after this transcript position.
         #[arg(long)]
@@ -1002,11 +1193,13 @@ enum McpServersAction {
     Add {
         /// claude or codex.
         provider: String,
+        /// What the server is called in the agent's configuration.
         name: String,
         /// user (every project), project (the workspace's `.mcp.json`) or
         /// local (this project, for you only). Codex has user only.
         #[arg(long, default_value = "user")]
         scope: String,
+        /// The address of a server reached over HTTP.
         #[arg(long, conflicts_with = "command")]
         url: Option<String>,
         /// The program and its arguments, after `--`.
@@ -1015,13 +1208,17 @@ enum McpServersAction {
     },
     /// Remove a server.
     Remove {
+        /// claude or codex.
         provider: String,
+        /// The server's configured name.
         name: String,
+        /// user, project or local. The agent CLI picks when omitted.
         #[arg(long)]
         scope: Option<String>,
     },
 }
 
+/// `ginka review …`.
 #[derive(Subcommand)]
 enum ReviewCommand {
     /// Leave a comment on a file, and a line of it.
@@ -1040,21 +1237,39 @@ enum ReviewCommand {
         end_line: Option<u32>,
     },
     /// Every comment waiting, in reading order.
-    List { workspace: String },
+    List {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Take one comment back.
-    Remove { comment: String },
+    Remove {
+        /// The comment's id, as shown by `review list`.
+        comment: String,
+    },
     /// Send the batch to a session's agent as one message.
-    Send { workspace: String, session: String },
+    Send {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// The session id, as shown by `session list`.
+        session: String,
+    },
 }
 
+/// `ginka checkpoint …`.
 #[derive(Subcommand)]
 enum CheckpointCommand {
     /// List a workspace's checkpoints, newest first.
-    List { workspace: String },
+    List {
+        /// The workspace id, as shown by `workspace list`.
+        workspace: String,
+    },
     /// Put a workspace back to a checkpoint's state.
     ///
     /// What is there now is snapshotted first, so this is reversible.
-    Restore { checkpoint: String },
+    Restore {
+        /// The checkpoint's id, as shown by `checkpoint list`.
+        checkpoint: String,
+    },
 }
 
 fn main() -> Result<()> {
