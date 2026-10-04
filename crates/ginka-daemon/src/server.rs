@@ -473,6 +473,15 @@ impl Daemon {
     }
 }
 
+/// Whether an `Authorization` header carries the daemon's bearer token,
+/// compared without leaking in timing how much of it was right
+/// ([`ginka_core::daemon::token_matches`]).
+fn bearer_matches(token: &str, header: &str) -> bool {
+    header
+        .strip_prefix("Bearer ")
+        .is_some_and(|presented| ginka_core::daemon::token_matches(token, presented))
+}
+
 /// Dig the request id out of a frame that would not parse.
 ///
 /// Only the id is wanted, and only well enough to answer: a frame that has no
@@ -626,7 +635,7 @@ impl Connection {
         &self,
         stream: async_net::TcpStream,
     ) -> Result<WebSocketStream<async_net::TcpStream>> {
-        let expected = format!("Bearer {}", self.token);
+        let token = self.token.clone();
         let socket = async_tungstenite::accept_hdr_async_with_config(
             stream,
             move |request: &HandshakeRequest, response: HandshakeResponse| {
@@ -637,7 +646,7 @@ impl Connection {
                     .unwrap_or_default();
                 // Loopback is not authentication: every other process on the
                 // machine can reach this port.
-                if presented == expected {
+                if bearer_matches(&token, presented) {
                     Ok(response)
                 } else {
                     let mut refusal =
@@ -761,6 +770,22 @@ fn wire_config() -> WebSocketConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_daemons_bearer_token_opens_a_connection() {
+        assert!(bearer_matches("s3cret", "Bearer s3cret"));
+        assert!(!bearer_matches("s3cret", "Bearer s3cres"));
+        assert!(
+            !bearer_matches("s3cret", "s3cret"),
+            "the scheme is required"
+        );
+        assert!(!bearer_matches("s3cret", "Basic s3cret"));
+        assert!(!bearer_matches("s3cret", ""));
+        assert!(
+            !bearer_matches("", "Bearer "),
+            "an empty token never matches"
+        );
+    }
 
     #[test]
     fn a_request_that_panics_is_answered_with_an_error() {
