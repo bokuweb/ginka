@@ -2471,6 +2471,9 @@ impl Service {
                     "/side and /btw need an existing conversation",
                 ));
             }
+            Some(Command::Fork(_)) => {
+                return Err(RpcError::failed("/fork needs an existing conversation"));
+            }
             Some(Command::ClearGoal) => {
                 return Err(RpcError::failed("/goal done needs an existing goal"));
             }
@@ -2750,6 +2753,16 @@ impl Service {
         // A fresh thread is a move in all but name: the vendor's thread holds
         // what is being replaced, so the digest stands in for it.
         let moved = !same_agent || account != original.account || fresh_thread;
+        // The vendor's thread remembers everything said in it, so a fork from
+        // an earlier point cannot keep it; nor can one on an agent that
+        // cannot branch a thread, or the two would write into one. Those
+        // start a thread of their own and are handed the record.
+        let last = session::transcript(&self.conn(), id, None, None)
+            .map_err(failed)?
+            .last()
+            .map(|entry| entry.seq);
+        let truncated = after.is_some_and(|after| last.is_some_and(|last| after < last));
+        let own_thread = moved || truncated || !driver.branches_threads();
         let keeps_model_options = same_agent
             && model
                 .as_ref()
@@ -2793,7 +2806,7 @@ impl Service {
             summary: (moved && !fresh_thread).then(|| format!("moved from {}", original.agent)),
             // Inherited only where continuing it would continue the same
             // conversation; elsewhere the digest stands in for it.
-            vendor_session_id: (!moved)
+            vendor_session_id: (!own_thread)
                 .then_some(original.vendor_session_id.clone())
                 .flatten(),
             created_at: now,
@@ -2803,13 +2816,17 @@ impl Service {
             let conn = self.conn();
             session::insert(&conn, &fork).map_err(failed)?;
             session::copy_transcript(&conn, id, &fork.id, after).map_err(failed)?;
+            if fork.vendor_session_id.is_some() {
+                // Shares the original's thread until its first turn branches it.
+                session::set_fork_thread(&conn, &fork.id, true).map_err(failed)?;
+            }
             if let Some(objective) =
                 crate::conversation_commands::goal(&conn, id).map_err(failed)?
             {
                 crate::conversation_commands::set_goal(&conn, &fork.id, Some(&objective))
                     .map_err(failed)?;
             }
-            if moved {
+            if own_thread {
                 let carried = session::transcript(&conn, &fork.id, None, None).map_err(failed)?;
                 let digest = crate::handoff::digest(
                     &carried,
@@ -2998,6 +3015,24 @@ impl Service {
                     Some(conversation::PLAN_INSTRUCTION),
                 );
             }
+            // Claude Code's /fork: the whole conversation, carried on in a
+            // new one; what follows the command is the branch's first
+            // message, and the original hears none of it.
+            Some(Command::Fork(rest)) => {
+                let rest = rest.to_string();
+                let forked = match self.fork_session(id, None, None, None, None, false)? {
+                    Response::Session { session } => session,
+                    other => {
+                        return Err(RpcError::failed(format!(
+                            "unexpected fork answer: {other:?}"
+                        )));
+                    }
+                };
+                if !rest.is_empty() {
+                    self.send_message(&forked.id, rest)?;
+                }
+                return Ok(Response::Session { session: forked });
+            }
             Some(Command::Side(question) | Command::Btw(question)) => {
                 let is_btw = matches!(command, Some(Command::Btw(_)));
                 if question.is_empty() && is_btw {
@@ -3131,7 +3166,13 @@ impl Service {
             // reserves for a new session.
             .with_access_mode(mode)
             .with_preamble(preamble)
-            .with_mcp_servers(self.mcp_servers(&worktree.path, id));
+            .with_mcp_servers(self.mcp_servers(&worktree.path, id))
+            // A fork's first turn branches the thread it shares with the
+            // original instead of continuing it.
+            .with_fork_thread(
+                stored.vendor_session_id.is_some()
+                    && session::fork_thread(&self.conn(), id).map_err(failed)?,
+            );
         // The same login the conversation started on: the vendor's thread
         // lives in its directory (`docs/accounts.md` §5).
         for (key, value) in crate::account::env_layer(

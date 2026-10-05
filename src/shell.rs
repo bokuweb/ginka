@@ -10349,13 +10349,43 @@ impl Shell {
             current_agent,
             current_model.as_deref(),
         );
-        let has_targets = !targets.is_empty();
+        // A fork on the same agent is always there: Claude Code's fork, the
+        // same conversation carried on two ways. Other agents and models
+        // follow when there are any.
+        let has_targets = !current_agent.is_empty();
         let (fork_open, fork_busy, fork_error) = self
             .forking
             .as_ref()
             .filter(|menu| menu.turn == turn && menu.seq == seq)
             .map(|menu| (true, menu.busy, menu.error.clone()))
             .unwrap_or((false, false, None));
+        let same_agent_button = (!current_agent.is_empty()).then(|| {
+            let id = current_agent.to_string();
+            let label = self
+                .session
+                .as_ref()
+                .map(|row| row.agent.label().to_string())
+                .unwrap_or_else(|| id.clone());
+            Button::new(SharedString::from(format!("fork-{turn}-same")))
+                // The toolkit draws a button's hover itself; a second one
+                // trips its debug assertion.
+                .ghost()
+                .disabled(fork_busy)
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(tokens.radius.row))
+                .text_xs()
+                .text_color(tokens.colors().text_primary)
+                .when(!fork_busy, |this| {
+                    this.cursor_pointer().on_click(
+                        cx.listener(move |this, _, _, cx| {
+                            this.fork_from(seq, id.clone(), None, cx)
+                        }),
+                    )
+                })
+                .child(rust_i18n::t!("transcript.fork.same", agent = label).to_string())
+                .into_any_element()
+        });
         let mut action_buttons: Vec<AnyElement> = Vec::new();
         for agent in &targets {
             for (action, button_id, label) in [
@@ -10562,7 +10592,13 @@ impl Shell {
                                 rust_i18n::t!("transcript.fork.label").to_string()
                             }),
                     )
-                    .children(fork_open.then(|| h_flex().gap_1().children(target_buttons)))
+                    .children(fork_open.then(|| {
+                        h_flex()
+                            .gap_1()
+                            .flex_wrap()
+                            .children(same_agent_button)
+                            .children(target_buttons)
+                    }))
                     .children(
                         fork_open.then(|| h_flex().gap_1().flex_wrap().children(action_buttons)),
                     )
@@ -11595,6 +11631,9 @@ impl Shell {
                         }
                         "plan" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
                             rust_i18n::t!("composer.command.plan.description").to_string()
+                        }
+                        "fork" if command.scope == ginka_protocol::model::CommandScope::BuiltIn => {
+                            rust_i18n::t!("composer.command.fork.description").to_string()
                         }
                         _ => command.description.clone(),
                     };

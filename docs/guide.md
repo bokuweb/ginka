@@ -78,8 +78,10 @@ agent* on a row stopped mid-merge. After an amend or rebase of pushed work,
 a refused push offers *Force push…* with a lease.
 
 Every finished turn is a checkpoint: **Rewind** puts the worktree back to
-how it was, and a turn's footer offers **Fork** onto another agent or
-**Second opinion** from one.
+how it was, and a turn's footer offers **Fork** — on the same agent, as
+Claude Code's fork does, or onto another — and **Second opinion** from one.
+`/fork` in the composer forks the whole conversation, and `/fork <message>`
+sends the message to the new branch; the original hears none of it.
 
 ## Several attempts at once
 

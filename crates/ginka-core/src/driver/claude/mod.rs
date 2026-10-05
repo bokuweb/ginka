@@ -200,6 +200,10 @@ impl AgentDriver for ClaudeDriver {
             .args(self.streaming_args(spec))
             .arg("--resume")
             .arg(vendor_session_id);
+        if spec.fork_thread {
+            // A new session id for the same history: the fork's own thread.
+            command = command.arg("--fork-session");
+        }
         for (key, value) in self.env.iter().chain(spec.env.iter()) {
             command = command.env(key, value);
         }
@@ -207,6 +211,10 @@ impl AgentDriver for ClaudeDriver {
     }
 
     fn supports_steer(&self) -> bool {
+        true
+    }
+
+    fn branches_threads(&self) -> bool {
         true
     }
 

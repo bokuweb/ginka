@@ -150,6 +150,10 @@ pub struct SessionSpec {
     /// The MCP servers the agent is told about (`crate::tools`). Each driver
     /// puts them on the command line in its vendor's own way.
     pub mcp_servers: Vec<crate::tools::McpServer>,
+    /// Resume as a branch of the vendor's thread rather than a continuation
+    /// of it: the first turn of a fork that shares the original's thread
+    /// (only for a driver whose [`AgentDriver::branches_threads`] is true).
+    pub fork_thread: bool,
 }
 
 impl SessionSpec {
@@ -165,7 +169,14 @@ impl SessionSpec {
             access_mode: AccessMode::default(),
             env: Vec::new(),
             mcp_servers: Vec::new(),
+            fork_thread: false,
         }
+    }
+
+    /// Resume as a branch of the vendor's thread ([`SessionSpec::fork_thread`]).
+    pub fn with_fork_thread(mut self, fork: bool) -> Self {
+        self.fork_thread = fork;
+        self
     }
 
     /// Tell the agent about these MCP servers.
@@ -363,6 +374,14 @@ pub trait AgentDriver: Send + Sync + 'static {
     /// arrives that way, so `start_command` must not put it on the command
     /// line.
     fn supports_steer(&self) -> bool {
+        false
+    }
+
+    /// Whether the vendor can resume a thread as a new branch of it
+    /// ([`SessionSpec::fork_thread`]), so a fork from the end of a
+    /// conversation keeps the agent's own memory of it. Without it a fork
+    /// starts a thread of its own and is handed the record instead.
+    fn branches_threads(&self) -> bool {
         false
     }
 

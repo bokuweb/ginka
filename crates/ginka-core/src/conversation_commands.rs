@@ -21,6 +21,9 @@ pub enum Command<'a> {
     /// Run this one turn read-only, asking for a plan rather than changes;
     /// the conversation's own mode applies again to the next.
     Plan(&'a str),
+    /// Carry the whole conversation on in a new one, sending what follows
+    /// there; empty opens the branch and waits.
+    Fork(&'a str),
 }
 
 /// What a `/plan` turn is told in front of its prompt.
@@ -29,7 +32,13 @@ pub const PLAN_INSTRUCTION: &str = "Plan only, for this turn: read what you need
 /// Parse only complete command names at the beginning of a message.
 pub fn parse(text: &str) -> Option<Command<'_>> {
     let text = text.trim();
-    for (prefix, kind) in [("/goal", 0), ("/side", 1), ("/btw", 2), ("/plan", 3)] {
+    for (prefix, kind) in [
+        ("/goal", 0),
+        ("/side", 1),
+        ("/btw", 2),
+        ("/plan", 3),
+        ("/fork", 4),
+    ] {
         let Some(rest) = text.strip_prefix(prefix) else {
             continue;
         };
@@ -42,7 +51,8 @@ pub fn parse(text: &str) -> Option<Command<'_>> {
             0 => Command::Goal(argument),
             1 => Command::Side(argument),
             2 => Command::Btw(argument),
-            _ => Command::Plan(argument),
+            3 => Command::Plan(argument),
+            _ => Command::Fork(argument),
         });
     }
     None
@@ -101,6 +111,9 @@ mod tests {
             Some(Command::Plan("the migration"))
         );
         assert_eq!(parse("/planning x"), None);
+        assert_eq!(parse("/fork"), Some(Command::Fork("")));
+        assert_eq!(parse("/fork try it"), Some(Command::Fork("try it")));
+        assert_eq!(parse("/forking"), None);
     }
 
     #[test]

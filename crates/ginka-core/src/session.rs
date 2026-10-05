@@ -192,10 +192,37 @@ pub fn set_vendor_session_id(conn: &Connection, id: &SessionId, vendor: &str) ->
     // A thread of its own is what a handoff was for: once the agent has one,
     // the digest has been read and is not sent again.
     conn.execute(
-        "UPDATE sessions SET vendor_session_id = ?1, handoff = NULL WHERE id = ?2",
+        // A new id is the branch a fork asked for: the next resume continues
+        // it rather than branching again.
+        "UPDATE sessions SET vendor_session_id = ?1, handoff = NULL,
+             fork_thread = CASE WHEN vendor_session_id IS ?1 THEN fork_thread ELSE 0 END
+         WHERE id = ?2",
         rusqlite::params![vendor, id.0],
     )?;
     Ok(())
+}
+
+/// Mark a fork whose next resume must branch the vendor's thread it shares
+/// with the original, rather than continue it.
+pub fn set_fork_thread(conn: &Connection, id: &SessionId, fork: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE sessions SET fork_thread = ?1 WHERE id = ?2",
+        rusqlite::params![fork, id.0],
+    )?;
+    Ok(())
+}
+
+/// Whether the session's next resume must branch its vendor thread
+/// ([`set_fork_thread`]).
+pub fn fork_thread(conn: &Connection, id: &SessionId) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT fork_thread FROM sessions WHERE id = ?1",
+            [&id.0],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 /// Keep what a session moved from another agent has to be told first.
