@@ -4,6 +4,24 @@ Notable changes, newest first.
 
 ## Unreleased
 
+## 0.2.0 — 2026-10-05
+
+### Agents and sessions
+- Fork a conversation on the same agent, as Claude Code does: a turn's
+  *Fork* menu offers *Fork here on <agent>* first, and `/fork [message]`
+  forks the whole conversation from the composer, the CLI, MCP or Slack,
+  sending the message to the new branch only.
+- A fork from the end keeps the agent's memory and gets a thread of its own
+  on its first turn (Claude's `--fork-session`); before, the original and
+  the fork wrote into one Claude session.
+- A fork from an earlier turn starts a fresh thread with the record up to
+  that turn; before, the agent still remembered what came after it.
+
+### Packaging
+- The macOS release builds install both architectures for the pinned Rust
+  toolchain, sign Chromium's bundled libraries before notarizing, and print
+  Apple's log when notarization is refused.
+
 ## 0.1.0 — 2026-10-04
 
 The first release.
