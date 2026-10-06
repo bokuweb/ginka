@@ -47,6 +47,7 @@ Manage workspaces, which are git worktrees
 - `ginka workspace merge` — Merge a workspace's branch into another — by default the branch the project is on. A conflict is aborted and named (`ginka workspace merge <WORKSPACE>`)
 - `ginka workspace index` — Build zvec-grep's index for a workspace, here in this terminal, so agents started in it get semantic search. Needs `zg` on PATH (`ginka workspace index <WORKSPACE>`)
 - `ginka workspace pin` — Pin a workspace so it sorts first (`ginka workspace pin <WORKSPACE>`)
+- `ginka workspace folder` — Assign a project-local sidebar folder, or clear it by omitting the name (`ginka workspace folder <WORKSPACE> [NAME]`). Folder labels stay with the workspace across branch changes and archive/restore; they do not move files.
 - `ginka workspace archive` — Archive a workspace without removing its worktree or conversation (`ginka workspace archive <WORKSPACE>`)
 - `ginka workspace status` — Write the line of status the sidebar shows under a workspace, or clear it by giving none (`ginka workspace status <WORKSPACE> [NOTE]`)
 
