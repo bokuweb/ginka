@@ -85,6 +85,22 @@ fn unstaging_before_the_first_commit_removes_only_the_literal_index_entry() {
 }
 
 #[test]
+fn unstaging_a_literal_directory_before_the_first_commit_keeps_other_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    support::git(dir.path(), &["init", "-q", "-b", "main"]);
+    std::fs::create_dir_all(dir.path().join("[ab]/nested")).unwrap();
+    std::fs::create_dir_all(dir.path().join("a")).unwrap();
+    std::fs::write(dir.path().join("[ab]/one.txt"), "one\n").unwrap();
+    std::fs::write(dir.path().join("[ab]/nested/two.txt"), "two\n").unwrap();
+    std::fs::write(dir.path().join("a/other.txt"), "other\n").unwrap();
+    support::git(dir.path(), &["add", "-A"]);
+    git::unstage(dir.path(), "[ab]").unwrap();
+    assert_eq!(support::git(dir.path(), &["ls-files"]), "a/other.txt");
+    assert!(dir.path().join("[ab]/one.txt").is_file());
+    assert!(dir.path().join("[ab]/nested/two.txt").is_file());
+}
+
+#[test]
 fn a_deleted_literal_file_can_be_staged_and_unstaged() {
     let repo = edited_pair("[ab].txt", "a.txt");
     std::fs::remove_file(repo.path().join("[ab].txt")).unwrap();

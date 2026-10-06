@@ -1063,6 +1063,7 @@ pub fn unstage(worktree: &Path, path: &str) -> Result<()> {
             &[
                 "--literal-pathspecs",
                 "rm",
+                "-r",
                 "--cached",
                 "--force",
                 "--quiet",
