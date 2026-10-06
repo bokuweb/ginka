@@ -1316,6 +1316,25 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::SetFolders {
+                        project,
+                        workspaces,
+                        folder,
+                    } => {
+                        let (link, project, workspaces, folder) = (
+                            this.link.clone(),
+                            project.clone(),
+                            workspaces.clone(),
+                            folder.clone(),
+                        );
+                        this.after_row_change(
+                            async move {
+                                link.set_workspace_folders(&project, workspaces, folder)
+                                    .await
+                            },
+                            cx,
+                        );
+                    }
                     SidebarEvent::SetStatusNote { workspace, note } => {
                         let (link, workspace, note) =
                             (this.link.clone(), workspace.clone(), note.clone());

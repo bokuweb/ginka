@@ -1611,6 +1611,22 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Move a project-local batch atomically through the shared protocol.
+    pub async fn set_workspace_folders(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        folder: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceFolders {
+            project: project.clone(),
+            workspaces,
+            folder,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

@@ -177,13 +177,7 @@ pub fn set_folder(
     workspace: &WorkspaceId,
     folder: Option<&str>,
 ) -> Result<bool> {
-    let folder = folder.map(str::trim).filter(|name| !name.is_empty());
-    if let Some(name) = folder {
-        anyhow::ensure!(
-            !name.chars().any(char::is_control) && name.chars().count() <= 80,
-            "folder name must be at most 80 characters without control characters"
-        );
-    }
+    let folder = validate_folder(folder)?;
     let Some((project, name)) = workspace.parts() else {
         return Ok(false);
     };
@@ -191,6 +185,66 @@ pub fn set_folder(
         "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
         rusqlite::params![folder, project.0, name],
     )? > 0)
+}
+
+fn validate_folder(folder: Option<&str>) -> Result<Option<&str>> {
+    let folder = folder.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = folder {
+        anyhow::ensure!(
+            !name.chars().any(char::is_control) && name.chars().count() <= 80,
+            "folder name must be at most 80 characters without control characters"
+        );
+    }
+    Ok(folder)
+}
+
+/// Assign one folder to 1–256 project-local workspaces atomically.
+/// Duplicate ids count toward the limit but are updated once. A missing,
+/// malformed or foreign id, invalid label, or failed write leaves every row
+/// unchanged. Archived workspaces are valid targets; no files are moved.
+pub fn set_folders(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    folder: Option<&str>,
+) -> Result<()> {
+    anyhow::ensure!(
+        !workspaces.is_empty() && workspaces.len() <= 256,
+        "select between 1 and 256 workspaces"
+    );
+    let folder = validate_folder(folder)?;
+    let tx = conn.unchecked_transaction()?;
+    anyhow::ensure!(
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE name = ?1)",
+            [&project.0],
+            |row| row.get::<_, bool>(0)
+        )?,
+        "no project named {project}"
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for workspace in workspaces {
+        let (owner, name) = workspace
+            .parts()
+            .ok_or_else(|| anyhow::anyhow!("invalid workspace id {workspace}"))?;
+        anyhow::ensure!(
+            owner == *project,
+            "workspace {workspace} is outside project {project}"
+        );
+        anyhow::ensure!(
+            find_worktree(&tx, workspace)?.is_some(),
+            "no workspace named {workspace}"
+        );
+        names.insert(name);
+    }
+    for name in names {
+        tx.execute(
+            "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![folder, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 /// Archive or restore a workspace. Returns whether a row was affected.
@@ -313,6 +367,70 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn batch_folders_validate_every_target_and_roll_back_write_failures() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for name in ["a", "b"] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder) VALUES ('comet', ?1, 'main', ?1, 'Before')", [name]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_folders(&conn, &sample().name, &targets, Some("After")).is_err());
+            assert_eq!(
+                find_worktree(&conn, &a).unwrap().unwrap().folder.as_deref(),
+                Some("Before")
+            );
+        }
+        assert!(
+            set_folders(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone()],
+                Some("bad\nname")
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_b BEFORE UPDATE OF folder ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(
+            set_folders(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone()],
+                Some("After")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            find_worktree(&conn, &a).unwrap().unwrap().folder.as_deref(),
+            Some("Before")
+        );
+        conn.execute_batch("DROP TRIGGER refuse_b").unwrap();
+        set_folders(
+            &conn,
+            &sample().name,
+            &[a.clone(), b.clone(), a.clone()],
+            Some("  Review  "),
+        )
+        .unwrap();
+        for id in [&a, &b] {
+            assert_eq!(
+                find_worktree(&conn, id).unwrap().unwrap().folder.as_deref(),
+                Some("Review")
+            );
+        }
+        set_folders(&conn, &sample().name, &[a.clone(), b.clone()], Some("   ")).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().folder.is_none());
+        assert!(find_worktree(&conn, &b).unwrap().unwrap().folder.is_none());
     }
 
     #[test]

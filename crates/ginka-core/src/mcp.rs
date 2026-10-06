@@ -92,6 +92,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_folders_set",
+            description: "Assign a folder to 1–256 workspaces in one project atomically. Any invalid target rejects the whole batch. Omit folder to ungroup every target.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "workspaces": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string"}},
+                    "folder": {"type": "string", "description": "At most 80 characters, without control characters"},
+                },
+                "required": ["project", "workspaces"],
+            }),
+        },
+        Tool {
             name: "ginka_workspace_archive",
             description: "Archive a workspace without deleting it, or restore it to active work.",
             schema: json!({
@@ -947,6 +960,26 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 Some(_) => return Err(anyhow!("folder must be a string")),
             },
         },
+        "ginka_workspace_folders_set" => Request::SetWorkspaceFolders {
+            project: ProjectName(text("project")?),
+            workspaces: arguments
+                .get("workspaces")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("workspaces must be an array of strings"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(|id| WorkspaceId(id.to_owned()))
+                        .ok_or_else(|| anyhow!("workspaces must be an array of strings"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            folder: match arguments.get("folder") {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(anyhow!("folder must be a string")),
+            },
+        },
         "ginka_workspace_archive" => Request::ArchiveWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             archived: !flag("restore"),
@@ -1525,6 +1558,7 @@ mod tests {
                 "project": "comet",
                 "branch": "harbor",
                 "workspace": "comet/harbor",
+                "workspaces": ["comet/harbor"],
                 "session": "s-1",
                 "request_id": "ask-1",
                 "id": 7,
@@ -1730,6 +1764,35 @@ mod tests {
                 note: None,
             }
         ));
+    }
+
+    #[test]
+    fn batch_folder_tool_keeps_every_id_and_rejects_bad_types() {
+        assert_eq!(request_for("ginka_workspace_folders_set", &json!({"project": "comet", "workspaces": ["comet/a", "comet/b"], "folder": "Review"})).unwrap(), Request::SetWorkspaceFolders {
+            project: ProjectName("comet".into()), workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())], folder: Some("Review".into()),
+        });
+        assert!(matches!(
+            request_for(
+                "ginka_workspace_folders_set",
+                &json!({"project": "comet", "workspaces": ["comet/a"]})
+            )
+            .unwrap(),
+            Request::SetWorkspaceFolders { folder: None, .. }
+        ));
+        for args in [
+            json!({}),
+            json!({"project": "comet", "workspaces": "comet/a"}),
+            json!({"project": "comet", "workspaces": ["comet/a", 42]}),
+            json!({"project": "comet", "workspaces": ["comet/a"], "folder": null}),
+        ] {
+            assert!(request_for("ginka_workspace_folders_set", &args).is_err());
+        }
+        let tool = tools()
+            .into_iter()
+            .find(|t| t.name == "ginka_workspace_folders_set")
+            .unwrap();
+        assert_eq!(tool.schema["required"], json!(["project", "workspaces"]));
+        assert_eq!(tool.schema["properties"]["workspaces"]["maxItems"], 256);
     }
 
     #[test]

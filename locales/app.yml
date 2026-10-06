@@ -2497,3 +2497,22 @@ sidebar.folder.new:
 sidebar.folder.ungrouped:
   en: Ungrouped
   ja: 分類なし
+
+sidebar.selection.start:
+  en: Select workspaces
+  ja: ワークスペースを選択
+sidebar.selection.done:
+  en: Done selecting
+  ja: 選択を終了
+sidebar.selection.count:
+  en: "%{count} selected"
+  ja: "%{count} 件を選択"
+sidebar.selection.limit:
+  en: Select up to 256 visible workspaces in this project
+  ja: このプロジェクトの表示中のワークスペースを 256 件まで選択
+sidebar.selection.check:
+  en: "Select %{name}"
+  ja: "%{name} を選択"
+sidebar.selection.uncheck:
+  en: "Deselect %{name}"
+  ja: "%{name} の選択を解除"

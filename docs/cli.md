@@ -49,6 +49,7 @@ Manage workspaces, which are git worktrees
 - `ginka workspace pin` — Pin a workspace so it sorts first (`ginka workspace pin <WORKSPACE>`)
 - `ginka workspace folders` — List a project's assigned folders, sorted by exact label, with active and archived membership counts (`ginka workspace folders <PROJECT>`). Includes archived-only folders; empty folders disappear when their last member is cleared.
 - `ginka workspace folder` — Assign a project-local sidebar folder, or clear it by omitting the name (`ginka workspace folder <WORKSPACE> [NAME]`). Folder labels stay with the workspace across branch changes and archive/restore; they do not move files.
+- `ginka workspace folder-many` — Assign or clear one folder for 1–256 workspaces in a project atomically (`ginka workspace folder-many <PROJECT> <WORKSPACE>... [--name <NAME>]`). Omit `--name` to clear the labels; an invalid target rejects the whole batch.
 - `ginka workspace archive` — Archive a workspace without removing its worktree or conversation (`ginka workspace archive <WORKSPACE>`)
 - `ginka workspace status` — Write the line of status the sidebar shows under a workspace, or clear it by giving none (`ginka workspace status <WORKSPACE> [NOTE]`)
 

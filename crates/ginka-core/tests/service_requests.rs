@@ -207,6 +207,58 @@ fn workspace_folders_survive_git_reconciliation_and_archive_without_rekeying() {
 }
 
 #[test]
+fn batch_folders_emit_once_after_commit_and_never_on_a_rejected_batch() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let a = new_workspace(&mut fixture, &project, "batch-a").unwrap();
+    let b = new_workspace(&mut fixture, &project, "batch-b").unwrap();
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: b.id(),
+        archived: true,
+    });
+    fixture.recorder.taken();
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolders {
+                project: project.clone(),
+                workspaces: vec![a.id(), WorkspaceId("comet/missing".into())],
+                folder: Some("Review".into()),
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    assert_eq!(
+        fixture.ask(Request::SetWorkspaceFolders {
+            project: project.clone(),
+            workspaces: vec![a.id(), b.id(), a.id()],
+            folder: Some("Review".into()),
+        }),
+        Response::Ack
+    );
+    assert_eq!(
+        fixture.recorder.taken(),
+        vec![DaemonEvent::WorkspacesChanged {
+            project: project.clone()
+        }]
+    );
+    let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project),
+    }) else {
+        panic!("expected workspaces")
+    };
+    for original in [a, b] {
+        let row = workspaces
+            .iter()
+            .find(|row| row.id() == original.id())
+            .unwrap();
+        assert_eq!(row.worktree.folder.as_deref(), Some("Review"));
+        assert_eq!(row.worktree.path, original.worktree.path);
+        assert_eq!(row.worktree.branch, original.worktree.branch);
+    }
+}
+
+#[test]
 fn folder_catalog_reads_archived_metadata_without_git_or_push_events() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

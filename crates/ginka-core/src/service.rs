@@ -1100,6 +1100,16 @@ impl Service {
                 }
                 Ok(Response::Ack)
             }
+            Request::SetWorkspaceFolders {
+                project,
+                workspaces,
+                folder,
+            } => {
+                project::set_folders(&self.conn(), &project, &workspaces, folder.as_deref())
+                    .map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                Ok(Response::Ack)
+            }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
                     return Err(RpcError::not_found(format!(

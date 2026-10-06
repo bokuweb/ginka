@@ -103,6 +103,15 @@ pub enum Request {
         /// A trimmed name of at most 80 characters; blank or `None` clears it.
         folder: Option<String>,
     },
+    /// Assign a sidebar folder to a batch, committing all targets or none.
+    SetWorkspaceFolders {
+        /// Every target must belong to this registered project.
+        project: ProjectName,
+        /// Between 1 and 256 immutable ids; duplicates are updated once.
+        workspaces: Vec<WorkspaceId>,
+        /// Same name rules as `SetWorkspaceFolder`; blank or `None` clears it.
+        folder: Option<String>,
+    },
     /// Pin or unpin a workspace.
     PinWorkspace {
         /// The workspace to pin or unpin.

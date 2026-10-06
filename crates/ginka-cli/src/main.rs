@@ -541,6 +541,17 @@ enum WorkspaceCommand {
         /// Folder name; omit it to return the workspace to the ungrouped list.
         name: Option<String>,
     },
+    /// Move several project workspaces into a sidebar folder atomically.
+    FolderMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Destination folder; omit to ungroup every target.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Pin a workspace so it sorts first.
     Pin {
         /// The workspace id, as shown by `workspace list`.
@@ -1618,6 +1629,15 @@ fn request_for(command: Command) -> Result<Request> {
                 folder: name,
             }
         }
+        Command::Workspace(WorkspaceCommand::FolderMany {
+            project,
+            workspaces,
+            name,
+        }) => Request::SetWorkspaceFolders {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
+            folder: name,
+        },
         Command::Workspace(WorkspaceCommand::Pin { workspace, off }) => Request::PinWorkspace {
             workspace: WorkspaceId(workspace),
             pinned: !off,

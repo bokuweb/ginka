@@ -16,14 +16,16 @@
 
 use ginka_protocol::{ProjectName, PullRequestState, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
-use ginka_ui::folders::Destination;
+use ginka_ui::folders::{Destination, Selection};
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{InputEvent, InputState};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::{
-    Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable as _, StyledExt as _, h_flex,
+    scroll::ScrollableElement as _, v_flex,
 };
 
 /// A translated picker label paired with an unambiguous action.
@@ -112,6 +114,15 @@ pub enum SidebarEvent {
         /// A folder name, or `None` to ungroup.
         folder: Option<String>,
     },
+    /// Move a validated project-local batch in one daemon transaction.
+    SetFolders {
+        /// The project owning every target.
+        project: ProjectName,
+        /// The exact selection captured when the picker opened.
+        workspaces: Vec<WorkspaceId>,
+        /// A folder name, or `None` to ungroup every target.
+        folder: Option<String>,
+    },
     /// Write a workspace's status note, or clear it with `None`.
     SetStatusNote {
         /// The workspace whose note changes.
@@ -187,6 +198,11 @@ pub struct SessionSidebar {
     entries: Vec<ginka_ui::session_list::Entry>,
     /// The live rows' order as of the last frame, to see which moved.
     row_order: Vec<WorkspaceId>,
+    /// Checked rows are independent of the conversation on screen.
+    batch: Selection,
+    selecting: bool,
+    /// Immutable targets while a destination or its new name is being chosen.
+    folder_targets: Vec<WorkspaceId>,
     /// Rows that moved, which way, and when: they slide into place over
     /// `ginka_ui::motion::REORDER`.
     moving:
@@ -250,6 +266,9 @@ impl SessionSidebar {
             session_list: ListState::new(0, ListAlignment::Top, px(600.)),
             entries: Vec::new(),
             row_order: Vec::new(),
+            batch: Selection::default(),
+            selecting: false,
+            folder_targets: Vec::new(),
             moving: std::collections::HashMap::new(),
             moves: 0,
             account: None,
@@ -470,6 +489,7 @@ impl SessionSidebar {
 
     /// Select a workspace by name, which is how the palette switches to one.
     pub fn select_workspace(&mut self, workspace: &WorkspaceId, cx: &mut Context<Self>) {
+        self.batch.anchor(workspace);
         if self.selected.as_ref() == Some(workspace) && self.place == Place::Workspace {
             return;
         }
@@ -529,6 +549,7 @@ impl SessionSidebar {
     /// announcement is what clears the transcript, and clearing the one that
     /// was just created is not what "select this" meant here.
     pub fn adopt_workspace(&mut self, workspace: WorkspaceId, cx: &mut Context<Self>) {
+        let previous_project = self.selected_project.clone();
         self.selected_project = self
             .rows
             .iter()
@@ -542,6 +563,14 @@ impl SessionSidebar {
                     .split_once('/')
                     .map(|(project, _)| ProjectName(project.to_string()))
             });
+        if self.selected_project != previous_project {
+            self.batch = Selection::default();
+            self.selecting = false;
+            self.folder_picker = None;
+            self.foldering = None;
+            self.folder_targets.clear();
+        }
+        self.batch.anchor(&workspace);
         self.selected = Some(workspace);
         self.unlisted = 0;
         cx.notify();
@@ -562,6 +591,11 @@ impl SessionSidebar {
         self.selected = None;
         self.unlisted = 0;
         self.selected_project = project;
+        self.batch = Selection::default();
+        self.selecting = false;
+        self.folder_picker = None;
+        self.foldering = None;
+        self.folder_targets.clear();
         cx.notify();
     }
 
@@ -1128,6 +1162,8 @@ impl SessionSidebar {
             .filter(|(workspace, _)| workspace == &row.workspace)
             .map(|(_, picker)| picker.clone());
         let menu_workspace = row.workspace.clone();
+        let check_workspace = row.workspace.clone();
+        let checked = self.batch.contains(&row.workspace);
 
         v_flex()
             .w_full()
@@ -1144,16 +1180,53 @@ impl SessionSidebar {
                     .py_1p5()
                     .gap_0p5()
                     .rounded(px(tokens.radius.row))
-                    .when(selected, |this| this.bg(tokens.colors().row_active()))
+                    .when(selected || checked, |this| {
+                        this.bg(tokens.colors().row_active())
+                    })
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.select_workspace(&workspace, cx)),
-                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.modifiers().shift && this.selected_project.is_some() {
+                            this.batch.range(&workspace, &this.row_order);
+                            this.selecting = true;
+                            cx.notify();
+                        } else if this.selecting {
+                            this.batch.toggle(&workspace);
+                            cx.notify();
+                        } else {
+                            this.batch = Selection::default();
+                            this.select_workspace(&workspace, cx);
+                        }
+                    }))
                     .child(
                         h_flex()
                             .w_full()
                             .gap_2()
                             .items_center()
+                            .when(self.selecting, |this| {
+                                this.child(
+                                    Button::new(("workspace-check", index))
+                                        .ghost()
+                                        .small()
+                                        .selected(checked)
+                                        .label(if checked { "✓" } else { "□" })
+                                        .accessibility_label(
+                                            rust_i18n::t!(
+                                                if checked {
+                                                    "sidebar.selection.uncheck"
+                                                } else {
+                                                    "sidebar.selection.check"
+                                                },
+                                                name = row.title.to_string()
+                                            )
+                                            .to_string(),
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            this.batch.toggle(&check_workspace);
+                                            cx.notify();
+                                        })),
+                                )
+                            })
                             .child(row.agent.glyph().size_3p5().text_color(if selected {
                                 tokens.colors().text_secondary
                             } else {
@@ -1299,6 +1372,7 @@ impl SessionSidebar {
                             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                                 if event.keystroke.key == "escape" {
                                     this.folder_picker = None;
+                                    this.folder_targets.clear();
                                     cx.stop_propagation();
                                     cx.notify();
                                 }
@@ -1312,6 +1386,7 @@ impl SessionSidebar {
                             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
                                 if event.keystroke.key == "escape" {
                                     this.foldering = None;
+                                    this.folder_targets.clear();
                                     cx.stop_propagation();
                                     cx.notify();
                                 }
@@ -1346,6 +1421,7 @@ impl SessionSidebar {
     ) {
         self.foldering = None;
         self.folder_picker = None;
+        self.folder_targets.clear();
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_value(title.to_string(), window, cx);
@@ -1481,6 +1557,7 @@ impl SessionSidebar {
     ) {
         self.foldering = None;
         self.folder_picker = None;
+        self.folder_targets.clear();
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.note.placeholder").to_string());
@@ -1513,6 +1590,83 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Submit only the frozen, still-visible target set.
+    fn submit_folder(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+        let targets = std::mem::take(&mut self.folder_targets);
+        if !ginka_ui::folders::valid_targets(&targets, &self.row_order) {
+            return;
+        }
+        if targets.len() == 1 {
+            cx.emit(SidebarEvent::SetFolder {
+                workspace: targets[0].clone(),
+                folder,
+            });
+        } else if let Some((project, _)) = targets[0].parts() {
+            cx.emit(SidebarEvent::SetFolders {
+                project,
+                workspaces: targets,
+                folder,
+            });
+        }
+        self.batch = Selection::default();
+        self.selecting = false;
+    }
+
+    fn batch_actions(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let targets = self.batch.targets(&self.row_order);
+        let count = targets.len();
+        h_flex()
+            .px_2()
+            .gap_1()
+            .flex_wrap()
+            .child(
+                Button::new("select-workspaces")
+                    .ghost()
+                    .small()
+                    .disabled(self.selected_project.is_none())
+                    .label(
+                        rust_i18n::t!(if self.selecting {
+                            "sidebar.selection.done"
+                        } else {
+                            "sidebar.selection.start"
+                        })
+                        .to_string(),
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.selecting = !this.selecting;
+                        this.batch = Selection::default();
+                        if let Some(workspace) = &this.selected {
+                            this.batch.anchor(workspace);
+                        }
+                        this.folder_picker = None;
+                        this.foldering = None;
+                        this.folder_targets.clear();
+                        cx.notify();
+                    })),
+            )
+            .when(self.selecting, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .child(rust_i18n::t!("sidebar.selection.count", count = count).to_string()),
+                )
+                .child(
+                    Button::new("move-workspaces")
+                        .ghost()
+                        .small()
+                        .label(rust_i18n::t!("sidebar.action.folder").to_string())
+                        .disabled(!ginka_ui::folders::valid_targets(&targets, &self.row_order))
+                        .tooltip(rust_i18n::t!("sidebar.selection.limit").to_string())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if let Some(first) = targets.first() {
+                                this.start_folder_picker(first.clone(), None, window, cx);
+                                this.folder_targets = targets.clone();
+                            }
+                        })),
+                )
+            })
+    }
+
     /// Choose a destination from every registered workspace in the same project.
     fn start_folder_picker(
         &mut self,
@@ -1524,6 +1678,7 @@ impl SessionSidebar {
         let Some((project, _)) = workspace.parts() else {
             return;
         };
+        self.folder_targets = vec![workspace.clone()];
         let options: Vec<FolderOption> = ginka_ui::folders::destinations(
             &project,
             self.rows
@@ -1571,14 +1726,8 @@ impl SessionSidebar {
                 if let Some((workspace, _)) = this.folder_picker.take() {
                     match destination {
                         Destination::New => this.start_folder(workspace, None, window, cx),
-                        Destination::Ungrouped => cx.emit(SidebarEvent::SetFolder {
-                            workspace,
-                            folder: None,
-                        }),
-                        Destination::Existing(name) => cx.emit(SidebarEvent::SetFolder {
-                            workspace,
-                            folder: Some(name.clone()),
-                        }),
+                        Destination::Ungrouped => this.submit_folder(None, cx),
+                        Destination::Existing(name) => this.submit_folder(Some(name.clone()), cx),
                     }
                 }
                 cx.notify();
@@ -1590,7 +1739,7 @@ impl SessionSidebar {
         cx.notify();
     }
 
-    /// Edit the selected workspace's folder. Enter saves; an empty name ungroups.
+    /// Name the frozen selection's folder. Enter saves; an empty name ungroups.
     fn start_folder(
         &mut self,
         workspace: WorkspaceId,
@@ -1610,22 +1759,28 @@ impl SessionSidebar {
         self.noting = None;
         self.renaming = None;
         field.read(cx).focus_handle(cx).focus(window, cx);
-        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
-            InputEvent::PressEnter { .. } => {
-                let text = field.read(cx).value().trim().to_string();
-                if let Some((workspace, _)) = this.foldering.take() {
-                    cx.emit(SidebarEvent::SetFolder {
-                        workspace,
-                        folder: (!text.is_empty()).then_some(text),
-                    });
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| {
+            if this
+                .foldering
+                .as_ref()
+                .is_none_or(|(_, current)| current.entity_id() != field.entity_id())
+            {
+                return;
+            }
+            match event {
+                InputEvent::PressEnter { .. } => {
+                    let text = field.read(cx).value().trim().to_string();
+                    this.foldering = None;
+                    this.submit_folder((!text.is_empty()).then_some(text), cx);
+                    cx.notify();
                 }
-                cx.notify();
+                InputEvent::Blur => {
+                    this.foldering = None;
+                    this.folder_targets.clear();
+                    cx.notify();
+                }
+                _ => {}
             }
-            InputEvent::Blur => {
-                this.foldering = None;
-                cx.notify();
-            }
-            _ => {}
         })
         .detach();
         self.menu_for = None;
@@ -2176,6 +2331,14 @@ impl Render for SessionSidebar {
                 _ => None,
             })
             .collect();
+        self.batch.retain(&order);
+        if !self.folder_targets.is_empty()
+            && !ginka_ui::folders::valid_targets(&self.folder_targets, &order)
+        {
+            self.folder_picker = None;
+            self.foldering = None;
+            self.folder_targets.clear();
+        }
         if order != self.row_order {
             if !self.row_order.is_empty() {
                 let now = std::time::Instant::now();
@@ -2384,6 +2547,7 @@ impl Render for SessionSidebar {
                                     )
                                 }),
                         )
+                        .child(self.batch_actions(cx))
                         .child(self.new_chat(cx))
                         .child(
                             v_flex()

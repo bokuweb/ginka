@@ -1050,3 +1050,59 @@ fn a_refused_commit_is_handed_to_the_agent_with_fix_with_agent() {
         "a conversation was started in the workspace"
     );
 }
+
+#[test]
+fn batch_folders_are_atomic_and_persist_for_active_and_archived_workspaces() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["batch-a", "batch-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    let rejected = home.run(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/missing",
+        "--name",
+        "Review",
+    ]);
+    assert!(!rejected.status.success());
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
+    home.ok(&["workspace", "archive", "comet/batch-b"]);
+    home.ok(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/batch-b",
+        "--name",
+        "  Review  ",
+    ]);
+    home.ok(&["daemon", "stop"]);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 1, "archived": 1}])
+    );
+    home.ok(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/batch-b",
+    ]);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
+    assert!(
+        !home
+            .run(&["workspace", "folder-many", "comet"])
+            .status
+            .success()
+    );
+}

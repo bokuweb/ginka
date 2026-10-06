@@ -612,3 +612,26 @@ fn a_check_says_its_state_in_a_word() {
         json!({"name": "test", "workflow": "CI", "state": "failed", "link": null})
     );
 }
+
+#[test]
+fn batch_folders_carry_a_project_and_every_target_on_the_wire() {
+    let value = json!({
+        "method": "set_workspace_folders",
+        "project": "comet",
+        "workspaces": ["comet/a", "comet/b"],
+        "folder": "Review",
+    });
+    let request = Request::SetWorkspaceFolders {
+        project: ProjectName("comet".into()),
+        workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())],
+        folder: Some("Review".into()),
+    };
+    assert_eq!(wire(&request), value);
+    assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+    let clear =
+        json!({"method": "set_workspace_folders", "project": "comet", "workspaces": ["comet/a"]});
+    assert!(matches!(
+        serde_json::from_value::<Request>(clear).unwrap(),
+        Request::SetWorkspaceFolders { folder: None, .. }
+    ));
+}
