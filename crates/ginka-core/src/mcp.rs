@@ -105,6 +105,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspaces_pin",
+            description: "Pin or unpin 1–256 workspaces in one project atomically. Set pinned explicitly; any invalid target rejects the whole batch.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "workspaces": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string"}},
+                    "pinned": {"type": "boolean"},
+                },
+                "required": ["project", "workspaces", "pinned"],
+            }),
+        },
+        Tool {
             name: "ginka_workspace_archive",
             description: "Archive a workspace without deleting it, or restore it to active work.",
             schema: json!({
@@ -980,6 +993,25 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 Some(_) => return Err(anyhow!("folder must be a string")),
             },
         },
+        "ginka_workspaces_pin" => Request::PinWorkspaces {
+            project: ProjectName(text("project")?),
+            workspaces: arguments
+                .get("workspaces")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("workspaces must be an array of strings"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(|id| WorkspaceId(id.to_owned()))
+                        .ok_or_else(|| anyhow!("workspaces must be an array of strings"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            pinned: arguments
+                .get("pinned")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("pinned must be a boolean"))?,
+        },
         "ginka_workspace_archive" => Request::ArchiveWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             archived: !flag("restore"),
@@ -1559,6 +1591,7 @@ mod tests {
                 "branch": "harbor",
                 "workspace": "comet/harbor",
                 "workspaces": ["comet/harbor"],
+                "pinned": true,
                 "session": "s-1",
                 "request_id": "ask-1",
                 "id": 7,
@@ -1764,6 +1797,35 @@ mod tests {
                 note: None,
             }
         ));
+    }
+
+    #[test]
+    fn bulk_pin_requires_an_explicit_boolean_and_a_list_of_ids() {
+        for pinned in [true, false] {
+            assert_eq!(request_for("ginka_workspaces_pin", &json!({"project": "comet", "workspaces": ["comet/a", "comet/b"], "pinned": pinned})).unwrap(), Request::PinWorkspaces {
+                project: ProjectName("comet".into()), workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())], pinned,
+            });
+        }
+        for args in [
+            json!({"project": "comet", "workspaces": ["comet/a"]}),
+            json!({"project": "comet", "workspaces": ["comet/a"], "pinned": null}),
+            json!({"project": "comet", "workspaces": ["comet/a"], "pinned": "false"}),
+            json!({"project": "comet", "workspaces": "comet/a", "pinned": true}),
+            json!({"project": "comet", "workspaces": ["comet/a", 42], "pinned": true}),
+            json!({"workspaces": ["comet/a"], "pinned": true}),
+        ] {
+            assert!(request_for("ginka_workspaces_pin", &args).is_err());
+        }
+        let tool = tools()
+            .into_iter()
+            .find(|t| t.name == "ginka_workspaces_pin")
+            .unwrap();
+        assert_eq!(
+            tool.schema["required"],
+            json!(["project", "workspaces", "pinned"])
+        );
+        assert_eq!(tool.schema["properties"]["workspaces"]["minItems"], 1);
+        assert_eq!(tool.schema["properties"]["workspaces"]["maxItems"], 256);
     }
 
     #[test]

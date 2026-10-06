@@ -1248,6 +1248,22 @@ impl Shell {
                     // The inbox, the notes, the settings — or a project, which
                     // the rail also announces as a selection.
                     SidebarEvent::Open(place) => this.open_place(*place, window, cx),
+                    SidebarEvent::PinMany {
+                        project,
+                        workspaces,
+                        pinned,
+                    } => {
+                        let (link, project, workspaces, pinned) = (
+                            this.link.clone(),
+                            project.clone(),
+                            workspaces.clone(),
+                            *pinned,
+                        );
+                        this.after_row_change(
+                            async move { link.pin_workspaces(&project, workspaces, pinned).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::Pin { workspace, pinned } => {
                         let (link, workspace, pinned) =
                             (this.link.clone(), workspace.clone(), *pinned);

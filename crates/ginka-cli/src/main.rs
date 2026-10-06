@@ -560,6 +560,17 @@ enum WorkspaceCommand {
         #[arg(long)]
         off: bool,
     },
+    /// Pin or unpin several project workspaces atomically.
+    PinMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Unpin every target instead.
+        #[arg(long)]
+        off: bool,
+    },
     /// Archive a workspace without removing its worktree or conversation.
     Archive {
         /// The workspace id, as shown by `workspace list`.
@@ -1640,6 +1651,15 @@ fn request_for(command: Command) -> Result<Request> {
         },
         Command::Workspace(WorkspaceCommand::Pin { workspace, off }) => Request::PinWorkspace {
             workspace: WorkspaceId(workspace),
+            pinned: !off,
+        },
+        Command::Workspace(WorkspaceCommand::PinMany {
+            project,
+            workspaces,
+            off,
+        }) => Request::PinWorkspaces {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
             pinned: !off,
         },
         Command::Workspace(WorkspaceCommand::Archive { workspace, restore }) => {

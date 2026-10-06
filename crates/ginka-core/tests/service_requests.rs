@@ -259,6 +259,75 @@ fn batch_folders_emit_once_after_commit_and_never_on_a_rejected_batch() {
 }
 
 #[test]
+fn batch_pins_publish_one_committed_update_and_keep_other_metadata() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let a = new_workspace(&mut fixture, &project, "pin-a").unwrap();
+    let b = new_workspace(&mut fixture, &project, "pin-b").unwrap();
+    fixture.ask(Request::PinWorkspace {
+        workspace: b.id(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: b.id(),
+        archived: true,
+    });
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: a.id(),
+        folder: Some("Review".into()),
+    });
+    let Response::Workspaces { workspaces: before } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) else {
+        panic!("expected workspaces")
+    };
+    fixture.recorder.taken();
+    assert!(
+        fixture
+            .service
+            .handle(Request::PinWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), WorkspaceId("comet/missing".into())],
+                pinned: true
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    for pinned in [true, false] {
+        assert_eq!(
+            fixture.ask(Request::PinWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), b.id(), a.id()],
+                pinned
+            }),
+            Response::Ack
+        );
+        assert_eq!(
+            fixture.recorder.taken(),
+            vec![DaemonEvent::WorkspacesChanged {
+                project: project.clone()
+            }]
+        );
+        let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+            project: Some(project.clone()),
+        }) else {
+            panic!("expected workspaces")
+        };
+        for original in &before {
+            let row = workspaces
+                .iter()
+                .find(|row| row.id() == original.id())
+                .unwrap();
+            let mut expected = original.worktree.clone();
+            if [a.id(), b.id()].contains(&original.id()) {
+                expected.pinned = pinned;
+            }
+            assert_eq!(row.worktree, expected);
+        }
+    }
+}
+
+#[test]
 fn folder_catalog_reads_archived_metadata_without_git_or_push_events() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();

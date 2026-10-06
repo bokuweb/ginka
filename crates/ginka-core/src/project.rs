@@ -148,6 +148,27 @@ pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> R
     Ok(updated > 0)
 }
 
+/// Pin or unpin 1–256 project-local workspaces in one transaction.
+/// All ids are validated before any write. Duplicates count toward the bound
+/// but are updated once; archived rows are valid. A refusal or failed write
+/// leaves every row unchanged, including its folder and git identity.
+pub fn set_pins(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    pinned: bool,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET pinned = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![pinned, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Summarize assigned folder labels for one project, including archived workspaces.
 pub fn list_workspace_folders(
     conn: &Connection,
@@ -208,14 +229,31 @@ pub fn set_folders(
     workspaces: &[WorkspaceId],
     folder: Option<&str>,
 ) -> Result<()> {
+    let folder = validate_folder(folder)?;
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![folder, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+// Called inside the mutation's transaction, so validation and writes see the
+// same registered rows. Both batch operations share their bounds and ownership.
+fn batch_names(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+) -> Result<std::collections::BTreeSet<String>> {
     anyhow::ensure!(
         !workspaces.is_empty() && workspaces.len() <= 256,
         "select between 1 and 256 workspaces"
     );
-    let folder = validate_folder(folder)?;
-    let tx = conn.unchecked_transaction()?;
     anyhow::ensure!(
-        tx.query_row(
+        conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE name = ?1)",
             [&project.0],
             |row| row.get::<_, bool>(0)
@@ -232,19 +270,12 @@ pub fn set_folders(
             "workspace {workspace} is outside project {project}"
         );
         anyhow::ensure!(
-            find_worktree(&tx, workspace)?.is_some(),
+            find_worktree(conn, workspace)?.is_some(),
             "no workspace named {workspace}"
         );
-        names.insert(name);
+        names.insert(name.to_owned());
     }
-    for name in names {
-        tx.execute(
-            "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
-            rusqlite::params![folder, project.0, name],
-        )?;
-    }
-    tx.commit()?;
-    Ok(())
+    Ok(names)
 }
 
 /// Archive or restore a workspace. Returns whether a row was affected.
@@ -367,6 +398,64 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn batch_pins_validate_all_targets_and_roll_back_failed_writes() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for (name, pinned, archived) in [("a", false, false), ("b", true, true)] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder, pinned, archived) VALUES ('comet', ?1, 'topic', ?1, 'Review', ?2, ?3)", rusqlite::params![name, pinned, archived]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        let before = list_worktrees(&conn, &sample().name).unwrap();
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_pins(&conn, &sample().name, &targets, true).is_err());
+            assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        }
+        assert!(
+            set_pins(
+                &conn,
+                &ProjectName("missing".into()),
+                std::slice::from_ref(&a),
+                true
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_pin_b BEFORE UPDATE OF pinned ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(set_pins(&conn, &sample().name, &[a.clone(), b.clone()], true).is_err());
+        assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        conn.execute_batch("DROP TRIGGER refuse_pin_b").unwrap();
+        for pinned in [true, true, false] {
+            set_pins(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone(), a.clone()],
+                pinned,
+            )
+            .unwrap();
+            for original in &before {
+                let mut expected = original.clone();
+                expected.pinned = pinned;
+                assert_eq!(
+                    find_worktree(&conn, &WorkspaceId::new(&original.project, &original.name))
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        // The exact boundary is accepted even when all ids refer to one row.
+        set_pins(&conn, &sample().name, &vec![a.clone(); 256], true).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().pinned);
+        assert!(!find_worktree(&conn, &b).unwrap().unwrap().pinned);
     }
 
     #[test]

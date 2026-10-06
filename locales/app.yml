@@ -2510,6 +2510,12 @@ sidebar.selection.count:
 sidebar.selection.limit:
   en: Select up to 256 visible workspaces in this project
   ja: このプロジェクトの表示中のワークスペースを 256 件まで選択
+sidebar.selection.pin:
+  en: Pin every selected workspace (up to 256)
+  ja: 選択したすべてのワークスペースをピン留め（256 件まで）
+sidebar.selection.unpin:
+  en: Unpin every selected workspace (up to 256)
+  ja: 選択したすべてのワークスペースのピンを外す（256 件まで）
 sidebar.selection.check:
   en: "Select %{name}"
   ja: "%{name} を選択"

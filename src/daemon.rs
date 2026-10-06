@@ -1627,6 +1627,22 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Atomically pin or unpin project-local workspaces through the daemon.
+    pub async fn pin_workspaces(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        pinned: bool,
+    ) -> Result<(), String> {
+        self.ask_result(Request::PinWorkspaces {
+            project: project.clone(),
+            workspaces,
+            pinned,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

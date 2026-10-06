@@ -614,6 +614,26 @@ fn a_check_says_its_state_in_a_word() {
 }
 
 #[test]
+fn batch_pins_require_the_requested_state_on_the_wire() {
+    for pinned in [true, false] {
+        let value = json!({"method": "pin_workspaces", "project": "comet", "workspaces": ["comet/a", "comet/b"], "pinned": pinned});
+        let request = Request::PinWorkspaces {
+            project: ProjectName("comet".into()),
+            workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())],
+            pinned,
+        };
+        assert_eq!(wire(&request), value);
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+    }
+    assert!(
+        serde_json::from_value::<Request>(
+            json!({"method": "pin_workspaces", "project": "comet", "workspaces": ["comet/a"]})
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn batch_folders_carry_a_project_and_every_target_on_the_wire() {
     let value = json!({
         "method": "set_workspace_folders",

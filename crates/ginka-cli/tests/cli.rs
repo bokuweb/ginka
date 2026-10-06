@@ -1052,6 +1052,74 @@ fn a_refused_commit_is_handed_to_the_agent_with_fix_with_agent() {
 }
 
 #[test]
+fn batch_pins_are_atomic_and_survive_restart_with_archived_targets() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["pin-a", "pin-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    home.ok(&["workspace", "pin", "comet/pin-b"]);
+    home.ok(&["workspace", "archive", "comet/pin-b"]);
+    let read = || -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&home.ok(&["--json", "workspace", "list", "comet"])).unwrap();
+        // Pinning deliberately changes display order; compare rows by identity.
+        value["workspaces"].as_array_mut().unwrap().sort_by(|a, b| {
+            a["worktree"]["name"]
+                .as_str()
+                .cmp(&b["worktree"]["name"].as_str())
+        });
+        value
+    };
+    let before = read();
+    assert!(
+        !home
+            .run(&[
+                "workspace",
+                "pin-many",
+                "comet",
+                "comet/pin-a",
+                "comet/missing"
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(read(), before);
+    for pinned in [true, false] {
+        let mut args = vec![
+            "workspace",
+            "pin-many",
+            "comet",
+            "comet/pin-a",
+            "comet/pin-b",
+            "comet/pin-a",
+        ];
+        if !pinned {
+            args.push("--off");
+        }
+        home.ok(&args);
+        home.ok(&["daemon", "stop"]);
+        let mut expected = before.clone();
+        for row in expected["workspaces"].as_array_mut().unwrap() {
+            if ["pin-a", "pin-b"]
+                .iter()
+                .any(|name| row["worktree"]["name"] == *name)
+            {
+                row["worktree"]["pinned"] = pinned.into();
+            }
+        }
+        assert_eq!(read(), expected);
+    }
+    assert!(
+        !home
+            .run(&["workspace", "pin-many", "comet"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn batch_folders_are_atomic_and_persist_for_active_and_archived_workspaces() {
     let home = Home::new();
     let repository = home.repository("comet");

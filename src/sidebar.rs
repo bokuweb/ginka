@@ -76,6 +76,15 @@ pub enum SidebarEvent {
         workspace: WorkspaceId,
         pinned: bool,
     },
+    /// Set one pin state for a project-local selection atomically.
+    PinMany {
+        /// Project owning every target.
+        project: ProjectName,
+        /// Immutable ids in the displayed selection.
+        workspaces: Vec<WorkspaceId>,
+        /// Explicit state applied to every target.
+        pinned: bool,
+    },
     /// Hand the workspace's merge conflicts to an agent to resolve.
     ResolveConflicts {
         workspace: WorkspaceId,
@@ -1650,6 +1659,52 @@ impl SessionSidebar {
                         .text_xs()
                         .child(rust_i18n::t!("sidebar.selection.count", count = count).to_string()),
                 )
+                .children([true, false].into_iter().map(|pinned| {
+                    let targets = targets.clone();
+                    Button::new(if pinned {
+                        "pin-workspaces"
+                    } else {
+                        "unpin-workspaces"
+                    })
+                    .ghost()
+                    .small()
+                    .label(
+                        rust_i18n::t!(if pinned {
+                            "sidebar.action.pin"
+                        } else {
+                            "sidebar.action.unpin"
+                        })
+                        .to_string(),
+                    )
+                    .disabled(!ginka_ui::folders::valid_targets(&targets, &self.row_order))
+                    .tooltip(
+                        rust_i18n::t!(if pinned {
+                            "sidebar.selection.pin"
+                        } else {
+                            "sidebar.selection.unpin"
+                        })
+                        .to_string(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Recheck the visible selection when activating a rendered control.
+                        if !ginka_ui::folders::valid_targets(&targets, &this.row_order) {
+                            return;
+                        }
+                        if let Some((project, _)) = targets.first().and_then(WorkspaceId::parts) {
+                            cx.emit(SidebarEvent::PinMany {
+                                project,
+                                workspaces: targets.clone(),
+                                pinned,
+                            });
+                            this.batch = Selection::default();
+                            this.selecting = false;
+                            this.folder_picker = None;
+                            this.foldering = None;
+                            this.folder_targets.clear();
+                            cx.notify();
+                        }
+                    }))
+                }))
                 .child(
                     Button::new("move-workspaces")
                         .ghost()
