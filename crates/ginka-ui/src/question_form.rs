@@ -4,8 +4,8 @@
 //! [`Question`]s, each with described choices, some taking several picks. The
 //! card draws one row per choice, numbered so a key picks it, an *Other* field
 //! for an answer the agent did not offer, and *Skip* and *Send*. This holds
-//! what the reader has picked and typed, and turns it into the
-//! [`Answers`] the driver sends back.
+//! what the reader has picked and typed while revisiting questions, and turns
+//! it into the [`Answers`] the driver sends back.
 
 use ginka_protocol::question::{Answers, Question};
 use std::collections::BTreeSet;
@@ -60,6 +60,37 @@ impl QuestionForm {
         if question < self.questions.len() {
             self.current = question;
         }
+    }
+
+    /// Whether an earlier question can be revisited.
+    pub fn can_go_back(&self) -> bool {
+        self.current > 0
+    }
+
+    /// Whether a later question exists, even if this one is unanswered.
+    pub fn can_go_next(&self) -> bool {
+        self.current + 1 < self.questions.len()
+    }
+
+    /// Revisit the previous question without changing any answers; never wraps.
+    /// Returns whether the current question changed.
+    pub fn go_back(&mut self) -> bool {
+        if !self.can_go_back() {
+            return false;
+        }
+        self.current -= 1;
+        true
+    }
+
+    /// Visit the next question without changing any answers; never wraps.
+    /// Returns whether the current question changed. Sending still requires
+    /// every question to be answered.
+    pub fn go_next(&mut self) -> bool {
+        if !self.can_go_next() {
+            return false;
+        }
+        self.current += 1;
+        true
     }
 
     /// Pick `choice` in `question`. With one pick allowed it replaces the
@@ -233,6 +264,73 @@ mod tests {
         assert!(!form.is_complete(), "the second question is unanswered");
         form.set_other(1, "ledger");
         assert!(form.is_complete());
+    }
+
+    #[test]
+    fn navigation_is_bounded_even_for_empty_and_single_question_forms() {
+        for questions in [vec![], vec![question("Name?", &[], false)]] {
+            let mut form = QuestionForm::new(questions);
+            assert!(!form.can_go_back());
+            assert!(!form.can_go_next());
+            assert!(!form.go_back());
+            assert!(!form.go_next());
+            form.focus(usize::MAX);
+            assert_eq!(form.current(), 0);
+        }
+        let mut form = QuestionForm::new(vec![
+            question("DB?", &["SQLite"], false),
+            question("Name?", &[], false),
+        ]);
+        assert!(form.can_go_next());
+        assert!(form.go_next());
+        assert_eq!(form.current(), 1);
+        assert!(!form.go_next());
+        assert!(form.can_go_back());
+        assert!(form.go_back());
+        assert_eq!(form.current(), 0);
+        assert!(!form.go_back());
+        assert!(!form.is_complete(), "navigation does not answer questions");
+    }
+
+    #[test]
+    fn revisiting_and_editing_an_answer_preserves_the_other_questions() {
+        let mut form = QuestionForm::new(vec![
+            question("DB?", &["SQLite", "Postgres"], false),
+            question("Name?", &[], false),
+            question("Features?", &["Auth", "Search"], true),
+        ]);
+        form.press_number(1);
+        form.go_next();
+        form.set_other(1, "  ledger  ");
+        form.go_next();
+        form.press_number(2);
+        form.set_other(2, "audit logs");
+        let before = form.answers();
+        assert!(form.is_complete());
+
+        form.go_back();
+        assert_eq!(form.other(1), "  ledger  ");
+        form.go_back();
+        assert!(form.is_picked(0, 0));
+        assert_eq!(form.answers(), before, "moving never changes an answer");
+        form.press_number(2);
+        form.go_next();
+        form.set_other(1, "   ");
+        assert!(
+            !form.is_complete(),
+            "clearing an earlier answer blocks send"
+        );
+        form.set_other(1, "journal");
+        form.go_next();
+        assert!(form.is_picked(2, 1));
+        assert_eq!(form.other(2), "audit logs");
+        assert!(form.is_complete());
+        assert_eq!(form.answers().answers["DB?"], vec!["Postgres"]);
+        assert_eq!(form.answers().answers["Name?"], vec!["journal"]);
+        assert_eq!(
+            form.answers().answers["Features?"],
+            vec!["Search", "audit logs"]
+        );
     }
 
     #[test]

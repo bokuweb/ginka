@@ -9121,18 +9121,19 @@ impl Shell {
         self.respond(card, response, cx);
     }
 
-    /// The agent's open questions as a form above the composer: each
-    /// question's numbered choices with their descriptions, an *Other* field,
-    /// and *Skip* and *Send*. A number picks in the current question, the
-    /// number after the last choice moves to *Other*, ↑/↓ change question and
-    /// ⌘↩ sends.
+    /// The agent's open questions, one at a time above the composer, retaining
+    /// every answer while Back and Next revisit questions. Numbered choices
+    /// have descriptions and an *Other* field. A number picks in the current
+    /// question, the number after the last choice moves to *Other*, ↑/↓ change
+    /// question and ⌘↩ sends.
     fn question_form_view(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let open = self.question_form.as_ref()?;
         let tokens = Tokens::global(cx).clone();
         let form = &open.form;
         let complete = form.is_complete();
-        let questions = form.questions().iter().enumerate().map(|(q, question)| {
-            let current = form.current() == q && form.questions().len() > 1;
+        let questions = form.questions().get(form.current()).map(|question| {
+            let q = form.current();
+            let current = form.questions().len() > 1;
             let choices = question.options.iter().enumerate().map(|(c, choice)| {
                 let picked = form.is_picked(q, c);
                 h_flex()
@@ -9156,9 +9157,14 @@ impl Shell {
                     })
                     .cursor_pointer()
                     .hover(|this| this.bg(tokens.colors().row_hover()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
                         if let Some(open) = this.question_form.as_mut() {
                             open.form.pick(q, c);
+                            if !open.form.questions()[q].multi_select {
+                                open.others[q]
+                                    .update(cx, |field, cx| field.set_value("", window, cx));
+                            }
+                            open.focus.focus(window, cx);
                             cx.notify();
                         }
                     }))
@@ -9281,6 +9287,56 @@ impl Shell {
                 .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                     this.question_form_key(event, window, cx)
                 }))
+                .when(form.questions().len() > 1, |this| {
+                    this.child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .text_color(tokens.colors().text_muted)
+                                    .child(
+                                        rust_i18n::t!(
+                                            "question.progress",
+                                            current = form.current() + 1,
+                                            total = form.questions().len()
+                                        )
+                                        .to_string(),
+                                    ),
+                            )
+                            .child(
+                                Button::new("question-back")
+                                    .ghost()
+                                    .small()
+                                    .disabled(!form.can_go_back())
+                                    .label(rust_i18n::t!("question.back").to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(open) = this.question_form.as_mut() {
+                                            open.form.go_back();
+                                            open.focus.focus(window, cx);
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .child(
+                                Button::new("question-next")
+                                    .ghost()
+                                    .small()
+                                    .disabled(!form.can_go_next())
+                                    .label(rust_i18n::t!("question.next").to_string())
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(open) = this.question_form.as_mut() {
+                                            open.form.go_next();
+                                            open.focus.focus(window, cx);
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    )
+                })
                 .children(questions)
                 .child(
                     h_flex()
@@ -9333,9 +9389,21 @@ impl Shell {
         let Some(open) = self.question_form.as_mut() else {
             return;
         };
+        // Editing words must keep text navigation and number keys in the input.
+        if open
+            .others
+            .iter()
+            .any(|field| field.read(cx).focus_handle(cx).is_focused(window))
+        {
+            return;
+        }
         match keystroke.key.as_str() {
-            "up" => open.form.focus(open.form.current().saturating_sub(1)),
-            "down" => open.form.focus(open.form.current() + 1),
+            "up" => {
+                open.form.go_back();
+            }
+            "down" => {
+                open.form.go_next();
+            }
             digit => {
                 let Some(number) = digit
                     .parse::<usize>()
@@ -9344,9 +9412,18 @@ impl Shell {
                 else {
                     return;
                 };
-                if open.form.press_number(number) == ginka_ui::question_form::KeyOutcome::Other {
-                    let field = open.others[open.form.current()].clone();
-                    field.read(cx).focus_handle(cx).focus(window, cx);
+                match open.form.press_number(number) {
+                    ginka_ui::question_form::KeyOutcome::Other => {
+                        let field = open.others[open.form.current()].clone();
+                        field.read(cx).focus_handle(cx).focus(window, cx);
+                    }
+                    ginka_ui::question_form::KeyOutcome::Picked => {
+                        let q = open.form.current();
+                        if !open.form.questions()[q].multi_select {
+                            open.others[q].update(cx, |field, cx| field.set_value("", window, cx));
+                        }
+                    }
+                    ginka_ui::question_form::KeyOutcome::Ignored => return,
                 }
             }
         }

@@ -2466,6 +2466,15 @@ question.several:
 question.keys:
   en: "1–9 pick · ↑↓ question · ⌘↩ send"
   ja: "1–9 で選択 · ↑↓ で質問移動 · ⌘↩ で送信"
+question.progress:
+  en: "Question %{current} of %{total}"
+  ja: "質問 %{current} / %{total}"
+question.back:
+  en: Back
+  ja: 戻る
+question.next:
+  en: Next
+  ja: 次へ
 question.skip:
   en: Skip
   ja: スキップ
