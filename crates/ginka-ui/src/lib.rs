@@ -29,6 +29,7 @@ pub mod fan_out;
 pub mod field;
 pub mod file_search;
 pub mod file_tree;
+pub mod folders;
 pub mod graph;
 pub mod handoff;
 pub mod home;

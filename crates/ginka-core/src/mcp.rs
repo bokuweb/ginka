@@ -71,6 +71,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_folders",
+            description: "List a project's assigned sidebar folders in name order, with active and archived workspace counts. Includes archived-only folders; never polls git.",
+            schema: json!({
+                "type": "object",
+                "properties": { "project": {"type": "string"} },
+                "required": ["project"],
+            }),
+        },
+        Tool {
             name: "ginka_workspace_folder",
             description: "Group a workspace in a named sidebar folder within its project, without moving files. Omit folder to ungroup it.",
             schema: json!({
@@ -927,6 +936,9 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             branch: text("branch")?,
             base: maybe("base"),
         },
+        "ginka_workspace_folders" => Request::ListWorkspaceFolders {
+            project: ProjectName(text("project")?),
+        },
         "ginka_workspace_folder" => Request::SetWorkspaceFolder {
             workspace: WorkspaceId(text("workspace")?),
             folder: match arguments.get("folder") {
@@ -1718,6 +1730,24 @@ mod tests {
                 note: None,
             }
         ));
+    }
+
+    #[test]
+    fn workspace_folder_catalog_requires_an_explicit_project() {
+        assert_eq!(
+            request_for("ginka_workspace_folders", &json!({"project": "comet"})).unwrap(),
+            Request::ListWorkspaceFolders {
+                project: ProjectName("comet".into())
+            }
+        );
+        for args in [json!({}), json!({"project": null}), json!({"project": 42})] {
+            assert!(request_for("ginka_workspace_folders", &args).is_err());
+        }
+        let tool = tools()
+            .into_iter()
+            .find(|t| t.name == "ginka_workspace_folders")
+            .unwrap();
+        assert_eq!(tool.schema["required"], json!(["project"]));
     }
 
     #[test]

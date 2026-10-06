@@ -352,6 +352,18 @@ fn workspace_folders_persist_across_daemon_restarts_and_can_be_cleared() {
     home.ok(&["workspace", "folder", "comet/later", "  Review  "]);
     let invalid = home.run(&["workspace", "folder", "comet/later", "bad\nname"]);
     assert!(!invalid.status.success());
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 1, "archived": 0}])
+    );
+    assert!(
+        !home
+            .run(&["workspace", "folders", "missing"])
+            .status
+            .success()
+    );
     home.ok(&["workspace", "archive", "comet/later"]);
     home.ok(&["daemon", "stop"]);
     let listed: serde_json::Value =
@@ -364,6 +376,16 @@ fn workspace_folders_persist_across_daemon_restarts_and_can_be_cleared() {
         .unwrap();
     assert_eq!(workspace["worktree"]["folder"], "Review");
     assert_eq!(workspace["worktree"]["archived"], true);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 0, "archived": 1}])
+    );
+    assert!(
+        home.ok(&["workspace", "folders", "comet"])
+            .contains("Review")
+    );
     home.ok(&["workspace", "archive", "comet/later", "--restore"]);
     home.ok(&["workspace", "folder", "comet/later"]);
     let listed: serde_json::Value =
@@ -376,6 +398,9 @@ fn workspace_folders_persist_across_daemon_restarts_and_can_be_cleared() {
         .unwrap();
     assert!(workspace["worktree"]["folder"].is_null());
     assert_eq!(workspace["worktree"]["archived"], false);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
 }
 
 #[test]

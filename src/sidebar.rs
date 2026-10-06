@@ -16,13 +16,33 @@
 
 use ginka_protocol::{ProjectName, PullRequestState, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
+use ginka_ui::folders::Destination;
 use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::input::{InputEvent, InputState};
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState};
 use gpui_component::{
     Icon, IconName, StyledExt as _, h_flex, scroll::ScrollableElement as _, v_flex,
 };
+
+/// A translated picker label paired with an unambiguous action.
+#[derive(Clone)]
+struct FolderOption {
+    title: SharedString,
+    destination: Destination,
+}
+
+impl SelectItem for FolderOption {
+    type Value = Destination;
+
+    fn title(&self) -> SharedString {
+        self.title.clone()
+    }
+    fn value(&self) -> &Destination {
+        &self.destination
+    }
+}
 
 /// Emitted when the user picks a row.
 ///
@@ -208,6 +228,11 @@ pub struct SessionSidebar {
     noting: Option<(WorkspaceId, Entity<InputState>)>,
     /// The workspace whose sidebar folder is being edited, and its field.
     foldering: Option<(WorkspaceId, Entity<InputState>)>,
+    /// The workspace choosing an existing folder or starting a new one.
+    folder_picker: Option<(
+        WorkspaceId,
+        Entity<SelectState<SearchableVec<FolderOption>>>,
+    )>,
     /// A project or archived workspace asked to be removed once; the
     /// second click removes it.
     removing: Option<Removal>,
@@ -242,6 +267,7 @@ impl SessionSidebar {
             renaming: None,
             noting: None,
             foldering: None,
+            folder_picker: None,
             removing: None,
         }
     }
@@ -1096,6 +1122,11 @@ impl SessionSidebar {
             .as_ref()
             .filter(|(workspace, _)| workspace == &row.workspace)
             .map(|(_, field)| field.clone());
+        let folder_picker = self
+            .folder_picker
+            .as_ref()
+            .filter(|(workspace, _)| workspace == &row.workspace)
+            .map(|(_, picker)| picker.clone());
         let menu_workspace = row.workspace.clone();
 
         v_flex()
@@ -1263,6 +1294,19 @@ impl SessionSidebar {
                                 })),
                         )
                     })
+                    .children(folder_picker.map(|picker| {
+                        div()
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if event.keystroke.key == "escape" {
+                                    this.folder_picker = None;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }))
+                            .child(Select::new(&picker).accessibility_label(
+                                rust_i18n::t!("sidebar.action.folder").to_string(),
+                            ))
+                    }))
                     .children(folder_field.map(|field| {
                         div()
                             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
@@ -1301,6 +1345,7 @@ impl SessionSidebar {
         cx: &mut Context<Self>,
     ) {
         self.foldering = None;
+        self.folder_picker = None;
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_value(title.to_string(), window, cx);
@@ -1406,7 +1451,7 @@ impl SessionSidebar {
                 }
             }
             RowAction::Folder => {
-                self.start_folder(row.workspace.clone(), row.folder.clone(), window, cx);
+                self.start_folder_picker(row.workspace.clone(), row.folder.clone(), window, cx);
             }
             RowAction::StatusNote => {
                 self.start_note(row.workspace.clone(), row.status_note.clone(), window, cx)
@@ -1435,6 +1480,7 @@ impl SessionSidebar {
         cx: &mut Context<Self>,
     ) {
         self.foldering = None;
+        self.folder_picker = None;
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.note.placeholder").to_string());
@@ -1467,6 +1513,83 @@ impl SessionSidebar {
         cx.notify();
     }
 
+    /// Choose a destination from every registered workspace in the same project.
+    fn start_folder_picker(
+        &mut self,
+        workspace: WorkspaceId,
+        folder: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some((project, _)) = workspace.parts() else {
+            return;
+        };
+        let options: Vec<FolderOption> = ginka_ui::folders::destinations(
+            &project,
+            self.rows
+                .iter()
+                .map(|row| (&row.workspace, row.folder.as_deref())),
+        )
+        .into_iter()
+        .map(|destination| {
+            let title = match &destination {
+                Destination::Ungrouped => rust_i18n::t!("sidebar.folder.ungrouped").to_string(),
+                Destination::New => rust_i18n::t!("sidebar.folder.new").to_string(),
+                Destination::Existing(name) => name.clone(),
+            }
+            .into();
+            FolderOption { title, destination }
+        })
+        .collect();
+        let selected = folder
+            .map(Destination::Existing)
+            .unwrap_or(Destination::Ungrouped);
+        let picker = cx.new(|cx| {
+            let mut state =
+                SelectState::new(SearchableVec::new(options), None, window, cx).searchable(true);
+            state.set_selected_value(&selected, window, cx);
+            state
+        });
+        self.foldering = None;
+        self.noting = None;
+        self.renaming = None;
+        self.menu_for = None;
+        cx.subscribe_in(
+            &picker,
+            window,
+            |this, source, event: &SelectEvent<SearchableVec<FolderOption>>, window, cx| {
+                let SelectEvent::Confirm(Some(destination)) = event else {
+                    return;
+                };
+                if this
+                    .folder_picker
+                    .as_ref()
+                    .is_none_or(|(_, picker)| picker.entity_id() != source.entity_id())
+                {
+                    return;
+                }
+                if let Some((workspace, _)) = this.folder_picker.take() {
+                    match destination {
+                        Destination::New => this.start_folder(workspace, None, window, cx),
+                        Destination::Ungrouped => cx.emit(SidebarEvent::SetFolder {
+                            workspace,
+                            folder: None,
+                        }),
+                        Destination::Existing(name) => cx.emit(SidebarEvent::SetFolder {
+                            workspace,
+                            folder: Some(name.clone()),
+                        }),
+                    }
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        self.folder_picker = Some((workspace, picker.clone()));
+        picker.read(cx).focus_handle(cx).focus(window, cx);
+        cx.notify();
+    }
+
     /// Edit the selected workspace's folder. Enter saves; an empty name ungroups.
     fn start_folder(
         &mut self,
@@ -1475,6 +1598,7 @@ impl SessionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.folder_picker = None;
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.folder.placeholder").to_string());
@@ -1563,7 +1687,7 @@ impl SessionSidebar {
             )
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
-                this.start_folder(workspace.clone(), current.clone(), window, cx);
+                this.start_folder_picker(workspace.clone(), current.clone(), window, cx);
             }))
         };
         // The id `ginka session …` and MCP take, for a reader driving this

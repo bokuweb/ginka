@@ -104,6 +104,21 @@ pub struct Worktree {
     pub folder: Option<String>,
 }
 
+/// An assigned sidebar folder within the project requested by the client.
+///
+/// Empty folders have no record: clearing or removing the last member removes
+/// the folder from the catalog. Counts include pinned workspaces once.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFolder {
+    /// The exact, case-sensitive folder label used by member workspaces.
+    pub name: String,
+    /// Registered members that are not archived.
+    pub active: u64,
+    /// Registered members retained in the archive.
+    pub archived: u64,
+}
+
 impl Worktree {
     /// The id everything else in the system hangs off.
     pub fn workspace_id(&self) -> WorkspaceId {

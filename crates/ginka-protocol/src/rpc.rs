@@ -11,7 +11,7 @@ use crate::model::{
     ConnectorState, ContentMatch, DiffSide, FileContent, FileEntry, GitCommit, Note, PlanSnapshot,
     Project, ReviewComment, Session, SessionMatch, SessionOrigin, Skill, SlashCommand,
     TerminalInfo, TranscriptEntry, UsageRow, WorkspaceContentMatch, WorkspaceFileMatch,
-    WorkspaceSummary,
+    WorkspaceFolder, WorkspaceSummary,
 };
 use crate::provider::{AccessMode, ProviderKind};
 use serde::{Deserialize, Serialize};
@@ -62,6 +62,12 @@ pub enum Request {
     ListWorkspaces {
         /// Only this project's workspaces, when set.
         project: Option<ProjectName>,
+    },
+    /// Assigned sidebar folders and member counts in one registered project.
+    /// This reads persisted metadata without polling git or changing state.
+    ListWorkspaceFolders {
+        /// The project whose catalog to read, including archived-only folders.
+        project: ProjectName,
     },
     /// Create a worktree on `branch`, cutting it from `base` when the branch
     /// does not exist yet.
@@ -1353,6 +1359,11 @@ pub enum Response {
         /// Every matching workspace, reconciled against git.
         workspaces: Vec<WorkspaceSummary>,
     },
+    /// Answers [`Request::ListWorkspaceFolders`], ordered by exact label.
+    WorkspaceFolders {
+        /// Nonempty folders, each with active and archived member counts.
+        folders: Vec<WorkspaceFolder>,
+    },
     /// A workspace that was just created, by [`Request::CreateWorkspace`] or
     /// [`Request::CreateScratchWorkspace`].
     Workspace {
@@ -1781,6 +1792,9 @@ mod tests {
                 path: "src/main.rs".into(),
                 header: "@@ -1 +1 @@".into(),
                 staged: true,
+            },
+            Request::ListWorkspaceFolders {
+                project: ProjectName("comet".into()),
             },
             Request::SelectAccount {
                 id: AccountId("codex-work".into()),

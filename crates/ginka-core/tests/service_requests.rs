@@ -207,6 +207,60 @@ fn workspace_folders_survive_git_reconciliation_and_archive_without_rekeying() {
 }
 
 #[test]
+fn folder_catalog_reads_archived_metadata_without_git_or_push_events() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let original = new_workspace(&mut fixture, &project, "catalog").unwrap();
+    let workspace = original.id();
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: workspace.clone(),
+        folder: Some("Review".into()),
+    });
+    fixture.ask(Request::PinWorkspace {
+        workspace: workspace.clone(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: workspace.clone(),
+        archived: true,
+    });
+    fixture.recorder.taken();
+    // A catalog is usable even when the registered worktree is temporarily absent.
+    std::fs::remove_dir_all(&original.worktree.path).unwrap();
+    assert_eq!(
+        fixture.ask(Request::ListWorkspaceFolders {
+            project: project.clone()
+        }),
+        Response::WorkspaceFolders {
+            folders: vec![ginka_protocol::WorkspaceFolder {
+                name: "Review".into(),
+                active: 0,
+                archived: 1
+            }]
+        }
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace,
+        folder: None,
+    });
+    fixture.recorder.taken();
+    assert_eq!(
+        fixture.ask(Request::ListWorkspaceFolders { project }),
+        Response::WorkspaceFolders { folders: vec![] }
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::ListWorkspaceFolders {
+                project: ProjectName("missing".into())
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+}
+
+#[test]
 fn workspace_summaries_report_the_daemon_hosts_semantic_index_state() {
     let mut fixture = Fixture::new();
     fixture.with_project();

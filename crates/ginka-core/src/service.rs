@@ -1019,6 +1019,13 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
+            Request::ListWorkspaceFolders { project } => {
+                self.project(&project)?;
+                Ok(Response::WorkspaceFolders {
+                    folders: project::list_workspace_folders(&self.conn(), &project)
+                        .map_err(failed)?,
+                })
+            }
             Request::SetProjectLabel { project, label } => {
                 let label = label.trim();
                 let label = (!label.is_empty()).then_some(label);

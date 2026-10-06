@@ -148,6 +148,25 @@ pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> R
     Ok(updated > 0)
 }
 
+/// Summarize assigned folder labels for one project, including archived workspaces.
+pub fn list_workspace_folders(
+    conn: &Connection,
+    project: &ProjectName,
+) -> Result<Vec<ginka_protocol::WorkspaceFolder>> {
+    let mut stmt = conn.prepare(
+        "SELECT folder, SUM(NOT archived), SUM(archived) FROM worktrees
+         WHERE project_name = ?1 AND folder IS NOT NULL GROUP BY folder ORDER BY folder",
+    )?;
+    let folders = stmt.query_map([&project.0], |row| {
+        Ok(ginka_protocol::WorkspaceFolder {
+            name: row.get(0)?,
+            active: row.get(1)?,
+            archived: row.get(2)?,
+        })
+    })?;
+    Ok(folders.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
 /// Assign a project-local sidebar folder, or clear it with a blank or `None`.
 ///
 /// Names are trimmed and limited to 80 characters without control characters.
@@ -255,6 +274,45 @@ mod tests {
             kind: ProjectKind::Git,
             has_origin: None,
         }
+    }
+
+    #[test]
+    fn folder_catalog_is_project_local_counts_archived_and_drops_empty_folders() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        let mut other = sample();
+        other.name = ProjectName("other".into());
+        insert_project(&conn, &other).unwrap();
+        for (project, name, folder, archived, pinned) in [
+            ("comet", "a", Some("Review"), false, true),
+            ("comet", "b", Some("Review"), true, false),
+            ("comet", "c", Some("Archive only"), true, false),
+            ("comet", "d", None, false, false),
+            ("other", "e", Some("Foreign"), false, false),
+        ] {
+            conn.execute(
+                "INSERT INTO worktrees (project_name, name, branch, path, folder, archived, pinned) VALUES (?1, ?2, 'main', ?2, ?3, ?4, ?5)",
+                rusqlite::params![project, name, folder, archived, pinned],
+            ).unwrap();
+        }
+        let folders = list_workspace_folders(&conn, &sample().name).unwrap();
+        assert_eq!(
+            folders
+                .iter()
+                .map(|f| (f.name.as_str(), f.active, f.archived))
+                .collect::<Vec<_>>(),
+            vec![("Archive only", 0, 1), ("Review", 1, 1)]
+        );
+        set_folder(&conn, &WorkspaceId("comet/c".into()), None).unwrap();
+        assert_eq!(
+            list_workspace_folders(&conn, &sample().name).unwrap().len(),
+            1
+        );
+        assert!(
+            list_workspace_folders(&conn, &ProjectName("missing".into()))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

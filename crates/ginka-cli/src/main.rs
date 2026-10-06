@@ -463,6 +463,11 @@ enum ProjectCommand {
 /// `ginka workspace …`.
 #[derive(Subcommand)]
 enum WorkspaceCommand {
+    /// List assigned sidebar folders with active and archived member counts.
+    Folders {
+        /// The project's name, as shown by `project list`.
+        project: String,
+    },
     /// List workspaces, reconciling against git first.
     List {
         /// Limit to one project.
@@ -1579,6 +1584,11 @@ fn request_for(command: Command) -> Result<Request> {
             index,
         },
 
+        Command::Workspace(WorkspaceCommand::Folders { project }) => {
+            Request::ListWorkspaceFolders {
+                project: ProjectName(project),
+            }
+        }
         Command::Workspace(WorkspaceCommand::List { project }) => Request::ListWorkspaces {
             project: project.map(ProjectName),
         },
@@ -2782,6 +2792,22 @@ fn print(response: Response, patch: bool) {
         Response::Projects { projects } => print_projects(&projects),
         Response::Project { project } => print_projects(std::slice::from_ref(&project)),
         Response::Workspaces { workspaces } => print_workspaces(&workspaces),
+        Response::WorkspaceFolders { folders } => {
+            if folders.is_empty() {
+                println!("{}", rust_i18n::t!("cli.folders.empty"));
+            }
+            for folder in folders {
+                println!(
+                    "{}",
+                    rust_i18n::t!(
+                        "cli.folders.row",
+                        name = folder.name,
+                        active = folder.active,
+                        archived = folder.archived
+                    )
+                );
+            }
+        }
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
         Response::Accounts { accounts } => print_accounts(&accounts, &[]),

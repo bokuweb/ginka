@@ -2484,3 +2484,16 @@ composer.command.fork.description:
 transcript.fork.same:
   en: "Fork here on %{agent}"
   ja: "ここから %{agent} のまま分岐"
+
+cli.folders.empty:
+  en: No workspace folders in this project
+  ja: このプロジェクトにフォルダーはありません
+cli.folders.row:
+  en: "%{name} — %{active} active, %{archived} archived"
+  ja: "%{name} — アクティブ %{active} 件、アーカイブ %{archived} 件"
+sidebar.folder.new:
+  en: New folder…
+  ja: 新しいフォルダー…
+sidebar.folder.ungrouped:
+  en: Ungrouped
+  ja: 分類なし
