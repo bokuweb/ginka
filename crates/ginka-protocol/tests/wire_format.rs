@@ -634,6 +634,26 @@ fn batch_pins_require_the_requested_state_on_the_wire() {
 }
 
 #[test]
+fn batch_archives_require_the_requested_state_on_the_wire() {
+    for archived in [true, false] {
+        let value = json!({"method": "archive_workspaces", "project": "comet", "workspaces": ["comet/a", "comet/b"], "archived": archived});
+        let request = Request::ArchiveWorkspaces {
+            project: ProjectName("comet".into()),
+            workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())],
+            archived,
+        };
+        assert_eq!(wire(&request), value);
+        assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+    }
+    assert!(
+        serde_json::from_value::<Request>(
+            json!({"method": "archive_workspaces", "project": "comet", "workspaces": ["comet/a"]})
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn batch_folders_carry_a_project_and_every_target_on_the_wire() {
     let value = json!({
         "method": "set_workspace_folders",

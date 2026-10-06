@@ -128,6 +128,15 @@ pub enum Request {
         /// Set every target to this state, including already matching rows.
         pinned: bool,
     },
+    /// Archive or restore a project-local batch, committing all targets or none.
+    ArchiveWorkspaces {
+        /// Every target must belong to this registered project.
+        project: ProjectName,
+        /// Between 1 and 256 immutable ids; duplicates are updated once.
+        workspaces: Vec<WorkspaceId>,
+        /// Set every target to this state, including already matching rows.
+        archived: bool,
+    },
     /// Archive or restore a workspace without deleting its worktree or history.
     ArchiveWorkspace {
         /// The workspace to archive or restore.

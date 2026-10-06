@@ -1119,6 +1119,16 @@ impl Service {
                 self.events.emit(DaemonEvent::WorkspacesChanged { project });
                 Ok(Response::Ack)
             }
+            Request::ArchiveWorkspaces {
+                project,
+                workspaces,
+                archived,
+            } => {
+                project::set_archives(&self.conn(), &project, &workspaces, archived)
+                    .map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                Ok(Response::Ack)
+            }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
                     return Err(RpcError::not_found(format!(

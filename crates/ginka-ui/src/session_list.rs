@@ -62,6 +62,18 @@ pub fn entries(
     entries
 }
 
+/// Row indices in displayed order, including archives only while visible.
+/// Headings and footnotes cannot become batch-selection targets.
+pub fn row_indices(entries: &[Entry]) -> Vec<usize> {
+    entries
+        .iter()
+        .filter_map(|entry| match entry {
+            Entry::Row(index) | Entry::Archived(index) => Some(*index),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The first item that differs between two layouts — where a list must
 /// measure again from — or `None` when they are the same.
 pub fn first_difference(before: &[Entry], after: &[Entry]) -> Option<usize> {
@@ -181,6 +193,44 @@ mod tests {
         );
         assert_eq!(entries(&groups, false, &[], true), [Entry::Row(0)]);
         assert!(entries(&[], true, &[], true).is_empty());
+    }
+
+    #[test]
+    fn batch_selection_includes_visible_archives_and_drops_them_on_collapse() {
+        let groups = [group("comet", &[0, 1])];
+        let ids = (0..4)
+            .map(|index| ginka_protocol::WorkspaceId(format!("comet/work-{index}")))
+            .collect::<Vec<_>>();
+        let order = |open| {
+            row_indices(&entries(&groups, true, &[2, 3], open))
+                .into_iter()
+                .map(|index| ids[index].clone())
+                .collect::<Vec<_>>()
+        };
+        let visible = order(true);
+        assert_eq!(visible, ids);
+        let mut selection = crate::folders::Selection::default();
+        selection.anchor(&ids[1]);
+        selection.range(&ids[3], &visible);
+        assert_eq!(selection.targets(&visible), ids[1..]);
+        assert!(crate::folders::valid_targets(
+            &selection.targets(&visible),
+            &visible
+        ));
+        selection.anchor(&ids[3]);
+        selection.retain(&order(false));
+        assert_eq!(selection.targets(&visible), ids[1..2]);
+        selection.retain(&visible);
+        assert_eq!(selection.targets(&visible), ids[1..2]);
+        // A hidden archived anchor must not extend the next range.
+        selection.range(&ids[0], &visible);
+        assert_eq!(selection.targets(&visible), ids[..1]);
+        selection.toggle(&ids[2]);
+        assert_eq!(
+            selection.targets(&visible),
+            [ids[0].clone(), ids[2].clone()]
+        );
+        assert!(row_indices(&[Entry::ArchivedHeading, Entry::ArchivedFoot]).is_empty());
     }
 
     #[test]

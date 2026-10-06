@@ -571,6 +571,17 @@ enum WorkspaceCommand {
         #[arg(long)]
         off: bool,
     },
+    /// Archive or restore several project workspaces atomically.
+    ArchiveMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Restore every target instead.
+        #[arg(long)]
+        restore: bool,
+    },
     /// Archive a workspace without removing its worktree or conversation.
     Archive {
         /// The workspace id, as shown by `workspace list`.
@@ -1661,6 +1672,15 @@ fn request_for(command: Command) -> Result<Request> {
             project: ProjectName(project),
             workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
             pinned: !off,
+        },
+        Command::Workspace(WorkspaceCommand::ArchiveMany {
+            project,
+            workspaces,
+            restore,
+        }) => Request::ArchiveWorkspaces {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
+            archived: !restore,
         },
         Command::Workspace(WorkspaceCommand::Archive { workspace, restore }) => {
             Request::ArchiveWorkspace {

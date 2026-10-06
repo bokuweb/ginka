@@ -118,6 +118,19 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspaces_archive",
+            description: "Archive or restore 1–256 workspaces in one project atomically. Preserve worktrees and conversations. Set archived explicitly; any invalid target rejects the whole batch.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "project": {"type": "string"},
+                    "workspaces": {"type": "array", "minItems": 1, "maxItems": 256, "items": {"type": "string"}},
+                    "archived": {"type": "boolean"},
+                },
+                "required": ["project", "workspaces", "archived"],
+            }),
+        },
+        Tool {
             name: "ginka_workspace_archive",
             description: "Archive a workspace without deleting it, or restore it to active work.",
             schema: json!({
@@ -1012,6 +1025,25 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
                 .and_then(Value::as_bool)
                 .ok_or_else(|| anyhow!("pinned must be a boolean"))?,
         },
+        "ginka_workspaces_archive" => Request::ArchiveWorkspaces {
+            project: ProjectName(text("project")?),
+            workspaces: arguments
+                .get("workspaces")
+                .and_then(Value::as_array)
+                .ok_or_else(|| anyhow!("workspaces must be an array of strings"))?
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .map(|id| WorkspaceId(id.to_owned()))
+                        .ok_or_else(|| anyhow!("workspaces must be an array of strings"))
+                })
+                .collect::<Result<Vec<_>>>()?,
+            archived: arguments
+                .get("archived")
+                .and_then(Value::as_bool)
+                .ok_or_else(|| anyhow!("archived must be a boolean"))?,
+        },
         "ginka_workspace_archive" => Request::ArchiveWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             archived: !flag("restore"),
@@ -1592,6 +1624,7 @@ mod tests {
                 "workspace": "comet/harbor",
                 "workspaces": ["comet/harbor"],
                 "pinned": true,
+                "archived": true,
                 "session": "s-1",
                 "request_id": "ask-1",
                 "id": 7,
@@ -1823,6 +1856,35 @@ mod tests {
         assert_eq!(
             tool.schema["required"],
             json!(["project", "workspaces", "pinned"])
+        );
+        assert_eq!(tool.schema["properties"]["workspaces"]["minItems"], 1);
+        assert_eq!(tool.schema["properties"]["workspaces"]["maxItems"], 256);
+    }
+
+    #[test]
+    fn bulk_archive_requires_an_explicit_boolean_and_a_list_of_ids() {
+        for archived in [true, false] {
+            assert_eq!(request_for("ginka_workspaces_archive", &json!({"project": "comet", "workspaces": ["comet/a", "comet/b"], "archived": archived})).unwrap(), Request::ArchiveWorkspaces {
+                project: ProjectName("comet".into()), workspaces: vec![WorkspaceId("comet/a".into()), WorkspaceId("comet/b".into())], archived,
+            });
+        }
+        for args in [
+            json!({"project": "comet", "workspaces": ["comet/a"]}),
+            json!({"project": "comet", "workspaces": ["comet/a"], "archived": null}),
+            json!({"project": "comet", "workspaces": ["comet/a"], "archived": "false"}),
+            json!({"project": "comet", "workspaces": "comet/a", "archived": true}),
+            json!({"project": "comet", "workspaces": ["comet/a", 42], "archived": true}),
+            json!({"workspaces": ["comet/a"], "archived": true}),
+        ] {
+            assert!(request_for("ginka_workspaces_archive", &args).is_err());
+        }
+        let tool = tools()
+            .into_iter()
+            .find(|t| t.name == "ginka_workspaces_archive")
+            .unwrap();
+        assert_eq!(
+            tool.schema["required"],
+            json!(["project", "workspaces", "archived"])
         );
         assert_eq!(tool.schema["properties"]["workspaces"]["minItems"], 1);
         assert_eq!(tool.schema["properties"]["workspaces"]["maxItems"], 256);

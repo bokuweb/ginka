@@ -52,6 +52,7 @@ Manage workspaces, which are git worktrees
 - `ginka workspace folder` — Assign a project-local sidebar folder, or clear it by omitting the name (`ginka workspace folder <WORKSPACE> [NAME]`). Folder labels stay with the workspace across branch changes and archive/restore; they do not move files.
 - `ginka workspace folder-many` — Assign or clear one folder for 1–256 workspaces in a project atomically (`ginka workspace folder-many <PROJECT> <WORKSPACE>... [--name <NAME>]`). Omit `--name` to clear the labels; an invalid target rejects the whole batch.
 - `ginka workspace archive` — Archive a workspace without removing its worktree or conversation (`ginka workspace archive <WORKSPACE>`)
+- `ginka workspace archive-many` — Archive 1–256 project-local workspaces atomically (`ginka workspace archive-many <PROJECT> <WORKSPACE>... [--restore]`). Use `--restore` to restore every target; mixed active and archived rows are accepted and invalid targets reject the whole batch. Worktree files, running agents, conversations, pins and folders are preserved.
 - `ginka workspace status` — Write the line of status the sidebar shows under a workspace, or clear it by giving none (`ginka workspace status <WORKSPACE> [NOTE]`)
 
 ## `ginka agents`

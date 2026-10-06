@@ -1643,6 +1643,22 @@ impl DaemonLink {
         .map(|_| ())
     }
 
+    /// Atomically archive or restore project-local workspaces through the daemon.
+    pub async fn archive_workspaces(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        archived: bool,
+    ) -> Result<(), String> {
+        self.ask_result(Request::ArchiveWorkspaces {
+            project: project.clone(),
+            workspaces,
+            archived,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

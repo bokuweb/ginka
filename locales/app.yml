@@ -2516,6 +2516,12 @@ sidebar.selection.pin:
 sidebar.selection.unpin:
   en: Unpin every selected workspace (up to 256)
   ja: 選択したすべてのワークスペースのピンを外す（256 件まで）
+sidebar.selection.archive:
+  en: Archive every selected workspace without deleting its worktree or conversation (up to 256)
+  ja: 選択したすべてのワークスペースをアーカイブ（作業ツリーと会話を保持、256 件まで）
+sidebar.selection.restore:
+  en: Restore every selected workspace to the active list (up to 256)
+  ja: 選択したすべてのワークスペースを一覧に戻す（256 件まで）
 sidebar.selection.check:
   en: "Select %{name}"
   ja: "%{name} を選択"

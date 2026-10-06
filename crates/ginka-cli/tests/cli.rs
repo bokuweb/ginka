@@ -1120,6 +1120,74 @@ fn batch_pins_are_atomic_and_survive_restart_with_archived_targets() {
 }
 
 #[test]
+fn batch_archives_are_atomic_and_survive_restart_with_mixed_targets() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["archive-a", "archive-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    home.ok(&["workspace", "pin", "comet/archive-b"]);
+    home.ok(&["workspace", "archive", "comet/archive-b"]);
+    let read = || -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&home.ok(&["--json", "workspace", "list", "comet"])).unwrap();
+        // Archiving deliberately changes display order; compare rows by identity.
+        value["workspaces"].as_array_mut().unwrap().sort_by(|a, b| {
+            a["worktree"]["name"]
+                .as_str()
+                .cmp(&b["worktree"]["name"].as_str())
+        });
+        value
+    };
+    let before = read();
+    assert!(
+        !home
+            .run(&[
+                "workspace",
+                "archive-many",
+                "comet",
+                "comet/archive-a",
+                "comet/missing"
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(read(), before);
+    for archived in [true, false] {
+        let mut args = vec![
+            "workspace",
+            "archive-many",
+            "comet",
+            "comet/archive-a",
+            "comet/archive-b",
+            "comet/archive-a",
+        ];
+        if !archived {
+            args.push("--restore");
+        }
+        home.ok(&args);
+        home.ok(&["daemon", "stop"]);
+        let mut expected = before.clone();
+        for row in expected["workspaces"].as_array_mut().unwrap() {
+            if ["archive-a", "archive-b"]
+                .iter()
+                .any(|name| row["worktree"]["name"] == *name)
+            {
+                row["worktree"]["archived"] = archived.into();
+            }
+        }
+        assert_eq!(read(), expected);
+    }
+    assert!(
+        !home
+            .run(&["workspace", "archive-many", "comet"])
+            .status
+            .success()
+    );
+}
+
+#[test]
 fn batch_folders_are_atomic_and_persist_for_active_and_archived_workspaces() {
     let home = Home::new();
     let repository = home.repository("comet");

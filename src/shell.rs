@@ -1264,6 +1264,25 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::ArchiveMany {
+                        project,
+                        workspaces,
+                        archived,
+                    } => {
+                        let (link, project, workspaces, archived) = (
+                            this.link.clone(),
+                            project.clone(),
+                            workspaces.clone(),
+                            *archived,
+                        );
+                        this.after_row_change(
+                            async move {
+                                link.archive_workspaces(&project, workspaces, archived)
+                                    .await
+                            },
+                            cx,
+                        );
+                    }
                     SidebarEvent::Pin { workspace, pinned } => {
                         let (link, workspace, pinned) =
                             (this.link.clone(), workspace.clone(), *pinned);

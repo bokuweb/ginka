@@ -85,6 +85,15 @@ pub enum SidebarEvent {
         /// Explicit state applied to every target.
         pinned: bool,
     },
+    /// Set one archive state for a project-local selection atomically.
+    ArchiveMany {
+        /// Project owning every target.
+        project: ProjectName,
+        /// Immutable ids in the displayed selection.
+        workspaces: Vec<WorkspaceId>,
+        /// Explicit state applied to every target.
+        archived: bool,
+    },
     /// Hand the workspace's merge conflicts to an agent to resolve.
     ResolveConflicts {
         workspace: WorkspaceId,
@@ -1144,6 +1153,7 @@ impl SessionSidebar {
     ) -> impl IntoElement {
         let menu_open = self.menu_for.as_ref() == Some(&row.workspace);
         let actions = menu_open.then(|| self.row_actions(row, cx).into_any_element());
+        let folder_controls = self.folder_controls(row, cx);
         let tokens = Tokens::global(cx);
         let selected = self.selected.as_ref() == Some(&row.workspace);
         let branch = row.branch_worth_showing();
@@ -1160,16 +1170,6 @@ impl SessionSidebar {
             .filter(|(noting, _)| noting == &row.workspace)
             .map(|(_, field)| field.clone());
 
-        let folder_field = self
-            .foldering
-            .as_ref()
-            .filter(|(workspace, _)| workspace == &row.workspace)
-            .map(|(_, field)| field.clone());
-        let folder_picker = self
-            .folder_picker
-            .as_ref()
-            .filter(|(workspace, _)| workspace == &row.workspace)
-            .map(|(_, picker)| picker.clone());
         let menu_workspace = row.workspace.clone();
         let check_workspace = row.workspace.clone();
         let checked = self.batch.contains(&row.workspace);
@@ -1376,32 +1376,7 @@ impl SessionSidebar {
                                 })),
                         )
                     })
-                    .children(folder_picker.map(|picker| {
-                        div()
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                                if event.keystroke.key == "escape" {
-                                    this.folder_picker = None;
-                                    this.folder_targets.clear();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            }))
-                            .child(Select::new(&picker).accessibility_label(
-                                rust_i18n::t!("sidebar.action.folder").to_string(),
-                            ))
-                    }))
-                    .children(folder_field.map(|field| {
-                        div()
-                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
-                                if event.keystroke.key == "escape" {
-                                    this.foldering = None;
-                                    this.folder_targets.clear();
-                                    cx.stop_propagation();
-                                    cx.notify();
-                                }
-                            }))
-                            .child(ginka_ui::field::input(&field))
-                    }))
+                    .children(folder_controls)
                     .map(|this| match note_field {
                         Some(field) => this.child(ginka_ui::field::input(&field)),
                         None => this.children(row.status_note.clone().map(|note| {
@@ -1695,6 +1670,52 @@ impl SessionSidebar {
                                 project,
                                 workspaces: targets.clone(),
                                 pinned,
+                            });
+                            this.batch = Selection::default();
+                            this.selecting = false;
+                            this.folder_picker = None;
+                            this.foldering = None;
+                            this.folder_targets.clear();
+                            cx.notify();
+                        }
+                    }))
+                }))
+                .children([true, false].into_iter().map(|archived| {
+                    let targets = targets.clone();
+                    Button::new(if archived {
+                        "archive-workspaces"
+                    } else {
+                        "restore-workspaces"
+                    })
+                    .ghost()
+                    .small()
+                    .label(
+                        rust_i18n::t!(if archived {
+                            "sidebar.action.archive"
+                        } else {
+                            "sidebar.action.restore"
+                        })
+                        .to_string(),
+                    )
+                    .disabled(!ginka_ui::folders::valid_targets(&targets, &self.row_order))
+                    .tooltip(
+                        rust_i18n::t!(if archived {
+                            "sidebar.selection.archive"
+                        } else {
+                            "sidebar.selection.restore"
+                        })
+                        .to_string(),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // Recheck the visible selection when activating a rendered control.
+                        if !ginka_ui::folders::valid_targets(&targets, &this.row_order) {
+                            return;
+                        }
+                        if let Some((project, _)) = targets.first().and_then(WorkspaceId::parts) {
+                            cx.emit(SidebarEvent::ArchiveMany {
+                                project,
+                                workspaces: targets.clone(),
+                                archived,
                             });
                             this.batch = Selection::default();
                             this.selecting = false;
@@ -2142,95 +2163,192 @@ impl SessionSidebar {
             }))
     }
 
+    /// Share folder destination controls across active and archived rows.
+    fn folder_controls(&self, row: &SessionRow, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let folder_field = self
+            .foldering
+            .as_ref()
+            .filter(|(workspace, _)| workspace == &row.workspace)
+            .map(|(_, field)| field.clone());
+        let folder_picker = self
+            .folder_picker
+            .as_ref()
+            .filter(|(workspace, _)| workspace == &row.workspace)
+            .map(|(_, picker)| picker.clone());
+        let mut controls = Vec::new();
+        if let Some(picker) = folder_picker {
+            controls.push(
+                (div()
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.folder_picker = None;
+                            this.folder_targets.clear();
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        Select::new(&picker).accessibility_label(
+                            rust_i18n::t!("sidebar.action.folder").to_string(),
+                        ),
+                    ))
+                .into_any_element(),
+            );
+        }
+        if let Some(field) = folder_field {
+            controls.push(
+                (div()
+                    .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                        if event.keystroke.key == "escape" {
+                            this.foldering = None;
+                            this.folder_targets.clear();
+                            cx.stop_propagation();
+                            cx.notify();
+                        }
+                    }))
+                    .child(ginka_ui::field::input(&field)))
+                .into_any_element(),
+            );
+        }
+        controls
+    }
+
     fn archived_row(
         &self,
         index: usize,
         row: &SessionRow,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let folder_controls = self.folder_controls(row, cx);
         let tokens = Tokens::global(cx);
-        h_flex()
-            .id(("archived", index))
+        let workspace = row.workspace.clone();
+        let check_workspace = row.workspace.clone();
+        let checked = self.batch.contains(&row.workspace);
+        v_flex()
             .w_full()
-            .px_2p5()
-            .py_1p5()
-            .gap_2()
-            .items_center()
-            .rounded(px(tokens.radius.row))
-            .hover(|this| this.bg(tokens.colors().row_hover()))
             .child(
-                Icon::new(IconName::Inbox)
-                    .size_3p5()
-                    .text_color(tokens.colors().text_muted),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .text_sm()
-                    .text_color(tokens.colors().text_secondary)
-                    .truncate()
-                    .child(row.title.clone()),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(tokens.colors().text_muted)
-                    .child(row.age.clone()),
-            )
-            .child({
-                let workspace = row.workspace.clone();
-                div()
-                    .id(("restore", index))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(tokens.radius.control()))
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .cursor_pointer()
-                    .hover(|this| this.bg(tokens.colors().row_active()))
-                    .on_click(cx.listener(move |_, _, _, cx| {
-                        cx.emit(SidebarEvent::Archive {
-                            workspace: workspace.clone(),
-                            archived: false,
-                        });
-                    }))
-                    .child(rust_i18n::t!("sidebar.action.restore").to_string())
-            })
-            .child({
-                // Deleting the worktree is for good, so it asks twice; the
-                // daemon refuses one with uncommitted work either way.
-                let workspace = row.workspace.clone();
-                let armed = self.removing == Some(Removal::Workspace(workspace.clone()));
-                div()
-                    .id(("delete", index))
-                    .px_2()
-                    .py_0p5()
-                    .rounded(px(tokens.radius.control()))
-                    .text_xs()
-                    .text_color(if armed {
-                        tokens.colors().status_error
-                    } else {
-                        tokens.colors().text_muted
-                    })
-                    .cursor_pointer()
-                    .hover(|this| this.bg(tokens.colors().row_active()))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if armed {
-                            this.removing = None;
-                            cx.emit(SidebarEvent::RemoveWorkspace {
-                                workspace: workspace.clone(),
-                            });
-                        } else {
-                            this.removing = Some(Removal::Workspace(workspace.clone()));
+                h_flex()
+                    .id(("archived", index))
+                    .w_full()
+                    .px_2p5()
+                    .py_1p5()
+                    .gap_2()
+                    .items_center()
+                    .rounded(px(tokens.radius.row))
+                    .when(checked, |this| this.bg(tokens.colors().row_active()))
+                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.modifiers().shift && this.selected_project.is_some() {
+                            this.batch.range(&workspace, &this.row_order);
+                            this.selecting = true;
+                            cx.notify();
+                        } else if this.selecting {
+                            this.batch.toggle(&workspace);
+                            cx.notify();
                         }
-                        cx.notify();
                     }))
-                    .child(if armed {
-                        rust_i18n::t!("sidebar.action.delete.confirm").to_string()
-                    } else {
-                        rust_i18n::t!("sidebar.action.delete").to_string()
+                    .when(self.selecting, |this| {
+                        this.child(
+                            Button::new(("workspace-check", index))
+                                .ghost()
+                                .small()
+                                .selected(checked)
+                                .label(if checked { "✓" } else { "□" })
+                                .accessibility_label(
+                                    rust_i18n::t!(
+                                        if checked {
+                                            "sidebar.selection.uncheck"
+                                        } else {
+                                            "sidebar.selection.check"
+                                        },
+                                        name = row.title.to_string()
+                                    )
+                                    .to_string(),
+                                )
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    cx.stop_propagation();
+                                    this.batch.toggle(&check_workspace);
+                                    cx.notify();
+                                })),
+                        )
                     })
-            })
+                    .child(
+                        Icon::new(IconName::Inbox)
+                            .size_3p5()
+                            .text_color(tokens.colors().text_muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_sm()
+                            .text_color(tokens.colors().text_secondary)
+                            .truncate()
+                            .child(row.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(tokens.colors().text_muted)
+                            .child(row.age.clone()),
+                    )
+                    .child({
+                        let workspace = row.workspace.clone();
+                        div()
+                            .id(("restore", index))
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(tokens.radius.control()))
+                            .text_xs()
+                            .text_color(tokens.colors().text_secondary)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_active()))
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.stop_propagation();
+                                cx.emit(SidebarEvent::Archive {
+                                    workspace: workspace.clone(),
+                                    archived: false,
+                                });
+                            }))
+                            .child(rust_i18n::t!("sidebar.action.restore").to_string())
+                    })
+                    .child({
+                        // Deleting the worktree is for good, so it asks twice; the
+                        // daemon refuses one with uncommitted work either way.
+                        let workspace = row.workspace.clone();
+                        let armed = self.removing == Some(Removal::Workspace(workspace.clone()));
+                        div()
+                            .id(("delete", index))
+                            .px_2()
+                            .py_0p5()
+                            .rounded(px(tokens.radius.control()))
+                            .text_xs()
+                            .text_color(if armed {
+                                tokens.colors().status_error
+                            } else {
+                                tokens.colors().text_muted
+                            })
+                            .cursor_pointer()
+                            .hover(|this| this.bg(tokens.colors().row_active()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                if armed {
+                                    this.removing = None;
+                                    cx.emit(SidebarEvent::RemoveWorkspace {
+                                        workspace: workspace.clone(),
+                                    });
+                                } else {
+                                    this.removing = Some(Removal::Workspace(workspace.clone()));
+                                }
+                                cx.notify();
+                            }))
+                            .child(if armed {
+                                rust_i18n::t!("sidebar.action.delete.confirm").to_string()
+                            } else {
+                                rust_i18n::t!("sidebar.action.delete").to_string()
+                            })
+                    }),
+            )
+            .children(folder_controls)
     }
 
     /// First run: nothing is registered yet.
@@ -2377,14 +2495,9 @@ impl Render for SessionSidebar {
         }
         // Which rows jumped since the last frame. Not on the first: a list
         // appearing is not a list reordering.
-        let order: Vec<WorkspaceId> = entries
-            .iter()
-            .filter_map(|entry| match entry {
-                ginka_ui::session_list::Entry::Row(row) => {
-                    self.rows.get(*row).map(|row| row.workspace.clone())
-                }
-                _ => None,
-            })
+        let order: Vec<WorkspaceId> = ginka_ui::session_list::row_indices(&entries)
+            .into_iter()
+            .filter_map(|index| self.rows.get(index).map(|row| row.workspace.clone()))
             .collect();
         self.batch.retain(&order);
         if !self.folder_targets.is_empty()

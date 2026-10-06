@@ -169,6 +169,27 @@ pub fn set_pins(
     Ok(())
 }
 
+/// Archive or restore 1–256 project-local workspaces atomically.
+/// All targets are validated before writing; a failed write rolls back the batch.
+/// Duplicates count toward the bound but are updated once. Only sidebar metadata
+/// changes: files, git identity, pins, folders and conversations remain intact.
+pub fn set_archives(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    archived: bool,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET archived = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![archived, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
 /// Summarize assigned folder labels for one project, including archived workspaces.
 pub fn list_workspace_folders(
     conn: &Connection,
@@ -242,7 +263,7 @@ pub fn set_folders(
 }
 
 // Called inside the mutation's transaction, so validation and writes see the
-// same registered rows. Both batch operations share their bounds and ownership.
+// same registered rows. Batch operations share their bounds and ownership.
 fn batch_names(
     conn: &Connection,
     project: &ProjectName,
@@ -398,6 +419,64 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn batch_archives_validate_all_targets_and_roll_back_failed_writes() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for (name, pinned, archived) in [("a", false, false), ("b", true, true)] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder, pinned, archived) VALUES ('comet', ?1, 'topic', ?1, 'Review', ?2, ?3)", rusqlite::params![name, pinned, archived]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        let before = list_worktrees(&conn, &sample().name).unwrap();
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_archives(&conn, &sample().name, &targets, true).is_err());
+            assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        }
+        assert!(
+            set_archives(
+                &conn,
+                &ProjectName("missing".into()),
+                std::slice::from_ref(&a),
+                true
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_archive_b BEFORE UPDATE OF archived ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(set_archives(&conn, &sample().name, &[a.clone(), b.clone()], true).is_err());
+        assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        conn.execute_batch("DROP TRIGGER refuse_archive_b").unwrap();
+        for archived in [true, true, false] {
+            set_archives(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone(), a.clone()],
+                archived,
+            )
+            .unwrap();
+            for original in &before {
+                let mut expected = original.clone();
+                expected.archived = archived;
+                assert_eq!(
+                    find_worktree(&conn, &WorkspaceId::new(&original.project, &original.name))
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        // The exact boundary is accepted even when all ids refer to one row.
+        set_archives(&conn, &sample().name, &vec![a.clone(); 256], true).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().archived);
+        assert!(!find_worktree(&conn, &b).unwrap().unwrap().archived);
     }
 
     #[test]
