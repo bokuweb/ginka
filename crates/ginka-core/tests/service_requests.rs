@@ -1261,6 +1261,65 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
+fn review_requests_keep_literal_paths_and_neighbouring_changes_separate() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "literal-review".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let worktree = &workspace.worktree.path;
+    std::fs::write(worktree.join("[ab].txt"), "target\n").unwrap();
+    std::fs::write(worktree.join("a.txt"), "neighbour\n").unwrap();
+    let staged_paths = |fixture: &mut Fixture| match fixture.ask(Request::WorkspaceChanges {
+        workspace: workspace.id(),
+        source: ChangeSource::Staged,
+        context_lines: None,
+    }) {
+        Response::Changes { changes } => changes
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>(),
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(
+        fixture.ask(Request::StageFile {
+            workspace: workspace.id(),
+            path: "[ab].txt".into(),
+            staged: true,
+        }),
+        Response::Ack
+    );
+    assert_eq!(staged_paths(&mut fixture), ["[ab].txt"]);
+    fixture.ask(Request::StageFile {
+        workspace: workspace.id(),
+        path: "a.txt".into(),
+        staged: true,
+    });
+    fixture.ask(Request::StageFile {
+        workspace: workspace.id(),
+        path: "[ab].txt".into(),
+        staged: false,
+    });
+    assert_eq!(staged_paths(&mut fixture), ["a.txt"]);
+    fixture.ask(Request::RevertFile {
+        workspace: workspace.id(),
+        path: "[ab].txt".into(),
+    });
+    assert!(!worktree.join("[ab].txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("a.txt")).unwrap(),
+        "neighbour\n"
+    );
+    assert_eq!(staged_paths(&mut fixture), ["a.txt"]);
+}
+
+#[test]
 fn changes_context_crosses_the_service_boundary_and_is_bounded() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
