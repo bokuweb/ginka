@@ -1594,6 +1594,49 @@ fn a_branch_can_be_listed_and_checked_out_without_re_keying_the_workspace() {
 }
 
 #[test]
+fn skill_requests_reach_names_beyond_the_previous_limit_and_toggle_all_copies() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".claude/skills");
+    for n in 0..501 {
+        let skill = root.join(format!("skill-{n:04}"));
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Instructions").unwrap();
+    }
+    let mut fixture = Fixture::configured(|service| service.with_skills_home(home.path()));
+    let project = fixture.with_project();
+    let copy = fixture.repo().join(".agents/skills/skill-0500");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md.disabled"), "Instructions").unwrap();
+    match fixture.ask(Request::ListSkills {
+        project: Some(project.clone()),
+    }) {
+        Response::Skills { skills, truncated } => {
+            assert!(!truncated);
+            assert_eq!(skills.len(), 501);
+            let last = skills.last().unwrap();
+            assert_eq!(last.name, "skill-0500");
+            assert_eq!(last.installs.len(), 2);
+            assert!(!last.enabled);
+        }
+        other => panic!("expected skills, got {other:?}"),
+    }
+    fixture.ask(Request::SetSkillEnabled {
+        name: "skill-0500".into(),
+        enabled: true,
+        project: Some(project.clone()),
+    });
+    assert!(copy.join("SKILL.md").is_file());
+    fixture.ask(Request::SetSkillEnabled {
+        name: "skill-0500".into(),
+        enabled: false,
+        project: Some(project),
+    });
+    assert!(root.join("skill-0500/SKILL.md.disabled").is_file());
+    assert!(copy.join("SKILL.md.disabled").is_file());
+    assert!(root.join("skill-0499/SKILL.md").is_file());
+}
+
+#[test]
 fn a_projects_skills_are_listed_and_switched_off_without_being_deleted() {
     // N11: the agents' own skills, managed from here. A project's copy is
     // found under its checkout; disabling renames the file every tool looks

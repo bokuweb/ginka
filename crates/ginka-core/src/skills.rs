@@ -16,7 +16,8 @@
 //! mutations are one-shot user actions and are a rename per install.
 
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// The file whose presence makes a directory a skill, and every tool looks for.
@@ -24,10 +25,14 @@ pub const SKILL_FILE: &str = "SKILL.md";
 /// What `SKILL_FILE` is renamed to while the skill is turned off.
 pub const DISABLED_SKILL_FILE: &str = "SKILL.md.disabled";
 
-/// Upper bound on skills collected in one pass. Past this the library is
-/// best-effort: a dotfiles repository that symlinks a thousand skills should
-/// make the page partial, not slow.
-pub const DEFAULT_SCAN_CAP: usize = 500;
+/// Upper bound on distinct skill names collected in one pass. Known names can
+/// still collect duplicate installs after this limit, within the directory budget.
+pub const DEFAULT_SCAN_CAP: usize = 5_000;
+
+// Allow a full catalog in all three ecosystems under both home and one project.
+// Extra copies and non-skill directories count too, bounding retained paths and
+// file reads even when a root has many aliases for the same front-matter name.
+const DIRECTORY_SCAN_CAP: usize = 30_000;
 
 /// Only the head of a skill file is read, for its front matter.
 const FRONT_MATTER_MAX_BYTES: usize = 8 * 1024;
@@ -72,7 +77,8 @@ pub fn disabled_path(install: &SkillInstall) -> PathBuf {
 pub struct SkillCatalog {
     /// Sorted by name, so the list does not reshuffle between scans.
     pub skills: Vec<Skill>,
-    /// True when the scan stopped at its cap, so the list is partial.
+    /// True when names or directories were omitted at a limit. Install lists
+    /// can also be partial when the directory budget is exhausted.
     pub truncated: bool,
 }
 
@@ -114,19 +120,34 @@ pub fn discover(roots: &[SkillRoot]) -> Result<SkillCatalog> {
 }
 
 /// [`discover`] with an explicit cap on distinct skill names. An install of a
-/// name already collected never counts against the cap.
+/// name already collected never counts against the cap. At most 30,000 immediate
+/// subdirectories are inspected across the roots, in root order and then lexical
+/// path order; directory entries are enumerated to keep that selection stable.
+/// Each skill file contributes at most 8 KiB of front matter.
 pub fn discover_with_cap(roots: &[SkillRoot], cap: usize) -> Result<SkillCatalog> {
+    discover_with_limits(roots, cap, DIRECTORY_SCAN_CAP)
+}
+
+fn discover_with_limits(
+    roots: &[SkillRoot],
+    cap: usize,
+    directory_cap: usize,
+) -> Result<SkillCatalog> {
     let mut grouped: BTreeMap<String, Skill> = BTreeMap::new();
     let mut truncated = false;
+    let mut remaining_directories = directory_cap;
 
-    'roots: for root in roots {
-        for directory in skill_directories(&root.path)? {
+    for root in roots {
+        let (directories, omitted) = skill_directories(&root.path, remaining_directories)?;
+        truncated |= omitted;
+        remaining_directories -= directories.len();
+        for directory in directories {
             let Some(found) = read_skill(&directory) else {
                 continue;
             };
             if grouped.len() >= cap && !grouped.contains_key(&found.name) {
                 truncated = true;
-                break 'roots;
+                continue;
             }
 
             let install = SkillInstall {
@@ -297,6 +318,70 @@ mod creation_tests {
     }
 }
 
+#[cfg(test)]
+mod discovery_tests {
+    use super::*;
+
+    #[test]
+    fn directory_budget_keeps_a_stable_prefix_across_roots() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first");
+        let second = dir.path().join("second");
+        for (root, name) in [(&first, "zebra"), (&first, "alpha"), (&second, "beta")] {
+            create(root, name, "Description", "Body").unwrap();
+        }
+        let roots = [
+            SkillRoot::new("first", &first, SkillScope::User),
+            SkillRoot::new("second", &second, SkillScope::Project),
+        ];
+        let catalog = discover_with_limits(&roots, 10, 1).unwrap();
+        assert!(catalog.truncated);
+        assert_eq!(catalog.skills.len(), 1);
+        assert_eq!(catalog.skills[0].name, "alpha");
+        let catalog = discover_with_limits(&roots, 10, 2).unwrap();
+        assert!(catalog.truncated);
+        assert_eq!(catalog.skills.len(), 2);
+        let catalog = discover_with_limits(&roots, 10, 3).unwrap();
+        assert!(!catalog.truncated);
+        assert_eq!(catalog.skills.len(), 3);
+    }
+
+    #[test]
+    fn non_skill_directories_consume_the_budget_but_regular_files_do_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("a-empty")).unwrap();
+        std::fs::write(dir.path().join("a-file"), "Not a directory").unwrap();
+        create(dir.path(), "z-skill", "Description", "Body").unwrap();
+        let roots = [SkillRoot::new("user", dir.path(), SkillScope::User)];
+        let catalog = discover_with_limits(&roots, 10, 1).unwrap();
+        assert!(catalog.truncated);
+        assert!(catalog.skills.is_empty());
+        let catalog = discover_with_limits(&roots, 10, 2).unwrap();
+        assert!(!catalog.truncated);
+        assert_eq!(catalog.skills.len(), 1);
+    }
+
+    #[test]
+    fn empty_roots_and_exact_name_limit_are_not_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = [SkillRoot::new("user", dir.path(), SkillScope::User)];
+        assert!(!discover_with_limits(&roots, 0, 0).unwrap().truncated);
+        create(dir.path(), "one", "Description", "Body").unwrap();
+        assert!(!discover_with_limits(&roots, 1, 1).unwrap().truncated);
+        let catalog = discover_with_limits(&roots, 0, 1).unwrap();
+        assert!(catalog.truncated);
+        assert!(catalog.skills.is_empty());
+    }
+
+    #[test]
+    fn front_matter_reader_does_not_consume_the_rest_of_a_large_file() {
+        let mut input = std::io::Cursor::new(vec![b'x'; FRONT_MATTER_MAX_BYTES * 2]);
+        let head = read_head_from(&mut input).unwrap();
+        assert_eq!(head.len(), FRONT_MATTER_MAX_BYTES);
+        assert_eq!(input.position(), FRONT_MATTER_MAX_BYTES as u64);
+    }
+}
+
 struct FoundSkill {
     name: String,
     description: Option<String>,
@@ -305,22 +390,34 @@ struct FoundSkill {
 
 /// Immediate subdirectories of a root, sorted, so a capped scan keeps the same
 /// entries between runs instead of whichever the filesystem listed first.
-fn skill_directories(root: &Path) -> Result<Vec<PathBuf>> {
+fn skill_directories(root: &Path, cap: usize) -> Result<(Vec<PathBuf>, bool)> {
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         // A root that is not installed is not an error: most users have some
         // of these ecosystems and not others.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false));
+        }
         Err(error) => return Err(error).with_context(|| format!("reading {}", root.display())),
     };
 
-    let mut directories: Vec<PathBuf> = entries
+    let mut directories = BTreeSet::new();
+    let mut truncated = false;
+    for path in entries
         .filter_map(Result::ok)
         .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
         .map(|entry| entry.path())
-        .collect();
-    directories.sort();
-    Ok(directories)
+    {
+        if cap == 0 {
+            return Ok((Vec::new(), true));
+        }
+        directories.insert(path);
+        if directories.len() > cap {
+            directories.pop_last();
+            truncated = true;
+        }
+    }
+    Ok((directories.into_iter().collect(), truncated))
 }
 
 fn read_skill(directory: &Path) -> Option<FoundSkill> {
@@ -358,9 +455,15 @@ fn directory_name(directory: &Path) -> String {
 }
 
 fn read_head(path: &Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    let head = &bytes[..bytes.len().min(FRONT_MATTER_MAX_BYTES)];
-    Some(String::from_utf8_lossy(head).into_owned())
+    read_head_from(std::fs::File::open(path).ok()?).ok()
+}
+
+fn read_head_from(reader: impl Read) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    reader
+        .take(FRONT_MATTER_MAX_BYTES as u64)
+        .read_to_end(&mut bytes)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 /// The `key: value` block between the leading `---` fences. Deliberately not a
