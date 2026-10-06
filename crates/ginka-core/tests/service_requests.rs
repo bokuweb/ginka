@@ -122,6 +122,91 @@ fn adding_a_project_registers_it_and_announces_the_change() {
 }
 
 #[test]
+fn workspace_folders_survive_git_reconciliation_and_archive_without_rekeying() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let original = new_workspace(&mut fixture, &project, "topic").unwrap();
+    let id = original.id();
+    fixture.recorder.taken();
+    assert_eq!(
+        fixture.ask(Request::SetWorkspaceFolder {
+            workspace: id.clone(),
+            folder: Some("  Review  ".into()),
+        }),
+        Response::Ack
+    );
+    assert_eq!(
+        fixture.recorder.taken(),
+        vec![DaemonEvent::WorkspacesChanged {
+            project: project.clone(),
+        }]
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolder {
+                workspace: id.clone(),
+                folder: Some("bad\nname".into()),
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    fixture.ask(Request::PinWorkspace {
+        workspace: id.clone(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: id.clone(),
+        archived: true,
+    });
+    support::git(&original.worktree.path, &["checkout", "-b", "renamed"]);
+    let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) else {
+        panic!("expected workspaces")
+    };
+    let workspace = workspaces.iter().find(|row| row.id() == id).unwrap();
+    assert_eq!(workspace.worktree.folder.as_deref(), Some("Review"));
+    assert_eq!(workspace.worktree.name, original.worktree.name);
+    assert_eq!(workspace.worktree.path, original.worktree.path);
+    assert_eq!(workspace.worktree.branch, "renamed");
+    assert!(workspace.worktree.archived && workspace.worktree.pinned);
+    assert!(
+        workspaces
+            .iter()
+            .filter(|row| row.id() != id)
+            .all(|row| row.worktree.folder.is_none())
+    );
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: id.clone(),
+        folder: None,
+    });
+    let Response::Workspaces { workspaces } =
+        fixture.ask(Request::ListWorkspaces { project: None })
+    else {
+        panic!("expected workspaces")
+    };
+    assert!(
+        workspaces
+            .iter()
+            .find(|row| row.id() == id)
+            .unwrap()
+            .worktree
+            .folder
+            .is_none()
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolder {
+                workspace: WorkspaceId("comet/missing".into()),
+                folder: Some("Review".into()),
+            })
+            .is_err()
+    );
+}
+
+#[test]
 fn workspace_summaries_report_the_daemon_hosts_semantic_index_state() {
     let mut fixture = Fixture::new();
     fixture.with_project();

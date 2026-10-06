@@ -529,6 +529,13 @@ enum WorkspaceCommand {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Group a workspace in a sidebar folder without moving its files.
+    Folder {
+        /// The immutable workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Folder name; omit it to return the workspace to the ungrouped list.
+        name: Option<String>,
+    },
     /// Pin a workspace so it sorts first.
     Pin {
         /// The workspace id, as shown by `workspace list`.
@@ -1595,6 +1602,12 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId::new(&ProjectName(project), &name),
             force,
         },
+        Command::Workspace(WorkspaceCommand::Folder { workspace, name }) => {
+            Request::SetWorkspaceFolder {
+                workspace: WorkspaceId(workspace),
+                folder: name,
+            }
+        }
         Command::Workspace(WorkspaceCommand::Pin { workspace, off }) => Request::PinWorkspace {
             workspace: WorkspaceId(workspace),
             pinned: !off,
@@ -3187,11 +3200,17 @@ fn print_workspaces(workspaces: &[WorkspaceSummary]) {
     }
     for summary in workspaces {
         println!(
-            "{:<32} {:<24} {:<10} {}",
+            "{:<32} {:<24} {:<10} {}{}",
             summary.id().0,
             summary.worktree.branch,
             ginka_cli_format::status_label(&summary.status),
-            summary.worktree.path.display()
+            summary.worktree.path.display(),
+            summary
+                .worktree
+                .folder
+                .as_ref()
+                .map(|folder| format!("  [{folder}]"))
+                .unwrap_or_default()
         );
     }
 }

@@ -1308,6 +1308,14 @@ impl Shell {
                             cx,
                         );
                     }
+                    SidebarEvent::SetFolder { workspace, folder } => {
+                        let (link, workspace, folder) =
+                            (this.link.clone(), workspace.clone(), folder.clone());
+                        this.after_row_change(
+                            async move { link.set_workspace_folder(&workspace, folder).await },
+                            cx,
+                        );
+                    }
                     SidebarEvent::SetStatusNote { workspace, note } => {
                         let (link, workspace, note) =
                             (this.link.clone(), workspace.clone(), note.clone());

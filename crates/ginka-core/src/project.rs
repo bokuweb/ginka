@@ -94,7 +94,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
 /// Every worktree stored for `project`, pinned ones first.
 pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Worktree>> {
     let mut statement = conn.prepare(
-        "SELECT project_name, name, branch, path, head, pinned, archived
+        "SELECT project_name, name, branch, path, head, pinned, archived, folder
          FROM worktrees
          WHERE project_name = ?1
          ORDER BY archived, pinned DESC, name",
@@ -108,6 +108,7 @@ pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Wo
             head: row.get(4)?,
             pinned: row.get(5)?,
             archived: row.get(6)?,
+            folder: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -145,6 +146,32 @@ pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> R
         rusqlite::params![pinned, project.0, name],
     )?;
     Ok(updated > 0)
+}
+
+/// Assign a project-local sidebar folder, or clear it with a blank or `None`.
+///
+/// Names are trimmed and limited to 80 characters without control characters.
+/// Invalid names leave the previous value intact. Returns whether the immutable
+/// workspace id matched a stored row; git reconciliation does not own this value.
+pub fn set_folder(
+    conn: &Connection,
+    workspace: &WorkspaceId,
+    folder: Option<&str>,
+) -> Result<bool> {
+    let folder = folder.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = folder {
+        anyhow::ensure!(
+            !name.chars().any(char::is_control) && name.chars().count() <= 80,
+            "folder name must be at most 80 characters without control characters"
+        );
+    }
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    Ok(conn.execute(
+        "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
+        rusqlite::params![folder, project.0, name],
+    )? > 0)
 }
 
 /// Archive or restore a workspace. Returns whether a row was affected.
@@ -228,6 +255,58 @@ mod tests {
             kind: ProjectKind::Git,
             has_origin: None,
         }
+    }
+
+    #[test]
+    fn folders_are_trimmed_cleared_and_invalid_names_leave_the_value_intact() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        conn.execute("INSERT INTO worktrees (project_name, name, branch, path) VALUES ('comet', 'work', 'main', '/tmp/work')", []).unwrap();
+        let id = WorkspaceId("comet/work".into());
+        assert!(set_folder(&conn, &id, Some("  Review  ")).unwrap());
+        assert_eq!(
+            find_worktree(&conn, &id)
+                .unwrap()
+                .unwrap()
+                .folder
+                .as_deref(),
+            Some("Review")
+        );
+        for invalid in ["one\ntwo".to_string(), "a\tb".to_string(), "x".repeat(81)] {
+            assert!(set_folder(&conn, &id, Some(&invalid)).is_err());
+            assert_eq!(
+                find_worktree(&conn, &id)
+                    .unwrap()
+                    .unwrap()
+                    .folder
+                    .as_deref(),
+                Some("Review")
+            );
+        }
+        assert!(set_folder(&conn, &id, Some("   ")).unwrap());
+        assert_eq!(find_worktree(&conn, &id).unwrap().unwrap().folder, None);
+        assert!(!set_folder(&conn, &WorkspaceId("comet/missing".into()), None).unwrap());
+    }
+
+    #[test]
+    fn folders_survive_reopening_the_database_and_accept_eighty_unicode_characters() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("state.db");
+        let id = WorkspaceId("comet/work".into());
+        let name = "試".repeat(80);
+        {
+            let conn = db::open(&path).unwrap();
+            insert_project(&conn, &sample()).unwrap();
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path) VALUES ('comet', 'work', 'main', '/tmp/work')", []).unwrap();
+            assert!(set_folder(&conn, &id, Some(&name)).unwrap());
+            assert!(set_archived(&conn, &id, true).unwrap());
+        }
+        let conn = db::open(&path).unwrap();
+        let row = find_worktree(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.folder.as_deref(), Some(name.as_str()));
+        assert!(row.archived);
+        assert!(set_folder(&conn, &id, None).unwrap());
+        assert_eq!(find_worktree(&conn, &id).unwrap().unwrap().folder, None);
     }
 
     #[test]

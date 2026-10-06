@@ -99,6 +99,9 @@ pub struct Worktree {
     /// Archived workspaces stay registered but leave the active project tree.
     #[serde(default)]
     pub archived: bool,
+    /// A project-local sidebar folder; this never changes the filesystem path.
+    #[serde(default)]
+    pub folder: Option<String>,
 }
 
 impl Worktree {
@@ -1351,7 +1354,23 @@ mod tests {
             head: None,
             pinned: false,
             archived: false,
+            folder: None,
         }
+    }
+
+    #[test]
+    fn older_workspaces_have_no_folder_and_named_folders_round_trip() {
+        let mut tree = worktree();
+        let mut old = serde_json::to_value(&tree).unwrap();
+        old.as_object_mut().unwrap().remove("folder");
+        assert_eq!(
+            serde_json::from_value::<Worktree>(old).unwrap().folder,
+            None
+        );
+        tree.folder = Some("Review".into());
+        let decoded: Worktree =
+            serde_json::from_value(serde_json::to_value(&tree).unwrap()).unwrap();
+        assert_eq!(decoded, tree);
     }
 
     fn session_in(state: SessionState) -> Session {

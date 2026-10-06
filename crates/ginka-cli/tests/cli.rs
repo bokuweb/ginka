@@ -344,6 +344,41 @@ fn a_workspace_can_be_archived_and_restored_without_removing_it() {
 }
 
 #[test]
+fn workspace_folders_persist_across_daemon_restarts_and_can_be_cleared() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "later"]);
+    home.ok(&["workspace", "folder", "comet/later", "  Review  "]);
+    let invalid = home.run(&["workspace", "folder", "comet/later", "bad\nname"]);
+    assert!(!invalid.status.success());
+    home.ok(&["workspace", "archive", "comet/later"]);
+    home.ok(&["daemon", "stop"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "list"])).unwrap();
+    let workspace = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["worktree"]["name"] == "later")
+        .unwrap();
+    assert_eq!(workspace["worktree"]["folder"], "Review");
+    assert_eq!(workspace["worktree"]["archived"], true);
+    home.ok(&["workspace", "archive", "comet/later", "--restore"]);
+    home.ok(&["workspace", "folder", "comet/later"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "list"])).unwrap();
+    let workspace = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["worktree"]["name"] == "later")
+        .unwrap();
+    assert!(workspace["worktree"]["folder"].is_null());
+    assert_eq!(workspace["worktree"]["archived"], false);
+}
+
+#[test]
 fn json_output_is_the_protocols_own_shape_so_an_agent_can_read_it() {
     let home = Home::new();
     let repository = home.repository("comet");

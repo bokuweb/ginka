@@ -71,6 +71,18 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_workspace_folder",
+            description: "Group a workspace in a named sidebar folder within its project, without moving files. Omit folder to ungroup it.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "folder": {"type": "string", "description": "At most 80 characters, without control characters"},
+                },
+                "required": ["workspace"],
+            }),
+        },
+        Tool {
             name: "ginka_workspace_archive",
             description: "Archive a workspace without deleting it, or restore it to active work.",
             schema: json!({
@@ -915,6 +927,14 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             branch: text("branch")?,
             base: maybe("base"),
         },
+        "ginka_workspace_folder" => Request::SetWorkspaceFolder {
+            workspace: WorkspaceId(text("workspace")?),
+            folder: match arguments.get("folder") {
+                None => None,
+                Some(Value::String(name)) => Some(name.clone()),
+                Some(_) => return Err(anyhow!("folder must be a string")),
+            },
+        },
         "ginka_workspace_archive" => Request::ArchiveWorkspace {
             workspace: WorkspaceId(text("workspace")?),
             archived: !flag("restore"),
@@ -1698,6 +1718,35 @@ mod tests {
                 note: None,
             }
         ));
+    }
+
+    #[test]
+    fn workspace_folders_can_be_assigned_or_cleared_but_bad_types_cannot_clear_them() {
+        for folder in [Some("Review"), None] {
+            let mut args = json!({"workspace": "comet/harbor"});
+            if let Some(name) = folder {
+                args["folder"] = json!(name);
+            }
+            assert_eq!(
+                request_for("ginka_workspace_folder", &args).unwrap(),
+                Request::SetWorkspaceFolder {
+                    workspace: WorkspaceId("comet/harbor".into()),
+                    folder: folder.map(str::to_string),
+                }
+            );
+        }
+        for value in [json!(null), json!(false), json!(42), json!([])] {
+            assert!(
+                request_for(
+                    "ginka_workspace_folder",
+                    &json!({
+                        "workspace": "comet/harbor", "folder": value
+                    })
+                )
+                .is_err()
+            );
+        }
+        assert!(request_for("ginka_workspace_folder", &json!({"folder": "Review"})).is_err());
     }
 
     #[test]

@@ -1080,6 +1080,19 @@ impl Service {
                     workspace: self.summarize(worktree),
                 })
             }
+            Request::SetWorkspaceFolder { workspace, folder } => {
+                if !project::set_folder(&self.conn(), &workspace, folder.as_deref())
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::not_found(format!(
+                        "no workspace named {workspace}"
+                    )));
+                }
+                if let Some((project, _)) = workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {
                     return Err(RpcError::not_found(format!(

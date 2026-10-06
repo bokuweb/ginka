@@ -211,6 +211,7 @@ active conversation. With nothing selected, the rail stands alone.
      A workspace is named after the branch it was cut on, so this line appears
      when an agent has checked out something else inside the worktree — which
      is exactly when it matters.
+- **Workspace folders** — always-open, muted folder-icon headings scoped to the selected project. Pinned rows lead the list, followed by ungrouped rows and folders in lexical name order. The row menu and palette offer *Move to folder…*: a focused inline name field saves with Enter, clears the folder when blank and cancels on blur or Escape. Folder names participate in search; headings do not take a session number. Archive and restore retain the label.
 - **Archived section** — collapsible header, one-line rows (glyph, title, age).
   Archive is durable workspace metadata: restoring a row returns it to its
   project without recreating the worktree or conversation. `Show N more` is a
@@ -218,7 +219,7 @@ active conversation. With nothing selected, the rail stands alone.
 - **Footer** — avatar, user name, and the account in use with its headroom —
   the plan label this line used to reserve, now attached to the login it
   describes (`docs/accounts.md` §11).
-- Rows reorder on an attention sort (working → needs-attention → recent) with
+- Rows reorder within their pin/folder section on an attention sort (working → needs-attention → recent) with
   the 260 ms curve, and a project is ordered by the most urgent row in it, so a
   project with an agent working in it rises the way a row does. Reordering must
   never move the row under the cursor mid-click.
@@ -654,7 +655,7 @@ Four things are not in any library and are load-bearing for the product's identi
 
 ## 6. Interaction rules
 
-- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, `⌘[` / `⌘]` moves through project/session history (`Ctrl+Alt+↑/↓` elsewhere), `⌘⇧[` / `⌘⇧]` cycles terminal tabs while the terminal is focused (`Ctrl+PageUp/PageDown` elsewhere), and `⌘⌥←/→` cycles surfaces. Session numbers follow the same attention-first stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
+- **Keyboard-first.** Every action reachable from the command palette (`⌘K`); no action mouse-only. `⌘P` quick open, `⌘⇧F` search, `⌘1..9` switch among the first nine visible active sessions in the selected project, `⌘[` / `⌘]` moves through project/session history (`Ctrl+Alt+↑/↓` elsewhere), `⌘⇧[` / `⌘⇧]` cycles terminal tabs while the terminal is focused (`Ctrl+PageUp/PageDown` elsewhere), and `⌘⌥←/→` cycles surfaces. Session numbers follow the same pinned/folder/attention stable order as the list; archived or search-hidden rows do not take a number, and a number beyond the visible rows does nothing.
 - **Panels open and close independently**, on VS Code's chords: `⌘B` sidebar, `⌘⌥B` right panel, `⌘J` terminal dock (`ctrl` elsewhere). Each also has a title-bar control, and the control's icon reports the *state* rather than the action — an open panel shows the "close" variant — so it reads without hovering. A closed panel keeps its size. Sidebar visibility and width are global navigation preferences; right-panel visibility/width, terminal visibility/height and the active surface persist by immutable workspace id in `app.json`, so switching or restarting restores what that workspace last showed. The centre column is not a panel and cannot be closed.
 - **Focus is explicit.** A visible ring on the focused pane; `⌘K` never steals focus from a running terminal without returning it.
 - **No blocking modals** except destructive confirmations (delete worktree, force push).

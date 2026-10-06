@@ -85,9 +85,18 @@ pub enum SidebarEvent {
     RemoveWorkspace {
         workspace: WorkspaceId,
     },
+    /// Assign or clear a workspace’s project-local sidebar folder.
+    SetFolder {
+        /// The workspace to organize.
+        workspace: WorkspaceId,
+        /// A folder name, or `None` to ungroup.
+        folder: Option<String>,
+    },
     /// Write a workspace's status note, or clear it with `None`.
     SetStatusNote {
+        /// The workspace whose note changes.
         workspace: WorkspaceId,
+        /// The note, or `None` to clear it.
         note: Option<String>,
     },
     /// Mute a project's notifications until a Unix second (`i64::MAX` for
@@ -197,6 +206,8 @@ pub struct SessionSidebar {
     renaming: Option<(WorkspaceId, SessionId, Entity<InputState>)>,
     /// The workspace whose status note is being written, and its field.
     noting: Option<(WorkspaceId, Entity<InputState>)>,
+    /// The workspace whose sidebar folder is being edited, and its field.
+    foldering: Option<(WorkspaceId, Entity<InputState>)>,
     /// A project or archived workspace asked to be removed once; the
     /// second click removes it.
     removing: Option<Removal>,
@@ -230,6 +241,7 @@ impl SessionSidebar {
             labelling: None,
             renaming: None,
             noting: None,
+            foldering: None,
             removing: None,
         }
     }
@@ -1079,6 +1091,11 @@ impl SessionSidebar {
             .filter(|(noting, _)| noting == &row.workspace)
             .map(|(_, field)| field.clone());
 
+        let folder_field = self
+            .foldering
+            .as_ref()
+            .filter(|(workspace, _)| workspace == &row.workspace)
+            .map(|(_, field)| field.clone());
         let menu_workspace = row.workspace.clone();
 
         v_flex()
@@ -1246,6 +1263,17 @@ impl SessionSidebar {
                                 })),
                         )
                     })
+                    .children(folder_field.map(|field| {
+                        div()
+                            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                                if event.keystroke.key == "escape" {
+                                    this.foldering = None;
+                                    cx.stop_propagation();
+                                    cx.notify();
+                                }
+                            }))
+                            .child(ginka_ui::field::input(&field))
+                    }))
                     .map(|this| match note_field {
                         Some(field) => this.child(ginka_ui::field::input(&field)),
                         None => this.children(row.status_note.clone().map(|note| {
@@ -1272,6 +1300,7 @@ impl SessionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.foldering = None;
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
             state.set_value(title.to_string(), window, cx);
@@ -1376,6 +1405,9 @@ impl SessionSidebar {
                     );
                 }
             }
+            RowAction::Folder => {
+                self.start_folder(row.workspace.clone(), row.folder.clone(), window, cx);
+            }
             RowAction::StatusNote => {
                 self.start_note(row.workspace.clone(), row.status_note.clone(), window, cx)
             }
@@ -1402,6 +1434,7 @@ impl SessionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.foldering = None;
         let field = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .placeholder(rust_i18n::t!("sidebar.note.placeholder").to_string());
@@ -1431,6 +1464,48 @@ impl SessionSidebar {
         .detach();
         self.menu_for = None;
         self.noting = Some((workspace, field));
+        cx.notify();
+    }
+
+    /// Edit the selected workspace's folder. Enter saves; an empty name ungroups.
+    fn start_folder(
+        &mut self,
+        workspace: WorkspaceId,
+        folder: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let field = cx.new(|cx| {
+            let mut state = InputState::new(window, cx)
+                .placeholder(rust_i18n::t!("sidebar.folder.placeholder").to_string());
+            if let Some(folder) = &folder {
+                state.set_value(folder.clone(), window, cx);
+            }
+            state
+        });
+        self.noting = None;
+        self.renaming = None;
+        field.read(cx).focus_handle(cx).focus(window, cx);
+        cx.subscribe(&field, |this, field, event: &InputEvent, cx| match event {
+            InputEvent::PressEnter { .. } => {
+                let text = field.read(cx).value().trim().to_string();
+                if let Some((workspace, _)) = this.foldering.take() {
+                    cx.emit(SidebarEvent::SetFolder {
+                        workspace,
+                        folder: (!text.is_empty()).then_some(text),
+                    });
+                }
+                cx.notify();
+            }
+            InputEvent::Blur => {
+                this.foldering = None;
+                cx.notify();
+            }
+            _ => {}
+        })
+        .detach();
+        self.menu_for = None;
+        self.foldering = Some((workspace, field));
         cx.notify();
     }
 
@@ -1475,6 +1550,20 @@ impl SessionSidebar {
             .on_click(cx.listener(move |this, _, window, cx| {
                 cx.stop_propagation();
                 this.start_note(workspace.clone(), current.clone(), window, cx);
+            }))
+        };
+        let folder = {
+            let workspace = row.workspace.clone();
+            let current = row.folder.clone();
+            menu_item(
+                &tokens,
+                format!("folder:{key}"),
+                Icon::new(IconName::Folder),
+                rust_i18n::t!("sidebar.action.folder").to_string(),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.start_folder(workspace.clone(), current.clone(), window, cx);
             }))
         };
         // The id `ginka session …` and MCP take, for a reader driving this
@@ -1585,7 +1674,7 @@ impl SessionSidebar {
             resolve
                 .into_iter()
                 .chain(rename)
-                .chain([note])
+                .chain([note, folder])
                 .chain(copy_id)
                 .chain([pin, archive])
                 .chain(forget),
@@ -1619,6 +1708,21 @@ impl SessionSidebar {
                 let count = self.projects.len();
                 item.child(self.project_header(name, label, position, count, cx))
                     .into_any_element()
+            }
+            Entry::Folder(_, name) => {
+                let tokens = Tokens::global(cx);
+                item.child(
+                    h_flex()
+                        .pl_3()
+                        .px_2p5()
+                        .py_1p5()
+                        .gap_2()
+                        .text_xs()
+                        .text_color(tokens.colors().text_muted)
+                        .child(Icon::new(IconName::Folder).size_3p5())
+                        .child(div().truncate().child(name)),
+                )
+                .into_any_element()
             }
             Entry::Row(row) => match self.rows.get(row).cloned() {
                 Some(session) => {
@@ -1883,10 +1987,9 @@ impl Render for SessionSidebar {
             .filter(|(_, row)| ginka_ui::workspace::session_matches(row, &self.search_query))
             .map(|(index, row)| (index, row.clone()))
             .collect();
-        // Stable: equal ranks keep their insertion order.
-        // Pinned first, then the attention sort; stable, so equal ranks keep
-        // their insertion order.
-        active.sort_by_key(|(_, row)| row.list_rank());
+        // Share the folder and attention order with keyboard navigation;
+        // equal ranks keep their insertion order.
+        active.sort_by(|(_, left), (_, right)| left.compare_list(right));
         // Grouped under their projects, which is also what orders the projects:
         // the one with an agent working in it rises the way a row does.
         let active_rows: Vec<SessionRow> = active.iter().map(|(_, row)| row.clone()).collect();

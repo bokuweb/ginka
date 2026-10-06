@@ -90,6 +90,13 @@ pub enum Request {
         /// Remove it even with uncommitted work, which is then lost.
         force: bool,
     },
+    /// Assign a project-local sidebar folder without moving files.
+    SetWorkspaceFolder {
+        /// The immutable workspace id to organize.
+        workspace: WorkspaceId,
+        /// A trimmed name of at most 80 characters; blank or `None` clears it.
+        folder: Option<String>,
+    },
     /// Pin or unpin a workspace.
     PinWorkspace {
         /// The workspace to pin or unpin.

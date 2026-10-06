@@ -14,6 +14,8 @@ use ginka_protocol::ProjectName;
 pub enum Entry {
     /// A project's heading, where more than one project is listed.
     Project(ProjectName),
+    /// A project-local folder heading; no directory is created or moved.
+    Folder(ProjectName, String),
     /// A live session row.
     Row(usize),
     /// The archived section's heading, which opens and closes it.
@@ -37,7 +39,18 @@ pub fn entries(
         if headings {
             entries.push(Entry::Project(group.name.clone()));
         }
-        entries.extend(group.rows.iter().map(|(index, _)| Entry::Row(*index)));
+        let mut rows = group.rows.iter().collect::<Vec<_>>();
+        rows.sort_by(|(_, left), (_, right)| left.compare_list(right));
+        let mut folder = None;
+        for (index, row) in rows {
+            if !row.pinned && row.folder.as_ref() != folder {
+                folder = row.folder.as_ref();
+                if let Some(name) = folder {
+                    entries.push(Entry::Folder(group.name.clone(), name.clone()));
+                }
+            }
+            entries.push(Entry::Row(*index));
+        }
     }
     if !archived.is_empty() {
         entries.push(Entry::ArchivedHeading);
@@ -71,6 +84,73 @@ mod tests {
             project: name.to_string().into(),
             rows: rows.iter().map(|index| (*index, row.clone())).collect(),
         }
+    }
+
+    #[test]
+    fn folders_group_rows_after_pins_and_keyboard_order_matches() {
+        let mut group = group("comet", &[0, 1, 2, 3]);
+        for (index, row) in &mut group.rows {
+            row.workspace = ginka_protocol::WorkspaceId(format!("comet/work-{index}"));
+            row.origin = "comet".into();
+            row.pinned = false;
+        }
+        group.rows[0].1.folder = Some("Review".into());
+        group.rows[1].1.folder = Some("Build".into());
+        group.rows[2].1.folder = Some("Review".into());
+        group.rows[2].1.pinned = true;
+        let layout = entries(&[group.clone()], false, &[], false);
+        assert_eq!(
+            layout,
+            [
+                Entry::Row(2),
+                Entry::Row(3),
+                Entry::Folder(ProjectName("comet".into()), "Build".into()),
+                Entry::Row(1),
+                Entry::Folder(ProjectName("comet".into()), "Review".into()),
+                Entry::Row(0)
+            ]
+        );
+        let rows = group
+            .rows
+            .iter()
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        let keyboard = crate::workspace::visible_sessions(&rows, &group.name, "");
+        let displayed = layout
+            .iter()
+            .filter_map(|entry| match entry {
+                Entry::Row(index) => Some(rows[*index].workspace.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(keyboard, displayed);
+        assert!(crate::workspace::session_matches(&rows[0], "review"));
+        assert!(!crate::workspace::session_matches(&rows[3], "review"));
+    }
+
+    #[test]
+    fn folders_are_project_local_and_attention_sort_is_stable_inside_them() {
+        let mut first = group("comet", &[0, 1, 2]);
+        let mut second = group("aurora", &[3]);
+        for (_, row) in first.rows.iter_mut().chain(second.rows.iter_mut()) {
+            row.pinned = false;
+            row.folder = Some("Review".into());
+            row.state = crate::workspace::AgentState::Idle;
+        }
+        first.rows[1].1.state = crate::workspace::AgentState::Working;
+        assert_eq!(
+            entries(&[first, second], true, &[], false),
+            [
+                Entry::Project(ProjectName("comet".into())),
+                Entry::Folder(ProjectName("comet".into()), "Review".into()),
+                Entry::Row(1),
+                Entry::Row(0),
+                Entry::Row(2),
+                Entry::Project(ProjectName("aurora".into())),
+                Entry::Folder(ProjectName("aurora".into()), "Review".into()),
+                Entry::Row(3),
+            ]
+        );
     }
 
     #[test]

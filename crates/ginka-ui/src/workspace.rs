@@ -383,6 +383,8 @@ pub struct SessionRow {
     pub age: SharedString,
     /// Whether the worktree is archived; archived rows are left out of the list and of next/previous stepping.
     pub archived: bool,
+    /// Project-local grouping that persists independently of the git branch.
+    pub folder: Option<String>,
     /// Kept at the top of its project's list, in a section of its own.
     pub pinned: bool,
     /// Follow-ups waiting in the session's queue, shown beside the status.
@@ -477,6 +479,7 @@ impl SessionRow {
                 .unwrap_or_default()
                 .into(),
             archived: summary.worktree.archived,
+            folder: summary.worktree.folder.clone(),
             pinned: summary.worktree.pinned,
             queued: summary.queued,
             indexed: summary.indexed,
@@ -573,6 +576,7 @@ impl SessionRow {
             state,
             age: age.into(),
             archived,
+            folder: None,
             pinned: false,
             queued: 0,
             indexed: false,
@@ -652,10 +656,21 @@ impl SessionRow {
         ]
     }
 
-    /// The order the session list uses: pinned rows first — the reader put
-    /// them there — and then the attention sort within each part.
-    pub fn list_rank(&self) -> (bool, u8) {
-        (!self.pinned, self.attention_rank())
+    /// The shared sidebar and keyboard order: pins, ungrouped rows, then named
+    /// folders in lexical order; attention sorts rows inside each section.
+    /// Equal rows preserve their input order. Pinned rows stay above folders.
+    pub fn compare_list(&self, other: &Self) -> std::cmp::Ordering {
+        self.pinned
+            .cmp(&other.pinned)
+            .reverse()
+            .then_with(|| {
+                if self.pinned {
+                    std::cmp::Ordering::Equal
+                } else {
+                    self.folder.cmp(&other.folder)
+                }
+            })
+            .then_with(|| self.attention_rank().cmp(&other.attention_rank()))
     }
 
     /// The attention sort's key: working first (0), then rows waiting on the
@@ -675,7 +690,7 @@ impl SessionRow {
 
 /// Whether a sidebar row fuzzy-matches visible conversation metadata.
 ///
-/// Search covers the title, model, provider, project and branch independently;
+/// Search covers title, model, provider, project, branch and folder independently;
 /// joining them first would let a query cross field boundaries that are not
 /// visible next to each other.
 pub fn session_matches(row: &SessionRow, query: &str) -> bool {
@@ -690,6 +705,7 @@ pub fn session_matches(row: &SessionRow, query: &str) -> bool {
         row.agent.label(),
         row.origin.as_ref(),
         row.branch.as_ref(),
+        row.folder.as_deref().unwrap_or_default(),
     ];
     fields.into_iter().any(|field| {
         let mut matcher = Matcher::new(Config::DEFAULT);
@@ -728,7 +744,7 @@ pub fn visible_sessions(
         .filter(|row| row.origin.as_ref() == project.0)
         .filter(|row| session_matches(row, query))
         .collect::<Vec<_>>();
-    visible.sort_by_key(|row| row.attention_rank());
+    visible.sort_by(|left, right| left.compare_list(right));
     visible
         .into_iter()
         .map(|row| row.workspace.clone())
@@ -817,7 +833,7 @@ mod tests {
             .position(|row| row.state == AgentState::Idle)
             .expect("an idle sample");
         rows[quiet].pinned = true;
-        rows.sort_by_key(SessionRow::list_rank);
+        rows.sort_by(SessionRow::compare_list);
         assert!(rows[0].pinned);
         assert_eq!(
             rows[1].state,
@@ -1092,6 +1108,7 @@ mod tests {
                 head: None,
                 pinned: false,
                 archived: false,
+                folder: None,
             },
             status: BranchStatus::default(),
             session,

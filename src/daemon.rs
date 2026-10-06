@@ -1597,6 +1597,20 @@ impl DaemonLink {
         self.git_sync(Request::DismissTicket { ticket }).await
     }
 
+    /// Assign or clear a project-local sidebar folder through the daemon.
+    pub async fn set_workspace_folder(
+        &self,
+        workspace: &WorkspaceId,
+        folder: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceFolder {
+            workspace: workspace.clone(),
+            folder,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

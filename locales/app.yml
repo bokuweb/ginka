@@ -1548,6 +1548,12 @@ sidebar.action.move_down:
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
+sidebar.action.folder:
+  en: Move to folder…
+  ja: フォルダーへ移動…
+sidebar.folder.placeholder:
+  en: Folder name — empty ungroups this workspace
+  ja: フォルダー名（空にすると分類を解除）
 sidebar.action.note:
   en: Status note…
   ja: ステータスメモ…
@@ -2403,6 +2409,9 @@ surface.name.skills:
 palette.row.rename:
   en: Rename this conversation
   ja: この会話の名前を変更
+palette.row.folder:
+  en: Move this workspace to a folder
+  ja: このワークスペースをフォルダーへ移動
 palette.row.note:
   en: Write this workspace's status note
   ja: このワークスペースのステータスメモを書く

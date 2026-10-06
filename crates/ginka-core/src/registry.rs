@@ -538,6 +538,7 @@ mod tests {
             head: None,
             pinned: false,
             archived: false,
+            folder: None,
         }];
         // `fix-a` and `fix/a` slugify identically; the second must not collide
         // with the first on a unique key.
