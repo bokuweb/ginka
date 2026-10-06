@@ -2528,3 +2528,13 @@ sidebar.selection.check:
 sidebar.selection.uncheck:
   en: "Deselect %{name}"
   ja: "%{name} の選択を解除"
+
+sidebar.folder.expand:
+  en: "Expand %{name}"
+  ja: "%{name} を展開"
+sidebar.folder.collapse:
+  en: "Collapse %{name}"
+  ja: "%{name} を折りたたむ"
+sidebar.folder.search_open:
+  en: Matching folders stay open while searching
+  ja: 検索中は一致するフォルダーを展開します

@@ -725,7 +725,17 @@ pub fn session_shortcuts(
     project: &ProjectName,
     query: &str,
 ) -> Vec<WorkspaceId> {
-    visible_sessions(rows, project, query)
+    session_shortcuts_with_folders(rows, project, query, &Default::default())
+}
+
+/// The first nine active keyboard targets after folder and search filtering.
+pub fn session_shortcuts_with_folders(
+    rows: &[SessionRow],
+    project: &ProjectName,
+    query: &str,
+    collapsed: &ginka_core::settings::CollapsedWorkspaceFolders,
+) -> Vec<WorkspaceId> {
+    visible_sessions_with_folders(rows, project, query, collapsed)
         .into_iter()
         .take(9)
         .collect()
@@ -738,9 +748,28 @@ pub fn visible_sessions(
     project: &ProjectName,
     query: &str,
 ) -> Vec<WorkspaceId> {
+    visible_sessions_with_folders(rows, project, query, &Default::default())
+}
+
+/// Active keyboard targets in displayed order, excluding collapsed members.
+/// Pins stay outside folders; a nonempty search temporarily reveals its matches.
+pub fn visible_sessions_with_folders(
+    rows: &[SessionRow],
+    project: &ProjectName,
+    query: &str,
+    collapsed: &ginka_core::settings::CollapsedWorkspaceFolders,
+) -> Vec<WorkspaceId> {
     let mut visible = rows
         .iter()
         .filter(|row| !row.archived)
+        .filter(|row| {
+            !query.trim().is_empty()
+                || row.pinned
+                || !row
+                    .folder
+                    .as_ref()
+                    .is_some_and(|folder| collapsed.is_collapsed(project, folder))
+        })
         .filter(|row| row.origin.as_ref() == project.0)
         .filter(|row| session_matches(row, query))
         .collect::<Vec<_>>();
@@ -942,6 +971,37 @@ mod tests {
         assert_eq!(
             session_shortcuts(&rows, &ProjectName("comet".into()), "task 11"),
             vec![WorkspaceId("comet/task-11".into())]
+        );
+    }
+
+    #[test]
+    fn numbered_shortcuts_skip_collapsed_members_and_ignore_blank_search() {
+        let sample = SessionRow::samples().remove(0);
+        let project = ProjectName("comet".into());
+        let rows = (0..12)
+            .map(|index| {
+                let mut row = sample.clone();
+                row.workspace = WorkspaceId(format!("comet/task-{index}"));
+                row.origin = "comet".into();
+                row.folder = Some("Review".into());
+                row.pinned = index == 0;
+                row
+            })
+            .collect::<Vec<_>>();
+        let mut collapsed = ginka_core::settings::CollapsedWorkspaceFolders::default();
+        collapsed.set_collapsed(&project, "Review", true);
+        assert_eq!(
+            session_shortcuts_with_folders(&rows, &project, " \t ", &collapsed),
+            [rows[0].workspace.clone()]
+        );
+        assert_eq!(
+            session_shortcuts_with_folders(&rows, &project, "Review", &collapsed).len(),
+            9
+        );
+        assert_eq!(
+            session_shortcuts_with_folders(&rows, &project, "", &collapsed),
+            [rows[0].workspace.clone()],
+            "clearing search must restore the saved collapse"
         );
     }
 

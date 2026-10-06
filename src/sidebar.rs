@@ -17,7 +17,7 @@
 use ginka_protocol::{ProjectName, PullRequestState, SessionId, WorkspaceId};
 use ginka_ui::Tokens;
 use ginka_ui::folders::{Destination, Selection};
-use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, session_shortcuts, tree};
+use ginka_ui::workspace::{AgentState, ProjectRow, SessionRow, tree};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -75,6 +75,15 @@ pub enum SidebarEvent {
     Pin {
         workspace: WorkspaceId,
         pinned: bool,
+    },
+    /// Persist a project-local folder's presentation state in app settings.
+    FolderVisibility {
+        /// Immutable project name owning the folder.
+        project: ProjectName,
+        /// Exact folder label.
+        folder: String,
+        /// Whether unpinned active members are hidden outside search.
+        collapsed: bool,
     },
     /// Set one pin state for a project-local selection atomically.
     PinMany {
@@ -209,6 +218,7 @@ pub struct SessionSidebar {
     /// See [`SessionSidebar::set_rows`].
     unlisted: u8,
     archived_open: bool,
+    collapsed_folders: ginka_core::settings::CollapsedWorkspaceFolders,
     /// The session list, virtualized (`AGENTS.md` rule 5): only the rows
     /// near the screen are laid out, however many sessions there are.
     session_list: ListState,
@@ -281,6 +291,7 @@ impl SessionSidebar {
             selected_project: None,
             unlisted: 0,
             archived_open: true,
+            collapsed_folders: Default::default(),
             session_list: ListState::new(0, ListAlignment::Top, px(600.)),
             entries: Vec::new(),
             row_order: Vec::new(),
@@ -307,6 +318,16 @@ impl SessionSidebar {
             folder_picker: None,
             removing: None,
         }
+    }
+
+    /// Restore project-local folder visibility from the app's settings.
+    pub fn set_collapsed_folders(
+        &mut self,
+        folders: ginka_core::settings::CollapsedWorkspaceFolders,
+        cx: &mut Context<Self>,
+    ) {
+        self.collapsed_folders = folders;
+        cx.notify();
     }
 
     /// Apply the current conversation query from the search input.
@@ -531,7 +552,12 @@ impl SessionSidebar {
             .filter(|row| self.status.admits(row.state))
             .cloned()
             .collect();
-        let visible = ginka_ui::workspace::visible_sessions(&rows, &project, &self.search_query);
+        let visible = ginka_ui::workspace::visible_sessions_with_folders(
+            &rows,
+            &project,
+            &self.search_query,
+            &self.collapsed_folders,
+        );
         if let Some(next) =
             ginka_ui::workspace::adjacent_session(&visible, self.selected.as_ref(), forward)
         {
@@ -552,10 +578,14 @@ impl SessionSidebar {
             .filter(|row| self.status.admits(row.state))
             .cloned()
             .collect();
-        let Some(workspace) = session_shortcuts(&rows, project, &self.search_query)
-            .get(index)
-            .cloned()
-        else {
+        let Some(workspace) = ginka_ui::workspace::session_shortcuts_with_folders(
+            &rows,
+            project,
+            &self.search_query,
+            &self.collapsed_folders,
+        )
+        .get(index)
+        .cloned() else {
             return;
         };
         self.select_workspace(&workspace, cx);
@@ -2064,18 +2094,47 @@ impl SessionSidebar {
                 item.child(self.project_header(name, label, position, count, cx))
                     .into_any_element()
             }
-            Entry::Folder(_, name) => {
+            Entry::Folder(project, name) => {
+                let collapsed = self.collapsed_folders.is_collapsed(&project, &name);
+                let searching = !self.search_query.trim().is_empty();
                 let tokens = Tokens::global(cx);
                 item.child(
-                    h_flex()
-                        .pl_3()
-                        .px_2p5()
-                        .py_1p5()
-                        .gap_2()
-                        .text_xs()
+                    Button::new(SharedString::from(format!("folder:{}:{}", project.0, name)))
+                        .ghost()
+                        .small()
+                        .w_full()
+                        .justify_start()
                         .text_color(tokens.colors().text_muted)
-                        .child(Icon::new(IconName::Folder).size_3p5())
-                        .child(div().truncate().child(name)),
+                        .icon(if collapsed && !searching {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        })
+                        .label(name.clone())
+                        .tooltip(
+                            rust_i18n::t!(
+                                if searching {
+                                    "sidebar.folder.search_open"
+                                } else if collapsed {
+                                    "sidebar.folder.expand"
+                                } else {
+                                    "sidebar.folder.collapse"
+                                },
+                                name = name.clone()
+                            )
+                            .to_string(),
+                        )
+                        .disabled(searching)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.collapsed_folders
+                                .set_collapsed(&project, &name, !collapsed);
+                            cx.emit(SidebarEvent::FolderVisibility {
+                                project: project.clone(),
+                                folder: name.clone(),
+                                collapsed: !collapsed,
+                            });
+                            cx.notify();
+                        })),
                 )
                 .into_any_element()
             }
@@ -2483,11 +2542,13 @@ impl Render for SessionSidebar {
             groups.iter().all(|group| group.rows.is_empty()) && archived_count == 0;
         let headings = !(selected_project_name.is_some() && self.place == Place::Workspace);
         let archived_indices: Vec<usize> = archived.iter().map(|(index, _)| *index).collect();
-        let entries = ginka_ui::session_list::entries(
+        let entries = ginka_ui::session_list::entries_with_folders(
             &groups,
             headings,
             &archived_indices,
             self.archived_open,
+            &self.collapsed_folders,
+            !self.search_query.trim().is_empty(),
         );
         if let Some(from) = ginka_ui::session_list::first_difference(&self.entries, &entries) {
             let old = self.entries.len();

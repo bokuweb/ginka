@@ -34,6 +34,27 @@ pub fn entries(
     archived: &[usize],
     archived_open: bool,
 ) -> Vec<Entry> {
+    entries_with_folders(
+        groups,
+        headings,
+        archived,
+        archived_open,
+        &Default::default(),
+        false,
+    )
+}
+
+/// Lay out project-local folder headings even while their members are hidden.
+/// Pins remain visible; searching temporarily reveals matching members without
+/// modifying the saved preference. Callers filter search matches before layout.
+pub fn entries_with_folders(
+    groups: &[ProjectGroup],
+    headings: bool,
+    archived: &[usize],
+    archived_open: bool,
+    collapsed: &ginka_core::settings::CollapsedWorkspaceFolders,
+    searching: bool,
+) -> Vec<Entry> {
     let mut entries = Vec::new();
     for group in groups {
         if headings {
@@ -48,6 +69,15 @@ pub fn entries(
                 if let Some(name) = folder {
                     entries.push(Entry::Folder(group.name.clone(), name.clone()));
                 }
+            }
+            if !searching
+                && !row.pinned
+                && row
+                    .folder
+                    .as_ref()
+                    .is_some_and(|name| collapsed.is_collapsed(&group.name, name))
+            {
+                continue;
             }
             entries.push(Entry::Row(*index));
         }
@@ -163,6 +193,87 @@ mod tests {
                 Entry::Row(3),
             ]
         );
+    }
+
+    #[test]
+    fn collapsed_folders_hide_only_unpinned_members_and_keep_keyboard_order() {
+        let mut comet = group("comet", &[0, 1, 2]);
+        let mut aurora = group("aurora", &[3]);
+        for (index, row) in comet.rows.iter_mut().chain(aurora.rows.iter_mut()) {
+            row.workspace = ginka_protocol::WorkspaceId(format!(
+                "{}/work-{index}",
+                if *index == 3 { "aurora" } else { "comet" }
+            ));
+            row.origin = if *index == 3 {
+                "aurora".into()
+            } else {
+                "comet".into()
+            };
+            row.pinned = false;
+            row.folder = Some("Review".into());
+        }
+        comet.rows[1].1.pinned = true;
+        comet.rows[2].1.folder = None;
+        let mut collapsed = ginka_core::settings::CollapsedWorkspaceFolders::default();
+        collapsed.set_collapsed(&comet.name, "Review", true);
+        let groups = [comet.clone(), aurora];
+        let layout = entries_with_folders(&groups, true, &[4], true, &collapsed, false);
+        assert_eq!(row_indices(&layout), [1, 2, 3, 4]);
+        assert!(layout.contains(&Entry::Folder(comet.name.clone(), "Review".into())));
+        let rows = comet
+            .rows
+            .iter()
+            .map(|(_, row)| row.clone())
+            .collect::<Vec<_>>();
+        let keyboard =
+            crate::workspace::visible_sessions_with_folders(&rows, &comet.name, "", &collapsed);
+        assert_eq!(
+            keyboard,
+            [rows[1].workspace.clone(), rows[2].workspace.clone()]
+        );
+        assert_eq!(
+            crate::workspace::adjacent_session(&keyboard, Some(&rows[1].workspace), true),
+            Some(rows[2].workspace.clone())
+        );
+        assert_eq!(
+            crate::workspace::adjacent_session(&keyboard, Some(&rows[2].workspace), true),
+            Some(rows[1].workspace.clone())
+        );
+
+        let searching = entries_with_folders(&groups, true, &[], false, &collapsed, true);
+        assert_eq!(row_indices(&searching), [1, 2, 0, 3]);
+        assert_eq!(
+            crate::workspace::visible_sessions_with_folders(
+                &rows,
+                &comet.name,
+                "Review",
+                &collapsed
+            ),
+            [rows[1].workspace.clone(), rows[0].workspace.clone()]
+        );
+        assert!(
+            collapsed.is_collapsed(&comet.name, "Review"),
+            "search must not change the saved preference"
+        );
+
+        let mut selected = crate::folders::Selection::default();
+        selected.toggle(&rows[0].workspace);
+        selected.toggle(&rows[1].workspace);
+        selected.retain(&keyboard);
+        assert_eq!(selected.targets(&keyboard), [rows[1].workspace.clone()]);
+        collapsed.set_collapsed(&comet.name, "Review", false);
+        let reopened =
+            crate::workspace::visible_sessions_with_folders(&rows, &comet.name, "", &collapsed);
+        selected.retain(&reopened);
+        assert_eq!(
+            selected.targets(&reopened),
+            [rows[1].workspace.clone()],
+            "hidden selections must not return"
+        );
+        assert!(!crate::folders::valid_targets(
+            &[rows[0].workspace.clone()],
+            &keyboard
+        ));
     }
 
     #[test]

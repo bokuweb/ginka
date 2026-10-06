@@ -965,9 +965,11 @@ impl Shell {
                 .placeholder(rust_i18n::t!("sidebar.sessions.search").to_string())
         });
         let muted = settings.muted_projects.clone();
+        let collapsed_folders = settings.collapsed_workspace_folders.clone();
         let sidebar = cx.new(|cx| {
             let mut sidebar = SessionSidebar::new(rows, sidebar_search.clone(), local_paths);
             sidebar.set_muted(muted, cx);
+            sidebar.set_collapsed_folders(collapsed_folders, cx);
             sidebar
         });
         let surfaces = cx.new(|cx| SurfacePanel::new(window, cx, local_paths));
@@ -1248,6 +1250,16 @@ impl Shell {
                     // The inbox, the notes, the settings — or a project, which
                     // the rail also announces as a selection.
                     SidebarEvent::Open(place) => this.open_place(*place, window, cx),
+                    SidebarEvent::FolderVisibility {
+                        project,
+                        folder,
+                        collapsed,
+                    } => {
+                        this.settings
+                            .collapsed_workspace_folders
+                            .set_collapsed(project, folder, *collapsed);
+                        this.save_settings();
+                    }
                     SidebarEvent::PinMany {
                         project,
                         workspaces,
