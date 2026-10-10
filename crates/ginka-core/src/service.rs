@@ -900,6 +900,10 @@ impl Service {
                     })
                 }))
             }
+            Request::UndoTurn { checkpoint } => match self.plan_undo(&checkpoint) {
+                Ok(plan) => plan,
+                Err(error) => Step::Done(Err(error)),
+            },
             Request::RestoreCheckpoint { checkpoint } => match self.plan_restore(&checkpoint) {
                 Ok(plan) => plan,
                 Err(error) => Step::Done(Err(error)),
@@ -1016,6 +1020,7 @@ impl Service {
             | Request::CheckoutBranch { .. }
             | Request::RemoveWorkspace { .. }
             | Request::RestoreCheckpoint { .. }
+            | Request::UndoTurn { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
             | Request::WorkspaceHistory { .. }
@@ -3453,6 +3458,73 @@ impl Service {
             text,
             &crate::attachment::AttachmentStore::new(self.paths.attachments()),
         )
+    }
+
+    /// Reserve every overlapping workspace while a guarded undo runs off the
+    /// service lock. An alias or nested workspace cannot start a writer meanwhile.
+    fn plan_undo(&mut self, id: &CheckpointId) -> Result<Step, RpcError> {
+        let checkpoint = checkpoint::get(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::not_found(format!("no checkpoint with id {}", id.0)))?;
+        let evidence = checkpoint::undo_state(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| {
+                RpcError::failed("this checkpoint has no supported turn undo evidence")
+            })?;
+        let worktree = self.worktree(&checkpoint.workspace)?;
+        let mut affected = vec![checkpoint.workspace.clone()];
+        for project in self.projects()? {
+            // Drop the database guard before looking up each workspace again.
+            let worktrees = project::list_worktrees(&self.conn(), &project.name).map_err(failed)?;
+            for other in worktrees {
+                if checkpoint::undo::paths_overlap(&worktree.path, &other.path) {
+                    let workspace = other.workspace_id();
+                    self.worktree(&workspace)?;
+                    if !affected.contains(&workspace) {
+                        affected.push(workspace);
+                    }
+                }
+            }
+        }
+        self.refuse_while_running(|workspace| affected.contains(workspace))?;
+        for workspace in &affected {
+            self.busy.insert(workspace.clone(), "being undone");
+        }
+        Ok(Step::Away(Box::new(move || {
+            let kept = checkpoint::snapshot(
+                &worktree.path,
+                checkpoint::TurnRef {
+                    workspace: &checkpoint.workspace,
+                    session: &checkpoint.session,
+                    turn: checkpoint.turn,
+                },
+                &format!("before undoing: {}", checkpoint.label),
+                now(),
+            );
+            let undone = match &kept {
+                Ok(_) => checkpoint::Checkpoints::new(&worktree.path).undo_turn(&evidence),
+                Err(_) => Ok(()),
+            };
+            Box::new(move |service: &mut Service| {
+                for workspace in affected {
+                    service.busy.remove(&workspace);
+                }
+                let kept = kept.map_err(failed)?;
+                checkpoint::insert(&service.conn(), &kept).map_err(failed)?;
+                undone.map_err(failed)?;
+                service
+                    .conn()
+                    .execute(
+                        "UPDATE checkpoints SET undo_state = NULL WHERE id = ?1",
+                        [&checkpoint.id.0],
+                    )
+                    .map_err(failed)?;
+                service.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            })
+        })))
     }
 
     /// Put a workspace back to the state a checkpoint captured.

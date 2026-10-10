@@ -1043,6 +1043,18 @@ impl Supervisor {
         let queued = self.queued.clone();
         let cancelled = Arc::new(AtomicBool::new(false));
 
+        // A process can edit its worktree before emitting its first event.
+        // Capture before spawning, so even those first edits belong to the
+        // turn rather than becoming part of the state Undo must preserve.
+        let turns_so_far = context.turns_completed(&session);
+        let turn_start = match checkpoint::begin(&spec.workspace_path, &session, turns_so_far + 1) {
+            Ok(start) => Some(start),
+            Err(error) => {
+                tracing::warn!(%error, session = %session, "could not capture the turn's starting state");
+                None
+            }
+        };
+
         let mut child = match spawn(
             &command,
             &spec,
@@ -1107,9 +1119,6 @@ impl Supervisor {
             let session = session.clone();
             let cancelled = cancelled.clone();
             let workspace_path = spec.workspace_path.clone();
-            // A turn is one process, so the driver's own counter restarts with
-            // it; the session's count is what the transcript is numbered by.
-            let turns_so_far = self.context.turns_completed(&session);
             let steer = steer.clone();
             let requests = requests.clone();
             async move {
@@ -1122,6 +1131,7 @@ impl Supervisor {
                         session: &session,
                         workspace_path: &workspace_path,
                         turns_so_far,
+                        turn_start,
                         provider: driver.id(),
                         model: spec.model.as_deref(),
                         reasoning_effort: spec.reasoning_effort.as_deref(),
@@ -1259,6 +1269,8 @@ struct Turn<'a> {
     /// Turns already completed, so the reader's own per-process count carries
     /// on rather than restarting at one.
     turns_so_far: u32,
+    /// Captured before spawning, including edits made before vendor output.
+    turn_start: Option<checkpoint::TurnStart>,
     /// Effective options recorded before vendor output so provenance exists
     /// for every driver and survives later option changes.
     provider: &'a str,
@@ -1300,6 +1312,7 @@ async fn pump(
         session,
         workspace_path,
         turns_so_far,
+        turn_start,
         provider,
         model,
         reasoning_effort,
@@ -1330,17 +1343,6 @@ async fn pump(
     let mut parse = ParseState {
         turn: turns_so_far,
         ..parse
-    };
-    // Captured before the agent runs, so a file the user edited in the terminal
-    // between turns counts as part of what the agent was handed rather than as
-    // part of what it did (§3.3 N8). Failing to take it is not a reason to stop
-    // a turn, so it is logged and the turn carries on without it.
-    let turn_start = match checkpoint::begin(workspace_path, session, turns_so_far + 1) {
-        Ok(start) => Some(start),
-        Err(error) => {
-            tracing::warn!(%error, session = %session, "could not capture the turn's starting state");
-            None
-        }
     };
     let mut reported: Option<(SessionState, Option<String>)> = None;
     // What the agent last said, which is the useful label for the checkpoint

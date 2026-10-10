@@ -12,6 +12,7 @@
 use crate::git;
 
 pub mod turns;
+pub mod undo;
 
 use anyhow::Result;
 use ginka_protocol::model::Checkpoint;
@@ -98,8 +99,35 @@ pub fn take(
             "UPDATE checkpoints SET start_commit = ?2, base_commit = ?3 WHERE id = ?1",
             rusqlite::params![checkpoint.id.0, start.commit, start.base_commit],
         )?;
+        if let Some(state) =
+            Checkpoints::new(workspace_path).capture_undo(start, &checkpoint.commit)?
+        {
+            Checkpoints::new(workspace_path).keep_undo(&undo_reference(&checkpoint.id), &state)?;
+            conn.execute(
+                "UPDATE checkpoints SET undo_state = ?2 WHERE id = ?1",
+                rusqlite::params![checkpoint.id.0, serde_json::to_string(&state)?],
+            )?;
+            checkpoint.can_undo = true;
+        }
     }
     Ok(checkpoint)
+}
+
+/// The extra reachability root retaining an undo's staged snapshots.
+pub fn undo_reference(id: &CheckpointId) -> String {
+    format!("refs/ginka/undo/{}", id.0)
+}
+
+/// Durable undo evidence, absent for older or unsupported checkpoints.
+pub fn undo_state(conn: &Connection, id: &CheckpointId) -> Result<Option<undo::UndoState>> {
+    let json: Option<String> = conn.query_row(
+        "SELECT undo_state FROM checkpoints WHERE id = ?1",
+        [&id.0],
+        |row| row.get(0),
+    )?;
+    json.map(|json| serde_json::from_str(&json))
+        .transpose()
+        .map_err(Into::into)
 }
 
 /// Snapshot the worktree into a checkpoint without storing it: the git half
@@ -126,6 +154,7 @@ pub fn snapshot(
         commit,
         label,
         has_turn_start: false,
+        can_undo: false,
         created_at: now,
     })
 }
@@ -203,6 +232,7 @@ pub fn prune(
         if let Err(error) = git::drop_snapshot(workspace_path, &reference(&checkpoint.id)) {
             tracing::debug!(%error, id = checkpoint.id.0, "no ref to drop for this checkpoint");
         }
+        let _ = git::drop_snapshot(workspace_path, &undo_reference(&checkpoint.id));
         conn.execute("DELETE FROM checkpoints WHERE id = ?1", [&checkpoint.id.0])?;
         dropped += 1;
     }
@@ -224,7 +254,7 @@ fn trim_label(label: &str) -> String {
     format!("{kept}…")
 }
 
-const SELECT: &str = "SELECT id, session_id, workspace_id, turn, commit_id, label, created_at, start_commit IS NOT NULL \
+const SELECT: &str = "SELECT id, session_id, workspace_id, turn, commit_id, label, created_at, start_commit IS NOT NULL, undo_state IS NOT NULL \
      FROM checkpoints";
 const ORDER: &str = "ORDER BY created_at DESC, turn DESC";
 
@@ -238,6 +268,7 @@ fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Checkpoint> {
         label: row.get(5)?,
         created_at: row.get(6)?,
         has_turn_start: row.get(7)?,
+        can_undo: row.get(8)?,
     })
 }
 
@@ -279,6 +310,7 @@ mod tests {
             commit: format!("commit-{id}"),
             label: format!("turn {turn}"),
             has_turn_start: false,
+            can_undo: false,
             created_at: at,
         }
     }

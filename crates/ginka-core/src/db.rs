@@ -118,6 +118,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0027_workspace_folder",
         include_str!("../../../db/migrations/0027_workspace_folder.sql"),
     ),
+    (
+        "0028_turn_undo",
+        include_str!("../../../db/migrations/0028_turn_undo.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.

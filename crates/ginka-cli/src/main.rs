@@ -1321,6 +1321,12 @@ enum CheckpointCommand {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Undo a completed turn, preserving its initial files and staging.
+    /// Refuses later edits, changed HEAD and active overlapping agents.
+    Undo {
+        /// The completed turn's checkpoint id, from `checkpoint list`.
+        checkpoint: String,
+    },
     /// Put a workspace back to a checkpoint's state.
     ///
     /// What is there now is snapshotted first, so this is reversible.
@@ -2492,6 +2498,9 @@ fn request_for(command: Command) -> Result<Request> {
 
         Command::Checkpoint(CheckpointCommand::List { workspace }) => Request::ListCheckpoints {
             workspace: WorkspaceId(workspace),
+        },
+        Command::Checkpoint(CheckpointCommand::Undo { checkpoint }) => Request::UndoTurn {
+            checkpoint: CheckpointId(checkpoint),
         },
         Command::Checkpoint(CheckpointCommand::Restore { checkpoint }) => {
             Request::RestoreCheckpoint {
@@ -3898,6 +3907,13 @@ mod ginka_cli_format {
         use super::*;
         use crate::{ChangeSource, Cli, Request, request_for};
         use clap::Parser;
+
+        #[test]
+        fn checkpoint_undo_uses_the_guarded_daemon_request() {
+            let cli = Cli::try_parse_from(["ginka", "checkpoint", "undo", "c-1"]).unwrap();
+            assert!(matches!(request_for(cli.command).unwrap(),
+                Request::UndoTurn { checkpoint } if checkpoint.0 == "c-1"));
+        }
 
         #[test]
         fn changes_turn_selects_one_completed_checkpoint() {

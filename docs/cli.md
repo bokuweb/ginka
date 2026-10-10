@@ -359,7 +359,8 @@ Serve Ginka's operations to an agent over MCP, on stdin and stdout
 
 ## `ginka checkpoint`
 
-Rewind a workspace to a saved state
+Undo a completed turn or restore a workspace to a saved state
 
 - `ginka checkpoint list` — List a workspace's checkpoints, newest first (`ginka checkpoint list <WORKSPACE>`)
+- `ginka checkpoint undo` — Restore a completed turn's starting files and partial staging without moving HEAD (`ginka checkpoint undo <CHECKPOINT>`). Refuses later file/index edits, changed HEAD/branch and active agents in overlapping workspace roots. A recovery checkpoint is retained before mutation; older or unsupported checkpoints have ordinary restore only, including turns exposing pre-existing ignored files.
 - `ginka checkpoint restore` — Put a workspace back to a checkpoint's state (`ginka checkpoint restore <CHECKPOINT>`)

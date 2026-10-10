@@ -667,6 +667,18 @@ transcript.rewind.yes:
 transcript.rewind.no:
   en: Keep
   ja: やめる
+transcript.undo.label:
+  en: Undo turn
+  ja: ターンを取り消す
+transcript.undo.hint:
+  en: Restore pre-turn files and staging if no later edits, commits or overlapping agents exist
+  ja: 後の編集・コミット・同じ場所で動くエージェントがなければ、開始前のファイルと staging を復元
+transcript.undo.working:
+  en: Undoing…
+  ja: 取り消し中…
+transcript.undo.failed:
+  en: "Undo refused: %{error}"
+  ja: "取り消せませんでした：%{error}"
 transcript.fork.label:
   en: Fork
   ja: フォーク

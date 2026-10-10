@@ -393,6 +393,7 @@ Dragging across the terminal grid selects exact character cells in either direct
   the composer under a banner that says what will happen; sending rewinds the
   worktree to before that prompt and continues in a fork on a fresh thread, so
   the original conversation and its changes are still there.
+- **Turn undo** — a completed turn with supported checkpoint evidence offers a keyboard-focusable *Undo* button in its boundary row. The action resolves the checkpoint by conversation and turn, restores starting files and partial staging through the daemon, and retains a recovery checkpoint. It shows *Undoing…* while pending and the daemon's refusal beside that turn when files, staging, HEAD/branch or overlapping active agents make the operation unsafe. Unsupported and already-undone checkpoints omit the button; ordinary rewind keeps its separate confirmation. Errors wrap below the boundary controls and use the status-error token plus explanatory text.
 - **Fan-out and compare** — before a conversation starts, the composer offers
   *Try several ways*: a panel above it with an agent a row and a −/+ count
   each (six attempts at most), and *Try N ways*, which starts every attempt in

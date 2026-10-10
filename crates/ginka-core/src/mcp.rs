@@ -938,6 +938,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_undo_turn",
+            description: "Undo a completed turn, preserving its initial files and staging. Refuses later edits, changed HEAD or active agents in overlapping workspaces. Older checkpoints may lack undo evidence.",
+            schema: json!({
+                "type": "object",
+                "properties": {"checkpoint": {"type": "string"}},
+                "required": ["checkpoint"],
+            }),
+        },
+        Tool {
             name: "ginka_restore",
             description: "Put a workspace back to a checkpoint. Destructive: work since is removed, after being snapshotted.",
             schema: json!({
@@ -1525,6 +1534,9 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         "ginka_checkpoints" => Request::ListCheckpoints {
             workspace: WorkspaceId(text("workspace")?),
         },
+        "ginka_undo_turn" => Request::UndoTurn {
+            checkpoint: CheckpointId(text("checkpoint")?),
+        },
         "ginka_restore" => Request::RestoreCheckpoint {
             checkpoint: CheckpointId(text("checkpoint")?),
         },
@@ -1616,6 +1628,16 @@ pub const PARSE_ERROR: i64 = -32700;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_undo_is_available_and_requires_a_checkpoint() {
+        assert!(tools().iter().any(|tool| tool.name == "ginka_undo_turn"));
+        assert!(
+            matches!(request_for("ginka_undo_turn", &json!({ "checkpoint": "c-1" })).unwrap(),
+            Request::UndoTurn { checkpoint } if checkpoint.0 == "c-1")
+        );
+        assert!(request_for("ginka_undo_turn", &json!({})).is_err());
+    }
 
     #[test]
     fn commit_message_generation_preserves_scope_and_rejects_malformed_selections() {

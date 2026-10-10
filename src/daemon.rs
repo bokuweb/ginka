@@ -939,6 +939,14 @@ impl DaemonLink {
         .await;
     }
 
+    /// Undo a supported completed turn and return any guard refusal to the view.
+    pub async fn undo_turn(&self, checkpoint: &CheckpointId) -> Result<(), String> {
+        self.git_sync(Request::UndoTurn {
+            checkpoint: checkpoint.clone(),
+        })
+        .await
+    }
+
     /// Put a workspace back to the state a checkpoint captured.
     pub async fn restore(&self, checkpoint: &CheckpointId) {
         self.ask(Request::RestoreCheckpoint {

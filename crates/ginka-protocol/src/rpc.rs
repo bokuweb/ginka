@@ -1087,6 +1087,13 @@ pub enum Request {
         checkpoint: CheckpointId,
     },
 
+    /// Undo a completed turn while preserving its initial working files and
+    /// staging. Refuses later edits, changed HEAD and active overlapping agents.
+    UndoTurn {
+        /// The completed turn's checkpoint; older snapshots may lack evidence.
+        checkpoint: CheckpointId,
+    },
+
     /// Start a shell in a workspace.
     ///
     /// The daemon owns the pty, so the shell outlives the window that opened

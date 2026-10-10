@@ -771,6 +771,10 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// Completed checkpoint currently being undone through the daemon.
+    undoing: Option<ginka_protocol::CheckpointId>,
+    /// Last refusal, kept with its checkpoint so another turn cannot display it.
+    undo_error: Option<(ginka_protocol::CheckpointId, String)>,
     /// A turn whose conversation can be continued by another agent.
     forking: Option<ForkMenu>,
     /// The fan-out panel above the composer, while it is open.
@@ -1991,6 +1995,8 @@ impl Shell {
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
+            undoing: None,
+            undo_error: None,
             forking: None,
             fan_out: None,
             comparing: None,
@@ -3407,6 +3413,41 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             cx.background_spawn(async move { link.restore(&checkpoint).await })
                 .await;
+        })
+        .detach();
+    }
+
+    /// Undo a completed turn with daemon-side guards and visible refusals.
+    fn undo_turn(&mut self, checkpoint: ginka_protocol::CheckpointId, cx: &mut Context<Self>) {
+        if self.undoing.is_some() {
+            return;
+        }
+        self.undoing = Some(checkpoint.clone());
+        self.undo_error = None;
+        self.rewinding = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requested = checkpoint.clone();
+            let result = cx
+                .background_spawn(async move { link.undo_turn(&requested).await })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.undoing = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(point) = this
+                            .checkpoints
+                            .iter_mut()
+                            .find(|point| point.id == checkpoint)
+                        {
+                            point.can_undo = false;
+                        }
+                    }
+                    Err(error) => this.undo_error = Some((checkpoint, error)),
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -10515,11 +10556,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
-        let checkpoint = self
-            .checkpoints
-            .iter()
-            .find(|checkpoint| checkpoint.turn == turn)
-            .map(|checkpoint| checkpoint.id.clone());
+        let point = self.session.as_ref().and_then(|row| {
+            row.session.as_ref().and_then(|session| {
+                ginka_ui::transcript::checkpoint_for_turn(&self.checkpoints, session, turn)
+            })
+        });
+        let checkpoint = point.map(|point| point.id.clone());
+        let undo = point
+            .filter(|point| point.can_undo)
+            .map(|point| point.id.clone());
+        let undo_error = self
+            .undo_error
+            .as_ref()
+            .filter(|(id, _)| checkpoint.as_ref() == Some(id))
+            .map(|(_, error)| error.clone());
         let asking = self.rewinding == Some(turn);
         let current_agent = self
             .session
@@ -10646,6 +10696,7 @@ impl Shell {
         h_flex()
             .w_full()
             .items_center()
+            .flex_wrap()
             .gap_2()
             .child(rule())
             .children(checkpoint.is_none().then(|| {
@@ -10722,6 +10773,30 @@ impl Shell {
                                     .child(rust_i18n::t!("transcript.rewind.no").to_string()),
                             )
                     }))
+            }))
+            .children(undo.map(|id| {
+                let working = self.undoing.as_ref() == Some(&id);
+                Button::new(SharedString::from(format!("undo-turn-{turn}")))
+                    .ghost()
+                    .disabled(self.undoing.is_some())
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .tooltip(rust_i18n::t!("transcript.undo.hint").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| this.undo_turn(id.clone(), cx)))
+                    .child(if working {
+                        rust_i18n::t!("transcript.undo.working").to_string()
+                    } else {
+                        rust_i18n::t!("transcript.undo.label").to_string()
+                    })
+            }))
+            .children(undo_error.map(|error| {
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(rust_i18n::t!("transcript.undo.failed", error = error).to_string())
             }))
             .children(provenance.map(|provenance| {
                 div()
