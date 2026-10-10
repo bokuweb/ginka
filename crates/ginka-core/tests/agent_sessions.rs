@@ -1724,8 +1724,10 @@ fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
 
     match fixture.ask(Request::GenerateCommitMessage {
         workspace: fixture.workspace.clone(),
+        generation_id: None,
         agent: Some("claude".into()),
         staged: false,
+        paths: Vec::new(),
     }) {
         Response::Ack => {}
         other => panic!("expected an ack, got {other:?}"),
@@ -1766,12 +1768,80 @@ fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
 }
 
 #[test]
+fn selected_commit_message_generation_excludes_other_staged_and_unstaged_work() {
+    let mut fixture = Fixture::new();
+    let worktree = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|summary| summary.id() == fixture.workspace)
+            .map(|summary| summary.worktree.path)
+            .unwrap(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    std::fs::write(worktree.join("[new].txt"), "SELECTED_CURRENT\n").unwrap();
+    std::fs::write(worktree.join("other.txt"), "EXCLUDED_STAGED\n").unwrap();
+    support::git(&worktree, &["add", "other.txt"]);
+    std::fs::write(worktree.join("other.txt"), "EXCLUDED_UNSTAGED\n").unwrap();
+    let staged = support::git(&worktree, &["diff", "--cached"]);
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"one-shot"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{prompt_json}}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"one-shot"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.ask(Request::GenerateCommitMessage {
+            workspace: fixture.workspace.clone(),
+            generation_id: Some("selected-test".into()),
+            agent: Some("claude".into()),
+            staged: false,
+            paths: vec!["[new].txt".into()],
+        }),
+        Response::Ack
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let message = loop {
+        if let Some((message, error)) = fixture.recorder.all().into_iter().find_map(|event| {
+            if let DaemonEvent::CommitMessageGenerated {
+                generation_id,
+                message,
+                error,
+                ..
+            } = event
+            {
+                assert_eq!(generation_id.as_deref(), Some("selected-test"));
+                Some((message, error))
+            } else {
+                None
+            }
+        }) {
+            assert_eq!(error, None);
+            break message.unwrap();
+        }
+        assert!(Instant::now() < deadline, "no message was ever pushed");
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(message.contains("[new].txt"), "{message}");
+    assert!(message.contains("SELECTED_CURRENT"), "{message}");
+    assert!(!message.contains("EXCLUDED_STAGED"), "{message}");
+    assert!(!message.contains("EXCLUDED_UNSTAGED"), "{message}");
+    assert!(!message.contains("other.txt"), "{message}");
+    assert_eq!(support::git(&worktree, &["diff", "--cached"]), staged);
+}
+
+#[test]
 fn a_clean_worktree_has_no_commit_message_to_write() {
     let mut fixture = Fixture::new();
     fixture.ask(Request::GenerateCommitMessage {
         workspace: fixture.workspace.clone(),
+        generation_id: None,
         agent: Some("claude".into()),
         staged: false,
+        paths: Vec::new(),
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -2524,6 +2594,229 @@ fn restoring_a_checkpoint_that_does_not_exist_is_not_found() {
         })
         .expect_err("there is no such checkpoint");
     assert_eq!(error.code, "not_found");
+}
+
+/// A real driver turn held open while the fixture changes its worktree.
+fn undo_test_turn(fixture: &mut Fixture) -> ginka_protocol::model::Checkpoint {
+    let session = fixture.start(
+        &[
+            r#"{"type":"system","subtype":"init","session_id":"undo-vendor"}"#,
+            "#read",
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"undo-vendor"}"#,
+        ]
+        .join("\n"),
+        "change files",
+    );
+    let path = fixture.workspace_path();
+    // The start snapshot must already exist when spawning returns, even if
+    // the vendor has not emitted anything or reached Running yet.
+    std::fs::write(path.join("README.md"), "agent version\n").unwrap();
+    std::fs::write(path.join("agent.txt"), "agent addition\n").unwrap();
+    support::git(&path, &["add", "."]);
+    fixture.wait_for_state(&session, SessionState::Running);
+    fixture
+        .service
+        .handle(Request::SendMessage {
+            session: session.clone(),
+            text: "finish".into(),
+        })
+        .unwrap();
+    assert_eq!(fixture.settle(&session), SessionState::Finished);
+    fixture
+        .checkpoints()
+        .into_iter()
+        .find(|point| point.session == session && point.turn == 1)
+        .expect("the completed turn has a checkpoint")
+}
+
+#[test]
+fn turn_undo_survives_restart_preserves_staging_and_retains_a_recovery_checkpoint() {
+    let mut fixture = Fixture::new();
+    let path = fixture.workspace_path();
+    let head = support::git(&path, &["rev-parse", "HEAD"]);
+    std::fs::write(path.join("README.md"), "staged draft\n").unwrap();
+    support::git(&path, &["add", "README.md"]);
+    std::fs::write(path.join("README.md"), "working draft\n").unwrap();
+    std::fs::write(path.join("notes.txt"), "untracked draft\n").unwrap();
+    let completed = undo_test_turn(&mut fixture);
+    assert!(completed.can_undo);
+    fixture.restart();
+    assert!(matches!(
+        fixture
+            .service
+            .handle(Request::UndoTurn {
+                checkpoint: completed.id.clone(),
+            })
+            .unwrap(),
+        Response::Ack
+    ));
+    assert_eq!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "working draft\n"
+    );
+    assert_eq!(support::git(&path, &["show", ":README.md"]), "staged draft");
+    assert_eq!(
+        std::fs::read_to_string(path.join("notes.txt")).unwrap(),
+        "untracked draft\n"
+    );
+    assert!(!path.join("agent.txt").exists());
+    assert_eq!(support::git(&path, &["rev-parse", "HEAD"]), head);
+    let checkpoints = fixture.checkpoints();
+    assert!(
+        !checkpoints
+            .iter()
+            .find(|point| point.id == completed.id)
+            .unwrap()
+            .can_undo
+    );
+    let recovery = checkpoints
+        .iter()
+        .find(|point| point.label.starts_with("before undoing:"))
+        .expect("the replaced files remain reachable");
+    assert!(!recovery.can_undo);
+    assert_eq!(
+        support::git(&path, &["show", &format!("{}:README.md", recovery.commit)]),
+        "agent version"
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::UndoTurn {
+                checkpoint: completed.id
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn turn_undo_refuses_later_edits_and_checkpoints_without_evidence() {
+    let mut fixture = Fixture::new();
+    let completed = undo_test_turn(&mut fixture);
+    let path = fixture.workspace_path();
+    std::fs::write(path.join("README.md"), "later hand edit\n").unwrap();
+    let error = fixture
+        .service
+        .handle(Request::UndoTurn {
+            checkpoint: completed.id.clone(),
+        })
+        .unwrap_err();
+    assert!(error.message.contains("files changed"), "{error:?}");
+    assert_eq!(
+        std::fs::read_to_string(path.join("README.md")).unwrap(),
+        "later hand edit\n"
+    );
+    assert!(
+        fixture
+            .checkpoints()
+            .iter()
+            .find(|point| point.id == completed.id)
+            .unwrap()
+            .can_undo
+    );
+    let preflight = fixture
+        .checkpoints()
+        .into_iter()
+        .find(|point| point.turn == 0)
+        .unwrap();
+    assert!(
+        fixture
+            .service
+            .handle(Request::UndoTurn {
+                checkpoint: preflight.id
+            })
+            .unwrap_err()
+            .message
+            .contains("no supported turn undo evidence")
+    );
+    assert_eq!(
+        fixture
+            .service
+            .handle(Request::UndoTurn {
+                checkpoint: ginka_protocol::CheckpointId("absent".into()),
+            })
+            .unwrap_err()
+            .code,
+        "not_found"
+    );
+}
+
+#[test]
+fn turn_undo_excludes_agents_in_overlapping_folders_but_allows_sibling_worktrees() {
+    let mut fixture = Fixture::new();
+    let completed = undo_test_turn(&mut fixture);
+    let target = fixture.workspace.clone();
+    let parent_project = match fixture
+        .service
+        .handle(Request::AddProject {
+            path: fixture.paths.worktrees(),
+            label: Some("parent".into()),
+        })
+        .unwrap()
+    {
+        Response::Project { project } => project.name,
+        other => panic!("expected project, got {other:?}"),
+    };
+    let parent = match fixture
+        .service
+        .handle(Request::ListWorkspaces { project: None })
+        .unwrap()
+    {
+        Response::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|workspace| workspace.worktree.project == parent_project)
+            .unwrap()
+            .id(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    fixture.workspace = parent;
+    let running = fixture.start("#read", "work in the parent folder");
+    let error = fixture
+        .service
+        .handle(Request::UndoTurn {
+            checkpoint: completed.id.clone(),
+        })
+        .unwrap_err();
+    assert!(error.message.contains("running"), "{error:?}");
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: running.clone(),
+        })
+        .unwrap();
+    fixture.settle(&running);
+    let sibling = match fixture
+        .service
+        .handle(Request::CreateWorkspace {
+            project: ProjectName("comet".into()),
+            branch: "sibling".into(),
+            base: None,
+        })
+        .unwrap()
+    {
+        Response::Workspace { workspace } => workspace.id(),
+        other => panic!("expected workspace, got {other:?}"),
+    };
+    fixture.workspace = sibling;
+    let running = fixture.start("#read", "work in an independent sibling");
+    fixture
+        .service
+        .handle(Request::UndoTurn {
+            checkpoint: completed.id,
+        })
+        .unwrap();
+    assert!(matches!(
+        fixture.state(&running),
+        SessionState::Starting | SessionState::Running
+    ));
+    fixture
+        .service
+        .handle(Request::CancelSession {
+            session: running.clone(),
+        })
+        .unwrap();
+    fixture.settle(&running);
+    fixture.workspace = target;
+    assert!(!fixture.workspace_path().join("agent.txt").exists());
 }
 
 #[test]
@@ -3938,6 +4231,7 @@ fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
             message: "Add the parser".into(),
             all: true,
             amend: false,
+            paths: Vec::new(),
         })
         .unwrap_err();
     assert!(

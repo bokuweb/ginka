@@ -667,6 +667,18 @@ transcript.rewind.yes:
 transcript.rewind.no:
   en: Keep
   ja: やめる
+transcript.undo.label:
+  en: Undo turn
+  ja: ターンを取り消す
+transcript.undo.hint:
+  en: Restore pre-turn files and staging if no later edits, commits or overlapping agents exist
+  ja: 後の編集・コミット・同じ場所で動くエージェントがなければ、開始前のファイルと staging を復元
+transcript.undo.working:
+  en: Undoing…
+  ja: 取り消し中…
+transcript.undo.failed:
+  en: "Undo refused: %{error}"
+  ja: "取り消せませんでした：%{error}"
 transcript.fork.label:
   en: Fork
   ja: フォーク
@@ -2547,3 +2559,32 @@ sidebar.folder.collapse:
 sidebar.folder.search_open:
   en: Matching folders stay open while searching
   ja: 検索中は一致するフォルダーを展開します
+
+surface.files.image.zoom_out:
+  en: "Zoom out"
+  ja: "縮小"
+surface.files.image.zoom_in:
+  en: "Zoom in"
+  ja: "拡大"
+surface.files.image.fit:
+  en: "Fit"
+  ja: "全体を表示"
+surface.files.image.help:
+  en: "Pinch or Ctrl/⌘ + scroll to zoom; drag to pan. Keyboard: +/−, arrows, 0 to fit. Double-click to fit. Scale is relative to fit."
+  ja: "ピンチまたは Ctrl/⌘ + スクロールで拡大・縮小、ドラッグで移動。キー: +/−、矢印、0 で全体表示。ダブルクリックでも全体表示。倍率は全体表示が基準です。"
+
+surface.git.selected_files:
+  en: Selected files (%{count})
+  ja: 選択したファイル（%{count}件）
+surface.git.selection_hint:
+  en: Commit complete file contents, including unstaged edits. Other staged files are preserved.
+  ja: 未ステージの変更を含め、選択したファイル全体をコミットします。他のファイルのステージ状態は保持します。
+surface.git.clear_selection:
+  en: Clear selection
+  ja: 選択を解除
+surface.git.select_file:
+  en: Select %{path} for commit
+  ja: '%{path} をコミット対象に選択'
+surface.git.needs_selection:
+  en: Select at least one changed file, or clear the selection.
+  ja: 変更されたファイルを1件以上選択するか、選択を解除してください。

@@ -284,6 +284,52 @@ impl Client {
         }
     }
 
+    /// Generate a commit message and wait for the daemon's completed result.
+    ///
+    /// Use a dedicated connection without another event reader: this consumes
+    /// its push stream. A fresh id distinguishes this result from simultaneous
+    /// generation by other clients in the same workspace.
+    /// Nonempty `paths` describe complete selected files and exclude unrelated
+    /// staged work; that scope cannot be combined with `staged`.
+    pub async fn generate_commit_message(
+        &self,
+        workspace: ginka_protocol::WorkspaceId,
+        agent: Option<String>,
+        staged: bool,
+        paths: Vec<String>,
+    ) -> Result<String> {
+        let events = self.events();
+        let generation_id = uuid::Uuid::new_v4().to_string();
+        self.request(Request::GenerateCommitMessage {
+            workspace: workspace.clone(),
+            generation_id: Some(generation_id.clone()),
+            agent,
+            staged,
+            paths,
+        })
+        .await
+        .map_err(|error| anyhow!("{error}"))?;
+        loop {
+            let event = events
+                .recv()
+                .await
+                .context("the daemon closed the connection before generating a commit message")?;
+            if let DaemonEvent::CommitMessageGenerated {
+                workspace: done,
+                generation_id: completed,
+                message,
+                error,
+            } = event.payload
+                && done == workspace
+                && completed.as_deref() == Some(generation_id.as_str())
+            {
+                return message.ok_or_else(|| {
+                    anyhow!(error.unwrap_or_else(|| "no message was written".into()))
+                });
+            }
+        }
+    }
+
     /// The next push, waiting for one if none has arrived.
     pub async fn next_event(&self) -> Option<Event> {
         self.events.recv().await.ok()
@@ -359,8 +405,156 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::wire_config;
+    use super::*;
     use ginka_protocol::MAX_WIRE_MESSAGE_BYTES;
+
+    fn commit_client(events: Vec<Event>, before_ack: bool) -> Client {
+        let (outgoing, requests) = async_channel::unbounded();
+        let (pushes, received) = async_channel::unbounded();
+        let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
+        let waiting = pending.clone();
+        let pump = smol::spawn(async move {
+            let ClientMessage::Request { id, payload } = requests.recv().await.unwrap() else {
+                panic!("expected a request");
+            };
+            let Request::GenerateCommitMessage {
+                workspace,
+                generation_id: Some(generation_id),
+                agent: Some(agent),
+                staged: false,
+                paths,
+            } = *payload
+            else {
+                panic!("expected scoped generation with an id");
+            };
+            assert_eq!(workspace.0, "comet/harbor");
+            assert_eq!(agent, "claude");
+            assert_eq!(paths, ["[new].txt"]);
+            assert!(uuid::Uuid::parse_str(&generation_id).is_ok());
+            if !before_ack {
+                answer(&waiting, id, Ok(Response::Ack));
+            }
+            for mut event in events {
+                if let DaemonEvent::CommitMessageGenerated {
+                    generation_id: result_id,
+                    ..
+                } = &mut event.payload
+                    && result_id.as_deref() == Some("current")
+                {
+                    *result_id = Some(generation_id.clone());
+                }
+                pushes.send(event).await.unwrap();
+            }
+            if before_ack {
+                answer(&waiting, id, Ok(Response::Ack));
+            }
+        });
+        Client {
+            outgoing,
+            events: received,
+            pending,
+            next_id: AtomicU64::new(1),
+            current_seq: 0,
+            version: "test".into(),
+            resync_needed: Arc::new(AtomicBool::new(false)),
+            _pump: pump,
+        }
+    }
+
+    fn generated(workspace: &str, message: Option<&str>, error: Option<&str>) -> Event {
+        Event {
+            seq: 1,
+            payload: DaemonEvent::CommitMessageGenerated {
+                workspace: ginka_protocol::WorkspaceId(workspace.into()),
+                generation_id: Some("current".into()),
+                message: message.map(str::to_string),
+                error: error.map(str::to_string),
+            },
+        }
+    }
+
+    #[test]
+    fn generated_commit_messages_wait_for_the_result_before_or_after_the_ack() {
+        smol::block_on(async {
+            for before_ack in [true, false] {
+                let client = commit_client(
+                    vec![
+                        generated("another/workspace", Some("Unrelated"), None),
+                        {
+                            let mut event =
+                                generated("comet/harbor", Some("Another client's message"), None);
+                            if let DaemonEvent::CommitMessageGenerated { generation_id, .. } =
+                                &mut event.payload
+                            {
+                                *generation_id = Some("foreign".into());
+                            }
+                            event
+                        },
+                        {
+                            let mut event = generated("comet/harbor", Some("Legacy result"), None);
+                            if let DaemonEvent::CommitMessageGenerated { generation_id, .. } =
+                                &mut event.payload
+                            {
+                                *generation_id = None;
+                            }
+                            event
+                        },
+                        generated("comet/harbor", Some("Add a parser\n"), None),
+                    ],
+                    before_ack,
+                );
+                assert_eq!(
+                    client
+                        .generate_commit_message(
+                            ginka_protocol::WorkspaceId("comet/harbor".into()),
+                            Some("claude".into()),
+                            false,
+                            vec!["[new].txt".into()],
+                        )
+                        .await
+                        .unwrap(),
+                    "Add a parser\n"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn generated_commit_message_failures_reach_the_caller() {
+        smol::block_on(async {
+            let client = commit_client(
+                vec![generated("comet/harbor", None, Some("nothing to describe"))],
+                false,
+            );
+            let error = client
+                .generate_commit_message(
+                    ginka_protocol::WorkspaceId("comet/harbor".into()),
+                    Some("claude".into()),
+                    false,
+                    vec!["[new].txt".into()],
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("nothing to describe"));
+        });
+    }
+
+    #[test]
+    fn a_disconnect_does_not_leave_commit_message_generation_waiting() {
+        smol::block_on(async {
+            let client = commit_client(Vec::new(), false);
+            let error = client
+                .generate_commit_message(
+                    ginka_protocol::WorkspaceId("comet/harbor".into()),
+                    Some("claude".into()),
+                    false,
+                    vec!["[new].txt".into()],
+                )
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains("closed"));
+        });
+    }
 
     #[test]
     fn the_client_bounds_daemon_messages_and_their_frames() {

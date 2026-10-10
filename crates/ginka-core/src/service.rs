@@ -623,10 +623,17 @@ impl Service {
                 message,
                 all,
                 amend,
+                paths,
             } => self.away_in(
                 &workspace,
                 move |path| {
-                    if amend {
+                    if !paths.is_empty() {
+                        anyhow::ensure!(
+                            all && !amend,
+                            "selected files cannot be combined with staged-only or amend"
+                        );
+                        git::commit_selected(path, &message, &paths)
+                    } else if amend {
                         git::amend(path, &message, all)
                     } else {
                         anyhow::ensure!(!message.trim().is_empty(), "a commit needs a message");
@@ -893,6 +900,10 @@ impl Service {
                     })
                 }))
             }
+            Request::UndoTurn { checkpoint } => match self.plan_undo(&checkpoint) {
+                Ok(plan) => plan,
+                Err(error) => Step::Done(Err(error)),
+            },
             Request::RestoreCheckpoint { checkpoint } => match self.plan_restore(&checkpoint) {
                 Ok(plan) => plan,
                 Err(error) => Step::Done(Err(error)),
@@ -1009,6 +1020,7 @@ impl Service {
             | Request::CheckoutBranch { .. }
             | Request::RemoveWorkspace { .. }
             | Request::RestoreCheckpoint { .. }
+            | Request::UndoTurn { .. }
             | Request::ListWorkspaces { .. }
             | Request::WorkspaceChanges { .. }
             | Request::WorkspaceHistory { .. }
@@ -1920,9 +1932,17 @@ impl Service {
             }
             Request::GenerateCommitMessage {
                 workspace,
+                generation_id,
                 agent,
                 staged,
-            } => self.generate_commit_message(workspace, agent.as_deref(), staged),
+                paths,
+            } => self.generate_commit_message(
+                workspace,
+                generation_id,
+                agent.as_deref(),
+                staged,
+                paths,
+            ),
             Request::CreateGeneratedPullRequest {
                 workspace,
                 draft,
@@ -3440,6 +3460,73 @@ impl Service {
         )
     }
 
+    /// Reserve every overlapping workspace while a guarded undo runs off the
+    /// service lock. An alias or nested workspace cannot start a writer meanwhile.
+    fn plan_undo(&mut self, id: &CheckpointId) -> Result<Step, RpcError> {
+        let checkpoint = checkpoint::get(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| RpcError::not_found(format!("no checkpoint with id {}", id.0)))?;
+        let evidence = checkpoint::undo_state(&self.conn(), id)
+            .map_err(failed)?
+            .ok_or_else(|| {
+                RpcError::failed("this checkpoint has no supported turn undo evidence")
+            })?;
+        let worktree = self.worktree(&checkpoint.workspace)?;
+        let mut affected = vec![checkpoint.workspace.clone()];
+        for project in self.projects()? {
+            // Drop the database guard before looking up each workspace again.
+            let worktrees = project::list_worktrees(&self.conn(), &project.name).map_err(failed)?;
+            for other in worktrees {
+                if checkpoint::undo::paths_overlap(&worktree.path, &other.path) {
+                    let workspace = other.workspace_id();
+                    self.worktree(&workspace)?;
+                    if !affected.contains(&workspace) {
+                        affected.push(workspace);
+                    }
+                }
+            }
+        }
+        self.refuse_while_running(|workspace| affected.contains(workspace))?;
+        for workspace in &affected {
+            self.busy.insert(workspace.clone(), "being undone");
+        }
+        Ok(Step::Away(Box::new(move || {
+            let kept = checkpoint::snapshot(
+                &worktree.path,
+                checkpoint::TurnRef {
+                    workspace: &checkpoint.workspace,
+                    session: &checkpoint.session,
+                    turn: checkpoint.turn,
+                },
+                &format!("before undoing: {}", checkpoint.label),
+                now(),
+            );
+            let undone = match &kept {
+                Ok(_) => checkpoint::Checkpoints::new(&worktree.path).undo_turn(&evidence),
+                Err(_) => Ok(()),
+            };
+            Box::new(move |service: &mut Service| {
+                for workspace in affected {
+                    service.busy.remove(&workspace);
+                }
+                let kept = kept.map_err(failed)?;
+                checkpoint::insert(&service.conn(), &kept).map_err(failed)?;
+                undone.map_err(failed)?;
+                service
+                    .conn()
+                    .execute(
+                        "UPDATE checkpoints SET undo_state = NULL WHERE id = ?1",
+                        [&checkpoint.id.0],
+                    )
+                    .map_err(failed)?;
+                service.events.emit(DaemonEvent::WorkspacesChanged {
+                    project: worktree.project.clone(),
+                });
+                Ok(Response::Ack)
+            })
+        })))
+    }
+
     /// Put a workspace back to the state a checkpoint captured.
     ///
     /// Restoring is destructive — files written since are removed — so the
@@ -3554,9 +3641,16 @@ impl Service {
     fn generate_commit_message(
         &mut self,
         workspace: WorkspaceId,
+        generation_id: Option<String>,
         agent: Option<&str>,
         staged: bool,
+        paths: Vec<String>,
     ) -> Result<Response, RpcError> {
+        if staged && !paths.is_empty() {
+            return Err(RpcError::failed(
+                "selected files cannot be combined with staged-only",
+            ));
+        }
         let worktree = self.worktree(&workspace)?;
         let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
         let agent = agent
@@ -3578,16 +3672,21 @@ impl Service {
         );
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let outcome =
-                crate::commit::describe(&worktree.path, staged).and_then(|(files, diff)| {
-                    crate::commit::generate(driver.as_ref(), &worktree.path, &env, &files, &diff)
-                });
+            let outcome = (if paths.is_empty() {
+                crate::commit::describe(&worktree.path, staged)
+            } else {
+                git::describe_selected(&worktree.path, &paths)
+            })
+            .and_then(|(files, diff)| {
+                crate::commit::generate(driver.as_ref(), &worktree.path, &env, &files, &diff)
+            });
             let (message, error) = match outcome {
                 Ok(message) => (Some(message.to_git_message()), None),
                 Err(error) => (None, Some(format!("{error:#}"))),
             };
             events.emit(DaemonEvent::CommitMessageGenerated {
                 workspace,
+                generation_id,
                 message,
                 error,
             });

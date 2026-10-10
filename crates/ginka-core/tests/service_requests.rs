@@ -1245,6 +1245,7 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
         message: "keep the good half".into(),
         all: false,
         amend: false,
+        paths: Vec::new(),
     }) {
         Response::Committed { commit } => assert!(!commit.is_empty()),
         other => panic!("expected a commit, got {other:?}"),
@@ -1317,6 +1318,90 @@ fn review_requests_keep_literal_paths_and_neighbouring_changes_separate() {
         "neighbour\n"
     );
     assert_eq!(staged_paths(&mut fixture), ["a.txt"]);
+}
+
+#[test]
+fn selected_commits_cross_the_service_without_consuming_other_staging() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "selected-commit".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let worktree = &workspace.worktree.path;
+    std::fs::write(worktree.join("README.md"), "staged\n").unwrap();
+    fixture.ask(Request::StageFile {
+        workspace: workspace.id(),
+        path: "README.md".into(),
+        staged: true,
+    });
+    std::fs::write(worktree.join("README.md"), "staged and later\n").unwrap();
+    std::fs::write(worktree.join("new.txt"), "selected\n").unwrap();
+    assert!(matches!(
+        fixture.ask(Request::Commit {
+            workspace: workspace.id(),
+            message: "Select new file".into(),
+            all: true,
+            amend: false,
+            paths: vec!["new.txt".into()],
+        }),
+        Response::Committed { .. }
+    ));
+    let staged = match fixture.ask(Request::WorkspaceChanges {
+        workspace: workspace.id(),
+        source: ChangeSource::Staged,
+        context_lines: None,
+    }) {
+        Response::Changes { changes } => changes,
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(
+        staged
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<Vec<_>>(),
+        ["README.md"]
+    );
+    assert!(
+        staged.files[0]
+            .hunks
+            .iter()
+            .flat_map(|hunk| &hunk.lines)
+            .any(|line| line.text == "staged")
+    );
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "staged and later\n"
+    );
+    for (all, amend) in [(false, false), (true, true)] {
+        let error = fixture
+            .service
+            .handle(Request::Commit {
+                workspace: workspace.id(),
+                message: "Invalid selection".into(),
+                all,
+                amend,
+                paths: vec!["README.md".into()],
+            })
+            .unwrap_err();
+        assert!(error.message.contains("selected"), "{error}");
+    }
+    let error = fixture
+        .service
+        .handle(Request::GenerateCommitMessage {
+            workspace: workspace.id(),
+            generation_id: None,
+            agent: None,
+            staged: true,
+            paths: vec!["README.md".into()],
+        })
+        .unwrap_err();
+    assert!(error.message.contains("selected"), "{error}");
 }
 
 #[test]
@@ -3222,6 +3307,7 @@ fn a_commit_leaves_the_service_free_while_its_hooks_run() {
             message: "add new".into(),
             all: true,
             amend: false,
+            paths: Vec::new(),
         },
         hook,
     );

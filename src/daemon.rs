@@ -568,14 +568,18 @@ impl DaemonLink {
     pub async fn generate_commit_message(
         &self,
         workspace: &WorkspaceId,
+        generation_id: String,
         only_staged: bool,
+        paths: Vec<String>,
     ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         client
             .request(Request::GenerateCommitMessage {
                 workspace: workspace.clone(),
+                generation_id: Some(generation_id),
                 agent: None,
                 staged: only_staged,
+                paths,
             })
             .await
             .map(|_| ())
@@ -588,6 +592,7 @@ impl DaemonLink {
         message: String,
         all: bool,
         amend: bool,
+        paths: Vec<String>,
     ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         match client
@@ -596,6 +601,7 @@ impl DaemonLink {
                 message,
                 all,
                 amend,
+                paths,
             })
             .await
         {
@@ -931,6 +937,14 @@ impl DaemonLink {
             session: session.clone(),
         })
         .await;
+    }
+
+    /// Undo a supported completed turn and return any guard refusal to the view.
+    pub async fn undo_turn(&self, checkpoint: &CheckpointId) -> Result<(), String> {
+        self.git_sync(Request::UndoTurn {
+            checkpoint: checkpoint.clone(),
+        })
+        .await
     }
 
     /// Put a workspace back to the state a checkpoint captured.

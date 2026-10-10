@@ -88,12 +88,18 @@ pub struct TurnStart {
     pub base_commit: Option<String>,
     /// The branch checked out at the time, or `None` when detached.
     pub branch: Option<String>,
+    /// Staged tree wrapped in a commit, absent for unsupported index states.
+    pub index_commit: Option<String>,
+    /// Ignored untracked paths before the turn, with wholly ignored directories
+    /// collapsed. Unreadable paths disable guarded undo, not ordinary snapshots.
+    pub ignored_paths: Option<Vec<PathBuf>>,
 }
 
 /// Checkpoints for one worktree.
 #[derive(Debug, Clone)]
 pub struct Checkpoints {
-    git: Git,
+    /// Git operations shared by snapshot capture and guarded undo.
+    pub(super) git: Git,
     root: PathBuf,
 }
 
@@ -119,12 +125,31 @@ impl Checkpoints {
     pub fn capture_turn_start(&self, turn: &TurnId) -> Result<TurnStart> {
         let base_commit = self.head_commit()?;
         let branch = self.current_branch()?;
+        let index_commit = self.capture_index().ok();
+        let ignored_paths = self
+            .git
+            .run_paths(&[
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "--directory",
+                "-z",
+            ])
+            .ok();
         let tree = self.snapshot_tree()?;
-        let commit = self.commit_tree(&tree, base_commit.as_deref(), "turn start")?;
+        let parents: Vec<&str> = base_commit
+            .iter()
+            .chain(index_commit.iter())
+            .map(String::as_str)
+            .collect();
+        let commit = self.commit_tree_with_parents(&tree, &parents, "turn start")?;
 
         self.set_ref(&turn.start_ref(), &commit)?;
         if let Some(base) = &base_commit {
             self.set_ref(&turn.base_ref(), base)?;
+        } else {
+            self.delete_ref(&turn.base_ref())?;
         }
         // A retry must not leave the previous attempt's ending state behind,
         // or the turn's diff would be measured against work that was undone.
@@ -135,6 +160,8 @@ impl Checkpoints {
             commit,
             base_commit,
             branch,
+            index_commit,
+            ignored_paths,
         })
     }
 
@@ -226,26 +253,45 @@ impl Checkpoints {
     ///
     /// The index git stages into is a temporary file, so a checkpoint taken
     /// mid-turn cannot disturb a `git add` the user is in the middle of.
-    fn snapshot_tree(&self) -> Result<String> {
-        let index = self.root.join(".git").join("ginka-checkpoint-index");
-        // A stale index from a killed process would be reused as a starting
-        // point and hide deletions, so it is always started from empty.
-        if index.exists() {
-            std::fs::remove_file(&index)
-                .with_context(|| format!("clearing {}", index.display()))?;
+    pub(crate) fn snapshot_tree(&self) -> Result<String> {
+        let scratch = super::undo::ScratchIndex::new(&self.git)?;
+        scratch.copy_current(&self.git)?;
+        let env = [("GIT_INDEX_FILE", scratch.path.as_os_str())];
+        // Rebuilding from the staged tree clears assume-unchanged and sparse
+        // flags in the private index while retaining force-added ignored paths.
+        // A conflicted index cannot write a tree; ordinary checkpoints still
+        // capture its working files against HEAD.
+        match self.git.run_with_env(&["write-tree"], &env) {
+            Ok(tree) => {
+                self.git.run_with_env(&["read-tree", &tree], &env)?;
+            }
+            Err(_) => {
+                if let Some(head) = self.head_commit()? {
+                    self.git.run_with_env(&["read-tree", &head], &env)?;
+                } else {
+                    self.git.run_with_env(&["read-tree", "--empty"], &env)?;
+                }
+            }
         }
-        let env = [("GIT_INDEX_FILE", index.as_os_str())];
-        let result = (|| -> Result<String> {
-            self.git.run_with_env(&["add", "-A", "."], &env)?;
-            self.git.run_with_env(&["write-tree"], &env)
-        })();
-        let _ = std::fs::remove_file(&index);
-        result.context("snapshotting the working tree")
+        self.git.run_with_env(&["add", "-A", "."], &env)?;
+        self.git
+            .run_with_env(&["write-tree"], &env)
+            .context("snapshotting the working tree")
     }
 
     fn commit_tree(&self, tree: &str, parent: Option<&str>, message: &str) -> Result<String> {
+        self.commit_tree_with_parents(tree, &parent.into_iter().collect::<Vec<_>>(), message)
+    }
+
+    /// Wrap a tree with Ginka's identity, retaining each supplied parent for GC.
+    pub(super) fn commit_tree_with_parents(
+        &self,
+        tree: &str,
+        parents: &[&str],
+        message: &str,
+    ) -> Result<String> {
         let mut args: Vec<&OsStr> = vec![OsStr::new("commit-tree"), OsStr::new(tree)];
-        if let Some(parent) = parent {
+        for parent in parents {
             args.push(OsStr::new("-p"));
             args.push(OsStr::new(parent));
         }
@@ -266,15 +312,24 @@ impl Checkpoints {
         self.git.run_with_env(&args, &identity)
     }
 
-    fn head_commit(&self) -> Result<Option<String>> {
+    /// Resolve HEAD, returning no commit for an unborn branch.
+    pub(super) fn head_commit(&self) -> Result<Option<String>> {
         // An unborn HEAD is the first turn in a fresh repository, not an error.
         self.git
             .query(&["rev-parse", "--verify", "--quiet", "HEAD"])
     }
 
-    fn current_branch(&self) -> Result<Option<String>> {
-        let branch = self.git.run(&["rev-parse", "--abbrev-ref", "HEAD"])?;
-        Ok((branch != "HEAD").then_some(branch))
+    /// Resolve the symbolic branch name, returning none for detached HEAD.
+    pub(super) fn current_branch(&self) -> Result<Option<String>> {
+        Ok(self
+            .git
+            .query(&["symbolic-ref", "--quiet", "HEAD"])?
+            .map(|branch| {
+                branch
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(&branch)
+                    .to_string()
+            }))
     }
 
     fn resolve(&self, reference: &str) -> Result<Option<String>> {

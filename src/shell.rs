@@ -771,6 +771,10 @@ pub struct Shell {
     /// a single click that quietly rewrites the worktree is not something to
     /// discover by accident.
     rewinding: Option<u32>,
+    /// Completed checkpoint currently being undone through the daemon.
+    undoing: Option<ginka_protocol::CheckpointId>,
+    /// Last refusal, kept with its checkpoint so another turn cannot display it.
+    undo_error: Option<(ginka_protocol::CheckpointId, String)>,
     /// A turn whose conversation can be continued by another agent.
     forking: Option<ForkMenu>,
     /// The fan-out panel above the composer, while it is open.
@@ -1048,7 +1052,15 @@ impl Shell {
                     only_staged,
                     then,
                     amend,
-                } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
+                    paths,
+                } => this.commit(
+                    message.clone(),
+                    *only_staged,
+                    *then,
+                    *amend,
+                    paths.clone(),
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::Comment {
                     path,
                     line,
@@ -1059,9 +1071,16 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::RemoveComment { id } => {
                     this.remove_comment(id.clone(), cx)
                 }
-                crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
-                    this.generate_commit_message(*only_staged, cx)
-                }
+                crate::surfaces::SurfaceEvent::GenerateCommitMessage {
+                    generation_id,
+                    only_staged,
+                    paths,
+                } => this.generate_commit_message(
+                    generation_id.clone(),
+                    *only_staged,
+                    paths.clone(),
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
                 crate::surfaces::SurfaceEvent::PushWithLease => {
@@ -1822,6 +1841,7 @@ impl Shell {
                             .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
+                            generation_id,
                             message,
                             error,
                         } => this
@@ -1830,7 +1850,12 @@ impl Shell {
                                     == Some(&workspace)
                                 {
                                     this.surfaces.update(cx, |surfaces, cx| {
-                                        surfaces.set_generated(message, error, cx)
+                                        surfaces.set_generated(
+                                            generation_id.as_deref(),
+                                            message,
+                                            error,
+                                            cx,
+                                        )
                                     });
                                 }
                             })
@@ -1970,6 +1995,8 @@ impl Shell {
             start_fresh: false,
             checkpoints: Vec::new(),
             rewinding: None,
+            undoing: None,
+            undo_error: None,
             forking: None,
             fan_out: None,
             comparing: None,
@@ -3390,6 +3417,41 @@ impl Shell {
         .detach();
     }
 
+    /// Undo a completed turn with daemon-side guards and visible refusals.
+    fn undo_turn(&mut self, checkpoint: ginka_protocol::CheckpointId, cx: &mut Context<Self>) {
+        if self.undoing.is_some() {
+            return;
+        }
+        self.undoing = Some(checkpoint.clone());
+        self.undo_error = None;
+        self.rewinding = None;
+        cx.notify();
+        let link = self.link.clone();
+        cx.spawn(async move |this, cx| {
+            let requested = checkpoint.clone();
+            let result = cx
+                .background_spawn(async move { link.undo_turn(&requested).await })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.undoing = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(point) = this
+                            .checkpoints
+                            .iter_mut()
+                            .find(|point| point.id == checkpoint)
+                        {
+                            point.can_undo = false;
+                        }
+                    }
+                    Err(error) => this.undo_error = Some((checkpoint, error)),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Commit the workspace's work, and say so if git would not.
     fn commit(
         &mut self,
@@ -3397,6 +3459,7 @@ impl Shell {
         only_staged: bool,
         then: crate::surfaces::CommitThen,
         amend: bool,
+        paths: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         use crate::surfaces::CommitThen;
@@ -3408,7 +3471,9 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let (committed, after) = cx
                 .background_spawn(async move {
-                    let committed = link.commit(&workspace, message, !only_staged, amend).await;
+                    let committed = link
+                        .commit(&workspace, message, !only_staged, amend, paths)
+                        .await;
                     // Only after a commit that went in: pushing or opening a
                     // pull request for the previous state is not what was asked.
                     let after = match (&committed, then) {
@@ -3472,21 +3537,29 @@ impl Shell {
     /// Ask the daemon for a commit message. The answer comes back as an
     /// event, which is what keeps a model's thirty seconds off the request
     /// path; only a refusal to *start* is reported here.
-    fn generate_commit_message(&mut self, only_staged: bool, cx: &mut Context<Self>) {
+    fn generate_commit_message(
+        &mut self,
+        generation_id: String,
+        only_staged: bool,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
+            let requested_id = generation_id.clone();
             let outcome = cx
                 .background_spawn(async move {
-                    link.generate_commit_message(&workspace, only_staged).await
+                    link.generate_commit_message(&workspace, requested_id, only_staged, paths)
+                        .await
                 })
                 .await;
             if let Err(error) = outcome {
                 surfaces.update(cx, |surfaces, cx| {
-                    surfaces.set_generated(None, Some(error), cx)
+                    surfaces.set_generated(Some(&generation_id), None, Some(error), cx)
                 });
             }
         })
@@ -10483,11 +10556,20 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let tokens = Tokens::global(cx).clone();
-        let checkpoint = self
-            .checkpoints
-            .iter()
-            .find(|checkpoint| checkpoint.turn == turn)
-            .map(|checkpoint| checkpoint.id.clone());
+        let point = self.session.as_ref().and_then(|row| {
+            row.session.as_ref().and_then(|session| {
+                ginka_ui::transcript::checkpoint_for_turn(&self.checkpoints, session, turn)
+            })
+        });
+        let checkpoint = point.map(|point| point.id.clone());
+        let undo = point
+            .filter(|point| point.can_undo)
+            .map(|point| point.id.clone());
+        let undo_error = self
+            .undo_error
+            .as_ref()
+            .filter(|(id, _)| checkpoint.as_ref() == Some(id))
+            .map(|(_, error)| error.clone());
         let asking = self.rewinding == Some(turn);
         let current_agent = self
             .session
@@ -10614,6 +10696,7 @@ impl Shell {
         h_flex()
             .w_full()
             .items_center()
+            .flex_wrap()
             .gap_2()
             .child(rule())
             .children(checkpoint.is_none().then(|| {
@@ -10690,6 +10773,30 @@ impl Shell {
                                     .child(rust_i18n::t!("transcript.rewind.no").to_string()),
                             )
                     }))
+            }))
+            .children(undo.map(|id| {
+                let working = self.undoing.as_ref() == Some(&id);
+                Button::new(SharedString::from(format!("undo-turn-{turn}")))
+                    .ghost()
+                    .disabled(self.undoing.is_some())
+                    .px(px(7.))
+                    .py(px(2.))
+                    .rounded(px(tokens.radius.row))
+                    .text_xs()
+                    .tooltip(rust_i18n::t!("transcript.undo.hint").to_string())
+                    .on_click(cx.listener(move |this, _, _, cx| this.undo_turn(id.clone(), cx)))
+                    .child(if working {
+                        rust_i18n::t!("transcript.undo.working").to_string()
+                    } else {
+                        rust_i18n::t!("transcript.undo.label").to_string()
+                    })
+            }))
+            .children(undo_error.map(|error| {
+                div()
+                    .w_full()
+                    .text_xs()
+                    .text_color(tokens.colors().status_error)
+                    .child(rust_i18n::t!("transcript.undo.failed", error = error).to_string())
             }))
             .children(provenance.map(|provenance| {
                 div()

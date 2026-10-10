@@ -836,6 +836,10 @@ pub struct Checkpoint {
     /// Whether a saved start snapshot makes this checkpoint a completed turn
     /// with an exact diff. Initial and restore-safety checkpoints lack one.
     pub has_turn_start: bool,
+    /// Durable guarded-undo evidence exists. Current file, index and HEAD
+    /// guards are checked when undo is requested; older checkpoints default off.
+    #[serde(default)]
+    pub can_undo: bool,
     /// Unix seconds.
     pub created_at: i64,
 }

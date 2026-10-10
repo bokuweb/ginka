@@ -537,6 +537,11 @@ pub enum Request {
         /// Fold into the last commit instead of making a new one.
         #[serde(default)]
         amend: bool,
+        /// Commit complete worktree contents of these literal file paths,
+        /// preserving other staged entries. Empty retains `all`/index scope;
+        /// a selection requires `all` and cannot be combined with `amend`.
+        #[serde(default)]
+        paths: Vec<String>,
     },
     /// Merge a workspace's branch into another — fan-out's "merge the
     /// winner". `into` defaults to the branch the project's own checkout is
@@ -812,12 +817,20 @@ pub enum Request {
     GenerateCommitMessage {
         /// The workspace whose changes are described.
         workspace: WorkspaceId,
+        /// Caller-generated id echoed in the result to distinguish concurrent
+        /// generation in the same workspace. Legacy callers may omit it.
+        #[serde(default)]
+        generation_id: Option<String>,
         /// Driver id to write it with.
         #[serde(default)]
         agent: Option<String>,
         /// Describe only what is staged.
         #[serde(default)]
         staged: bool,
+        /// Describe complete contents of selected files instead. Empty uses
+        /// `staged`; a nonempty selection cannot also request staged scope.
+        #[serde(default)]
+        paths: Vec<String>,
     },
     /// Have an agent write a pull request's title and description from the
     /// branch's commits and its diff against the project's default branch,
@@ -1071,6 +1084,13 @@ pub enum Request {
     /// Put the worktree back to a checkpoint's state.
     RestoreCheckpoint {
         /// The checkpoint whose tree is restored.
+        checkpoint: CheckpointId,
+    },
+
+    /// Undo a completed turn while preserving its initial working files and
+    /// staging. Refuses later edits, changed HEAD and active overlapping agents.
+    UndoTurn {
+        /// The completed turn's checkpoint; older snapshots may lack evidence.
         checkpoint: CheckpointId,
     },
 
@@ -1698,6 +1718,63 @@ pub enum Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commit_message_generation_ids_roundtrip_and_default_for_legacy_callers() {
+        let request = Request::GenerateCommitMessage {
+            workspace: WorkspaceId("comet/harbor".into()),
+            generation_id: Some("caller-id".into()),
+            agent: None,
+            staged: false,
+            paths: Vec::new(),
+        };
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Request>(wire.clone()).unwrap(),
+            request
+        );
+        wire.as_object_mut().unwrap().remove("generation_id");
+        assert!(matches!(
+            serde_json::from_value::<Request>(wire).unwrap(),
+            Request::GenerateCommitMessage {
+                generation_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn commit_file_selections_roundtrip_and_legacy_requests_keep_their_scope() {
+        for request in [
+            Request::Commit {
+                workspace: WorkspaceId("comet/harbor".into()),
+                message: "Selected files".into(),
+                all: true,
+                amend: false,
+                paths: vec!["[new].txt".into()],
+            },
+            Request::GenerateCommitMessage {
+                workspace: WorkspaceId("comet/harbor".into()),
+                generation_id: None,
+                agent: None,
+                staged: false,
+                paths: vec!["[new].txt".into()],
+            },
+        ] {
+            let mut wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                serde_json::from_value::<Request>(wire.clone()).unwrap(),
+                request
+            );
+            wire.as_object_mut().unwrap().remove("paths");
+            match serde_json::from_value::<Request>(wire).unwrap() {
+                Request::Commit { paths, .. } | Request::GenerateCommitMessage { paths, .. } => {
+                    assert!(paths.is_empty());
+                }
+                other => panic!("expected a commit request, got {other:?}"),
+            }
+        }
+    }
 
     #[test]
     fn optional_fields_may_be_omitted_by_a_client_that_does_not_care() {

@@ -659,16 +659,31 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_commit",
-            description: "Commit a workspace's work. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
+            description: "Commit a workspace's work. Optional `paths` commits complete contents of those literal files while preserving unrelated staged work; cannot combine with staged_only or amend. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "workspace": workspace,
                     "message": {"type": "string"},
+                    "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
                     "staged_only": {"type": "boolean"},
                     "amend": {"type": "boolean"},
                 },
                 "required": ["workspace", "message"],
+            }),
+        },
+        Tool {
+            name: "ginka_generate_commit_message",
+            description: "Generate and return a commit message without committing. Optional `paths` describes complete contents of those literal files and excludes unrelated staged work; cannot combine with staged_only. Uses the named agent or the workspace's latest agent.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "workspace": workspace,
+                    "agent": {"type": "string"},
+                    "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+                    "staged_only": {"type": "boolean"},
+                },
+                "required": ["workspace"],
             }),
         },
         Tool {
@@ -923,6 +938,15 @@ pub fn tools() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "ginka_undo_turn",
+            description: "Undo a completed turn, preserving its initial files and staging. Refuses later edits, changed HEAD or active agents in overlapping workspaces. Older checkpoints may lack undo evidence.",
+            schema: json!({
+                "type": "object",
+                "properties": {"checkpoint": {"type": "string"}},
+                "required": ["checkpoint"],
+            }),
+        },
+        Tool {
             name: "ginka_restore",
             description: "Put a workspace back to a checkpoint. Destructive: work since is removed, after being snapshotted.",
             schema: json!({
@@ -964,6 +988,23 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
     };
     let flag = |key: &str| arguments.get(key).and_then(Value::as_bool).unwrap_or(false);
     let number = |key: &str| arguments.get(key).and_then(Value::as_u64);
+    let selected_paths = || -> Result<Vec<String>> {
+        match arguments.get("paths") {
+            None => Ok(Vec::new()),
+            Some(Value::Array(paths)) if !paths.is_empty() => paths
+                .iter()
+                .map(|path| {
+                    path.as_str()
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| anyhow!("{tool}: paths must contain nonempty strings"))
+                })
+                .collect(),
+            Some(_) => Err(anyhow!(
+                "{tool}: paths must be a nonempty array of file paths"
+            )),
+        }
+    };
 
     Ok(match tool {
         "ginka_projects" => Request::ListProjects,
@@ -1355,6 +1396,14 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             message: text("message")?,
             all: !flag("staged_only"),
             amend: flag("amend"),
+            paths: selected_paths()?,
+        },
+        "ginka_generate_commit_message" => Request::GenerateCommitMessage {
+            workspace: WorkspaceId(text("workspace")?),
+            generation_id: None,
+            agent: maybe("agent"),
+            staged: flag("staged_only"),
+            paths: selected_paths()?,
         },
         "ginka_cron_jobs" => Request::ListCronJobs {
             project: text("project").ok().map(ProjectName),
@@ -1485,6 +1534,9 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
         "ginka_checkpoints" => Request::ListCheckpoints {
             workspace: WorkspaceId(text("workspace")?),
         },
+        "ginka_undo_turn" => Request::UndoTurn {
+            checkpoint: CheckpointId(text("checkpoint")?),
+        },
         "ginka_restore" => Request::RestoreCheckpoint {
             checkpoint: CheckpointId(text("checkpoint")?),
         },
@@ -1576,6 +1628,74 @@ pub const PARSE_ERROR: i64 = -32700;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_undo_is_available_and_requires_a_checkpoint() {
+        assert!(tools().iter().any(|tool| tool.name == "ginka_undo_turn"));
+        assert!(
+            matches!(request_for("ginka_undo_turn", &json!({ "checkpoint": "c-1" })).unwrap(),
+            Request::UndoTurn { checkpoint } if checkpoint.0 == "c-1")
+        );
+        assert!(request_for("ginka_undo_turn", &json!({})).is_err());
+    }
+
+    #[test]
+    fn commit_message_generation_preserves_scope_and_rejects_malformed_selections() {
+        assert!(matches!(
+            request_for("ginka_generate_commit_message", &json!({
+                "workspace": "w", "agent": "codex", "paths": ["[new].txt"]
+            })).unwrap(),
+            Request::GenerateCommitMessage { agent: Some(agent), staged: false, paths, .. }
+                if agent == "codex" && paths == ["[new].txt"]
+        ));
+        assert!(matches!(
+            request_for("ginka_generate_commit_message", &json!({
+                "workspace": "w", "staged_only": true
+            })).unwrap(),
+            Request::GenerateCommitMessage { agent: None, staged: true, paths, .. }
+                if paths.is_empty()
+        ));
+        for paths in [json!([]), json!("a.txt"), json!([""]), json!(["a.txt", 7])] {
+            assert!(
+                request_for(
+                    "ginka_generate_commit_message",
+                    &json!({
+                        "workspace": "w", "paths": paths
+                    })
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            tools()
+                .iter()
+                .any(|tool| tool.name == "ginka_generate_commit_message")
+        );
+    }
+
+    #[test]
+    fn selected_commit_tool_preserves_literal_files_and_refuses_empty_selections() {
+        let arguments =
+            json!({"workspace": "w", "message": "Selected", "paths": ["[a].txt", "new.txt"]});
+        assert!(matches!(
+            request_for("ginka_commit", &arguments).unwrap(),
+            Request::Commit { all: true, amend: false, paths, .. }
+                if paths == ["[a].txt", "new.txt"]
+        ));
+        assert!(matches!(
+            request_for("ginka_commit", &json!({"workspace": "w", "message": "Staged", "staged_only": true})).unwrap(),
+            Request::Commit { all: false, paths, .. } if paths.is_empty()
+        ));
+        for paths in [json!([]), json!("a.txt"), json!([""]), json!(["a.txt", 7])] {
+            assert!(
+                request_for(
+                    "ginka_commit",
+                    &json!({"workspace": "w", "message": "Selected", "paths": paths})
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn external_editor_tool_preserves_the_line_and_rejects_invalid_numbers() {

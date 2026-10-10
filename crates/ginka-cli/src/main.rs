@@ -321,6 +321,10 @@ enum Command {
         /// Commit only what is already staged.
         #[arg(long)]
         staged: bool,
+        /// Commit complete contents of this literal file; repeat to select more.
+        /// Preserves unrelated staged work.
+        #[arg(long = "path", conflicts_with_all = ["staged", "amend", "fix_with_agent"])]
+        paths: Vec<String>,
         /// If git or a hook refuses the commit, hand what it said, the
         /// staged files and the message to the workspace's agent to fix.
         #[arg(long, conflicts_with = "generate")]
@@ -1317,6 +1321,12 @@ enum CheckpointCommand {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Undo a completed turn, preserving its initial files and staging.
+    /// Refuses later edits, changed HEAD and active overlapping agents.
+    Undo {
+        /// The completed turn's checkpoint id, from `checkpoint list`.
+        checkpoint: String,
+    },
     /// Put a workspace back to a checkpoint's state.
     ///
     /// What is there now is snapshotted first, so this is reversible.
@@ -1343,8 +1353,9 @@ fn main() -> Result<()> {
             generate: true,
             staged,
             agent,
+            paths: selected_paths,
             ..
-        } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        } => commit_generated(&paths, &workspace, staged, agent, selected_paths, cli.json),
         Command::Commit {
             workspace,
             message: Some(message),
@@ -1527,14 +1538,36 @@ fn mcp(paths: &Paths) -> Result<()> {
                     Err(error) => mcp::reply(id, mcp::tool_failure(error.to_string())),
                     Ok(request) => {
                         let answered = smol::block_on(async {
+                            if let Request::GenerateCommitMessage {
+                                workspace,
+                                agent,
+                                staged,
+                                paths: selected_paths,
+                                ..
+                            } = request
+                            {
+                                // A fresh stream cannot contain a result left
+                                // over from an earlier tool call.
+                                let daemon = connect(paths).await?;
+                                let message = daemon
+                                    .generate_commit_message(
+                                        workspace,
+                                        agent,
+                                        staged,
+                                        selected_paths,
+                                    )
+                                    .await?;
+                                return Ok(serde_json::json!({ "message": message }));
+                            }
                             if client.is_none() {
                                 client = Some(connect(paths).await?);
                             }
                             let daemon = client.as_ref().expect("just connected");
-                            daemon
+                            let response = daemon
                                 .request(request)
                                 .await
-                                .map_err(|error| anyhow::anyhow!("{error}"))
+                                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                            serde_json::to_value(response).map_err(anyhow::Error::from)
                         });
                         match answered {
                             Ok(response) => {
@@ -2033,6 +2066,7 @@ fn request_for(command: Command) -> Result<Request> {
             message,
             staged,
             amend,
+            paths,
             ..
         } => Request::Commit {
             workspace: WorkspaceId(workspace),
@@ -2043,6 +2077,7 @@ fn request_for(command: Command) -> Result<Request> {
             },
             all: !staged,
             amend,
+            paths,
         },
         Command::Push {
             workspace,
@@ -2464,6 +2499,9 @@ fn request_for(command: Command) -> Result<Request> {
         Command::Checkpoint(CheckpointCommand::List { workspace }) => Request::ListCheckpoints {
             workspace: WorkspaceId(workspace),
         },
+        Command::Checkpoint(CheckpointCommand::Undo { checkpoint }) => Request::UndoTurn {
+            checkpoint: CheckpointId(checkpoint),
+        },
         Command::Checkpoint(CheckpointCommand::Restore { checkpoint }) => {
             Request::RestoreCheckpoint {
                 checkpoint: CheckpointId(checkpoint),
@@ -2513,6 +2551,7 @@ fn commit_or_hand_over(
                 message: message.clone(),
                 all: !staged,
                 amend,
+                paths: Vec::new(),
             })
             .await
         {
@@ -2641,37 +2680,15 @@ fn commit_generated(
     workspace: &str,
     staged: bool,
     agent: Option<String>,
+    selected_paths: Vec<String>,
     json: bool,
 ) -> Result<()> {
     let workspace = WorkspaceId(workspace.to_string());
     let response = smol::block_on(async {
         let client = connect(paths).await?;
-        let events = client.events();
-        client
-            .request(Request::GenerateCommitMessage {
-                workspace: workspace.clone(),
-                agent,
-                staged,
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let message = loop {
-            let event = events
-                .recv()
-                .await
-                .context("the daemon closed the connection before answering")?;
-            if let ginka_protocol::event::DaemonEvent::CommitMessageGenerated {
-                workspace: done,
-                message,
-                error,
-            } = event.payload
-                && done == workspace
-            {
-                break message.ok_or_else(|| {
-                    anyhow::anyhow!(error.unwrap_or_else(|| "no message was written".into()))
-                })?;
-            }
-        };
+        let message = client
+            .generate_commit_message(workspace.clone(), agent, staged, selected_paths.clone())
+            .await?;
         eprintln!("{}", message.trim_end());
         client
             .request(Request::Commit {
@@ -2679,6 +2696,7 @@ fn commit_generated(
                 message,
                 all: !staged,
                 amend: false,
+                paths: selected_paths,
             })
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))
@@ -3889,6 +3907,13 @@ mod ginka_cli_format {
         use super::*;
         use crate::{ChangeSource, Cli, Request, request_for};
         use clap::Parser;
+
+        #[test]
+        fn checkpoint_undo_uses_the_guarded_daemon_request() {
+            let cli = Cli::try_parse_from(["ginka", "checkpoint", "undo", "c-1"]).unwrap();
+            assert!(matches!(request_for(cli.command).unwrap(),
+                Request::UndoTurn { checkpoint } if checkpoint.0 == "c-1"));
+        }
 
         #[test]
         fn changes_turn_selects_one_completed_checkpoint() {

@@ -21,6 +21,9 @@ use ginka_protocol::model::{ChangeSource, FileChange, GitCommit, PullRequest, Pu
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod selected_commit;
+pub use selected_commit::{commit_selected, describe_selected};
+
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWorktree {
@@ -430,18 +433,7 @@ const CHECKPOINT_EMAIL: &str = "ginka@localhost";
 /// Untracked files are included; ignored ones are not, because that is where
 /// `node_modules` and `.env` live.
 pub fn snapshot(worktree: &Path, reference: &str, message: &str) -> Result<String> {
-    let index = scratch_index(worktree)?;
-    let index = index.to_string_lossy().to_string();
-    let env = [("GIT_INDEX_FILE", index.as_str())];
-
-    // Seed the scratch index from HEAD when there is one, so files that are
-    // unchanged are recorded as they already are rather than re-hashed.
-    if head_commit(worktree).is_some() {
-        git_with_env(worktree, &["read-tree", "HEAD"], &env)?;
-    }
-    git_with_env(worktree, &["add", "-A"], &env)?;
-    let tree = git_with_env(worktree, &["write-tree"], &env)?;
-    std::fs::remove_file(&index).ok();
+    let tree = crate::checkpoint::Checkpoints::new(worktree).snapshot_tree()?;
 
     // A checkpoint is Ginka's commit, not the user's: it is on no branch, it
     // was not asked for by name, and attributing it to whoever happens to be
@@ -496,16 +488,6 @@ pub fn head_commit(worktree: &Path) -> Option<String> {
     git(worktree, &["rev-parse", "--verify", "--quiet", "HEAD"])
         .ok()
         .filter(|commit| !commit.is_empty())
-}
-
-/// A private index file to build a snapshot in.
-///
-/// It lives beside the worktree's own index — inside the git directory, which
-/// for a linked worktree is its own directory under `.git/worktrees/` — so two
-/// workspaces snapshotting at once cannot write over each other.
-fn scratch_index(worktree: &Path) -> Result<PathBuf> {
-    let git_dir = git(worktree, &["rev-parse", "--absolute-git-dir"])?;
-    Ok(PathBuf::from(git_dir).join("ginka-snapshot-index"))
 }
 
 /// Run `git` with extra environment, and return stdout, trimmed.
@@ -2714,6 +2696,25 @@ impl Git {
                 bail!("git {} failed ({status}): {stderr}", describe(args))
             }
         }
+    }
+
+    /// Read NUL-delimited paths without trimming whitespace. Non-UTF-8 output
+    /// is refused so safety checks never inspect replacement-character paths.
+    pub(crate) fn run_paths(&self, args: &[&str]) -> Result<Vec<PathBuf>> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(&self.cwd)
+            .output()
+            .context("reading Git paths")?;
+        if !output.status.success() {
+            bail!("git {} failed: {}", describe(args), complaint(&output));
+        }
+        let paths = String::from_utf8(output.stdout).context("Git paths are not UTF-8")?;
+        Ok(paths
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from)
+            .collect())
     }
 
     /// Run git with extra environment — a temporary index, a fixed identity.

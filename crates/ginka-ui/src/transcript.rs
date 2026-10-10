@@ -18,6 +18,18 @@ use std::time::{Duration, Instant};
 
 use crate::terminal::{TerminalFileLink, file_links};
 
+/// Resolve a completed turn inside its owning conversation. Workspace-wide
+/// checkpoint lists can contain the same turn number from several sessions.
+pub fn checkpoint_for_turn<'a>(
+    checkpoints: &'a [ginka_protocol::Checkpoint],
+    session: &ginka_protocol::SessionId,
+    turn: u32,
+) -> Option<&'a ginka_protocol::Checkpoint> {
+    checkpoints
+        .iter()
+        .find(|point| &point.session == session && point.turn == turn && point.has_turn_start)
+}
+
 /// Markdown prepared for display with safe workspace file targets beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LinkedMarkdown {
@@ -2505,5 +2517,34 @@ mod mentions {
         assert_eq!(duration_label(60), "1m");
         assert_eq!(duration_label(125), "2m 5s");
         assert_eq!(duration_label(3840), "1h 4m");
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_selection_tests {
+    use super::checkpoint_for_turn;
+    use ginka_protocol::{Checkpoint, CheckpointId, SessionId, WorkspaceId};
+
+    #[test]
+    fn a_turn_action_cannot_restore_another_conversation_or_a_safety_snapshot() {
+        let point = |session: &str, completed| Checkpoint {
+            id: CheckpointId(session.into()),
+            session: SessionId(session.into()),
+            workspace: WorkspaceId("project/workspace".into()),
+            turn: 1,
+            commit: "commit".into(),
+            label: "turn".into(),
+            has_turn_start: completed,
+            can_undo: completed,
+            created_at: 0,
+        };
+        let points = vec![
+            point("other", true),
+            point("current", false),
+            point("current", true),
+        ];
+        let session = SessionId("current".into());
+        assert_eq!(checkpoint_for_turn(&points, &session, 1), Some(&points[2]));
+        assert!(checkpoint_for_turn(&points, &session, 2).is_none());
     }
 }
