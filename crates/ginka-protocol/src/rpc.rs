@@ -817,6 +817,10 @@ pub enum Request {
     GenerateCommitMessage {
         /// The workspace whose changes are described.
         workspace: WorkspaceId,
+        /// Caller-generated id echoed in the result to distinguish concurrent
+        /// generation in the same workspace. Legacy callers may omit it.
+        #[serde(default)]
+        generation_id: Option<String>,
         /// Driver id to write it with.
         #[serde(default)]
         agent: Option<String>,
@@ -1709,6 +1713,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn commit_message_generation_ids_roundtrip_and_default_for_legacy_callers() {
+        let request = Request::GenerateCommitMessage {
+            workspace: WorkspaceId("comet/harbor".into()),
+            generation_id: Some("caller-id".into()),
+            agent: None,
+            staged: false,
+            paths: Vec::new(),
+        };
+        let mut wire = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Request>(wire.clone()).unwrap(),
+            request
+        );
+        wire.as_object_mut().unwrap().remove("generation_id");
+        assert!(matches!(
+            serde_json::from_value::<Request>(wire).unwrap(),
+            Request::GenerateCommitMessage {
+                generation_id: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn commit_file_selections_roundtrip_and_legacy_requests_keep_their_scope() {
         for request in [
             Request::Commit {
@@ -1720,6 +1748,7 @@ mod tests {
             },
             Request::GenerateCommitMessage {
                 workspace: WorkspaceId("comet/harbor".into()),
+                generation_id: None,
                 agent: None,
                 staged: false,
                 paths: vec!["[new].txt".into()],

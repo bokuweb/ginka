@@ -11,7 +11,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
-use ginka_ui::commit_selection::CommitSelection;
+use ginka_ui::commit_selection::{CommitMessageGeneration, CommitSelection};
 use ginka_ui::diff_filter::DiffFilter;
 use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
@@ -186,7 +186,7 @@ pub struct SurfacePanel {
     /// Why the last commit did not happen.
     complaint: Option<SharedString>,
     /// An agent is writing the message; the button says so meanwhile.
-    generating: bool,
+    generation: CommitMessageGeneration,
     /// A message that arrived while the box was drawn: put into it on the
     /// next render, which is the first place a window is to hand.
     generated: Option<String>,
@@ -301,6 +301,8 @@ pub enum SurfaceEvent {
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
     GenerateCommitMessage {
+        /// Fresh id identifying the result allowed to update this draft.
+        generation_id: String,
         only_staged: bool,
         paths: Vec<String>,
     },
@@ -550,7 +552,7 @@ impl SurfacePanel {
             reverting: None,
             reverting_hunk: None,
             message: None,
-            generating: false,
+            generation: CommitMessageGeneration::default(),
             generated: None,
             complaint: None,
             usage: None,
@@ -1217,11 +1219,14 @@ impl SurfacePanel {
     /// What the agent wrote, or why it could not (`CommitMessageGenerated`).
     pub fn set_generated(
         &mut self,
+        generation_id: Option<&str>,
         message: Option<String>,
         error: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.generating = false;
+        if !self.generation.finish(generation_id) {
+            return;
+        }
         match message {
             Some(message) => self.generated = Some(message.trim_end().to_string()),
             None => {
@@ -1664,6 +1669,8 @@ impl SurfacePanel {
             return;
         }
         // Another workspace, another pull request.
+        self.generation.clear();
+        self.generated = None;
         self.commit_selection.clear();
         self.checks_open = false;
         self.checks = None;
@@ -2990,7 +2997,7 @@ impl SurfacePanel {
         let tokens = Tokens::global(cx).clone();
         let selected = self.commit_selection.active();
         let count = self.commit_selection.count(self.commit_files());
-        let blocked = self.generating || (selected && count == 0);
+        let blocked = self.generation.active() || (selected && count == 0);
         let amendable = !selected && self.history.first().is_some_and(|head| !head.published);
 
         v_flex()
@@ -3026,7 +3033,7 @@ impl SurfacePanel {
                                         .ghost()
                                         .compact()
                                         .small()
-                                        .disabled(self.generating)
+                                        .disabled(self.generation.active())
                                         .label(
                                             rust_i18n::t!("surface.git.clear_selection")
                                                 .to_string(),
@@ -3158,18 +3165,21 @@ impl SurfacePanel {
                                     .compact()
                                     .small()
                                     .disabled(blocked)
-                                    .label(if self.generating {
+                                    .label(if self.generation.active() {
                                         rust_i18n::t!("surface.git.generating").to_string()
                                     } else {
                                         rust_i18n::t!("surface.git.generate").to_string()
                                     })
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.generating || !this.valid_commit_scope(cx) {
+                                        if this.generation.active() || !this.valid_commit_scope(cx)
+                                        {
                                             return;
                                         }
-                                        this.generating = true;
+                                        let generation_id = uuid::Uuid::new_v4().to_string();
+                                        this.generation.start(generation_id.clone());
                                         this.complaint = None;
                                         cx.emit(SurfaceEvent::GenerateCommitMessage {
+                                            generation_id,
                                             only_staged: this.only_staged(),
                                             paths: this.commit_selection.paths(this.commit_files()),
                                         });
@@ -3215,7 +3225,7 @@ impl SurfacePanel {
 
     /// Hand the message to the shell, which is the one holding the daemon.
     fn commit(&mut self, then: CommitThen, amend: bool, cx: &mut Context<Self>) {
-        if self.generating
+        if self.generation.active()
             || (amend && self.commit_selection.active())
             || !self.valid_commit_scope(cx)
         {
@@ -3488,7 +3498,7 @@ impl SurfacePanel {
         let selection = Checkbox::new(SharedString::from(format!("commit-select:{row_key}")))
             .small()
             .checked(self.commit_selection.contains(&file.path))
-            .disabled(self.generating)
+            .disabled(self.generation.active())
             .accessibility_label(
                 rust_i18n::t!("surface.git.select_file", path = file.path.as_str()).to_string(),
             )

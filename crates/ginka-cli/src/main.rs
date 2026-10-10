@@ -1532,14 +1532,36 @@ fn mcp(paths: &Paths) -> Result<()> {
                     Err(error) => mcp::reply(id, mcp::tool_failure(error.to_string())),
                     Ok(request) => {
                         let answered = smol::block_on(async {
+                            if let Request::GenerateCommitMessage {
+                                workspace,
+                                agent,
+                                staged,
+                                paths: selected_paths,
+                                ..
+                            } = request
+                            {
+                                // A fresh stream cannot contain a result left
+                                // over from an earlier tool call.
+                                let daemon = connect(paths).await?;
+                                let message = daemon
+                                    .generate_commit_message(
+                                        workspace,
+                                        agent,
+                                        staged,
+                                        selected_paths,
+                                    )
+                                    .await?;
+                                return Ok(serde_json::json!({ "message": message }));
+                            }
                             if client.is_none() {
                                 client = Some(connect(paths).await?);
                             }
                             let daemon = client.as_ref().expect("just connected");
-                            daemon
+                            let response = daemon
                                 .request(request)
                                 .await
-                                .map_err(|error| anyhow::anyhow!("{error}"))
+                                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                            serde_json::to_value(response).map_err(anyhow::Error::from)
                         });
                         match answered {
                             Ok(response) => {
@@ -2655,33 +2677,9 @@ fn commit_generated(
     let workspace = WorkspaceId(workspace.to_string());
     let response = smol::block_on(async {
         let client = connect(paths).await?;
-        let events = client.events();
-        client
-            .request(Request::GenerateCommitMessage {
-                workspace: workspace.clone(),
-                agent,
-                staged,
-                paths: selected_paths.clone(),
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("{error}"))?;
-        let message = loop {
-            let event = events
-                .recv()
-                .await
-                .context("the daemon closed the connection before answering")?;
-            if let ginka_protocol::event::DaemonEvent::CommitMessageGenerated {
-                workspace: done,
-                message,
-                error,
-            } = event.payload
-                && done == workspace
-            {
-                break message.ok_or_else(|| {
-                    anyhow::anyhow!(error.unwrap_or_else(|| "no message was written".into()))
-                })?;
-            }
-        };
+        let message = client
+            .generate_commit_message(workspace.clone(), agent, staged, selected_paths.clone())
+            .await?;
         eprintln!("{}", message.trim_end());
         client
             .request(Request::Commit {

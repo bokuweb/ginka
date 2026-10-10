@@ -412,6 +412,9 @@ pub enum DaemonEvent {
     CommitMessageGenerated {
         /// The workspace the message was asked for.
         workspace: WorkspaceId,
+        /// The caller's generation id; absent for a legacy request.
+        #[serde(default)]
+        generation_id: Option<String>,
         /// Subject, blank line, body — as git takes it. `None` when it
         /// failed, and `error` says why.
         message: Option<String>,
@@ -451,6 +454,29 @@ pub enum DaemonEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generated_commit_message_ids_roundtrip_and_default_for_legacy_events() {
+        let event = DaemonEvent::CommitMessageGenerated {
+            workspace: crate::WorkspaceId("comet/harbor".into()),
+            generation_id: Some("caller-id".into()),
+            message: Some("Add a parser".into()),
+            error: None,
+        };
+        let mut wire = serde_json::to_value(&event).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DaemonEvent>(wire.clone()).unwrap(),
+            event
+        );
+        wire.as_object_mut().unwrap().remove("generation_id");
+        assert!(matches!(
+            serde_json::from_value::<DaemonEvent>(wire).unwrap(),
+            DaemonEvent::CommitMessageGenerated {
+                generation_id: None,
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn a_tool_call_and_its_result_are_correlated_by_id() {

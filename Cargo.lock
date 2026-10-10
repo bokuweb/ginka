@@ -2895,6 +2895,7 @@ dependencies = [
  "serde_json",
  "smol",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2941,6 +2942,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

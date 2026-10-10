@@ -1,4 +1,4 @@
-//! Explicit file scope for commits, independent of diff filtering and staging.
+//! Explicit commit scope and ownership of asynchronous message generation.
 
 use ginka_protocol::model::{ChangeKind, FileChange};
 use std::collections::BTreeSet;
@@ -70,9 +70,69 @@ impl CommitSelection {
     }
 }
 
+/// The generation whose result may update the current workspace's draft.
+///
+/// The daemon broadcasts results to every client. Only an exact, pending id
+/// may settle this draft; another client or an old workspace must not do so.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitMessageGeneration {
+    pending: Option<String>,
+}
+
+impl CommitMessageGeneration {
+    /// Track a fresh, globally unique request id before sending the request.
+    pub fn start(&mut self, generation_id: String) {
+        self.pending = Some(generation_id);
+    }
+
+    /// Whether this draft is waiting for its own generated message.
+    pub fn active(&self) -> bool {
+        self.pending.is_some()
+    }
+
+    /// Accept a matching result once, retaining the pending id on mismatches.
+    pub fn finish(&mut self, generation_id: Option<&str>) -> bool {
+        if self.pending.is_some() && self.pending.as_deref() == generation_id {
+            self.clear();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Discard the pending result when leaving its workspace.
+    pub fn clear(&mut self) {
+        self.pending = None;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_only_accepts_its_own_result_once() {
+        let mut generation = CommitMessageGeneration::default();
+        generation.start("mine".into());
+        assert!(!generation.finish(None));
+        assert!(!generation.finish(Some("another-client")));
+        assert!(generation.active());
+        assert!(generation.finish(Some("mine")));
+        assert!(!generation.active());
+        assert!(!generation.finish(Some("mine")));
+    }
+
+    #[test]
+    fn changing_workspace_discards_pending_generation() {
+        let mut generation = CommitMessageGeneration::default();
+        generation.start("old".into());
+        generation.clear();
+        assert!(!generation.active());
+        assert!(!generation.finish(Some("old")));
+        generation.start("new".into());
+        assert!(!generation.finish(Some("old")));
+        assert!(generation.finish(Some("new")));
+    }
 
     fn file(path: &str, old_path: Option<&str>) -> FileChange {
         FileChange {

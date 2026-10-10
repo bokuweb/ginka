@@ -1927,10 +1927,17 @@ impl Service {
             }
             Request::GenerateCommitMessage {
                 workspace,
+                generation_id,
                 agent,
                 staged,
                 paths,
-            } => self.generate_commit_message(workspace, agent.as_deref(), staged, paths),
+            } => self.generate_commit_message(
+                workspace,
+                generation_id,
+                agent.as_deref(),
+                staged,
+                paths,
+            ),
             Request::CreateGeneratedPullRequest {
                 workspace,
                 draft,
@@ -3562,6 +3569,7 @@ impl Service {
     fn generate_commit_message(
         &mut self,
         workspace: WorkspaceId,
+        generation_id: Option<String>,
         agent: Option<&str>,
         staged: bool,
         paths: Vec<String>,
@@ -3606,6 +3614,7 @@ impl Service {
             };
             events.emit(DaemonEvent::CommitMessageGenerated {
                 workspace,
+                generation_id,
                 message,
                 error,
             });

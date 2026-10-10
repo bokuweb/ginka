@@ -835,6 +835,23 @@ fn an_agent_can_drive_ginka_over_mcp() {
 }
 
 #[test]
+fn mcp_commit_message_generation_returns_the_failure_instead_of_an_ack() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "harbor"]);
+    let replies = home.mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ginka_generate_commit_message","arguments":{"workspace":"comet/harbor","paths":["README.md"]}}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ginka_workspaces","arguments":{}}}"#,
+    ]);
+    assert_eq!(replies.len(), 2);
+    assert_eq!(replies[0]["result"]["isError"], true, "{replies:?}");
+    let error = replies[0]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(error.contains("nothing to describe"), "{error}");
+    assert_ne!(replies[1]["result"]["isError"], true, "{replies:?}");
+}
+
+#[test]
 fn a_workspace_is_merged_into_the_branch_the_project_is_on() {
     let home = Home::new();
     let repository = home.repository("comet");

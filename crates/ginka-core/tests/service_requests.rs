@@ -1395,6 +1395,7 @@ fn selected_commits_cross_the_service_without_consuming_other_staging() {
         .service
         .handle(Request::GenerateCommitMessage {
             workspace: workspace.id(),
+            generation_id: None,
             agent: None,
             staged: true,
             paths: vec!["README.md".into()],

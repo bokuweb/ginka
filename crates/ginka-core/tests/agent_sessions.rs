@@ -1724,6 +1724,7 @@ fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
 
     match fixture.ask(Request::GenerateCommitMessage {
         workspace: fixture.workspace.clone(),
+        generation_id: None,
         agent: Some("claude".into()),
         staged: false,
         paths: Vec::new(),
@@ -1767,10 +1768,77 @@ fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
 }
 
 #[test]
+fn selected_commit_message_generation_excludes_other_staged_and_unstaged_work() {
+    let mut fixture = Fixture::new();
+    let worktree = match fixture.ask(Request::ListWorkspaces { project: None }) {
+        Response::Workspaces { workspaces } => workspaces
+            .into_iter()
+            .find(|summary| summary.id() == fixture.workspace)
+            .map(|summary| summary.worktree.path)
+            .unwrap(),
+        other => panic!("expected workspaces, got {other:?}"),
+    };
+    std::fs::write(worktree.join("[new].txt"), "SELECTED_CURRENT\n").unwrap();
+    std::fs::write(worktree.join("other.txt"), "EXCLUDED_STAGED\n").unwrap();
+    support::git(&worktree, &["add", "other.txt"]);
+    std::fs::write(worktree.join("other.txt"), "EXCLUDED_UNSTAGED\n").unwrap();
+    let staged = support::git(&worktree, &["diff", "--cached"]);
+    std::fs::write(
+        &fixture.script,
+        [
+            r#"{"type":"system","subtype":"init","session_id":"one-shot"}"#,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":{prompt_json}}]}}"#,
+            r#"{"type":"result","subtype":"success","is_error":false,"session_id":"one-shot"}"#,
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    assert!(matches!(
+        fixture.ask(Request::GenerateCommitMessage {
+            workspace: fixture.workspace.clone(),
+            generation_id: Some("selected-test".into()),
+            agent: Some("claude".into()),
+            staged: false,
+            paths: vec!["[new].txt".into()],
+        }),
+        Response::Ack
+    ));
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let message = loop {
+        if let Some((message, error)) = fixture.recorder.all().into_iter().find_map(|event| {
+            if let DaemonEvent::CommitMessageGenerated {
+                generation_id,
+                message,
+                error,
+                ..
+            } = event
+            {
+                assert_eq!(generation_id.as_deref(), Some("selected-test"));
+                Some((message, error))
+            } else {
+                None
+            }
+        }) {
+            assert_eq!(error, None);
+            break message.unwrap();
+        }
+        assert!(Instant::now() < deadline, "no message was ever pushed");
+        std::thread::sleep(Duration::from_millis(25));
+    };
+    assert!(message.contains("[new].txt"), "{message}");
+    assert!(message.contains("SELECTED_CURRENT"), "{message}");
+    assert!(!message.contains("EXCLUDED_STAGED"), "{message}");
+    assert!(!message.contains("EXCLUDED_UNSTAGED"), "{message}");
+    assert!(!message.contains("other.txt"), "{message}");
+    assert_eq!(support::git(&worktree, &["diff", "--cached"]), staged);
+}
+
+#[test]
 fn a_clean_worktree_has_no_commit_message_to_write() {
     let mut fixture = Fixture::new();
     fixture.ask(Request::GenerateCommitMessage {
         workspace: fixture.workspace.clone(),
+        generation_id: None,
         agent: Some("claude".into()),
         staged: false,
         paths: Vec::new(),

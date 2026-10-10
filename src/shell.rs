@@ -1067,9 +1067,16 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::RemoveComment { id } => {
                     this.remove_comment(id.clone(), cx)
                 }
-                crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged, paths } => {
-                    this.generate_commit_message(*only_staged, paths.clone(), cx)
-                }
+                crate::surfaces::SurfaceEvent::GenerateCommitMessage {
+                    generation_id,
+                    only_staged,
+                    paths,
+                } => this.generate_commit_message(
+                    generation_id.clone(),
+                    *only_staged,
+                    paths.clone(),
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
                 crate::surfaces::SurfaceEvent::PushWithLease => {
@@ -1830,6 +1837,7 @@ impl Shell {
                             .map_err(|_| ()),
                         DaemonEvent::CommitMessageGenerated {
                             workspace,
+                            generation_id,
                             message,
                             error,
                         } => this
@@ -1838,7 +1846,12 @@ impl Shell {
                                     == Some(&workspace)
                                 {
                                     this.surfaces.update(cx, |surfaces, cx| {
-                                        surfaces.set_generated(message, error, cx)
+                                        surfaces.set_generated(
+                                            generation_id.as_deref(),
+                                            message,
+                                            error,
+                                            cx,
+                                        )
                                     });
                                 }
                             })
@@ -3485,6 +3498,7 @@ impl Shell {
     /// path; only a refusal to *start* is reported here.
     fn generate_commit_message(
         &mut self,
+        generation_id: String,
         only_staged: bool,
         paths: Vec<String>,
         cx: &mut Context<Self>,
@@ -3495,15 +3509,16 @@ impl Shell {
         let link = self.link.clone();
         let surfaces = self.surfaces.clone();
         cx.spawn(async move |_, cx| {
+            let requested_id = generation_id.clone();
             let outcome = cx
                 .background_spawn(async move {
-                    link.generate_commit_message(&workspace, only_staged, paths)
+                    link.generate_commit_message(&workspace, requested_id, only_staged, paths)
                         .await
                 })
                 .await;
             if let Err(error) = outcome {
                 surfaces.update(cx, |surfaces, cx| {
-                    surfaces.set_generated(None, Some(error), cx)
+                    surfaces.set_generated(Some(&generation_id), None, Some(error), cx)
                 });
             }
         })

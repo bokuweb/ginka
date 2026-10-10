@@ -568,6 +568,7 @@ impl DaemonLink {
     pub async fn generate_commit_message(
         &self,
         workspace: &WorkspaceId,
+        generation_id: String,
         only_staged: bool,
         paths: Vec<String>,
     ) -> Result<(), String> {
@@ -575,6 +576,7 @@ impl DaemonLink {
         client
             .request(Request::GenerateCommitMessage {
                 workspace: workspace.clone(),
+                generation_id: Some(generation_id),
                 agent: None,
                 staged: only_staged,
                 paths,
