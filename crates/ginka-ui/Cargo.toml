@@ -7,6 +7,8 @@ description = "Ginka's design tokens, assets and view models"
 
 [dependencies]
 bgpui-kit.workspace = true
+base64.workspace = true
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 nucleo-matcher.workspace = true
 ginka-core.workspace = true
 alacritty_terminal.workspace = true
@@ -23,7 +25,6 @@ url.workspace = true
 shlex.workspace = true
 
 [dev-dependencies]
-base64.workspace = true
 tempfile = "3"
 
 [lints]

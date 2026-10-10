@@ -2547,3 +2547,16 @@ sidebar.folder.collapse:
 sidebar.folder.search_open:
   en: Matching folders stay open while searching
   ja: 検索中は一致するフォルダーを展開します
+
+surface.files.image.zoom_out:
+  en: "Zoom out"
+  ja: "縮小"
+surface.files.image.zoom_in:
+  en: "Zoom in"
+  ja: "拡大"
+surface.files.image.fit:
+  en: "Fit"
+  ja: "全体を表示"
+surface.files.image.help:
+  en: "Pinch or Ctrl/⌘ + scroll to zoom; drag to pan. Keyboard: +/−, arrows, 0 to fit. Double-click to fit. Scale is relative to fit."
+  ja: "ピンチまたは Ctrl/⌘ + スクロールで拡大・縮小、ドラッグで移動。キー: +/−、矢印、0 で全体表示。ダブルクリックでも全体表示。倍率は全体表示が基準です。"

@@ -14,12 +14,12 @@ use ginka_ui::Tokens;
 use ginka_ui::diff_filter::DiffFilter;
 use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
-    DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, image_data_url,
-    language_for_path, markdown_preview, preview_kind, save_state, saved_selection_reference,
-    selected_text,
+    DefinitionTarget, FileTabs, PreviewKind, SaveState, definition_selection, language_for_path,
+    markdown_preview, preview_kind, save_state, saved_selection_reference, selected_text,
 };
+use ginka_ui::file_explorer::{ExplorerOpen, FileExplorer};
 use ginka_ui::file_search::FileSearchScope;
-use ginka_ui::file_tree::{FileTree, TreeRowKind};
+use ginka_ui::image_preview::ImagePreview;
 use ginka_ui::skills::{ScopeFilter, SkillFilter, StateFilter};
 use ginka_ui::surface::Surface;
 use gpui::prelude::FluentBuilder as _;
@@ -51,6 +51,7 @@ struct FileBuffer {
     workspace: WorkspaceId,
     file: FileContent,
     editor: Option<Entity<EditorState>>,
+    image_view: Option<Entity<ImagePreview>>,
     complaint: Option<SharedString>,
     previewing: bool,
     /// When the reader last typed in it, for autosave.
@@ -189,14 +190,10 @@ pub struct SurfacePanel {
     finder: Entity<InputState>,
     /// The paths that match it, best first.
     files: Vec<FileEntry>,
-    /// The bounded flat catalogue folded into the explorer tree.
-    tree_files: Vec<FileEntry>,
+    /// Virtualized explorer owns bounded catalogue and keyboard navigation.
+    file_explorer: Entity<FileExplorer>,
     /// Workspace whose asynchronous tree response may replace the catalogue.
     tree_workspace: Option<WorkspaceId>,
-    /// Directory expansion retained while a search replaces the explorer.
-    file_tree: FileTree,
-    /// Whether the worktree had more files than the explorer retains.
-    file_tree_truncated: bool,
     /// The lines that contain what was typed, if any do.
     matches: Vec<ContentMatch>,
     /// Whether the finder reads this worktree or every active one in its project.
@@ -429,6 +426,15 @@ impl SurfacePanel {
             }
         })
         .detach();
+        let file_explorer = cx.new(FileExplorer::new);
+        cx.subscribe(&file_explorer, |this, _, event: &ExplorerOpen, cx| {
+            if !event.preview {
+                this.file_tabs.pin(&event.path);
+            }
+            this.preview_next = event.preview;
+            cx.emit(SurfaceEvent::OpenFile(event.path.clone()));
+        })
+        .detach();
         let diff_finder = cx.new(|cx| {
             InputState::new(window, cx).placeholder(rust_i18n::t!("surface.git.filter").to_string())
         });
@@ -485,10 +491,8 @@ impl SurfacePanel {
             terminal_view: None,
             finder,
             files: Vec::new(),
-            tree_files: Vec::new(),
+            file_explorer,
             tree_workspace: None,
-            file_tree: FileTree::default(),
-            file_tree_truncated: false,
             matches: Vec::new(),
             file_search_scope: FileSearchScope::default(),
             project_matches: Vec::new(),
@@ -659,11 +663,8 @@ impl SurfacePanel {
         if self.tree_workspace.as_ref() != Some(&workspace) {
             return;
         }
-        if self.tree_files != files || self.file_tree_truncated != truncated {
-            self.tree_files = files;
-            self.file_tree_truncated = truncated;
-            cx.notify();
-        }
+        self.file_explorer
+            .update(cx, |explorer, cx| explorer.set_files(files, truncated, cx));
     }
 
     /// Clear search-only rows as soon as the empty query restores the tree.
@@ -671,12 +672,6 @@ impl SurfacePanel {
         self.tree_workspace = Some(workspace);
         self.files.clear();
         self.matches.clear();
-        cx.notify();
-    }
-
-    /// Expand or collapse one directory without losing descendant state.
-    fn toggle_file_directory(&mut self, path: &str, cx: &mut Context<Self>) {
-        self.file_tree.toggle(path);
         cx.notify();
     }
 
@@ -818,10 +813,9 @@ impl SurfacePanel {
         self.project_matches.clear();
         self.project_files.clear();
         self.project_search = None;
-        self.tree_files.clear();
+        self.file_explorer
+            .update(cx, |explorer, cx| explorer.clear(cx));
         self.tree_workspace = None;
-        self.file_tree = FileTree::default();
-        self.file_tree_truncated = false;
         self.browsing_files = true;
         self.opening = None;
         self.definition = None;
@@ -915,10 +909,12 @@ impl SurfacePanel {
             }
             editor
         });
+        let image_view = ImagePreview::from_file(&file, cx).map(|preview| cx.new(|_| preview));
         self.file_buffers.push(FileBuffer {
             workspace: workspace.clone(),
             file,
             editor,
+            image_view,
             complaint: None,
             previewing: false,
             last_edit: None,
@@ -4714,116 +4710,8 @@ impl SurfacePanel {
     }
 
     /// The empty-query explorer, folded from the daemon's bounded catalogue.
-    fn file_tree(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let tokens = Tokens::global(cx).clone();
-        let rows = self.file_tree.rows(&self.tree_files);
-        let empty = rows.is_empty();
-        v_flex()
-            .id("workspace-file-tree")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .py_1()
-            .children(self.file_tree_truncated.then(|| {
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(tokens.colors().status_error)
-                    .child(
-                        rust_i18n::t!(
-                            "surface.files.tree.truncated",
-                            limit = ginka_ui::file_tree::TREE_FILE_LIMIT
-                        )
-                        .to_string(),
-                    )
-            }))
-            .children(rows.into_iter().map(|row| {
-                let path = row.path.clone();
-                let id = SharedString::from(format!("file-tree:{}", row.path));
-                let indent = px(8. + row.depth as f32 * 14.);
-                match row.kind {
-                    TreeRowKind::Directory => {
-                        Button::new(id)
-                            .ghost()
-                            .w_full()
-                            .child(
-                                h_flex()
-                                    .w_full()
-                                    .pl(indent)
-                                    .gap_1p5()
-                                    .child(
-                                        Icon::new(if row.expanded {
-                                            IconName::ChevronDown
-                                        } else {
-                                            IconName::ChevronRight
-                                        })
-                                        .size_3()
-                                        .text_color(tokens.colors().text_muted),
-                                    )
-                                    .child(
-                                        Icon::new(if row.expanded {
-                                            IconName::FolderOpen
-                                        } else {
-                                            IconName::Folder
-                                        })
-                                        .size_4()
-                                        .text_color(tokens.colors().text_secondary),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .min_w_0()
-                                            .text_sm()
-                                            .text_color(tokens.colors().text_secondary)
-                                            .truncate()
-                                            .child(row.name),
-                                    ),
-                            )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.toggle_file_directory(&path, cx)
-                            }))
-                            .into_any_element()
-                    }
-                    TreeRowKind::File => Button::new(id)
-                        .ghost()
-                        .w_full()
-                        .child(
-                            h_flex()
-                                .w_full()
-                                .pl(indent + px(18.))
-                                .gap_1p5()
-                                .child(
-                                    Icon::new(IconName::File)
-                                        .size_4()
-                                        .text_color(tokens.colors().text_muted),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_sm()
-                                        .text_color(tokens.colors().text_secondary)
-                                        .truncate()
-                                        .child(row.name),
-                                ),
-                        )
-                        .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                            this.open_from_list(path.clone(), event, cx)
-                        }))
-                        .into_any_element(),
-                }
-            }))
-            .children(empty.then(|| {
-                div()
-                    .w_full()
-                    .px_3()
-                    .py_2()
-                    .text_xs()
-                    .text_color(tokens.colors().text_muted)
-                    .child(rust_i18n::t!("surface.files.tree.empty").to_string())
-            }))
+    fn file_tree(&self, _: &mut Context<Self>) -> impl IntoElement + use<> {
+        self.file_explorer.clone()
     }
 
     /// One file, as it is on disk.
@@ -5076,20 +4964,11 @@ impl SurfacePanel {
                         .markdown_mdx(),
                     )
                     .into_any_element()
-            } else if let Some(image_url) = image_data_url(file) {
-                div()
-                    .id("file-image-preview")
+            } else if let Some(image) = &buffer.image_view {
+                v_flex()
                     .flex_1()
                     .min_h_0()
-                    .p_4()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(
-                        img(SharedString::from(image_url))
-                            .size_full()
-                            .object_fit(ObjectFit::Contain),
-                    )
+                    .child(image.clone())
                     .into_any_element()
             } else {
                 match &buffer.editor {

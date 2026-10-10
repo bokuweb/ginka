@@ -2,6 +2,7 @@
 
 use ginka_protocol::model::FileEntry;
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::{Duration, Instant};
 
 /// Maximum number of files retained by the tree in one workspace.
 pub const TREE_FILE_LIMIT: usize = 2_000;
@@ -37,13 +38,165 @@ pub struct TreeRow {
     pub expanded: bool,
 }
 
-/// Expansion state retained while search temporarily replaces the tree.
+/// Keyboard operations over the currently visible, directory-first rows.
+#[derive(Debug, Clone, Copy)]
+pub enum TreeNavigation {
+    /// Previous row, stopping at the beginning.
+    Previous,
+    /// Next row, stopping at the end.
+    Next,
+    /// First visible row.
+    First,
+    /// Last visible row.
+    Last,
+    /// One viewport toward the beginning.
+    PageUp,
+    /// One viewport toward the end.
+    PageDown,
+    /// Collapse a directory, otherwise select its parent.
+    Left,
+    /// Expand a directory, otherwise select its first child.
+    Right,
+    /// Toggle a directory or open a file.
+    Activate,
+}
+
+/// Expansion and path-based selection retained while search replaces the tree.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FileTree {
     expanded: BTreeSet<String>,
+    selected: Option<String>,
+    prefix: String,
+    typed_at: Option<Instant>,
 }
 
 impl FileTree {
+    /// Selected workspace-relative path, independent of row ordering.
+    pub fn selected(&self) -> Option<&str> {
+        self.selected.as_deref()
+    }
+
+    /// Select a clicked row and end any keyboard prefix search.
+    pub fn select(&mut self, path: &str) {
+        self.selected = Some(path.into());
+        self.prefix.clear();
+        self.typed_at = None;
+    }
+
+    /// Keep selection visible after a refresh or a collapsed ancestor.
+    pub fn reconcile(&mut self, files: &[FileEntry]) {
+        let rows = self.rows(files);
+        let mut candidate = self.selected.as_deref();
+        while let Some(path) = candidate {
+            if rows.iter().any(|row| row.path == path) {
+                self.selected = Some(path.into());
+                return;
+            }
+            candidate = path.rsplit_once('/').map(|(parent, _)| parent);
+        }
+        self.selected = rows.first().map(|row| row.path.clone());
+    }
+
+    /// Move or activate selection; only activating a file returns an open path.
+    pub fn navigate(
+        &mut self,
+        files: &[FileEntry],
+        action: TreeNavigation,
+        page_size: usize,
+    ) -> Option<String> {
+        self.prefix.clear();
+        self.typed_at = None;
+        self.reconcile(files);
+        let rows = self.rows(files);
+        let index = rows
+            .iter()
+            .position(|row| Some(row.path.as_str()) == self.selected())?;
+        let row = &rows[index];
+        let page = page_size.max(1);
+        let next = match action {
+            TreeNavigation::Previous => Some(index.saturating_sub(1)),
+            TreeNavigation::Next => Some(index.saturating_add(1).min(rows.len() - 1)),
+            TreeNavigation::First => Some(0),
+            TreeNavigation::Last => Some(rows.len() - 1),
+            TreeNavigation::PageUp => Some(index.saturating_sub(page)),
+            TreeNavigation::PageDown => Some(index.saturating_add(page).min(rows.len() - 1)),
+            TreeNavigation::Right if row.kind == TreeRowKind::Directory => {
+                if row.expanded {
+                    rows.get(index + 1)
+                        .filter(|child| child.depth > row.depth)
+                        .map(|_| index + 1)
+                } else {
+                    self.toggle(&row.path);
+                    None
+                }
+            }
+            TreeNavigation::Left => {
+                if row.expanded {
+                    self.toggle(&row.path);
+                    None
+                } else {
+                    row.path
+                        .rsplit_once('/')
+                        .and_then(|(parent, _)| rows.iter().position(|row| row.path == parent))
+                }
+            }
+            TreeNavigation::Activate => {
+                if row.kind == TreeRowKind::File {
+                    return Some(row.path.clone());
+                }
+                self.toggle(&row.path);
+                None
+            }
+            TreeNavigation::Right => None,
+        };
+        if let Some(next) = next {
+            self.selected = Some(rows[next].path.clone());
+        }
+        self.reconcile(files);
+        None
+    }
+
+    /// Find a visible filename by Unicode prefix; repeated letters cycle matches.
+    /// A one-second pause begins a new prefix instead of extending the old one.
+    /// At most 128 lowercase characters are retained, including pasted input.
+    pub fn type_prefix(&mut self, files: &[FileEntry], text: &str, now: Instant) -> bool {
+        if text.is_empty() || text.chars().any(char::is_control) {
+            return false;
+        }
+        self.reconcile(files);
+        let text: String = text.to_lowercase().chars().take(128).collect();
+        let continuing = self
+            .typed_at
+            .is_some_and(|last| now.saturating_duration_since(last) < Duration::from_secs(1));
+        let cycling = continuing && self.prefix == text && text.chars().count() == 1;
+        if !continuing || cycling {
+            self.prefix = text;
+        } else if self.prefix.chars().count() + text.chars().count() <= 128 {
+            self.prefix.push_str(&text);
+        }
+        self.typed_at = Some(now);
+        let rows = self.rows(files);
+        if rows.is_empty() {
+            return true;
+        }
+        let current = rows
+            .iter()
+            .position(|row| Some(row.path.as_str()) == self.selected())
+            .unwrap_or(0);
+        let start = if continuing && !cycling {
+            current
+        } else {
+            (current + 1) % rows.len()
+        };
+        if let Some(row) = (0..rows.len())
+            .map(|offset| &rows[(start + offset) % rows.len()])
+            .find(|row| row.name.to_lowercase().starts_with(&self.prefix))
+        {
+            self.selected = Some(row.path.clone());
+        }
+        true
+    }
+
     /// Expand a collapsed directory or collapse an expanded one.
     pub fn toggle(&mut self, path: &str) {
         if !self.expanded.remove(path) {
@@ -214,5 +367,94 @@ mod tests {
         let (complete, truncated) = bounded_catalogue(files, 3);
         assert_eq!(complete.len(), 3);
         assert!(!truncated);
+    }
+
+    #[test]
+    fn keyboard_walks_children_parents_and_opens_only_files() {
+        let files = files(&["src/nested/mod.rs", "src/lib.rs", "README.md"]);
+        let mut tree = FileTree::default();
+        assert_eq!(tree.navigate(&files, TreeNavigation::Right, 5), None);
+        assert_eq!(tree.selected(), Some("src"));
+        tree.navigate(&files, TreeNavigation::Right, 5);
+        assert_eq!(tree.selected(), Some("src/nested"));
+        tree.navigate(&files, TreeNavigation::Activate, 5);
+        tree.navigate(&files, TreeNavigation::Right, 5);
+        assert_eq!(tree.selected(), Some("src/nested/mod.rs"));
+        assert_eq!(
+            tree.navigate(&files, TreeNavigation::Activate, 5),
+            Some("src/nested/mod.rs".into())
+        );
+        tree.navigate(&files, TreeNavigation::Left, 5);
+        assert_eq!(tree.selected(), Some("src/nested"));
+        tree.navigate(&files, TreeNavigation::Left, 5);
+        assert!(!tree.rows(&files)[1].expanded);
+        tree.navigate(&files, TreeNavigation::Left, 5);
+        assert_eq!(tree.selected(), Some("src"));
+    }
+
+    #[test]
+    fn navigation_clamps_pages_and_handles_an_empty_catalogue() {
+        let files = files(&["a", "b", "c", "d", "e"]);
+        let mut tree = FileTree::default();
+        tree.navigate(&files, TreeNavigation::PageDown, 3);
+        assert_eq!(tree.selected(), Some("d"));
+        tree.navigate(&files, TreeNavigation::PageDown, 3);
+        assert_eq!(tree.selected(), Some("e"));
+        tree.navigate(&files, TreeNavigation::PageUp, 3);
+        assert_eq!(tree.selected(), Some("b"));
+        tree.navigate(&files, TreeNavigation::First, 3);
+        tree.navigate(&files, TreeNavigation::Previous, 3);
+        assert_eq!(tree.selected(), Some("a"));
+        tree.navigate(&files, TreeNavigation::Last, 3);
+        tree.navigate(&files, TreeNavigation::Next, 3);
+        assert_eq!(tree.selected(), Some("e"));
+        assert_eq!(tree.navigate(&[], TreeNavigation::Activate, 0), None);
+        assert_eq!(tree.selected(), None);
+    }
+
+    #[test]
+    fn catalogue_changes_keep_paths_and_collapsing_selects_visible_parent() {
+        let files = files(&["src/nested/mod.rs", "README.md"]);
+        let mut tree = FileTree::default();
+        tree.toggle("src");
+        tree.toggle("src/nested");
+        tree.select("src/nested/mod.rs");
+        let reordered = self::files(&["a.txt", "src/nested/mod.rs"]);
+        tree.reconcile(&reordered);
+        assert_eq!(tree.selected(), Some("src/nested/mod.rs"));
+        tree.toggle("src");
+        tree.reconcile(&files);
+        assert_eq!(tree.selected(), Some("src"));
+        tree.reconcile(&self::files(&["other.txt"]));
+        assert_eq!(tree.selected(), Some("other.txt"));
+    }
+
+    #[test]
+    fn filename_prefix_is_case_insensitive_cycles_and_expires() {
+        let files = files(&["Alpha", "apricot", "beta", "日本.txt"]);
+        let mut tree = FileTree::default();
+        let now = std::time::Instant::now();
+        tree.reconcile(&files);
+        assert!(tree.type_prefix(&files, "A", now));
+        assert_eq!(tree.selected(), Some("apricot"));
+        tree.type_prefix(&files, "a", now);
+        assert_eq!(tree.selected(), Some("Alpha"));
+        tree.type_prefix(&files, "p", now);
+        assert_eq!(tree.selected(), Some("apricot"));
+        tree.type_prefix(&files, "日", now + std::time::Duration::from_secs(2));
+        assert_eq!(tree.selected(), Some("日本.txt"));
+        assert!(!tree.type_prefix(&files, "\n", now));
+    }
+
+    #[test]
+    fn pasted_prefix_is_bounded_and_does_not_consume_control_keys() {
+        let files = files(&["a.txt"]);
+        let mut tree = FileTree::default();
+        let now = Instant::now();
+        assert!(tree.type_prefix(&files, &"日".repeat(1_000), now));
+        assert_eq!(tree.prefix.chars().count(), 128);
+        assert!(!tree.type_prefix(&files, "", now));
+        assert!(!tree.type_prefix(&files, "a\t", now));
+        assert_eq!(tree.prefix.chars().count(), 128);
     }
 }
