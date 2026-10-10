@@ -47,7 +47,12 @@ Manage workspaces, which are git worktrees
 - `ginka workspace merge` — Merge a workspace's branch into another — by default the branch the project is on. A conflict is aborted and named (`ginka workspace merge <WORKSPACE>`)
 - `ginka workspace index` — Build zvec-grep's index for a workspace, here in this terminal, so agents started in it get semantic search. Needs `zg` on PATH (`ginka workspace index <WORKSPACE>`)
 - `ginka workspace pin` — Pin a workspace so it sorts first (`ginka workspace pin <WORKSPACE>`)
+- `ginka workspace pin-many` — Pin 1–256 project-local workspaces atomically (`ginka workspace pin-many <PROJECT> <WORKSPACE>... [--off]`). Use `--off` to unpin every target; archived rows are accepted and invalid targets reject the whole batch.
+- `ginka workspace folders` — List a project's assigned folders, sorted by exact label, with active and archived membership counts (`ginka workspace folders <PROJECT>`). Includes archived-only folders; empty folders disappear when their last member is cleared.
+- `ginka workspace folder` — Assign a project-local sidebar folder, or clear it by omitting the name (`ginka workspace folder <WORKSPACE> [NAME]`). Folder labels stay with the workspace across branch changes and archive/restore; they do not move files.
+- `ginka workspace folder-many` — Assign or clear one folder for 1–256 workspaces in a project atomically (`ginka workspace folder-many <PROJECT> <WORKSPACE>... [--name <NAME>]`). Omit `--name` to clear the labels; an invalid target rejects the whole batch.
 - `ginka workspace archive` — Archive a workspace without removing its worktree or conversation (`ginka workspace archive <WORKSPACE>`)
+- `ginka workspace archive-many` — Archive 1–256 project-local workspaces atomically (`ginka workspace archive-many <PROJECT> <WORKSPACE>... [--restore]`). Use `--restore` to restore every target; mixed active and archived rows are accepted and invalid targets reject the whole batch. Worktree files, running agents, conversations, pins and folders are preserved.
 - `ginka workspace status` — Write the line of status the sidebar shows under a workspace, or clear it by giving none (`ginka workspace status <WORKSPACE> [NOTE]`)
 
 ## `ginka agents`

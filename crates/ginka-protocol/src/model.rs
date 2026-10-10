@@ -99,6 +99,24 @@ pub struct Worktree {
     /// Archived workspaces stay registered but leave the active project tree.
     #[serde(default)]
     pub archived: bool,
+    /// A project-local sidebar folder; this never changes the filesystem path.
+    #[serde(default)]
+    pub folder: Option<String>,
+}
+
+/// An assigned sidebar folder within the project requested by the client.
+///
+/// Empty folders have no record: clearing or removing the last member removes
+/// the folder from the catalog. Counts include pinned workspaces once.
+#[cfg_attr(feature = "export", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceFolder {
+    /// The exact, case-sensitive folder label used by member workspaces.
+    pub name: String,
+    /// Registered members that are not archived.
+    pub active: u64,
+    /// Registered members retained in the archive.
+    pub archived: u64,
 }
 
 impl Worktree {
@@ -1351,7 +1369,23 @@ mod tests {
             head: None,
             pinned: false,
             archived: false,
+            folder: None,
         }
+    }
+
+    #[test]
+    fn older_workspaces_have_no_folder_and_named_folders_round_trip() {
+        let mut tree = worktree();
+        let mut old = serde_json::to_value(&tree).unwrap();
+        old.as_object_mut().unwrap().remove("folder");
+        assert_eq!(
+            serde_json::from_value::<Worktree>(old).unwrap().folder,
+            None
+        );
+        tree.folder = Some("Review".into());
+        let decoded: Worktree =
+            serde_json::from_value(serde_json::to_value(&tree).unwrap()).unwrap();
+        assert_eq!(decoded, tree);
     }
 
     fn session_in(state: SessionState) -> Session {

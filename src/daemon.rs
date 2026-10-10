@@ -1597,6 +1597,68 @@ impl DaemonLink {
         self.git_sync(Request::DismissTicket { ticket }).await
     }
 
+    /// Assign or clear a project-local sidebar folder through the daemon.
+    pub async fn set_workspace_folder(
+        &self,
+        workspace: &WorkspaceId,
+        folder: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceFolder {
+            workspace: workspace.clone(),
+            folder,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Move a project-local batch atomically through the shared protocol.
+    pub async fn set_workspace_folders(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        folder: Option<String>,
+    ) -> Result<(), String> {
+        self.ask_result(Request::SetWorkspaceFolders {
+            project: project.clone(),
+            workspaces,
+            folder,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Atomically pin or unpin project-local workspaces through the daemon.
+    pub async fn pin_workspaces(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        pinned: bool,
+    ) -> Result<(), String> {
+        self.ask_result(Request::PinWorkspaces {
+            project: project.clone(),
+            workspaces,
+            pinned,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    /// Atomically archive or restore project-local workspaces through the daemon.
+    pub async fn archive_workspaces(
+        &self,
+        project: &ProjectName,
+        workspaces: Vec<WorkspaceId>,
+        archived: bool,
+    ) -> Result<(), String> {
+        self.ask_result(Request::ArchiveWorkspaces {
+            project: project.clone(),
+            workspaces,
+            archived,
+        })
+        .await
+        .map(|_| ())
+    }
+
     /// Pin or unpin a workspace; the refusal is the daemon's own words.
     pub async fn pin_workspace(&self, workspace: &WorkspaceId, pinned: bool) -> Result<(), String> {
         self.ask_result(Request::PinWorkspace {

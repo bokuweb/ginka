@@ -122,6 +122,359 @@ fn adding_a_project_registers_it_and_announces_the_change() {
 }
 
 #[test]
+fn workspace_folders_survive_git_reconciliation_and_archive_without_rekeying() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let original = new_workspace(&mut fixture, &project, "topic").unwrap();
+    let id = original.id();
+    fixture.recorder.taken();
+    assert_eq!(
+        fixture.ask(Request::SetWorkspaceFolder {
+            workspace: id.clone(),
+            folder: Some("  Review  ".into()),
+        }),
+        Response::Ack
+    );
+    assert_eq!(
+        fixture.recorder.taken(),
+        vec![DaemonEvent::WorkspacesChanged {
+            project: project.clone(),
+        }]
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolder {
+                workspace: id.clone(),
+                folder: Some("bad\nname".into()),
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    fixture.ask(Request::PinWorkspace {
+        workspace: id.clone(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: id.clone(),
+        archived: true,
+    });
+    support::git(&original.worktree.path, &["checkout", "-b", "renamed"]);
+    let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) else {
+        panic!("expected workspaces")
+    };
+    let workspace = workspaces.iter().find(|row| row.id() == id).unwrap();
+    assert_eq!(workspace.worktree.folder.as_deref(), Some("Review"));
+    assert_eq!(workspace.worktree.name, original.worktree.name);
+    assert_eq!(workspace.worktree.path, original.worktree.path);
+    assert_eq!(workspace.worktree.branch, "renamed");
+    assert!(workspace.worktree.archived && workspace.worktree.pinned);
+    assert!(
+        workspaces
+            .iter()
+            .filter(|row| row.id() != id)
+            .all(|row| row.worktree.folder.is_none())
+    );
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: id.clone(),
+        folder: None,
+    });
+    let Response::Workspaces { workspaces } =
+        fixture.ask(Request::ListWorkspaces { project: None })
+    else {
+        panic!("expected workspaces")
+    };
+    assert!(
+        workspaces
+            .iter()
+            .find(|row| row.id() == id)
+            .unwrap()
+            .worktree
+            .folder
+            .is_none()
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolder {
+                workspace: WorkspaceId("comet/missing".into()),
+                folder: Some("Review".into()),
+            })
+            .is_err()
+    );
+}
+
+#[test]
+fn batch_folders_emit_once_after_commit_and_never_on_a_rejected_batch() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let a = new_workspace(&mut fixture, &project, "batch-a").unwrap();
+    let b = new_workspace(&mut fixture, &project, "batch-b").unwrap();
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: b.id(),
+        archived: true,
+    });
+    fixture.recorder.taken();
+    assert!(
+        fixture
+            .service
+            .handle(Request::SetWorkspaceFolders {
+                project: project.clone(),
+                workspaces: vec![a.id(), WorkspaceId("comet/missing".into())],
+                folder: Some("Review".into()),
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    assert_eq!(
+        fixture.ask(Request::SetWorkspaceFolders {
+            project: project.clone(),
+            workspaces: vec![a.id(), b.id(), a.id()],
+            folder: Some("Review".into()),
+        }),
+        Response::Ack
+    );
+    assert_eq!(
+        fixture.recorder.taken(),
+        vec![DaemonEvent::WorkspacesChanged {
+            project: project.clone()
+        }]
+    );
+    let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project),
+    }) else {
+        panic!("expected workspaces")
+    };
+    for original in [a, b] {
+        let row = workspaces
+            .iter()
+            .find(|row| row.id() == original.id())
+            .unwrap();
+        assert_eq!(row.worktree.folder.as_deref(), Some("Review"));
+        assert_eq!(row.worktree.path, original.worktree.path);
+        assert_eq!(row.worktree.branch, original.worktree.branch);
+    }
+}
+
+#[test]
+fn batch_pins_publish_one_committed_update_and_keep_other_metadata() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let a = new_workspace(&mut fixture, &project, "pin-a").unwrap();
+    let b = new_workspace(&mut fixture, &project, "pin-b").unwrap();
+    fixture.ask(Request::PinWorkspace {
+        workspace: b.id(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: b.id(),
+        archived: true,
+    });
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: a.id(),
+        folder: Some("Review".into()),
+    });
+    let Response::Workspaces { workspaces: before } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) else {
+        panic!("expected workspaces")
+    };
+    fixture.recorder.taken();
+    assert!(
+        fixture
+            .service
+            .handle(Request::PinWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), WorkspaceId("comet/missing".into())],
+                pinned: true
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    for pinned in [true, false] {
+        assert_eq!(
+            fixture.ask(Request::PinWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), b.id(), a.id()],
+                pinned
+            }),
+            Response::Ack
+        );
+        assert_eq!(
+            fixture.recorder.taken(),
+            vec![DaemonEvent::WorkspacesChanged {
+                project: project.clone()
+            }]
+        );
+        let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+            project: Some(project.clone()),
+        }) else {
+            panic!("expected workspaces")
+        };
+        for original in &before {
+            let row = workspaces
+                .iter()
+                .find(|row| row.id() == original.id())
+                .unwrap();
+            let mut expected = original.worktree.clone();
+            if [a.id(), b.id()].contains(&original.id()) {
+                expected.pinned = pinned;
+            }
+            assert_eq!(row.worktree, expected);
+        }
+    }
+}
+
+#[test]
+fn batch_archives_publish_one_committed_update_and_keep_other_metadata() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let a = new_workspace(&mut fixture, &project, "archive-a").unwrap();
+    let b = new_workspace(&mut fixture, &project, "archive-b").unwrap();
+    let paths = [Path::new(&a.worktree.path), Path::new(&b.worktree.path)];
+    std::fs::write(paths[0].join("README.md"), "uncommitted tracked edit\n").unwrap();
+    std::fs::write(paths[1].join("archive-notes.txt"), "untracked notes\n").unwrap();
+    let git_before: Vec<_> = paths
+        .iter()
+        .map(|path| {
+            (
+                support::git(path, &["rev-parse", "HEAD"]),
+                support::git(path, &["status", "--porcelain"]),
+            )
+        })
+        .collect();
+    fixture.ask(Request::PinWorkspace {
+        workspace: b.id(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: b.id(),
+        archived: true,
+    });
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: a.id(),
+        folder: Some("Review".into()),
+    });
+    let Response::Workspaces { workspaces: before } = fixture.ask(Request::ListWorkspaces {
+        project: Some(project.clone()),
+    }) else {
+        panic!("expected workspaces")
+    };
+    fixture.recorder.taken();
+    assert!(
+        fixture
+            .service
+            .handle(Request::ArchiveWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), WorkspaceId("comet/missing".into())],
+                archived: true
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    for archived in [true, false] {
+        assert_eq!(
+            fixture.ask(Request::ArchiveWorkspaces {
+                project: project.clone(),
+                workspaces: vec![a.id(), b.id(), a.id()],
+                archived
+            }),
+            Response::Ack
+        );
+        assert_eq!(
+            fixture.recorder.taken(),
+            vec![DaemonEvent::WorkspacesChanged {
+                project: project.clone()
+            }]
+        );
+        let Response::Workspaces { workspaces } = fixture.ask(Request::ListWorkspaces {
+            project: Some(project.clone()),
+        }) else {
+            panic!("expected workspaces")
+        };
+        for original in &before {
+            let row = workspaces
+                .iter()
+                .find(|row| row.id() == original.id())
+                .unwrap();
+            let mut expected = original.worktree.clone();
+            if [a.id(), b.id()].contains(&original.id()) {
+                expected.archived = archived;
+            }
+            assert_eq!(row.worktree, expected);
+        }
+        for (path, (head, status)) in paths.iter().zip(&git_before) {
+            assert_eq!(&support::git(path, &["rev-parse", "HEAD"]), head);
+            assert_eq!(&support::git(path, &["status", "--porcelain"]), status);
+        }
+        assert_eq!(
+            std::fs::read_to_string(paths[0].join("README.md")).unwrap(),
+            "uncommitted tracked edit\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(paths[1].join("archive-notes.txt")).unwrap(),
+            "untracked notes\n"
+        );
+    }
+}
+
+#[test]
+fn folder_catalog_reads_archived_metadata_without_git_or_push_events() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let original = new_workspace(&mut fixture, &project, "catalog").unwrap();
+    let workspace = original.id();
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace: workspace.clone(),
+        folder: Some("Review".into()),
+    });
+    fixture.ask(Request::PinWorkspace {
+        workspace: workspace.clone(),
+        pinned: true,
+    });
+    fixture.ask(Request::ArchiveWorkspace {
+        workspace: workspace.clone(),
+        archived: true,
+    });
+    fixture.recorder.taken();
+    // A catalog is usable even when the registered worktree is temporarily absent.
+    std::fs::remove_dir_all(&original.worktree.path).unwrap();
+    assert_eq!(
+        fixture.ask(Request::ListWorkspaceFolders {
+            project: project.clone()
+        }),
+        Response::WorkspaceFolders {
+            folders: vec![ginka_protocol::WorkspaceFolder {
+                name: "Review".into(),
+                active: 0,
+                archived: 1
+            }]
+        }
+    );
+    assert!(fixture.recorder.taken().is_empty());
+    fixture.ask(Request::SetWorkspaceFolder {
+        workspace,
+        folder: None,
+    });
+    fixture.recorder.taken();
+    assert_eq!(
+        fixture.ask(Request::ListWorkspaceFolders { project }),
+        Response::WorkspaceFolders { folders: vec![] }
+    );
+    assert!(
+        fixture
+            .service
+            .handle(Request::ListWorkspaceFolders {
+                project: ProjectName("missing".into())
+            })
+            .is_err()
+    );
+    assert!(fixture.recorder.taken().is_empty());
+}
+
+#[test]
 fn workspace_summaries_report_the_daemon_hosts_semantic_index_state() {
     let mut fixture = Fixture::new();
     fixture.with_project();
@@ -908,6 +1261,65 @@ fn a_file_can_be_staged_reverted_and_committed_on_its_own() {
 }
 
 #[test]
+fn review_requests_keep_literal_paths_and_neighbouring_changes_separate() {
+    let mut fixture = Fixture::new();
+    let project = fixture.with_project();
+    let workspace = match fixture.ask(Request::CreateWorkspace {
+        project,
+        branch: "literal-review".into(),
+        base: None,
+    }) {
+        Response::Workspace { workspace } => workspace,
+        other => panic!("expected a workspace, got {other:?}"),
+    };
+    let worktree = &workspace.worktree.path;
+    std::fs::write(worktree.join("[ab].txt"), "target\n").unwrap();
+    std::fs::write(worktree.join("a.txt"), "neighbour\n").unwrap();
+    let staged_paths = |fixture: &mut Fixture| match fixture.ask(Request::WorkspaceChanges {
+        workspace: workspace.id(),
+        source: ChangeSource::Staged,
+        context_lines: None,
+    }) {
+        Response::Changes { changes } => changes
+            .files
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>(),
+        other => panic!("expected changes, got {other:?}"),
+    };
+    assert_eq!(
+        fixture.ask(Request::StageFile {
+            workspace: workspace.id(),
+            path: "[ab].txt".into(),
+            staged: true,
+        }),
+        Response::Ack
+    );
+    assert_eq!(staged_paths(&mut fixture), ["[ab].txt"]);
+    fixture.ask(Request::StageFile {
+        workspace: workspace.id(),
+        path: "a.txt".into(),
+        staged: true,
+    });
+    fixture.ask(Request::StageFile {
+        workspace: workspace.id(),
+        path: "[ab].txt".into(),
+        staged: false,
+    });
+    assert_eq!(staged_paths(&mut fixture), ["a.txt"]);
+    fixture.ask(Request::RevertFile {
+        workspace: workspace.id(),
+        path: "[ab].txt".into(),
+    });
+    assert!(!worktree.join("[ab].txt").exists());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("a.txt")).unwrap(),
+        "neighbour\n"
+    );
+    assert_eq!(staged_paths(&mut fixture), ["a.txt"]);
+}
+
+#[test]
 fn changes_context_crosses_the_service_boundary_and_is_bounded() {
     let mut fixture = Fixture::new();
     let project = fixture.with_project();
@@ -1179,6 +1591,49 @@ fn a_branch_can_be_listed_and_checked_out_without_re_keying_the_workspace() {
         })
         .unwrap_err();
     assert!(error.message.contains(&elsewhere.name), "{}", error.message);
+}
+
+#[test]
+fn skill_requests_reach_names_beyond_the_previous_limit_and_toggle_all_copies() {
+    let home = tempfile::tempdir().unwrap();
+    let root = home.path().join(".claude/skills");
+    for n in 0..501 {
+        let skill = root.join(format!("skill-{n:04}"));
+        std::fs::create_dir_all(&skill).unwrap();
+        std::fs::write(skill.join("SKILL.md"), "Instructions").unwrap();
+    }
+    let mut fixture = Fixture::configured(|service| service.with_skills_home(home.path()));
+    let project = fixture.with_project();
+    let copy = fixture.repo().join(".agents/skills/skill-0500");
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::write(copy.join("SKILL.md.disabled"), "Instructions").unwrap();
+    match fixture.ask(Request::ListSkills {
+        project: Some(project.clone()),
+    }) {
+        Response::Skills { skills, truncated } => {
+            assert!(!truncated);
+            assert_eq!(skills.len(), 501);
+            let last = skills.last().unwrap();
+            assert_eq!(last.name, "skill-0500");
+            assert_eq!(last.installs.len(), 2);
+            assert!(!last.enabled);
+        }
+        other => panic!("expected skills, got {other:?}"),
+    }
+    fixture.ask(Request::SetSkillEnabled {
+        name: "skill-0500".into(),
+        enabled: true,
+        project: Some(project.clone()),
+    });
+    assert!(copy.join("SKILL.md").is_file());
+    fixture.ask(Request::SetSkillEnabled {
+        name: "skill-0500".into(),
+        enabled: false,
+        project: Some(project),
+    });
+    assert!(root.join("skill-0500/SKILL.md.disabled").is_file());
+    assert!(copy.join("SKILL.md.disabled").is_file());
+    assert!(root.join("skill-0499/SKILL.md").is_file());
 }
 
 #[test]

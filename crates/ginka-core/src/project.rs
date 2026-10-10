@@ -94,7 +94,7 @@ pub fn list_projects(conn: &Connection) -> Result<Vec<Project>> {
 /// Every worktree stored for `project`, pinned ones first.
 pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Worktree>> {
     let mut statement = conn.prepare(
-        "SELECT project_name, name, branch, path, head, pinned, archived
+        "SELECT project_name, name, branch, path, head, pinned, archived, folder
          FROM worktrees
          WHERE project_name = ?1
          ORDER BY archived, pinned DESC, name",
@@ -108,6 +108,7 @@ pub fn list_worktrees(conn: &Connection, project: &ProjectName) -> Result<Vec<Wo
             head: row.get(4)?,
             pinned: row.get(5)?,
             archived: row.get(6)?,
+            folder: row.get(7)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)
@@ -145,6 +146,157 @@ pub fn set_pinned(conn: &Connection, workspace: &WorkspaceId, pinned: bool) -> R
         rusqlite::params![pinned, project.0, name],
     )?;
     Ok(updated > 0)
+}
+
+/// Pin or unpin 1–256 project-local workspaces in one transaction.
+/// All ids are validated before any write. Duplicates count toward the bound
+/// but are updated once; archived rows are valid. A refusal or failed write
+/// leaves every row unchanged, including its folder and git identity.
+pub fn set_pins(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    pinned: bool,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET pinned = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![pinned, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Archive or restore 1–256 project-local workspaces atomically.
+/// All targets are validated before writing; a failed write rolls back the batch.
+/// Duplicates count toward the bound but are updated once. Only sidebar metadata
+/// changes: files, git identity, pins, folders and conversations remain intact.
+pub fn set_archives(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    archived: bool,
+) -> Result<()> {
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET archived = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![archived, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Summarize assigned folder labels for one project, including archived workspaces.
+pub fn list_workspace_folders(
+    conn: &Connection,
+    project: &ProjectName,
+) -> Result<Vec<ginka_protocol::WorkspaceFolder>> {
+    let mut stmt = conn.prepare(
+        "SELECT folder, SUM(NOT archived), SUM(archived) FROM worktrees
+         WHERE project_name = ?1 AND folder IS NOT NULL GROUP BY folder ORDER BY folder",
+    )?;
+    let folders = stmt.query_map([&project.0], |row| {
+        Ok(ginka_protocol::WorkspaceFolder {
+            name: row.get(0)?,
+            active: row.get(1)?,
+            archived: row.get(2)?,
+        })
+    })?;
+    Ok(folders.collect::<rusqlite::Result<Vec<_>>>()?)
+}
+
+/// Assign a project-local sidebar folder, or clear it with a blank or `None`.
+///
+/// Names are trimmed and limited to 80 characters without control characters.
+/// Invalid names leave the previous value intact. Returns whether the immutable
+/// workspace id matched a stored row; git reconciliation does not own this value.
+pub fn set_folder(
+    conn: &Connection,
+    workspace: &WorkspaceId,
+    folder: Option<&str>,
+) -> Result<bool> {
+    let folder = validate_folder(folder)?;
+    let Some((project, name)) = workspace.parts() else {
+        return Ok(false);
+    };
+    Ok(conn.execute(
+        "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
+        rusqlite::params![folder, project.0, name],
+    )? > 0)
+}
+
+fn validate_folder(folder: Option<&str>) -> Result<Option<&str>> {
+    let folder = folder.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = folder {
+        anyhow::ensure!(
+            !name.chars().any(char::is_control) && name.chars().count() <= 80,
+            "folder name must be at most 80 characters without control characters"
+        );
+    }
+    Ok(folder)
+}
+
+/// Assign one folder to 1–256 project-local workspaces atomically.
+/// Duplicate ids count toward the limit but are updated once. A missing,
+/// malformed or foreign id, invalid label, or failed write leaves every row
+/// unchanged. Archived workspaces are valid targets; no files are moved.
+pub fn set_folders(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+    folder: Option<&str>,
+) -> Result<()> {
+    let folder = validate_folder(folder)?;
+    let tx = conn.unchecked_transaction()?;
+    for name in batch_names(&tx, project, workspaces)? {
+        tx.execute(
+            "UPDATE worktrees SET folder = ?1 WHERE project_name = ?2 AND name = ?3",
+            rusqlite::params![folder, project.0, name],
+        )?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+// Called inside the mutation's transaction, so validation and writes see the
+// same registered rows. Batch operations share their bounds and ownership.
+fn batch_names(
+    conn: &Connection,
+    project: &ProjectName,
+    workspaces: &[WorkspaceId],
+) -> Result<std::collections::BTreeSet<String>> {
+    anyhow::ensure!(
+        !workspaces.is_empty() && workspaces.len() <= 256,
+        "select between 1 and 256 workspaces"
+    );
+    anyhow::ensure!(
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE name = ?1)",
+            [&project.0],
+            |row| row.get::<_, bool>(0)
+        )?,
+        "no project named {project}"
+    );
+    let mut names = std::collections::BTreeSet::new();
+    for workspace in workspaces {
+        let (owner, name) = workspace
+            .parts()
+            .ok_or_else(|| anyhow::anyhow!("invalid workspace id {workspace}"))?;
+        anyhow::ensure!(
+            owner == *project,
+            "workspace {workspace} is outside project {project}"
+        );
+        anyhow::ensure!(
+            find_worktree(conn, workspace)?.is_some(),
+            "no workspace named {workspace}"
+        );
+        names.insert(name.to_owned());
+    }
+    Ok(names)
 }
 
 /// Archive or restore a workspace. Returns whether a row was affected.
@@ -228,6 +380,277 @@ mod tests {
             kind: ProjectKind::Git,
             has_origin: None,
         }
+    }
+
+    #[test]
+    fn folder_catalog_is_project_local_counts_archived_and_drops_empty_folders() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        let mut other = sample();
+        other.name = ProjectName("other".into());
+        insert_project(&conn, &other).unwrap();
+        for (project, name, folder, archived, pinned) in [
+            ("comet", "a", Some("Review"), false, true),
+            ("comet", "b", Some("Review"), true, false),
+            ("comet", "c", Some("Archive only"), true, false),
+            ("comet", "d", None, false, false),
+            ("other", "e", Some("Foreign"), false, false),
+        ] {
+            conn.execute(
+                "INSERT INTO worktrees (project_name, name, branch, path, folder, archived, pinned) VALUES (?1, ?2, 'main', ?2, ?3, ?4, ?5)",
+                rusqlite::params![project, name, folder, archived, pinned],
+            ).unwrap();
+        }
+        let folders = list_workspace_folders(&conn, &sample().name).unwrap();
+        assert_eq!(
+            folders
+                .iter()
+                .map(|f| (f.name.as_str(), f.active, f.archived))
+                .collect::<Vec<_>>(),
+            vec![("Archive only", 0, 1), ("Review", 1, 1)]
+        );
+        set_folder(&conn, &WorkspaceId("comet/c".into()), None).unwrap();
+        assert_eq!(
+            list_workspace_folders(&conn, &sample().name).unwrap().len(),
+            1
+        );
+        assert!(
+            list_workspace_folders(&conn, &ProjectName("missing".into()))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn batch_archives_validate_all_targets_and_roll_back_failed_writes() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for (name, pinned, archived) in [("a", false, false), ("b", true, true)] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder, pinned, archived) VALUES ('comet', ?1, 'topic', ?1, 'Review', ?2, ?3)", rusqlite::params![name, pinned, archived]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        let before = list_worktrees(&conn, &sample().name).unwrap();
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_archives(&conn, &sample().name, &targets, true).is_err());
+            assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        }
+        assert!(
+            set_archives(
+                &conn,
+                &ProjectName("missing".into()),
+                std::slice::from_ref(&a),
+                true
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_archive_b BEFORE UPDATE OF archived ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(set_archives(&conn, &sample().name, &[a.clone(), b.clone()], true).is_err());
+        assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        conn.execute_batch("DROP TRIGGER refuse_archive_b").unwrap();
+        for archived in [true, true, false] {
+            set_archives(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone(), a.clone()],
+                archived,
+            )
+            .unwrap();
+            for original in &before {
+                let mut expected = original.clone();
+                expected.archived = archived;
+                assert_eq!(
+                    find_worktree(&conn, &WorkspaceId::new(&original.project, &original.name))
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        // The exact boundary is accepted even when all ids refer to one row.
+        set_archives(&conn, &sample().name, &vec![a.clone(); 256], true).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().archived);
+        assert!(!find_worktree(&conn, &b).unwrap().unwrap().archived);
+    }
+
+    #[test]
+    fn batch_pins_validate_all_targets_and_roll_back_failed_writes() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for (name, pinned, archived) in [("a", false, false), ("b", true, true)] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder, pinned, archived) VALUES ('comet', ?1, 'topic', ?1, 'Review', ?2, ?3)", rusqlite::params![name, pinned, archived]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        let before = list_worktrees(&conn, &sample().name).unwrap();
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_pins(&conn, &sample().name, &targets, true).is_err());
+            assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        }
+        assert!(
+            set_pins(
+                &conn,
+                &ProjectName("missing".into()),
+                std::slice::from_ref(&a),
+                true
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_pin_b BEFORE UPDATE OF pinned ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(set_pins(&conn, &sample().name, &[a.clone(), b.clone()], true).is_err());
+        assert_eq!(list_worktrees(&conn, &sample().name).unwrap(), before);
+        conn.execute_batch("DROP TRIGGER refuse_pin_b").unwrap();
+        for pinned in [true, true, false] {
+            set_pins(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone(), a.clone()],
+                pinned,
+            )
+            .unwrap();
+            for original in &before {
+                let mut expected = original.clone();
+                expected.pinned = pinned;
+                assert_eq!(
+                    find_worktree(&conn, &WorkspaceId::new(&original.project, &original.name))
+                        .unwrap()
+                        .unwrap(),
+                    expected
+                );
+            }
+        }
+        // The exact boundary is accepted even when all ids refer to one row.
+        set_pins(&conn, &sample().name, &vec![a.clone(); 256], true).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().pinned);
+        assert!(!find_worktree(&conn, &b).unwrap().unwrap().pinned);
+    }
+
+    #[test]
+    fn batch_folders_validate_every_target_and_roll_back_write_failures() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        for name in ["a", "b"] {
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path, folder) VALUES ('comet', ?1, 'main', ?1, 'Before')", [name]).unwrap();
+        }
+        let a = WorkspaceId("comet/a".into());
+        let b = WorkspaceId("comet/b".into());
+        for targets in [
+            vec![],
+            vec![a.clone(), WorkspaceId("comet/missing".into())],
+            vec![a.clone(), WorkspaceId("other/b".into())],
+            vec![a.clone(), WorkspaceId("invalid".into())],
+            vec![a.clone(); 257],
+        ] {
+            assert!(set_folders(&conn, &sample().name, &targets, Some("After")).is_err());
+            assert_eq!(
+                find_worktree(&conn, &a).unwrap().unwrap().folder.as_deref(),
+                Some("Before")
+            );
+        }
+        assert!(
+            set_folders(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone()],
+                Some("bad\nname")
+            )
+            .is_err()
+        );
+        conn.execute_batch("CREATE TRIGGER refuse_b BEFORE UPDATE OF folder ON worktrees WHEN NEW.name = 'b' BEGIN SELECT RAISE(ABORT, 'refused'); END;").unwrap();
+        assert!(
+            set_folders(
+                &conn,
+                &sample().name,
+                &[a.clone(), b.clone()],
+                Some("After")
+            )
+            .is_err()
+        );
+        assert_eq!(
+            find_worktree(&conn, &a).unwrap().unwrap().folder.as_deref(),
+            Some("Before")
+        );
+        conn.execute_batch("DROP TRIGGER refuse_b").unwrap();
+        set_folders(
+            &conn,
+            &sample().name,
+            &[a.clone(), b.clone(), a.clone()],
+            Some("  Review  "),
+        )
+        .unwrap();
+        for id in [&a, &b] {
+            assert_eq!(
+                find_worktree(&conn, id).unwrap().unwrap().folder.as_deref(),
+                Some("Review")
+            );
+        }
+        set_folders(&conn, &sample().name, &[a.clone(), b.clone()], Some("   ")).unwrap();
+        assert!(find_worktree(&conn, &a).unwrap().unwrap().folder.is_none());
+        assert!(find_worktree(&conn, &b).unwrap().unwrap().folder.is_none());
+    }
+
+    #[test]
+    fn folders_are_trimmed_cleared_and_invalid_names_leave_the_value_intact() {
+        let conn = db::open_in_memory().unwrap();
+        insert_project(&conn, &sample()).unwrap();
+        conn.execute("INSERT INTO worktrees (project_name, name, branch, path) VALUES ('comet', 'work', 'main', '/tmp/work')", []).unwrap();
+        let id = WorkspaceId("comet/work".into());
+        assert!(set_folder(&conn, &id, Some("  Review  ")).unwrap());
+        assert_eq!(
+            find_worktree(&conn, &id)
+                .unwrap()
+                .unwrap()
+                .folder
+                .as_deref(),
+            Some("Review")
+        );
+        for invalid in ["one\ntwo".to_string(), "a\tb".to_string(), "x".repeat(81)] {
+            assert!(set_folder(&conn, &id, Some(&invalid)).is_err());
+            assert_eq!(
+                find_worktree(&conn, &id)
+                    .unwrap()
+                    .unwrap()
+                    .folder
+                    .as_deref(),
+                Some("Review")
+            );
+        }
+        assert!(set_folder(&conn, &id, Some("   ")).unwrap());
+        assert_eq!(find_worktree(&conn, &id).unwrap().unwrap().folder, None);
+        assert!(!set_folder(&conn, &WorkspaceId("comet/missing".into()), None).unwrap());
+    }
+
+    #[test]
+    fn folders_survive_reopening_the_database_and_accept_eighty_unicode_characters() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().join("state.db");
+        let id = WorkspaceId("comet/work".into());
+        let name = "試".repeat(80);
+        {
+            let conn = db::open(&path).unwrap();
+            insert_project(&conn, &sample()).unwrap();
+            conn.execute("INSERT INTO worktrees (project_name, name, branch, path) VALUES ('comet', 'work', 'main', '/tmp/work')", []).unwrap();
+            assert!(set_folder(&conn, &id, Some(&name)).unwrap());
+            assert!(set_archived(&conn, &id, true).unwrap());
+        }
+        let conn = db::open(&path).unwrap();
+        let row = find_worktree(&conn, &id).unwrap().unwrap();
+        assert_eq!(row.folder.as_deref(), Some(name.as_str()));
+        assert!(row.archived);
+        assert!(set_folder(&conn, &id, None).unwrap());
+        assert_eq!(find_worktree(&conn, &id).unwrap().unwrap().folder, None);
     }
 
     #[test]

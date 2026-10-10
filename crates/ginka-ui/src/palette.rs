@@ -94,6 +94,8 @@ pub enum RowAction {
     Rename,
     /// Write or clear the selected workspace's status note.
     StatusNote,
+    /// Move the selected workspace to a named sidebar folder or ungroup it.
+    Folder,
     /// Pin or unpin the selected workspace.
     TogglePin,
     /// Move the selected workspace to the archived section.
@@ -127,6 +129,7 @@ pub fn row_entries(row: Option<&SessionRow>) -> Vec<Entry> {
         entries.push(entry("rename", "palette.row.rename", RowAction::Rename));
     }
     entries.push(entry("note", "palette.row.note", RowAction::StatusNote));
+    entries.push(entry("folder", "palette.row.folder", RowAction::Folder));
     entries.push(entry(
         "pin",
         if row.pinned {
@@ -637,6 +640,7 @@ mod tests {
         row.status.conflict = false;
         let offered = commands(Some(&row));
         assert!(offered.contains(&Command::Row(RowAction::StatusNote)));
+        assert!(offered.contains(&Command::Row(RowAction::Folder)));
         assert!(offered.contains(&Command::Row(RowAction::TogglePin)));
         assert!(offered.contains(&Command::Row(RowAction::Archive)));
         assert!(!offered.contains(&Command::Row(RowAction::ResolveConflicts)));

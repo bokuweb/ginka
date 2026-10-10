@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 use ginka_protocol::provider::{ProviderKind, ProviderModel};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 /// Settings the UI owns: `~/.ginka/app.json`.
@@ -32,6 +32,8 @@ pub struct AppSettings {
     pub terminal_dock_height: f32,
     /// Right-panel and terminal arrangement keyed by immutable workspace id.
     pub workspace_layouts: BTreeMap<String, WorkspaceLayoutSettings>,
+    /// Sidebar folder visibility, scoped by immutable project name and exact label.
+    pub collapsed_workspace_folders: CollapsedWorkspaceFolders,
     /// Restored on launch when the workspace still exists.
     pub last_workspace: Option<String>,
     /// BCP-47 tag; `None` follows the system locale.
@@ -71,6 +73,7 @@ impl Default for AppSettings {
             terminal_dock_open: false,
             terminal_dock_height: 220.0,
             workspace_layouts: BTreeMap::new(),
+            collapsed_workspace_folders: CollapsedWorkspaceFolders::default(),
             last_workspace: None,
             locale: None,
             recent_models: BTreeMap::new(),
@@ -79,6 +82,41 @@ impl Default for AppSettings {
             notification_sounds: true,
             open_tabs: Vec::new(),
             muted_projects: BTreeMap::new(),
+        }
+    }
+}
+
+/// Collapsed sidebar folders, independent of workspace and branch metadata.
+/// Labels are case-sensitive and project-local; reopening removes the saved key.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct CollapsedWorkspaceFolders(BTreeMap<String, BTreeSet<String>>);
+
+impl CollapsedWorkspaceFolders {
+    /// Whether the exact folder is collapsed outside an active search.
+    pub fn is_collapsed(&self, project: &ginka_protocol::ProjectName, folder: &str) -> bool {
+        self.0
+            .get(&project.0)
+            .is_some_and(|folders| folders.contains(folder))
+    }
+
+    /// Save the explicit visibility preference without changing project metadata.
+    pub fn set_collapsed(
+        &mut self,
+        project: &ginka_protocol::ProjectName,
+        folder: &str,
+        collapsed: bool,
+    ) {
+        if collapsed {
+            self.0
+                .entry(project.0.clone())
+                .or_default()
+                .insert(folder.to_owned());
+        } else if let Some(folders) = self.0.get_mut(&project.0) {
+            folders.remove(folder);
+            if folders.is_empty() {
+                self.0.remove(&project.0);
+            }
         }
     }
 }
@@ -471,6 +509,60 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let loaded: AppSettings = load(&tmp.path().join("absent.json"));
         assert_eq!(loaded, AppSettings::default());
+    }
+
+    #[test]
+    fn collapsed_folders_restore_exact_project_local_labels() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("app.json");
+        let comet = ginka_protocol::ProjectName("comet".into());
+        let aurora = ginka_protocol::ProjectName("aurora".into());
+        let mut settings = AppSettings::default();
+        settings
+            .collapsed_workspace_folders
+            .set_collapsed(&comet, "Review/調査", true);
+        settings
+            .collapsed_workspace_folders
+            .set_collapsed(&aurora, "Review", true);
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert_eq!(restored, settings);
+        let folders = &restored.collapsed_workspace_folders;
+        assert!(folders.is_collapsed(&comet, "Review/調査"));
+        assert!(!folders.is_collapsed(&aurora, "Review/調査"));
+        assert!(!folders.is_collapsed(&comet, "review/調査"));
+        settings
+            .collapsed_workspace_folders
+            .set_collapsed(&comet, "Review/調査", false);
+        save(&path, &settings).unwrap();
+        let restored: AppSettings = load(&path);
+        assert!(
+            !restored
+                .collapsed_workspace_folders
+                .is_collapsed(&comet, "Review/調査")
+        );
+        assert!(
+            restored
+                .collapsed_workspace_folders
+                .is_collapsed(&aurora, "Review")
+        );
+        let json = serde_json::to_value(&restored).unwrap();
+        assert_eq!(
+            json["collapsed_workspace_folders"],
+            serde_json::json!({"aurora": ["Review"]})
+        );
+    }
+
+    #[test]
+    fn legacy_settings_open_all_folders_without_losing_other_preferences() {
+        let restored: AppSettings =
+            serde_json::from_str(r#"{"appearance":"dark","sidebar_open":false}"#).unwrap();
+        assert_eq!(restored.appearance, Appearance::Dark);
+        assert!(!restored.sidebar_open);
+        assert_eq!(
+            restored.collapsed_workspace_folders,
+            CollapsedWorkspaceFolders::default()
+        );
     }
 
     #[test]

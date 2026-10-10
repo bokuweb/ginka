@@ -1548,6 +1548,12 @@ sidebar.action.move_down:
 sidebar.action.rename:
   en: Rename
   ja: 名前を変更
+sidebar.action.folder:
+  en: Move to folder…
+  ja: フォルダーへ移動…
+sidebar.folder.placeholder:
+  en: Folder name — empty ungroups this workspace
+  ja: フォルダー名（空にすると分類を解除）
 sidebar.action.note:
   en: Status note…
   ja: ステータスメモ…
@@ -2403,6 +2409,9 @@ surface.name.skills:
 palette.row.rename:
   en: Rename this conversation
   ja: この会話の名前を変更
+palette.row.folder:
+  en: Move this workspace to a folder
+  ja: このワークスペースをフォルダーへ移動
 palette.row.note:
   en: Write this workspace's status note
   ja: このワークスペースのステータスメモを書く
@@ -2457,6 +2466,15 @@ question.several:
 question.keys:
   en: "1–9 pick · ↑↓ question · ⌘↩ send"
   ja: "1–9 で選択 · ↑↓ で質問移動 · ⌘↩ で送信"
+question.progress:
+  en: "Question %{current} of %{total}"
+  ja: "質問 %{current} / %{total}"
+question.back:
+  en: Back
+  ja: 戻る
+question.next:
+  en: Next
+  ja: 次へ
 question.skip:
   en: Skip
   ja: スキップ
@@ -2475,3 +2493,57 @@ composer.command.fork.description:
 transcript.fork.same:
   en: "Fork here on %{agent}"
   ja: "ここから %{agent} のまま分岐"
+
+cli.folders.empty:
+  en: No workspace folders in this project
+  ja: このプロジェクトにフォルダーはありません
+cli.folders.row:
+  en: "%{name} — %{active} active, %{archived} archived"
+  ja: "%{name} — アクティブ %{active} 件、アーカイブ %{archived} 件"
+sidebar.folder.new:
+  en: New folder…
+  ja: 新しいフォルダー…
+sidebar.folder.ungrouped:
+  en: Ungrouped
+  ja: 分類なし
+
+sidebar.selection.start:
+  en: Select workspaces
+  ja: ワークスペースを選択
+sidebar.selection.done:
+  en: Done selecting
+  ja: 選択を終了
+sidebar.selection.count:
+  en: "%{count} selected"
+  ja: "%{count} 件を選択"
+sidebar.selection.limit:
+  en: Select up to 256 visible workspaces in this project
+  ja: このプロジェクトの表示中のワークスペースを 256 件まで選択
+sidebar.selection.pin:
+  en: Pin every selected workspace (up to 256)
+  ja: 選択したすべてのワークスペースをピン留め（256 件まで）
+sidebar.selection.unpin:
+  en: Unpin every selected workspace (up to 256)
+  ja: 選択したすべてのワークスペースのピンを外す（256 件まで）
+sidebar.selection.archive:
+  en: Archive every selected workspace without deleting its worktree or conversation (up to 256)
+  ja: 選択したすべてのワークスペースをアーカイブ（作業ツリーと会話を保持、256 件まで）
+sidebar.selection.restore:
+  en: Restore every selected workspace to the active list (up to 256)
+  ja: 選択したすべてのワークスペースを一覧に戻す（256 件まで）
+sidebar.selection.check:
+  en: "Select %{name}"
+  ja: "%{name} を選択"
+sidebar.selection.uncheck:
+  en: "Deselect %{name}"
+  ja: "%{name} の選択を解除"
+
+sidebar.folder.expand:
+  en: "Expand %{name}"
+  ja: "%{name} を展開"
+sidebar.folder.collapse:
+  en: "Collapse %{name}"
+  ja: "%{name} を折りたたむ"
+sidebar.folder.search_open:
+  en: Matching folders stay open while searching
+  ja: 検索中は一致するフォルダーを展開します

@@ -611,12 +611,17 @@ pub fn changes_with_context(
 /// The patch is regenerated from the current repository state and selected by
 /// its complete `@@` header. If the view is stale, no other hunk is guessed:
 /// the operation fails before `git apply` can touch the index.
+/// The file path is literal, including wildcard characters and Git pathspec magic.
 pub fn stage_hunk(worktree: &Path, path: &str, header: &str, staged: bool) -> Result<()> {
     if staged {
         // Make a new file visible to `git diff` without staging its contents.
-        git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+        git(
+            worktree,
+            &["--literal-pathspecs", "add", "--intent-to-add", "--", path],
+        )
+        .ok();
     }
-    let mut args = vec!["diff"];
+    let mut args = vec!["--literal-pathspecs", "diff"];
     if !staged {
         args.push("--cached");
     }
@@ -638,12 +643,25 @@ pub fn stage_hunk(worktree: &Path, path: &str, header: &str, staged: bool) -> Re
 /// The worktree-versus-index patch is regenerated immediately before the
 /// reverse apply. A header that disappeared or changed is refused so a stale
 /// review cannot discard a neighbouring edit.
+/// The file path is literal, including wildcard characters and Git pathspec magic.
 pub fn revert_hunk(worktree: &Path, path: &str, header: &str) -> Result<()> {
     // Make a new file visible without moving its contents into the index.
-    git(worktree, &["add", "--intent-to-add", "--", path]).ok();
+    git(
+        worktree,
+        &["--literal-pathspecs", "add", "--intent-to-add", "--", path],
+    )
+    .ok();
     let patch = git_raw(
         worktree,
-        &["diff", "--no-color", "--no-ext-diff", "-U3", "--", path],
+        &[
+            "--literal-pathspecs",
+            "diff",
+            "--no-color",
+            "--no-ext-diff",
+            "-U3",
+            "--",
+            path,
+        ],
     )?;
     let selected = select_hunk_patch(&patch, header)
         .with_context(|| format!("hunk {header} no longer exists in {path}"))?;
@@ -1021,8 +1039,9 @@ fn unpublished(worktree: &Path, limit: usize) -> Result<std::collections::HashSe
 /// Per file rather than all-or-nothing, because a review that ends in "these
 /// three files are right and that one is not" has nowhere to put that answer
 /// otherwise.
+/// The path is literal; a directory includes only its descendants.
 pub fn stage(worktree: &Path, path: &str) -> Result<()> {
-    git(worktree, &["add", "--", path])?;
+    git(worktree, &["--literal-pathspecs", "add", "--", path])?;
     Ok(())
 }
 
@@ -1032,12 +1051,25 @@ pub fn stage(worktree: &Path, path: &str) -> Result<()> {
 /// repository whose first commit has not happened yet drops the entry instead.
 /// That is the same outcome — the file goes back to being untracked — reached
 /// the only way git offers before there is a HEAD.
+/// The path is literal; a directory includes only its descendants.
 pub fn unstage(worktree: &Path, path: &str) -> Result<()> {
     match head_commit(worktree) {
-        Some(_) => git(worktree, &["restore", "--staged", "--", path])?,
+        Some(_) => git(
+            worktree,
+            &["--literal-pathspecs", "restore", "--staged", "--", path],
+        )?,
         None => git(
             worktree,
-            &["rm", "--cached", "--force", "--quiet", "--", path],
+            &[
+                "--literal-pathspecs",
+                "rm",
+                "-r",
+                "--cached",
+                "--force",
+                "--quiet",
+                "--",
+                path,
+            ],
         )?,
     };
     Ok(())
@@ -1049,18 +1081,37 @@ pub fn unstage(worktree: &Path, path: &str) -> Result<()> {
 /// nothing to restore — so it is removed from the index and deleted, which is
 /// what "undo this file" means for a file the agent created. Destructive by
 /// definition: the caller is the one that has to have asked.
+/// The file path is literal, including wildcard characters and Git pathspec magic.
 pub fn revert_file(worktree: &Path, path: &str) -> Result<()> {
     let known = head_commit(worktree).is_some()
         && git(worktree, &["cat-file", "-e", &format!("HEAD:{path}")]).is_ok();
     if known {
-        git(worktree, &["restore", "--staged", "--worktree", "--", path])?;
+        git(
+            worktree,
+            &[
+                "--literal-pathspecs",
+                "restore",
+                "--staged",
+                "--worktree",
+                "--",
+                path,
+            ],
+        )?;
         return Ok(());
     }
     // Best-effort: the file may never have reached the index, and a path git
     // does not know is one there is nothing to remove.
     git(
         worktree,
-        &["rm", "--cached", "--force", "--quiet", "--", path],
+        &[
+            "--literal-pathspecs",
+            "rm",
+            "--cached",
+            "--force",
+            "--quiet",
+            "--",
+            path,
+        ],
     )
     .ok();
     let full = worktree.join(path);

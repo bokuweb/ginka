@@ -41,7 +41,8 @@ pub use model::{
     CommandScope, DiffLine, DiffSide, FileChange, FileEntry, Hunk, LineKind, LoginCommand,
     PlanSnapshot, PlanSource, PlanUsage, PlanWindow, Project, ProjectKind, PullRequest,
     PullRequestState, ReviewComment, Session, SessionMatch, SessionState, SlashCommand,
-    TranscriptEntry, TranscriptPayload, UsageRow, UsageTotals, WorkspaceSummary, Worktree,
+    TranscriptEntry, TranscriptPayload, UsageRow, UsageTotals, WorkspaceFolder, WorkspaceSummary,
+    Worktree,
 };
 pub use provider::{AccessMode, OptionOutcome, ProviderKind, ProviderModel, SessionOptions};
 pub use rpc::{Request, Response};

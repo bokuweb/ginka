@@ -463,6 +463,11 @@ enum ProjectCommand {
 /// `ginka workspace …`.
 #[derive(Subcommand)]
 enum WorkspaceCommand {
+    /// List assigned sidebar folders with active and archived member counts.
+    Folders {
+        /// The project's name, as shown by `project list`.
+        project: String,
+    },
     /// List workspaces, reconciling against git first.
     List {
         /// Limit to one project.
@@ -529,6 +534,24 @@ enum WorkspaceCommand {
         /// The workspace id, as shown by `workspace list`.
         workspace: String,
     },
+    /// Group a workspace in a sidebar folder without moving its files.
+    Folder {
+        /// The immutable workspace id, as shown by `workspace list`.
+        workspace: String,
+        /// Folder name; omit it to return the workspace to the ungrouped list.
+        name: Option<String>,
+    },
+    /// Move several project workspaces into a sidebar folder atomically.
+    FolderMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Destination folder; omit to ungroup every target.
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Pin a workspace so it sorts first.
     Pin {
         /// The workspace id, as shown by `workspace list`.
@@ -536,6 +559,28 @@ enum WorkspaceCommand {
         /// Unpin instead.
         #[arg(long)]
         off: bool,
+    },
+    /// Pin or unpin several project workspaces atomically.
+    PinMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Unpin every target instead.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Archive or restore several project workspaces atomically.
+    ArchiveMany {
+        /// All workspace ids must belong to this project.
+        project: String,
+        /// Between 1 and 256 immutable workspace ids.
+        #[arg(required = true, num_args = 1..)]
+        workspaces: Vec<String>,
+        /// Restore every target instead.
+        #[arg(long)]
+        restore: bool,
     },
     /// Archive a workspace without removing its worktree or conversation.
     Archive {
@@ -1572,6 +1617,11 @@ fn request_for(command: Command) -> Result<Request> {
             index,
         },
 
+        Command::Workspace(WorkspaceCommand::Folders { project }) => {
+            Request::ListWorkspaceFolders {
+                project: ProjectName(project),
+            }
+        }
         Command::Workspace(WorkspaceCommand::List { project }) => Request::ListWorkspaces {
             project: project.map(ProjectName),
         },
@@ -1595,9 +1645,42 @@ fn request_for(command: Command) -> Result<Request> {
             workspace: WorkspaceId::new(&ProjectName(project), &name),
             force,
         },
+        Command::Workspace(WorkspaceCommand::Folder { workspace, name }) => {
+            Request::SetWorkspaceFolder {
+                workspace: WorkspaceId(workspace),
+                folder: name,
+            }
+        }
+        Command::Workspace(WorkspaceCommand::FolderMany {
+            project,
+            workspaces,
+            name,
+        }) => Request::SetWorkspaceFolders {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
+            folder: name,
+        },
         Command::Workspace(WorkspaceCommand::Pin { workspace, off }) => Request::PinWorkspace {
             workspace: WorkspaceId(workspace),
             pinned: !off,
+        },
+        Command::Workspace(WorkspaceCommand::PinMany {
+            project,
+            workspaces,
+            off,
+        }) => Request::PinWorkspaces {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
+            pinned: !off,
+        },
+        Command::Workspace(WorkspaceCommand::ArchiveMany {
+            project,
+            workspaces,
+            restore,
+        }) => Request::ArchiveWorkspaces {
+            project: ProjectName(project),
+            workspaces: workspaces.into_iter().map(WorkspaceId).collect(),
+            archived: !restore,
         },
         Command::Workspace(WorkspaceCommand::Archive { workspace, restore }) => {
             Request::ArchiveWorkspace {
@@ -2769,6 +2852,22 @@ fn print(response: Response, patch: bool) {
         Response::Projects { projects } => print_projects(&projects),
         Response::Project { project } => print_projects(std::slice::from_ref(&project)),
         Response::Workspaces { workspaces } => print_workspaces(&workspaces),
+        Response::WorkspaceFolders { folders } => {
+            if folders.is_empty() {
+                println!("{}", rust_i18n::t!("cli.folders.empty"));
+            }
+            for folder in folders {
+                println!(
+                    "{}",
+                    rust_i18n::t!(
+                        "cli.folders.row",
+                        name = folder.name,
+                        active = folder.active,
+                        archived = folder.archived
+                    )
+                );
+            }
+        }
         Response::Workspace { workspace } => print_workspaces(std::slice::from_ref(&workspace)),
         Response::Agents { agents } => print_agents(&agents),
         Response::Accounts { accounts } => print_accounts(&accounts, &[]),
@@ -3187,11 +3286,17 @@ fn print_workspaces(workspaces: &[WorkspaceSummary]) {
     }
     for summary in workspaces {
         println!(
-            "{:<32} {:<24} {:<10} {}",
+            "{:<32} {:<24} {:<10} {}{}",
             summary.id().0,
             summary.worktree.branch,
             ginka_cli_format::status_label(&summary.status),
-            summary.worktree.path.display()
+            summary.worktree.path.display(),
+            summary
+                .worktree
+                .folder
+                .as_ref()
+                .map(|folder| format!("  [{folder}]"))
+                .unwrap_or_default()
         );
     }
 }

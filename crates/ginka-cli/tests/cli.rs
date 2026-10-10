@@ -344,6 +344,66 @@ fn a_workspace_can_be_archived_and_restored_without_removing_it() {
 }
 
 #[test]
+fn workspace_folders_persist_across_daemon_restarts_and_can_be_cleared() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "later"]);
+    home.ok(&["workspace", "folder", "comet/later", "  Review  "]);
+    let invalid = home.run(&["workspace", "folder", "comet/later", "bad\nname"]);
+    assert!(!invalid.status.success());
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 1, "archived": 0}])
+    );
+    assert!(
+        !home
+            .run(&["workspace", "folders", "missing"])
+            .status
+            .success()
+    );
+    home.ok(&["workspace", "archive", "comet/later"]);
+    home.ok(&["daemon", "stop"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "list"])).unwrap();
+    let workspace = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["worktree"]["name"] == "later")
+        .unwrap();
+    assert_eq!(workspace["worktree"]["folder"], "Review");
+    assert_eq!(workspace["worktree"]["archived"], true);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 0, "archived": 1}])
+    );
+    assert!(
+        home.ok(&["workspace", "folders", "comet"])
+            .contains("Review")
+    );
+    home.ok(&["workspace", "archive", "comet/later", "--restore"]);
+    home.ok(&["workspace", "folder", "comet/later"]);
+    let listed: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "list"])).unwrap();
+    let workspace = listed["workspaces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["worktree"]["name"] == "later")
+        .unwrap();
+    assert!(workspace["worktree"]["folder"].is_null());
+    assert_eq!(workspace["worktree"]["archived"], false);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
+}
+
+#[test]
 fn json_output_is_the_protocols_own_shape_so_an_agent_can_read_it() {
     let home = Home::new();
     let repository = home.repository("comet");
@@ -988,5 +1048,197 @@ fn a_refused_commit_is_handed_to_the_agent_with_fix_with_agent() {
     assert!(
         home.ok(&["session", "list"]).contains("comet/refused"),
         "a conversation was started in the workspace"
+    );
+}
+
+#[test]
+fn batch_pins_are_atomic_and_survive_restart_with_archived_targets() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["pin-a", "pin-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    home.ok(&["workspace", "pin", "comet/pin-b"]);
+    home.ok(&["workspace", "archive", "comet/pin-b"]);
+    let read = || -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&home.ok(&["--json", "workspace", "list", "comet"])).unwrap();
+        // Pinning deliberately changes display order; compare rows by identity.
+        value["workspaces"].as_array_mut().unwrap().sort_by(|a, b| {
+            a["worktree"]["name"]
+                .as_str()
+                .cmp(&b["worktree"]["name"].as_str())
+        });
+        value
+    };
+    let before = read();
+    assert!(
+        !home
+            .run(&[
+                "workspace",
+                "pin-many",
+                "comet",
+                "comet/pin-a",
+                "comet/missing"
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(read(), before);
+    for pinned in [true, false] {
+        let mut args = vec![
+            "workspace",
+            "pin-many",
+            "comet",
+            "comet/pin-a",
+            "comet/pin-b",
+            "comet/pin-a",
+        ];
+        if !pinned {
+            args.push("--off");
+        }
+        home.ok(&args);
+        home.ok(&["daemon", "stop"]);
+        let mut expected = before.clone();
+        for row in expected["workspaces"].as_array_mut().unwrap() {
+            if ["pin-a", "pin-b"]
+                .iter()
+                .any(|name| row["worktree"]["name"] == *name)
+            {
+                row["worktree"]["pinned"] = pinned.into();
+            }
+        }
+        assert_eq!(read(), expected);
+    }
+    assert!(
+        !home
+            .run(&["workspace", "pin-many", "comet"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn batch_archives_are_atomic_and_survive_restart_with_mixed_targets() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["archive-a", "archive-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    home.ok(&["workspace", "pin", "comet/archive-b"]);
+    home.ok(&["workspace", "archive", "comet/archive-b"]);
+    let read = || -> serde_json::Value {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&home.ok(&["--json", "workspace", "list", "comet"])).unwrap();
+        // Archiving deliberately changes display order; compare rows by identity.
+        value["workspaces"].as_array_mut().unwrap().sort_by(|a, b| {
+            a["worktree"]["name"]
+                .as_str()
+                .cmp(&b["worktree"]["name"].as_str())
+        });
+        value
+    };
+    let before = read();
+    assert!(
+        !home
+            .run(&[
+                "workspace",
+                "archive-many",
+                "comet",
+                "comet/archive-a",
+                "comet/missing"
+            ])
+            .status
+            .success()
+    );
+    assert_eq!(read(), before);
+    for archived in [true, false] {
+        let mut args = vec![
+            "workspace",
+            "archive-many",
+            "comet",
+            "comet/archive-a",
+            "comet/archive-b",
+            "comet/archive-a",
+        ];
+        if !archived {
+            args.push("--restore");
+        }
+        home.ok(&args);
+        home.ok(&["daemon", "stop"]);
+        let mut expected = before.clone();
+        for row in expected["workspaces"].as_array_mut().unwrap() {
+            if ["archive-a", "archive-b"]
+                .iter()
+                .any(|name| row["worktree"]["name"] == *name)
+            {
+                row["worktree"]["archived"] = archived.into();
+            }
+        }
+        assert_eq!(read(), expected);
+    }
+    assert!(
+        !home
+            .run(&["workspace", "archive-many", "comet"])
+            .status
+            .success()
+    );
+}
+
+#[test]
+fn batch_folders_are_atomic_and_persist_for_active_and_archived_workspaces() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    for branch in ["batch-a", "batch-b"] {
+        home.ok(&["workspace", "new", "comet", branch]);
+    }
+    let rejected = home.run(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/missing",
+        "--name",
+        "Review",
+    ]);
+    assert!(!rejected.status.success());
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
+    home.ok(&["workspace", "archive", "comet/batch-b"]);
+    home.ok(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/batch-b",
+        "--name",
+        "  Review  ",
+    ]);
+    home.ok(&["daemon", "stop"]);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(
+        catalog["folders"],
+        serde_json::json!([{"name": "Review", "active": 1, "archived": 1}])
+    );
+    home.ok(&[
+        "workspace",
+        "folder-many",
+        "comet",
+        "comet/batch-a",
+        "comet/batch-b",
+    ]);
+    let catalog: serde_json::Value =
+        serde_json::from_str(&home.ok(&["--json", "workspace", "folders", "comet"])).unwrap();
+    assert_eq!(catalog["folders"], serde_json::json!([]));
+    assert!(
+        !home
+            .run(&["workspace", "folder-many", "comet"])
+            .status
+            .success()
     );
 }

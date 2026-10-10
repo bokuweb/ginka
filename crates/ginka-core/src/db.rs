@@ -114,6 +114,10 @@ const MIGRATIONS: &[(&str, &str)] = &[
         "0026_fork_thread",
         include_str!("../../../db/migrations/0026_fork_thread.sql"),
     ),
+    (
+        "0027_workspace_folder",
+        include_str!("../../../db/migrations/0027_workspace_folder.sql"),
+    ),
 ];
 
 /// Open the database, applying any migrations the file has not seen.
@@ -244,6 +248,47 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(version, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn existing_workspaces_gain_no_folder_without_losing_identity_or_state() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        configure(&conn).unwrap();
+        let before_folders = MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == "0027_workspace_folder")
+            .expect("the workspace folder migration is registered");
+        for (_, sql) in &MIGRATIONS[..before_folders] {
+            conn.execute_batch(sql).unwrap();
+        }
+        conn.pragma_update(None, "user_version", before_folders)
+            .unwrap();
+        conn.execute(
+            "INSERT INTO projects (name, path, default_branch)
+             VALUES ('comet', '/tmp/comet', 'main')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO worktrees (project_name, name, branch, path, pinned, archived)
+             VALUES ('comet', 'topic', 'renamed', '/tmp/topic', 1, 1)",
+            [],
+        )
+        .unwrap();
+
+        migrate(&mut conn).unwrap();
+
+        let row = crate::project::find_worktree(
+            &conn,
+            &ginka_protocol::WorkspaceId("comet/topic".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(row.name, "topic");
+        assert_eq!(row.branch, "renamed");
+        assert_eq!(row.path, std::path::PathBuf::from("/tmp/topic"));
+        assert!(row.pinned && row.archived);
+        assert!(row.folder.is_none());
     }
 
     #[test]

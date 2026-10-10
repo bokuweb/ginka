@@ -1019,6 +1019,13 @@ impl Service {
             Request::ListProjects => Ok(Response::Projects {
                 projects: self.projects()?,
             }),
+            Request::ListWorkspaceFolders { project } => {
+                self.project(&project)?;
+                Ok(Response::WorkspaceFolders {
+                    folders: project::list_workspace_folders(&self.conn(), &project)
+                        .map_err(failed)?,
+                })
+            }
             Request::SetProjectLabel { project, label } => {
                 let label = label.trim();
                 let label = (!label.is_empty()).then_some(label);
@@ -1079,6 +1086,48 @@ impl Service {
                 Ok(Response::Workspace {
                     workspace: self.summarize(worktree),
                 })
+            }
+            Request::SetWorkspaceFolder { workspace, folder } => {
+                if !project::set_folder(&self.conn(), &workspace, folder.as_deref())
+                    .map_err(failed)?
+                {
+                    return Err(RpcError::not_found(format!(
+                        "no workspace named {workspace}"
+                    )));
+                }
+                if let Some((project, _)) = workspace.parts() {
+                    self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                }
+                Ok(Response::Ack)
+            }
+            Request::SetWorkspaceFolders {
+                project,
+                workspaces,
+                folder,
+            } => {
+                project::set_folders(&self.conn(), &project, &workspaces, folder.as_deref())
+                    .map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                Ok(Response::Ack)
+            }
+            Request::PinWorkspaces {
+                project,
+                workspaces,
+                pinned,
+            } => {
+                project::set_pins(&self.conn(), &project, &workspaces, pinned).map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                Ok(Response::Ack)
+            }
+            Request::ArchiveWorkspaces {
+                project,
+                workspaces,
+                archived,
+            } => {
+                project::set_archives(&self.conn(), &project, &workspaces, archived)
+                    .map_err(failed)?;
+                self.events.emit(DaemonEvent::WorkspacesChanged { project });
+                Ok(Response::Ack)
             }
             Request::PinWorkspace { workspace, pinned } => {
                 if !project::set_pinned(&self.conn(), &workspace, pinned).map_err(failed)? {

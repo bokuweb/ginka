@@ -171,7 +171,7 @@ fn a_root_that_does_not_exist_is_skipped_rather_than_failing() {
 }
 
 #[test]
-fn scanning_stops_at_the_cap_and_says_so() {
+fn new_names_are_capped_and_the_catalog_says_so() {
     let tmp = tempfile::tempdir().unwrap();
     for n in 0..10 {
         write_skill(tmp.path(), &format!("skill-{n}"), "x");
@@ -180,6 +180,68 @@ fn scanning_stops_at_the_cap_and_says_so() {
         skills::discover_with_cap(&roots(&[("user", tmp.path(), SkillScope::User)]), 4).unwrap();
     assert_eq!(catalog.skills.len(), 4);
     assert!(catalog.truncated);
+}
+
+#[test]
+fn default_catalog_accepts_five_thousand_names_and_reports_overflow() {
+    let tmp = tempfile::tempdir().unwrap();
+    for n in 0..5_000 {
+        write_skill(tmp.path(), &format!("skill-{n:04}"), "x");
+    }
+    let scan_roots = roots(&[("user", tmp.path(), SkillScope::User)]);
+    let catalog = skills::discover(&scan_roots).unwrap();
+    assert_eq!(catalog.skills.len(), 5_000);
+    assert!(!catalog.truncated);
+
+    write_skill(tmp.path(), "skill-overflow", "x");
+    let catalog = skills::discover(&scan_roots).unwrap();
+    assert_eq!(catalog.skills.len(), 5_000);
+    assert!(catalog.truncated);
+    assert_eq!(catalog.skills.last().unwrap().name, "skill-4999");
+}
+
+#[test]
+fn overflow_does_not_hide_later_copies_from_state_or_toggles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let user = tmp.path().join("user");
+    let project = tmp.path().join("project");
+    write_skill(&user, "alpha", "x");
+    write_skill(&user, "beta", "x");
+    // A rejected name sorts before the duplicate in the second root too.
+    write_skill(&project, "a-overflow", "x");
+    write_skill(
+        &project,
+        "z-copy",
+        "---\nname: alpha\ndescription: Later copy\n---\n",
+    );
+    std::fs::rename(
+        project.join("z-copy/SKILL.md"),
+        project.join("z-copy/SKILL.md.disabled"),
+    )
+    .unwrap();
+    let scan_roots = roots(&[
+        ("user", &user, SkillScope::User),
+        ("project", &project, SkillScope::Project),
+    ]);
+    let catalog = skills::discover_with_cap(&scan_roots, 1).unwrap();
+    assert!(catalog.truncated);
+    assert_eq!(catalog.skills.len(), 1);
+    let skill = &catalog.skills[0];
+    assert_eq!(skill.name, "alpha");
+    assert_eq!(skill.installs.len(), 2);
+    assert_eq!(skill.description.as_deref(), Some("Later copy"));
+    assert!(!skill.enabled);
+    assert_eq!(skill.installs[1].scope, SkillScope::Project);
+
+    skills::set_enabled(skill, true).unwrap();
+    assert!(project.join("z-copy/SKILL.md").is_file());
+    let catalog = skills::discover_with_cap(&scan_roots, 1).unwrap();
+    assert!(catalog.skills[0].enabled);
+    skills::set_enabled(&catalog.skills[0], false).unwrap();
+    assert!(user.join("alpha/SKILL.md.disabled").is_file());
+    assert!(project.join("z-copy/SKILL.md.disabled").is_file());
+    assert!(user.join("beta/SKILL.md").is_file());
+    assert!(project.join("a-overflow/SKILL.md").is_file());
 }
 
 #[test]
