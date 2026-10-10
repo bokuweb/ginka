@@ -569,6 +569,7 @@ impl DaemonLink {
         &self,
         workspace: &WorkspaceId,
         only_staged: bool,
+        paths: Vec<String>,
     ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         client
@@ -576,6 +577,7 @@ impl DaemonLink {
                 workspace: workspace.clone(),
                 agent: None,
                 staged: only_staged,
+                paths,
             })
             .await
             .map(|_| ())
@@ -588,6 +590,7 @@ impl DaemonLink {
         message: String,
         all: bool,
         amend: bool,
+        paths: Vec<String>,
     ) -> Result<(), String> {
         let client = self.client().await.ok_or("no daemon")?;
         match client
@@ -596,6 +599,7 @@ impl DaemonLink {
                 message,
                 all,
                 amend,
+                paths,
             })
             .await
         {

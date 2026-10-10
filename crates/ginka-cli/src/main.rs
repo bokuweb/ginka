@@ -321,6 +321,10 @@ enum Command {
         /// Commit only what is already staged.
         #[arg(long)]
         staged: bool,
+        /// Commit complete contents of this literal file; repeat to select more.
+        /// Preserves unrelated staged work.
+        #[arg(long = "path", conflicts_with_all = ["staged", "amend", "fix_with_agent"])]
+        paths: Vec<String>,
         /// If git or a hook refuses the commit, hand what it said, the
         /// staged files and the message to the workspace's agent to fix.
         #[arg(long, conflicts_with = "generate")]
@@ -1343,8 +1347,9 @@ fn main() -> Result<()> {
             generate: true,
             staged,
             agent,
+            paths: selected_paths,
             ..
-        } => commit_generated(&paths, &workspace, staged, agent, cli.json),
+        } => commit_generated(&paths, &workspace, staged, agent, selected_paths, cli.json),
         Command::Commit {
             workspace,
             message: Some(message),
@@ -2033,6 +2038,7 @@ fn request_for(command: Command) -> Result<Request> {
             message,
             staged,
             amend,
+            paths,
             ..
         } => Request::Commit {
             workspace: WorkspaceId(workspace),
@@ -2043,6 +2049,7 @@ fn request_for(command: Command) -> Result<Request> {
             },
             all: !staged,
             amend,
+            paths,
         },
         Command::Push {
             workspace,
@@ -2513,6 +2520,7 @@ fn commit_or_hand_over(
                 message: message.clone(),
                 all: !staged,
                 amend,
+                paths: Vec::new(),
             })
             .await
         {
@@ -2641,6 +2649,7 @@ fn commit_generated(
     workspace: &str,
     staged: bool,
     agent: Option<String>,
+    selected_paths: Vec<String>,
     json: bool,
 ) -> Result<()> {
     let workspace = WorkspaceId(workspace.to_string());
@@ -2652,6 +2661,7 @@ fn commit_generated(
                 workspace: workspace.clone(),
                 agent,
                 staged,
+                paths: selected_paths.clone(),
             })
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -2679,6 +2689,7 @@ fn commit_generated(
                 message,
                 all: !staged,
                 amend: false,
+                paths: selected_paths,
             })
             .await
             .map_err(|error| anyhow::anyhow!("{error}"))

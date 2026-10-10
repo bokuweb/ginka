@@ -21,6 +21,9 @@ use ginka_protocol::model::{ChangeSource, FileChange, GitCommit, PullRequest, Pu
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+mod selected_commit;
+pub use selected_commit::{commit_selected, describe_selected};
+
 /// One entry of `git worktree list --porcelain`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitWorktree {

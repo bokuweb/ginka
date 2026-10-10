@@ -1048,7 +1048,15 @@ impl Shell {
                     only_staged,
                     then,
                     amend,
-                } => this.commit(message.clone(), *only_staged, *then, *amend, cx),
+                    paths,
+                } => this.commit(
+                    message.clone(),
+                    *only_staged,
+                    *then,
+                    *amend,
+                    paths.clone(),
+                    cx,
+                ),
                 crate::surfaces::SurfaceEvent::Comment {
                     path,
                     line,
@@ -1059,8 +1067,8 @@ impl Shell {
                 crate::surfaces::SurfaceEvent::RemoveComment { id } => {
                     this.remove_comment(id.clone(), cx)
                 }
-                crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged } => {
-                    this.generate_commit_message(*only_staged, cx)
+                crate::surfaces::SurfaceEvent::GenerateCommitMessage { only_staged, paths } => {
+                    this.generate_commit_message(*only_staged, paths.clone(), cx)
                 }
                 crate::surfaces::SurfaceEvent::Pull => this.sync_git(RemoteAction::Pull, cx),
                 crate::surfaces::SurfaceEvent::Push => this.sync_git(RemoteAction::Push, cx),
@@ -3397,6 +3405,7 @@ impl Shell {
         only_staged: bool,
         then: crate::surfaces::CommitThen,
         amend: bool,
+        paths: Vec<String>,
         cx: &mut Context<Self>,
     ) {
         use crate::surfaces::CommitThen;
@@ -3408,7 +3417,9 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let (committed, after) = cx
                 .background_spawn(async move {
-                    let committed = link.commit(&workspace, message, !only_staged, amend).await;
+                    let committed = link
+                        .commit(&workspace, message, !only_staged, amend, paths)
+                        .await;
                     // Only after a commit that went in: pushing or opening a
                     // pull request for the previous state is not what was asked.
                     let after = match (&committed, then) {
@@ -3472,7 +3483,12 @@ impl Shell {
     /// Ask the daemon for a commit message. The answer comes back as an
     /// event, which is what keeps a model's thirty seconds off the request
     /// path; only a refusal to *start* is reported here.
-    fn generate_commit_message(&mut self, only_staged: bool, cx: &mut Context<Self>) {
+    fn generate_commit_message(
+        &mut self,
+        only_staged: bool,
+        paths: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(workspace) = self.session.as_ref().map(|row| row.workspace.clone()) else {
             return;
         };
@@ -3481,7 +3497,8 @@ impl Shell {
         cx.spawn(async move |_, cx| {
             let outcome = cx
                 .background_spawn(async move {
-                    link.generate_commit_message(&workspace, only_staged).await
+                    link.generate_commit_message(&workspace, only_staged, paths)
+                        .await
                 })
                 .await;
             if let Err(error) = outcome {

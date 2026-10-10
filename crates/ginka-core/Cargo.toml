@@ -46,13 +46,13 @@ tracing-appender.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 url.workspace = true
+tempfile = "3"
 
 [dev-dependencies]
 aes.workspace = true
 cbc.workspace = true
 base64.workspace = true
 rusqlite.workspace = true
-tempfile = "3"
 
 [lints]
 workspace = true

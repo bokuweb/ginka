@@ -629,6 +629,71 @@ fn committing_nothing_says_what_git_said() {
 }
 
 #[test]
+fn cli_and_mcp_commit_selected_files_without_consuming_other_staging() {
+    let home = Home::new();
+    let repository = home.repository("comet");
+    home.ok(&["project", "add", repository.to_str().unwrap()]);
+    home.ok(&["workspace", "new", "comet", "selected"]);
+    let worktree = home.root().join("worktrees/comet/selected");
+    std::fs::write(worktree.join("README.md"), "staged\n").unwrap();
+    git(&worktree, &["add", "README.md"]);
+    std::fs::write(worktree.join("README.md"), "later\n").unwrap();
+    std::fs::write(worktree.join("[new].txt"), "selected\n").unwrap();
+    std::fs::write(worktree.join("second.txt"), "second\n").unwrap();
+    std::fs::write(worktree.join("mcp.txt"), "mcp\n").unwrap();
+    home.ok(&[
+        "commit",
+        "comet/selected",
+        "Selected files",
+        "--path",
+        "[new].txt",
+        "--path",
+        "second.txt",
+    ]);
+    let read_git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&worktree)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    };
+    assert_eq!(read_git(&["diff", "--cached", "--name-only"]), "README.md");
+    assert_eq!(read_git(&["show", "HEAD:[new].txt"]), "selected");
+    assert_eq!(read_git(&["show", "HEAD:second.txt"]), "second");
+    assert_eq!(read_git(&["show", ":README.md"]), "staged");
+    assert_eq!(read_git(&["show", "HEAD:README.md"]), "hello");
+    let replies = home.mcp(&[
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ginka_commit","arguments":{"workspace":"comet/selected","message":"MCP selection","paths":["mcp.txt"]}}}"#,
+    ]);
+    assert_ne!(replies[1]["result"]["isError"], true, "{replies:?}");
+    assert_eq!(read_git(&["show", "HEAD:mcp.txt"]), "mcp");
+    assert_eq!(read_git(&["show", ":README.md"]), "staged");
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("README.md")).unwrap(),
+        "later\n"
+    );
+}
+
+#[test]
+fn selected_cli_commits_reject_flags_with_incompatible_scope() {
+    let home = Home::new();
+    for flag in ["--staged", "--amend", "--fix-with-agent"] {
+        let output = home.run(&["commit", "comet/w", "Selected", "--path", "a.txt", flag]);
+        assert!(!output.status.success());
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(error.contains("cannot be used with"), "{error}");
+    }
+}
+
+#[test]
 fn a_workspaces_files_are_searchable_by_any_part_of_their_path() {
     // What `@` in the composer reaches for.
     let home = Home::new();

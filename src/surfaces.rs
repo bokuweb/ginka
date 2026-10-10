@@ -11,6 +11,7 @@ use ginka_protocol::model::{
 };
 use ginka_protocol::{ProjectName, WorkspaceId};
 use ginka_ui::Tokens;
+use ginka_ui::commit_selection::CommitSelection;
 use ginka_ui::diff_filter::DiffFilter;
 use ginka_ui::dock::{DockNode, SurfaceDock};
 use ginka_ui::editor::{
@@ -26,6 +27,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::checkbox::Checkbox;
 use gpui_component::dock::{
     BasePanel, DockArea, DockEvent, DockLayout, Panel, PanelControl, PanelEvent, panel_handle,
 };
@@ -108,6 +110,8 @@ pub struct SurfacePanel {
     staged_changes: Option<Changes>,
     /// View-only path filter shared by current changes and the commit reader.
     diff_filter: DiffFilter,
+    /// Explicit whole-file commit scope, independent of staging and filtering.
+    commit_selection: CommitSelection,
     /// Surrounding lines requested for each displayed diff hunk.
     diff_context: u8,
     /// Input for the view-only diff path filter.
@@ -291,10 +295,15 @@ pub enum SurfaceEvent {
         /// Fold into the last commit rather than adding one; an empty
         /// `message` then keeps that commit's.
         amend: bool,
+        /// Literal whole-file selection; empty retains the normal staged/all scope.
+        paths: Vec<String>,
     },
     /// Have an agent write the message (§3.3 N9). It arrives later, as an
     /// event the shell hands back through [`SurfacePanel::set_generated`].
-    GenerateCommitMessage { only_staged: bool },
+    GenerateCommitMessage {
+        only_staged: bool,
+        paths: Vec<String>,
+    },
     /// Fast-forward the workspace from its configured upstream.
     Pull,
     /// Pull then push in one action, or publish a branch never pushed.
@@ -515,6 +524,7 @@ impl SurfacePanel {
             changes: None,
             staged_changes: None,
             diff_filter: DiffFilter::default(),
+            commit_selection: CommitSelection::default(),
             diff_context: 3,
             diff_finder,
             history: Vec::new(),
@@ -1177,7 +1187,31 @@ impl SurfacePanel {
 
     /// Whether the commit box would commit only part of what is on screen.
     fn only_staged(&self) -> bool {
-        !self.staged.is_empty()
+        !self.commit_selection.active() && !self.staged.is_empty()
+    }
+
+    /// Resolve selection against both sections, regardless of the path filter.
+    fn commit_files(&self) -> impl Iterator<Item = &ginka_protocol::model::FileChange> {
+        self.changes
+            .iter()
+            .chain(self.staged_changes.iter())
+            .flat_map(|changes| changes.files.iter())
+    }
+
+    /// An empty explicit selection must never fall back to committing everything.
+    fn valid_commit_scope(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.commit_selection.active()
+            && self.commit_selection.paths(self.commit_files()).is_empty()
+        {
+            self.complaint = Some(
+                rust_i18n::t!("surface.git.needs_selection")
+                    .to_string()
+                    .into(),
+            );
+            cx.notify();
+            return false;
+        }
+        true
     }
 
     /// What the agent wrote, or why it could not (`CommitMessageGenerated`).
@@ -1204,6 +1238,7 @@ impl SurfacePanel {
         if self.complaint.is_none() {
             // It went in; the message belongs to the commit now.
             self.message = None;
+            self.commit_selection.clear();
         }
         cx.notify();
     }
@@ -1629,6 +1664,7 @@ impl SurfacePanel {
             return;
         }
         // Another workspace, another pull request.
+        self.commit_selection.clear();
         self.checks_open = false;
         self.checks = None;
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
@@ -2952,11 +2988,10 @@ impl SurfacePanel {
     /// once you have read them, and a box at the top invites writing it first.
     fn commit_box(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let tokens = Tokens::global(cx).clone();
-        let open = self.message.clone();
-        let generating = self.generating;
-        // Offered only while the last commit is still this clone's alone:
-        // the daemon refuses the rest, and a button that always fails is noise.
-        let amendable = self.history.first().is_some_and(|head| !head.published);
+        let selected = self.commit_selection.active();
+        let count = self.commit_selection.count(self.commit_files());
+        let blocked = self.generating || (selected && count == 0);
+        let amendable = !selected && self.history.first().is_some_and(|head| !head.published);
 
         v_flex()
             .w_full()
@@ -2964,6 +2999,54 @@ impl SurfacePanel {
             .gap_1p5()
             .border_t_1()
             .border_color(tokens.colors().border_subtle)
+            .when(selected, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .text_xs()
+                                        .text_color(tokens.colors().text_secondary)
+                                        .child(
+                                            rust_i18n::t!(
+                                                "surface.git.selected_files",
+                                                count = count
+                                            )
+                                            .to_string(),
+                                        ),
+                                )
+                                .child(
+                                    Button::new("clear-commit-selection")
+                                        .ghost()
+                                        .compact()
+                                        .small()
+                                        .disabled(self.generating)
+                                        .label(
+                                            rust_i18n::t!("surface.git.clear_selection")
+                                                .to_string(),
+                                        )
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.commit_selection.clear();
+                                            this.complaint = None;
+                                            this.commit_refused = false;
+                                            cx.notify();
+                                        })),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(tokens.colors().text_muted)
+                                .child(rust_i18n::t!("surface.git.selection_hint").to_string()),
+                        ),
+                )
+            })
             .children(self.complaint.clone().map(|why| {
                 div()
                     .w_full()
@@ -2974,9 +3057,7 @@ impl SurfacePanel {
                     .text_color(tokens.colors().status_error)
                     .child(why)
             }))
-            .when(self.commit_refused, |this| {
-                // Orca's "Fix with AI": the hook said what is wrong, and the
-                // agent that wrote the code is the one to fix it.
+            .when(self.commit_refused && !selected, |this| {
                 this.child(
                     Button::new("commit-fix-with-agent")
                         .ghost()
@@ -3003,7 +3084,7 @@ impl SurfacePanel {
                         })),
                 )
             })
-            .child(match open {
+            .child(match self.message.clone() {
                 Some(state) => v_flex()
                     .w_full()
                     .gap_1p5()
@@ -3023,134 +3104,97 @@ impl SurfacePanel {
                             .w_full()
                             .gap_2()
                             .child(
-                                div()
-                                    .id("commit")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded(px(tokens.radius.row))
-                                    .bg(tokens.colors().primary_fill())
-                                    .text_xs()
-                                    .text_color(tokens.colors().bg_window_opaque())
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().accent))
+                                Button::new("commit")
+                                    .primary()
+                                    .compact()
+                                    .small()
+                                    .disabled(blocked)
+                                    .label(rust_i18n::t!("surface.git.commit").to_string())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.commit(CommitThen::Nothing, false, cx)
-                                    }))
-                                    .child(rust_i18n::t!("surface.git.commit").to_string()),
+                                    })),
                             )
                             .child(
-                                div()
-                                    .id("commit-push")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded(px(tokens.radius.row))
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_secondary)
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                Button::new("commit-push")
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .disabled(blocked)
+                                    .label(rust_i18n::t!("surface.git.commit_push").to_string())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.commit(CommitThen::Push, false, cx)
-                                    }))
-                                    .child(rust_i18n::t!("surface.git.commit_push").to_string()),
+                                    })),
                             )
                             .child(
-                                div()
-                                    .id("commit-pr")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded(px(tokens.radius.row))
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_secondary)
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                Button::new("commit-pr")
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .disabled(blocked)
+                                    .label(rust_i18n::t!("surface.git.commit_pr").to_string())
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        this.opening_pull_request = true;
-                                        this.pull_request = None;
                                         this.commit(CommitThen::PullRequest, false, cx)
-                                    }))
-                                    .child(rust_i18n::t!("surface.git.commit_pr").to_string()),
+                                    })),
                             )
                             .when(amendable, |row| {
                                 row.child(
-                                    div()
-                                        .id("commit-amend")
-                                        .px_2p5()
-                                        .py_1()
-                                        .rounded(px(tokens.radius.row))
-                                        .text_xs()
-                                        .text_color(tokens.colors().text_secondary)
-                                        .cursor_pointer()
-                                        .hover(|this| this.bg(tokens.colors().row_hover()))
-                                        .tooltip(|window, cx| {
-                                            Tooltip::new(
-                                                rust_i18n::t!("surface.git.amend_hint").to_string(),
-                                            )
-                                            .build(window, cx)
-                                        })
+                                    Button::new("commit-amend")
+                                        .ghost()
+                                        .compact()
+                                        .small()
+                                        .disabled(blocked)
+                                        .label(rust_i18n::t!("surface.git.amend").to_string())
+                                        .tooltip(
+                                            rust_i18n::t!("surface.git.amend_hint").to_string(),
+                                        )
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.commit(CommitThen::Nothing, true, cx)
-                                        }))
-                                        .child(rust_i18n::t!("surface.git.amend").to_string()),
+                                        })),
                                 )
                             })
                             .child(
-                                div()
-                                    .id("generate-commit")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded(px(tokens.radius.row))
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_secondary)
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                Button::new("generate-commit")
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .disabled(blocked)
+                                    .label(if self.generating {
+                                        rust_i18n::t!("surface.git.generating").to_string()
+                                    } else {
+                                        rust_i18n::t!("surface.git.generate").to_string()
+                                    })
                                     .on_click(cx.listener(|this, _, _, cx| {
-                                        if this.generating {
+                                        if this.generating || !this.valid_commit_scope(cx) {
                                             return;
                                         }
                                         this.generating = true;
                                         this.complaint = None;
                                         cx.emit(SurfaceEvent::GenerateCommitMessage {
                                             only_staged: this.only_staged(),
+                                            paths: this.commit_selection.paths(this.commit_files()),
                                         });
                                         cx.notify();
-                                    }))
-                                    .child(if generating {
-                                        rust_i18n::t!("surface.git.generating").to_string()
-                                    } else {
-                                        rust_i18n::t!("surface.git.generate").to_string()
-                                    }),
+                                    })),
                             )
                             .child(
-                                div()
-                                    .id("cancel-commit")
-                                    .px_2p5()
-                                    .py_1()
-                                    .rounded(px(tokens.radius.row))
-                                    .text_xs()
-                                    .text_color(tokens.colors().text_muted)
-                                    .cursor_pointer()
-                                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                                Button::new("cancel-commit")
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .label(rust_i18n::t!("surface.git.cancel").to_string())
                                     .on_click(cx.listener(|this, _, _, cx| {
                                         this.message = None;
                                         this.complaint = None;
                                         cx.notify();
-                                    }))
-                                    .child(rust_i18n::t!("surface.git.cancel").to_string()),
+                                    })),
                             ),
                     )
                     .into_any_element(),
-                None => div()
-                    .id("write-commit")
-                    .w_full()
-                    .px_2p5()
-                    .py_1p5()
-                    .rounded(px(tokens.radius.row))
-                    .text_xs()
-                    .text_color(tokens.colors().text_secondary)
-                    .cursor_pointer()
-                    .hover(|this| this.bg(tokens.colors().row_hover()))
+                None => Button::new("write-commit")
+                    .ghost()
+                    .small()
+                    .label(rust_i18n::t!("surface.git.write_commit").to_string())
                     .on_click(cx.listener(|this, _, window, cx| this.write_commit(window, cx)))
-                    .child(rust_i18n::t!("surface.git.write_commit").to_string())
                     .into_any_element(),
             })
     }
@@ -3171,6 +3215,12 @@ impl SurfacePanel {
 
     /// Hand the message to the shell, which is the one holding the daemon.
     fn commit(&mut self, then: CommitThen, amend: bool, cx: &mut Context<Self>) {
+        if self.generating
+            || (amend && self.commit_selection.active())
+            || !self.valid_commit_scope(cx)
+        {
+            return;
+        }
         let Some(state) = self.message.as_ref() else {
             return;
         };
@@ -3184,11 +3234,16 @@ impl SurfacePanel {
             cx.notify();
             return;
         }
+        if matches!(then, CommitThen::PullRequest) {
+            self.opening_pull_request = true;
+            self.pull_request = None;
+        }
         cx.emit(SurfaceEvent::Commit {
             message,
             only_staged: self.only_staged(),
             then,
             amend,
+            paths: self.commit_selection.paths(self.commit_files()),
         });
     }
 
@@ -3429,6 +3484,23 @@ impl SurfacePanel {
         let expand_key = row_key.clone();
         let mono = gpui_component::Theme::global(cx).mono_font_family.clone();
 
+        let selected_path = file.path.clone();
+        let selection = Checkbox::new(SharedString::from(format!("commit-select:{row_key}")))
+            .small()
+            .checked(self.commit_selection.contains(&file.path))
+            .disabled(self.generating)
+            .accessibility_label(
+                rust_i18n::t!("surface.git.select_file", path = file.path.as_str()).to_string(),
+            )
+            .tooltip(rust_i18n::t!("surface.git.selection_hint").to_string())
+            .on_click(cx.listener(move |this, checked: &bool, _, cx| {
+                cx.stop_propagation();
+                this.commit_selection.set(selected_path.clone(), *checked);
+                this.complaint = None;
+                this.commit_refused = false;
+                cx.notify();
+            }));
+
         v_flex()
             .w_full()
             .child(
@@ -3446,6 +3518,7 @@ impl SurfacePanel {
                         this.expanded = (!expanded).then(|| expand_key.clone());
                         cx.notify();
                     }))
+                    .child(selection)
                     .child(
                         div()
                             .w(px(26.))

@@ -15,8 +15,9 @@ Ginka implements behavioural requirements in its own architecture: a daemon
 owns all durable state, clients share one protocol, and a workspace is the
 worktree-sized task identity. Client-only navigation needs no new daemon request.
 
-The inventory reflects the shipped paths on Ginka main plus this M4 file-view
-change. It does not claim complete parity with either product:
+The inventory reflects the shipped paths on Ginka main plus the selected-file
+commit and file-inspection changes here (M3/M4). It does not claim complete parity
+with either product:
 
 - **Done** means a usable vertical path exists, even when polish remains.
 - **Partial** means the domain/protocol or a narrower UI is present.
@@ -64,7 +65,8 @@ Terminal copying now prefers an exact mouse-drag selection and falls back to the
 | MonoCode 0.11 | Image inspection with cursor-centred zoom, native pinch, keyboard and drag pan | **Done in the Files surface.** Fit-relative 1–16× zoom, clamped pan, resize-preserved view and fit controls. A separate lightbox and interactive Git image-diff previews remain candidates. |
 | MonoCode 0.11 | Devin CLI over ACP, model/effort/fast selection, resume and usage windows | **Planned under M5.** Ginka ships four drivers. An additional provider requires tested transport, option and account semantics; no unverified executable is added by this UI change. |
 | MonoCode 0.10 | OpenCode 2.x alongside 1.x, using version-specific server transports | **Partial.** Ginka's OpenCode path uses ACP. Version-specific server catalogue/event handling requires its own recorded transport tests. |
-| MonoCode 0.11 | Turn checkpoints, guarded undo, selected-file commits preserving unrelated index state | **Partial.** Saved turn diffs and literal file/hunk operations exist. Strict undo guards and a commit-selection transaction that leaves unrelated staged hunks intact are separate domain changes, requiring real-repository regression tests. |
+| MonoCode 0.11 | Selected-file commits preserving unrelated index state | **Done in this change.** Git checkboxes, repeatable CLI `commit --path` and MCP `ginka_commit.paths` commit complete selected contents through one daemon operation. A locked private index preserves unrelated partial staging; ordinary hooks run, and a refusal leaves the real index unchanged. Selected-file message generation uses the same scope. Regression tests cover literal names, renames, deletions, hook failure, locks, unborn/linked worktrees, split indexes and merge refusal. |
+| MonoCode 0.11 | Turn checkpoints and guarded undo | **Partial.** Saved turn diffs and checkpoint rewind exist. Strict undo guards against intervening work remain a separate domain change. |
 | MonoCode 0.9–0.11 | Mono document artifacts, floating Mono chats and per-chat Git panels | **Candidate.** Ginka has workspace notes, scratch conversations and Git surfaces. A persistent general assistant and document library need a product decision against roadmap §3.2. |
 | MonoCode 0.10–0.11 | Native spellcheck/autocorrect and signed Linux self-updates | **Planned / candidate.** Composer text services need platform support; distribution and updates belong to M6. |
 | Orca Design Mode | Click an element and attach HTML/CSS, source location and a cropped screenshot | **Partial.** Ginka captures bounded DOM/CSS/accessibility/geometry/source context. Cropped pixels remain missing: the pinned macOS browser component has no public capture API. Adding an unauthenticated debugging endpoint is not a substitute; a supported capture boundary is needed. |

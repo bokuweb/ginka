@@ -659,12 +659,13 @@ pub fn tools() -> Vec<Tool> {
         },
         Tool {
             name: "ginka_commit",
-            description: "Commit a workspace's work. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
+            description: "Commit a workspace's work. Optional `paths` commits complete contents of those literal files while preserving unrelated staged work; cannot combine with staged_only or amend. `amend` folds it into the last commit instead (an empty message keeps that commit's), and is refused once the commit is pushed.",
             schema: json!({
                 "type": "object",
                 "properties": {
                     "workspace": workspace,
                     "message": {"type": "string"},
+                    "paths": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
                     "staged_only": {"type": "boolean"},
                     "amend": {"type": "boolean"},
                 },
@@ -1355,6 +1356,25 @@ pub fn request_as(tool: &str, arguments: &Value, caller: Option<&SessionId>) -> 
             message: text("message")?,
             all: !flag("staged_only"),
             amend: flag("amend"),
+            paths: match arguments.get("paths") {
+                None => Vec::new(),
+                Some(Value::Array(paths)) if !paths.is_empty() => paths
+                    .iter()
+                    .map(|path| {
+                        path.as_str()
+                            .filter(|path| !path.is_empty())
+                            .map(str::to_string)
+                            .ok_or_else(|| {
+                                anyhow!("ginka_commit: paths must contain nonempty strings")
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+                Some(_) => {
+                    return Err(anyhow!(
+                        "ginka_commit: paths must be a nonempty array of file paths"
+                    ));
+                }
+            },
         },
         "ginka_cron_jobs" => Request::ListCronJobs {
             project: text("project").ok().map(ProjectName),
@@ -1576,6 +1596,30 @@ pub const PARSE_ERROR: i64 = -32700;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_commit_tool_preserves_literal_files_and_refuses_empty_selections() {
+        let arguments =
+            json!({"workspace": "w", "message": "Selected", "paths": ["[a].txt", "new.txt"]});
+        assert!(matches!(
+            request_for("ginka_commit", &arguments).unwrap(),
+            Request::Commit { all: true, amend: false, paths, .. }
+                if paths == ["[a].txt", "new.txt"]
+        ));
+        assert!(matches!(
+            request_for("ginka_commit", &json!({"workspace": "w", "message": "Staged", "staged_only": true})).unwrap(),
+            Request::Commit { all: false, paths, .. } if paths.is_empty()
+        ));
+        for paths in [json!([]), json!("a.txt"), json!([""]), json!(["a.txt", 7])] {
+            assert!(
+                request_for(
+                    "ginka_commit",
+                    &json!({"workspace": "w", "message": "Selected", "paths": paths})
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn external_editor_tool_preserves_the_line_and_rejects_invalid_numbers() {

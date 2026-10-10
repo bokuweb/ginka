@@ -1726,6 +1726,7 @@ fn a_commit_message_is_written_by_an_agent_and_pushed_when_it_lands() {
         workspace: fixture.workspace.clone(),
         agent: Some("claude".into()),
         staged: false,
+        paths: Vec::new(),
     }) {
         Response::Ack => {}
         other => panic!("expected an ack, got {other:?}"),
@@ -1772,6 +1773,7 @@ fn a_clean_worktree_has_no_commit_message_to_write() {
         workspace: fixture.workspace.clone(),
         agent: Some("claude".into()),
         staged: false,
+        paths: Vec::new(),
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -3938,6 +3940,7 @@ fn a_commit_a_hook_refused_goes_back_to_the_agent_with_the_hook_output() {
             message: "Add the parser".into(),
             all: true,
             amend: false,
+            paths: Vec::new(),
         })
         .unwrap_err();
     assert!(

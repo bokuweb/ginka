@@ -20,6 +20,7 @@ pub mod browser;
 pub mod checks;
 pub mod chrome;
 pub mod comment_range;
+pub mod commit_selection;
 pub mod composer;
 pub mod daemon_settings;
 pub mod diff_filter;

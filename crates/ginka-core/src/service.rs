@@ -623,10 +623,17 @@ impl Service {
                 message,
                 all,
                 amend,
+                paths,
             } => self.away_in(
                 &workspace,
                 move |path| {
-                    if amend {
+                    if !paths.is_empty() {
+                        anyhow::ensure!(
+                            all && !amend,
+                            "selected files cannot be combined with staged-only or amend"
+                        );
+                        git::commit_selected(path, &message, &paths)
+                    } else if amend {
                         git::amend(path, &message, all)
                     } else {
                         anyhow::ensure!(!message.trim().is_empty(), "a commit needs a message");
@@ -1922,7 +1929,8 @@ impl Service {
                 workspace,
                 agent,
                 staged,
-            } => self.generate_commit_message(workspace, agent.as_deref(), staged),
+                paths,
+            } => self.generate_commit_message(workspace, agent.as_deref(), staged, paths),
             Request::CreateGeneratedPullRequest {
                 workspace,
                 draft,
@@ -3556,7 +3564,13 @@ impl Service {
         workspace: WorkspaceId,
         agent: Option<&str>,
         staged: bool,
+        paths: Vec<String>,
     ) -> Result<Response, RpcError> {
+        if staged && !paths.is_empty() {
+            return Err(RpcError::failed(
+                "selected files cannot be combined with staged-only",
+            ));
+        }
         let worktree = self.worktree(&workspace)?;
         let latest = session::latest_for_workspace(&self.conn(), &workspace).map_err(failed)?;
         let agent = agent
@@ -3578,10 +3592,14 @@ impl Service {
         );
         let events = self.events.clone();
         std::thread::spawn(move || {
-            let outcome =
-                crate::commit::describe(&worktree.path, staged).and_then(|(files, diff)| {
-                    crate::commit::generate(driver.as_ref(), &worktree.path, &env, &files, &diff)
-                });
+            let outcome = (if paths.is_empty() {
+                crate::commit::describe(&worktree.path, staged)
+            } else {
+                git::describe_selected(&worktree.path, &paths)
+            })
+            .and_then(|(files, diff)| {
+                crate::commit::generate(driver.as_ref(), &worktree.path, &env, &files, &diff)
+            });
             let (message, error) = match outcome {
                 Ok(message) => (Some(message.to_git_message()), None),
                 Err(error) => (None, Some(format!("{error:#}"))),
